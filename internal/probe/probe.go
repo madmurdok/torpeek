@@ -150,9 +150,13 @@ func (p *Prober) Inspect(ctx context.Context, url string) (MediaInfo, error) {
 		return MediaInfo{}, fmt.Errorf("parse ffprobe output: %w", err)
 	}
 
+	// A file with no stated duration is reported as zero, as before: the
+	// planner already treats that as "nothing to plan across".
+	duration, _ := parseSeconds(raw.Format.Duration)
+
 	info := MediaInfo{
 		FormatName: raw.Format.FormatName,
-		Duration:   parseSeconds(raw.Format.Duration),
+		Duration:   duration,
 		Size:       parseInt(raw.Format.Size),
 		BitRate:    parseInt(raw.Format.BitRate),
 	}
@@ -224,7 +228,9 @@ func (p *Prober) KeyframeAt(ctx context.Context, url string, at time.Duration) (
 
 	args := append(p.limits(),
 		"-select_streams", "v:0",
-		"-show_entries", "packet=pts_time,pos,flags",
+		// AVI often carries no PTS on a packet, only DTS. Asking for both
+		// is the difference between a real timestamp and none at all.
+		"-show_entries", "packet=pts_time,dts_time,pos,flags",
 		// A handful of packets is enough to find the keyframe the seek landed
 		// on, without asking ffprobe to walk the file.
 		"-read_intervals", fmt.Sprintf("%.3f%%+#8", at.Seconds()),
@@ -240,6 +246,7 @@ func (p *Prober) KeyframeAt(ctx context.Context, url string, at time.Duration) (
 	var raw struct {
 		Packets []struct {
 			PTSTime string `json:"pts_time"`
+			DTSTime string `json:"dts_time"`
 			Pos     string `json:"pos"`
 			Flags   string `json:"flags"`
 		} `json:"packets"`
@@ -258,7 +265,21 @@ func (p *Prober) KeyframeAt(ctx context.Context, url string, at time.Duration) (
 			// nothing to map onto pieces.
 			continue
 		}
-		return Keyframe{PTS: parseSeconds(pkt.PTSTime), BytePos: pos}, nil
+
+		// A keyframe is not reordered, so its DTS is its PTS - which makes
+		// DTS a correct substitute where the container states only that one,
+		// as AVI does for H.264. Without either, this packet cannot be placed
+		// in time at all, and saying "zero" would send the decoder to the
+		// start of the file with every capture point.
+		pts, ok := parseSeconds(pkt.PTSTime)
+		if !ok {
+			if pts, ok = parseSeconds(pkt.DTSTime); !ok {
+				return Keyframe{}, fmt.Errorf("%w: keyframe at byte %d near %s carries no timestamp",
+					ErrNoIndex, pos, at)
+			}
+		}
+
+		return Keyframe{PTS: pts, BytePos: pos}, nil
 	}
 
 	return Keyframe{}, fmt.Errorf("%w: no keyframe with a byte position near %s", ErrNoIndex, at)
@@ -277,12 +298,15 @@ func (p *Prober) limits() []string {
 	return args
 }
 
-func parseSeconds(s string) time.Duration {
+// parseSeconds reads one of ffprobe's second-valued fields. The second result
+// is false when the field was absent or unreadable, which callers must not
+// confuse with a genuine zero.
+func parseSeconds(s string) (time.Duration, bool) {
 	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
 	if err != nil || f < 0 {
-		return 0
+		return 0, false
 	}
-	return time.Duration(f * float64(time.Second))
+	return time.Duration(f * float64(time.Second)), true
 }
 
 func parseInt(s string) int64 {
