@@ -3,17 +3,10 @@ package swarm
 import (
 	"bytes"
 	"context"
-	"math/rand"
-	"net"
-	"os"
-	"path/filepath"
-	"strconv"
 	"testing"
 	"time"
 
-	"github.com/anacrolix/torrent"
-	"github.com/anacrolix/torrent/bencode"
-	"github.com/anacrolix/torrent/metainfo"
+	"github.com/torpeek/torpeek/internal/torrenttest"
 )
 
 const (
@@ -21,98 +14,14 @@ const (
 	testPieceLength = 256 << 10 // 256 KiB, so the payload is 32 pieces
 )
 
-// buildPayloadTorrent writes a deterministic payload and a .torrent describing
-// it, returning the payload bytes and the path to the torrent file.
-func buildPayloadTorrent(t *testing.T) (payloadDir, torrentPath string, payload []byte) {
-	t.Helper()
-
-	payloadDir = t.TempDir()
-	payload = make([]byte, testPayloadSize)
-	rng := rand.New(rand.NewSource(1))
-	if _, err := rng.Read(payload); err != nil {
-		t.Fatalf("generate payload: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(payloadDir, "movie.mkv"), payload, 0o600); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-
-	info := metainfo.Info{PieceLength: testPieceLength}
-	if err := info.BuildFromFilePath(payloadDir); err != nil {
-		t.Fatalf("build info: %v", err)
-	}
-	infoBytes, err := bencode.Marshal(info)
-	if err != nil {
-		t.Fatalf("marshal info: %v", err)
-	}
-
-	// No announce URL: nothing in this test may reach the network.
-	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
-	torrentPath = filepath.Join(t.TempDir(), "payload.torrent")
-	f, err := os.Create(torrentPath)
-	if err != nil {
-		t.Fatalf("create torrent file: %v", err)
-	}
-	defer f.Close()
-	if err := mi.Write(f); err != nil {
-		t.Fatalf("write torrent file: %v", err)
-	}
-	return payloadDir, torrentPath, payload
-}
-
-// startSeeder serves the payload from disk on loopback and returns its address.
-func startSeeder(t *testing.T, payloadDir, torrentPath string) string {
-	t.Helper()
-
-	// The torrent's name is the payload directory's own name, so its files
-	// live at DataDir/<name>/... - the seeder's DataDir is the parent.
-	cfg := torrent.NewDefaultClientConfig()
-	cfg.DataDir = filepath.Dir(payloadDir)
-	cfg.Seed = true
-	cfg.NoDHT = true
-	cfg.DisableTrackers = true
-	cfg.DisablePEX = true
-	cfg.ListenPort = 0
-
-	cl, err := torrent.NewClient(cfg)
-	if err != nil {
-		t.Fatalf("start seeder: %v", err)
-	}
-	t.Cleanup(func() { cl.Close() })
-
-	tor, err := cl.AddTorrentFromFile(torrentPath)
-	if err != nil {
-		t.Fatalf("seeder add torrent: %v", err)
-	}
-	<-tor.GotInfo()
-	tor.VerifyData()
-
-	// VerifyData is asynchronous; a seeder that has not finished hashing has
-	// nothing to offer, and the leecher would just time out.
-	deadline := time.Now().Add(30 * time.Second)
-	for tor.BytesCompleted() < tor.Length() {
-		if time.Now().After(deadline) {
-			t.Fatalf("seeder verified only %d of %d bytes", tor.BytesCompleted(), tor.Length())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	for _, a := range cl.ListenAddrs() {
-		if tcp, ok := a.(*net.TCPAddr); ok {
-			return net.JoinHostPort("127.0.0.1", strconv.Itoa(tcp.Port))
-		}
-	}
-	t.Fatal("seeder has no TCP listen address")
-	return ""
-}
-
 // TestReadRangeFetchesOnlyTheWindow is the acceptance test for TOR-4: reading a
 // range from the middle of a torrent must cost the pieces covering that range,
 // not the file.
 func TestReadRangeFetchesOnlyTheWindow(t *testing.T) {
-	payloadDir, torrentPath, payload := buildPayloadTorrent(t)
-	seederAddr := startSeeder(t, payloadDir, torrentPath)
+	fixture := torrenttest.Build(t, "movie.mkv", testPayloadSize, testPieceLength)
+	seederAddr := fixture.StartSeeder(t)
 
-	src, err := ParseSource(torrentPath)
+	src, err := ParseSource(fixture.TorrentPath)
 	if err != nil {
 		t.Fatalf("parse source: %v", err)
 	}
@@ -144,7 +53,7 @@ func TestReadRangeFetchesOnlyTheWindow(t *testing.T) {
 		t.Fatalf("read range: %v", err)
 	}
 
-	want := payload[readOffset : readOffset+readLength]
+	want := fixture.Payload[readOffset : readOffset+readLength]
 	if !bytes.Equal(got, want) {
 		t.Fatalf("read %d bytes that do not match the payload", len(got))
 	}
