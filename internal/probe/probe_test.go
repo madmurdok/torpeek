@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
 )
 
 const (

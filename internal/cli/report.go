@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/core"
 )
 
 // reportText writes progress a person reads. Frames are announced as they land

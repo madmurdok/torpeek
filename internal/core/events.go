@@ -9,8 +9,8 @@ package core
 import (
 	"time"
 
-	"github.com/torpeek/torpeek/internal/probe"
-	"github.com/torpeek/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // Event is something that happened during a run. The set is closed: clients

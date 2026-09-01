@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
 )
 
 // ErrNoIndex means ffprobe could not make sense of the container well enough

@@ -11,7 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/torpeek/torpeek/internal/cli"
+	"github.com/madmurdok/torpeek/internal/cli"
 )
 
 func main() {

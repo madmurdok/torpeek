@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/ffmpeg"
-	"github.com/torpeek/torpeek/internal/torrenttest"
-	"github.com/torpeek/torpeek/internal/version"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/torrenttest"
+	"github.com/madmurdok/torpeek/internal/version"
 )
 
 func TestVersionFlag(t *testing.T) {
