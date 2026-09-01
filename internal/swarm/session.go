@@ -40,6 +40,10 @@ type Config struct {
 
 	// MetadataTimeout bounds the wait for metadata.
 	MetadataTimeout time.Duration
+
+	// Peers are addresses to contact directly, for a swarm no tracker or DHT
+	// will hand over - a known seedbox, or a test's own seeder.
+	Peers []string
 }
 
 // DefaultConfig returns the session defaults for a run staging data in dataDir.
@@ -182,6 +186,13 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	tor := newTorrent(t)
+	// Directly known peers are added before waiting: without a tracker or DHT
+	// they are the only way metadata arrives at all.
+	if len(s.cfg.Peers) > 0 {
+		tor.AddPeers(s.cfg.Peers...)
+	}
 
 	select {
 	case <-t.GotInfo():
