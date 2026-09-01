@@ -1,26 +1,24 @@
-// Command torpeek previews a video torrent without downloading it in full:
-// frames spread across each video file, plus a technical summary.
+// Command torpeek previews a video torrent without downloading it: frames
+// spread across each video file, plus a technical summary.
 //
-// See REQUIREMENTS.md for what this is meant to do.
+// See REQUIREMENTS.md for what it is meant to do and ARCHITECTURE.md for how
+// it is put together.
 package main
 
 import (
-	"flag"
-	"fmt"
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/torpeek/torpeek/internal/version"
+	"github.com/torpeek/torpeek/internal/cli"
 )
 
 func main() {
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	// Ctrl+C cancels the run rather than killing the process, so frames
+	// already written stay and the summary still prints.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	if *showVersion {
-		fmt.Println(version.Version)
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "torpeek %s: no commands wired up yet (TOR-1 is the skeleton only)\n", version.Version)
-	os.Exit(2)
+	os.Exit(cli.Run(ctx, os.Args[1:], os.Stdout, os.Stderr))
 }
