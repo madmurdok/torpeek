@@ -1,0 +1,12 @@
+# Build output
+/bin/
+/dist/
+
+# Bundled ffmpeg/ffprobe live next to the binary in a release archive, never in git
+/third_party/ffmpeg/
+
+# Run artefacts
+/out/
+/cache/
+
+.DS_Store
