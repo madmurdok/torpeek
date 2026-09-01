@@ -295,17 +295,18 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		}
 		produced++
 
-		shift := ShiftNone
-		if actual != at {
-			shift = ShiftUnavailable
-		}
-
+		// Actual almost never equals Requested: decoding starts at the
+		// keyframe before the wanted moment, which is ordinary behaviour and
+		// not a shift. ShiftUnavailable means something else entirely - that
+		// the swarm could not serve the pieces there and another position was
+		// chosen instead - and it is set by the availability logic (TOR-13),
+		// not inferred from the timestamps differing.
 		deps.bus.Publish(FrameReady{
 			File:      file.Index,
 			Index:     i,
 			Requested: at,
 			Actual:    actual,
-			Shift:     shift,
+			Shift:     ShiftNone,
 			Path:      path,
 			Width:     frame.Width,
 			Height:    frame.Height,

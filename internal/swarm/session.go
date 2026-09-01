@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	alog "github.com/anacrolix/log"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
@@ -144,6 +145,11 @@ func openBlind(ctx context.Context, cfg Config, src Source) (*Session, *Torrent,
 
 func newSession(cfg Config, dht bool) (*Session, error) {
 	tc := torrent.NewDefaultClientConfig()
+	// The library logs read failures to stderr, including the ones we cause
+	// on purpose by cancelling a reader when a window is released. The core
+	// stays silent and its clients decide what a person sees, so nothing below
+	// Critical is allowed through.
+	tc.Logger = alog.Default.FilterLevel(alog.Critical)
 	tc.DefaultStorage = storage.NewFileByInfoHash(cfg.DataDir)
 	tc.NoUpload = !cfg.Upload
 	tc.NoDHT = !dht
