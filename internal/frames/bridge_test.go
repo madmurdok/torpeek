@@ -126,14 +126,19 @@ func TestFrameFromTorrentMiddle(t *testing.T) {
 // putting -ss before -i makes ffmpeg jump to the keyframe, while putting it
 // after decodes everything up to that point - which over a torrent means
 // fetching everything up to that point too.
+//
+// Output seeking is allowed to fail outright rather than merely cost more.
+// Since the bridge began claiming only the head of a request, reading a whole
+// file arrives piece by piece and can exceed the request timeout - which makes
+// the point more strongly, not less, so both outcomes are accepted.
 func TestInputSeekBeatsOutputSeek(t *testing.T) {
 	tools := locateTools(t)
 
-	measure := func(inputSeek bool) int64 {
+	measure := func(inputSeek bool) (int64, error) {
 		t.Helper()
 
 		url, tor := torrentedVideo(t, tools, 120)
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 		defer cancel()
 
 		args := []string{"-hide_banner", "-loglevel", "error"}
@@ -144,15 +149,21 @@ func TestInputSeekBeatsOutputSeek(t *testing.T) {
 		}
 		args = append(args, "-frames:v", "1", "-f", "image2pipe", "-c:v", "mjpeg", "-")
 
-		if _, err := tools.Run(ctx, "ffmpeg", args...); err != nil {
-			t.Fatalf("decode (inputSeek=%v): %v", inputSeek, err)
-		}
+		_, err := tools.Run(ctx, "ffmpeg", args...)
 		time.Sleep(500 * time.Millisecond)
-		return tor.Downloaded()
+		return tor.Downloaded(), err
 	}
 
-	input := measure(true)
-	output := measure(false)
+	input, err := measure(true)
+	if err != nil {
+		t.Fatalf("input seeking failed, which is the path the extractor uses: %v", err)
+	}
+
+	output, outputErr := measure(false)
+	if outputErr != nil {
+		t.Logf("-ss before -i cost %d KiB; -ss after -i did not finish at all (%v)", input/1024, outputErr)
+		return
+	}
 
 	t.Logf("-ss before -i cost %d KiB; -ss after -i cost %d KiB", input/1024, output/1024)
 

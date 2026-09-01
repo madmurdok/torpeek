@@ -153,3 +153,31 @@ func BuildFromBytes(t *testing.T, name string, payload []byte, pieceLength int64
 
 	return Fixture{Dir: dir, TorrentPath: torrentPath, Payload: payload, FileName: name}
 }
+
+// BuildDir makes a torrent over a directory the caller has already filled,
+// for tests that need several files in one torrent.
+func BuildDir(t *testing.T, dir string, pieceLength int64) Fixture {
+	t.Helper()
+
+	info := metainfo.Info{PieceLength: pieceLength}
+	if err := info.BuildFromFilePath(dir); err != nil {
+		t.Fatalf("build info: %v", err)
+	}
+	infoBytes, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal info: %v", err)
+	}
+
+	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
+	torrentPath := filepath.Join(t.TempDir(), "fixture.torrent")
+	f, err := os.Create(torrentPath)
+	if err != nil {
+		t.Fatalf("create torrent file: %v", err)
+	}
+	defer f.Close()
+	if err := mi.Write(f); err != nil {
+		t.Fatalf("write torrent file: %v", err)
+	}
+
+	return Fixture{Dir: dir, TorrentPath: torrentPath}
+}
