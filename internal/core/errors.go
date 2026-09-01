@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/torpeek/torpeek/internal/ffmpeg"
-	"github.com/torpeek/torpeek/internal/probe"
-	"github.com/torpeek/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // ErrorCode is a stable, machine-readable name for a failure.

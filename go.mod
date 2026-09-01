@@ -1,4 +1,4 @@
-module github.com/torpeek/torpeek
+module github.com/madmurdok/torpeek
 
 go 1.27.0
 

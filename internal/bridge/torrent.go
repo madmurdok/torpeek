@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/torpeek/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // FromTorrent adapts a torrent to Content, fetching through the profile's

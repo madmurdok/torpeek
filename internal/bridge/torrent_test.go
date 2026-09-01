@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/swarm"
-	"github.com/torpeek/torpeek/internal/torrenttest"
+	"github.com/madmurdok/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
 const (

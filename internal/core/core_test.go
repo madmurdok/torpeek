@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/ffmpeg"
-	"github.com/torpeek/torpeek/internal/probe"
-	"github.com/torpeek/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 func TestBusFansOutToEverySubscriber(t *testing.T) {

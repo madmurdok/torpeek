@@ -9,12 +9,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/bridge"
-	"github.com/torpeek/torpeek/internal/ffmpeg"
-	"github.com/torpeek/torpeek/internal/frames"
-	"github.com/torpeek/torpeek/internal/output"
-	"github.com/torpeek/torpeek/internal/probe"
-	"github.com/torpeek/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/frames"
+	"github.com/madmurdok/torpeek/internal/output"
+	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // Config is everything one run needs.

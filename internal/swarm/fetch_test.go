@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/torrenttest"
+	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
 const (

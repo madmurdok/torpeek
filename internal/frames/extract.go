@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
 )
 
 // ErrNoFrame means ffmpeg read the file but produced no image at that point.

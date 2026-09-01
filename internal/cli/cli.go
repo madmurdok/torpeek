@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/core"
-	"github.com/torpeek/torpeek/internal/ffmpeg"
-	"github.com/torpeek/torpeek/internal/frames"
-	"github.com/torpeek/torpeek/internal/swarm"
-	"github.com/torpeek/torpeek/internal/version"
+	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/frames"
+	"github.com/madmurdok/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/version"
 )
 
 // Exit codes. These are an interface: a script calling torpeek reacts to them,

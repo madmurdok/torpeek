@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/torpeek/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/bridge"
 )
 
 // loggingContent records what the external tool actually asks the bridge for.

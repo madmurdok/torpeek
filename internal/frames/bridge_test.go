@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/torpeek/torpeek/internal/bridge"
-	"github.com/torpeek/torpeek/internal/ffmpeg"
-	"github.com/torpeek/torpeek/internal/swarm"
-	"github.com/torpeek/torpeek/internal/torrenttest"
+	"github.com/madmurdok/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
 const pieceLength = 256 << 10
