@@ -35,6 +35,9 @@ const (
 	CodeUnavailable ErrorCode = "unavailable"
 	// CodeDecodeFailed: ffmpeg read the data but produced no usable frame.
 	CodeDecodeFailed ErrorCode = "decode_failed"
+	// CodeSeekFailed: a frame was decoded, but nowhere near the moment that
+	// was asked for, so it answers a question nobody put.
+	CodeSeekFailed ErrorCode = "seek_failed"
 	// CodeToolMissing: ffmpeg or ffprobe could not be found.
 	CodeToolMissing ErrorCode = "tool_missing"
 	// CodeBudgetExhausted: a time or traffic limit stopped the run.
