@@ -27,6 +27,20 @@ Some.Movie.2019.1080p/movie.mkv
 6 frames from 1 file(s) in 1m14s, 71.4 MiB downloaded
 ```
 
+## What it is for
+
+- **Answer one question cheaply:** is this the right release — the right cut,
+  the right dub, the right quality — before spending hours and gigabytes
+  finding out. Twenty frames and a track list are usually the whole answer.
+- **Work over a swarm nobody controls.** Pieces arrive out of order, peers
+  hold different parts, some regions are unavailable at all. The tool budgets
+  its time and traffic and reports what it could not get, instead of hanging.
+- **Stay a library.** The core prints nothing and knows nothing about how
+  results are shown; the CLI is one client of it, and the TUI and web UI will
+  be others.
+- **Be one folder eventually.** No install, no daemon, no service: a binary
+  and the two ffmpeg executables next to it. That is not true yet — see below.
+
 ## Status
 
 Early development, but the main path works: a magnet link or `.torrent` turns
@@ -46,10 +60,57 @@ size, but the strategies on top of them are still open. See
 [REQUIREMENTS.md](REQUIREMENTS.md) for what this is meant to become and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how it is put together.
 
+## Requirements
+
+**There are no prebuilt binaries yet.** Release archives with ffmpeg bundled
+alongside the executable are planned but unbuilt, so the only way to run
+torpeek today is to compile it. That means two things have to be on the
+machine:
+
+- **Go 1.27 or newer** — the version in `go.mod`. `go version` to check;
+  [go.dev/dl](https://go.dev/dl/) to install.
+- **ffmpeg and ffprobe** — frame decoding and container inspection shell out
+  to them. `brew install ffmpeg` on macOS, `apt install ffmpeg` on Debian or
+  Ubuntu. Developed against ffmpeg 8.1.
+
+torpeek looks for the two executables next to its own binary first — that is
+where a release archive will one day put them — and falls back to `PATH`.
+
+## Build from source
+
+The repository is not published anywhere yet, so this starts from the working
+copy you already have:
+
+```sh
+cd torpeek
+make build          # ./bin/torpeek
+```
+
+A first run on something legal and well seeded, which is also how the project
+tests itself:
+
+```sh
+curl -LO https://archive.org/download/BigBuckBunny_124/BigBuckBunny_124_archive.torrent
+./bin/torpeek -n 6 -out ./frames BigBuckBunny_124_archive.torrent
+```
+
+That writes six frames from each of the torrent's three video files — 18 in
+`./frames` — and takes about 130 MB of its 421 MB to do it, in ten seconds on a
+warm swarm. `-mode min-traffic` trades time for a fraction of that. Point it at
+a magnet link the same way.
+
+Other targets:
+
+```sh
+make check     # vet + tests (the suite drives real torrents through a local seeder, so it is slow)
+make cross     # dist/{darwin,linux,windows}-*/
+make fmt
+```
+
 ## Usage
 
 ```sh
-torpeek [flags] <magnet-uri | file.torrent>
+./bin/torpeek [flags] <magnet-uri | file.torrent>
 ```
 
 | flag | default | meaning |
@@ -100,15 +161,3 @@ Exit codes distinguish the three outcomes a caller has to tell apart:
 | `1` | the run produced nothing |
 | `2` | bad command line — nothing was attempted |
 | `3` | stopped at a budget or cancelled; what was produced is kept |
-
-## Build
-
-```sh
-make build     # ./bin/torpeek
-make cross     # dist/{darwin,linux,windows}-*/
-make check     # vet + tests
-```
-
-Frame decoding shells out to `ffmpeg`/`ffprobe`. torpeek looks for them next to
-its own binary first — that is how a release archive will ship them — and falls
-back to `PATH`.
