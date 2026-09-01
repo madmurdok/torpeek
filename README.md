@@ -78,10 +78,8 @@ where a release archive will one day put them — and falls back to `PATH`.
 
 ## Build from source
 
-The repository is not published anywhere yet, so this starts from the working
-copy you already have:
-
 ```sh
+git clone https://github.com/madmurdok/torpeek.git
 cd torpeek
 make build          # ./bin/torpeek
 ```
