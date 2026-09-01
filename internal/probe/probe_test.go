@@ -217,3 +217,78 @@ func fileSize(t *testing.T, path string) int64 {
 func formatSeconds(d time.Duration) string {
 	return strconv.FormatFloat(d.Seconds(), 'f', 3, 64)
 }
+
+// sampleAVI renders H.264 into AVI, the combination that states only DTS on a
+// packet. It is small on purpose: the point is the container, not the content.
+func sampleAVI(t *testing.T) string {
+	t.Helper()
+
+	tools := locateTools(t)
+	path := filepath.Join(t.TempDir(), "sample.avi")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	if _, err := tools.Run(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration=30",
+		"-c:v", "libx264", "-g", "25", "-pix_fmt", "yuv420p",
+		path,
+	); err != nil {
+		t.Fatalf("render sample avi: %v", err)
+	}
+	return path
+}
+
+// TestKeyframeAtInAVIWithoutPTS is the regression for a run that wrote the same
+// opening frame twenty times: ffprobe states no pts_time for H.264 in AVI, the
+// missing value was read as zero, and every capture point decoded position 0.
+func TestKeyframeAtInAVIWithoutPTS(t *testing.T) {
+	tools := locateTools(t)
+	path := sampleAVI(t)
+	prober := New(tools)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, at := range []time.Duration{10 * time.Second, 20 * time.Second} {
+		t.Run(at.String(), func(t *testing.T) {
+			kf, err := prober.KeyframeAt(ctx, path, at)
+			if err != nil {
+				t.Fatalf("KeyframeAt(%s): %v", at, err)
+			}
+			if kf.PTS == 0 {
+				t.Fatalf("keyframe for %s came back at 0 - the timestamp was dropped, "+
+					"and every capture point would decode the start of the file", at)
+			}
+			if kf.PTS > at || at-kf.PTS > 2*time.Second {
+				t.Errorf("keyframe at %s is not the one before %s", kf.PTS, at)
+			}
+			if kf.BytePos <= 0 {
+				t.Errorf("BytePos = %d, want a real offset", kf.BytePos)
+			}
+		})
+	}
+}
+
+// TestParseSecondsSeparatesAbsentFromZero guards the distinction the bug turned
+// on: ffprobe omitting a field must not read as a timestamp of zero.
+func TestParseSecondsSeparatesAbsentFromZero(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want time.Duration
+		ok   bool
+	}{
+		{"", 0, false},
+		{"N/A", 0, false},
+		{"-1", 0, false},
+		{"0", 0, true},
+		{"0.000000", 0, true},
+		{"10.5", 10500 * time.Millisecond, true},
+	} {
+		got, ok := parseSeconds(c.in)
+		if ok != c.ok || got != c.want {
+			t.Errorf("parseSeconds(%q) = %v, %v; want %v, %v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
