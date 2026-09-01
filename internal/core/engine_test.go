@@ -325,3 +325,45 @@ func TestParamsKeyDistinguishesWhatChangesTheResult(t *testing.T) {
 		})
 	}
 }
+
+// TestLandedNearUsesRealRunData feeds the guard the timestamps two real runs
+// actually produced: the pairs from an MP4 where seeking worked, and the pairs
+// from an AVI where every point came back at zero and was reported a success.
+func TestLandedNearUsesRealRunData(t *testing.T) {
+	sec := func(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
+
+	// Twenty points across a 888s film: the spacing is the tolerance.
+	good := seekTolerance([]time.Duration{sec(44.4), sec(86.5)})
+	for _, c := range []struct{ requested, actual float64 }{
+		{44.4, 43.7}, {128.5, 126.3}, {170.6, 162.1}, {296.8, 289.3}, {843.7, 833.6},
+	} {
+		if !landedNear(sec(c.requested), sec(c.actual), good) {
+			t.Errorf("frame decoded at %.1fs for a point at %.1fs was rejected, but a keyframe "+
+				"a few seconds early is ordinary", c.actual, c.requested)
+		}
+	}
+
+	// The AVI: every point decoded position 0.
+	bad := seekTolerance([]time.Duration{sec(175.3), sec(341.4)})
+	for _, requested := range []float64{175.3, 341.4, 1836.1, 3330.8} {
+		if landedNear(sec(requested), 0, bad) {
+			t.Errorf("a frame decoded at 0s was accepted for a point at %.1fs", requested)
+		}
+	}
+}
+
+func TestSeekToleranceNeverGoesBelowAKeyframeInterval(t *testing.T) {
+	sec := func(f float64) time.Duration { return time.Duration(f * float64(time.Second)) }
+
+	// A dense plan over a short clip: points can sit closer together than the
+	// file's keyframes, and that must not turn ordinary frames into misses.
+	if got := seekTolerance([]time.Duration{sec(3), sec(5.85)}); got != minSeekTolerance {
+		t.Errorf("tolerance = %s for points 2.85s apart, want the %s floor", got, minSeekTolerance)
+	}
+	if got := seekTolerance(nil); got != minSeekTolerance {
+		t.Errorf("tolerance = %s with no points, want the %s floor", got, minSeekTolerance)
+	}
+	if got := seekTolerance([]time.Duration{sec(175.3), sec(341.4)}); got != sec(166.1) {
+		t.Errorf("tolerance = %s, want the spacing between the points", got)
+	}
+}

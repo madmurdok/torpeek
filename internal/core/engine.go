@@ -265,6 +265,7 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 
 	produced := 0
 	skipped := 0
+	tolerance := seekTolerance(points)
 
 	for i, at := range points {
 		if _, halt := haltReason(ctx, deps.tracker); halt {
@@ -285,6 +286,26 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 				Requested: at,
 				Code:      CodeOf(err),
 				Reason:    err.Error(),
+			})
+			continue
+		}
+
+		// A keyframe legitimately sits before its capture point - the decoder
+		// starts there and runs forward. One sitting closer to a neighbouring
+		// point than to its own is a different thing: the seek did not land,
+		// and the frame answers a question nobody asked. Writing it would put
+		// a plausible-looking wrong answer on disk and report it as a success,
+		// which is exactly how a run once wrote the same opening frame twenty
+		// times over.
+		if !landedNear(at, actual, tolerance) {
+			skipped++
+			deps.bus.Publish(FrameSkipped{
+				File:      file.Index,
+				Index:     i,
+				Requested: at,
+				Code:      CodeSeekFailed,
+				Reason: fmt.Sprintf("decoded at %s, %s away from the requested %s",
+					actual.Round(time.Second), (at - actual).Abs().Round(time.Second), at.Round(time.Second)),
 			})
 			continue
 		}
@@ -333,6 +354,36 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	})
 
 	return produced, nil
+}
+
+// minSeekTolerance is the smallest gap worth calling a miss. Keyframes are
+// commonly seconds apart, so below this nothing can be judged: a plan denser
+// than the file's own keyframes produces near-duplicate frames by design, not
+// by failure.
+const minSeekTolerance = 10 * time.Second
+
+// seekTolerance is how far before its capture point a frame may land. The
+// spacing between points is the natural bound - past it, a frame belongs to
+// the neighbouring point rather than its own.
+func seekTolerance(points []time.Duration) time.Duration {
+	spacing := time.Duration(0)
+	if len(points) >= 2 {
+		spacing = points[1] - points[0]
+	}
+	if spacing < minSeekTolerance {
+		return minSeekTolerance
+	}
+	return spacing
+}
+
+// landedNear reports whether a decoded frame answers the point it was asked
+// for. Forward slack is small and only absorbs rounding: a keyframe is
+// expected at or before the request.
+func landedNear(requested, actual, tolerance time.Duration) bool {
+	if actual > requested+time.Second {
+		return false
+	}
+	return requested-actual <= tolerance
 }
 
 // captureOne locates the keyframe for a timestamp and decodes it. The keyframe
