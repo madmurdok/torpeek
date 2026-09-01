@@ -10,6 +10,11 @@ type Torrent struct {
 	t       *torrent.Torrent
 	private bool
 	files   []FileInfo
+
+	// Cached from the metadata: these never change once info is known, and
+	// caching them keeps the piece arithmetic testable without a client.
+	pieceLength int64
+	numPieces   int
 }
 
 func newTorrent(t *torrent.Torrent) *Torrent {
@@ -30,7 +35,11 @@ func newTorrent(t *torrent.Torrent) *Torrent {
 		})
 	}
 
-	return &Torrent{t: t, private: private, files: files}
+	tor := &Torrent{t: t, private: private, files: files, numPieces: t.NumPieces()}
+	if info != nil {
+		tor.pieceLength = info.PieceLength
+	}
+	return tor
 }
 
 // Name is the torrent's display name.
@@ -54,15 +63,10 @@ func (t *Torrent) Length() int64 { return t.t.Length() }
 
 // PieceLength is the swarm's unit of exchange, and so the floor on what any
 // single frame can cost.
-func (t *Torrent) PieceLength() int64 {
-	if info := t.t.Info(); info != nil {
-		return info.PieceLength
-	}
-	return 0
-}
+func (t *Torrent) PieceLength() int64 { return t.pieceLength }
 
 // NumPieces is how many pieces the torrent is split into.
-func (t *Torrent) NumPieces() int { return t.t.NumPieces() }
+func (t *Torrent) NumPieces() int { return t.numPieces }
 
 // Downloaded is the useful data received from the swarm so far, in bytes. This
 // is what the run's traffic budget is measured against.
