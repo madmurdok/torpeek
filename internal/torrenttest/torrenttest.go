@@ -120,3 +120,36 @@ func deterministicBytes(size int64) []byte {
 	}
 	return b
 }
+
+// BuildFromBytes makes a torrent over content the caller already has, for
+// tests that need a real media file rather than a synthetic payload.
+func BuildFromBytes(t *testing.T, name string, payload []byte, pieceLength int64) Fixture {
+	t.Helper()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), payload, 0o600); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	info := metainfo.Info{PieceLength: pieceLength}
+	if err := info.BuildFromFilePath(dir); err != nil {
+		t.Fatalf("build info: %v", err)
+	}
+	infoBytes, err := bencode.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal info: %v", err)
+	}
+
+	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
+	torrentPath := filepath.Join(t.TempDir(), "fixture.torrent")
+	f, err := os.Create(torrentPath)
+	if err != nil {
+		t.Fatalf("create torrent file: %v", err)
+	}
+	defer f.Close()
+	if err := mi.Write(f); err != nil {
+		t.Fatalf("write torrent file: %v", err)
+	}
+
+	return Fixture{Dir: dir, TorrentPath: torrentPath, Payload: payload, FileName: name}
+}

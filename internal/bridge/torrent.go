@@ -35,11 +35,22 @@ func (c torrentContent) Name(file int) string {
 	return files[file].Name()
 }
 
-// Fetch claims the pieces backing the range, then streams it. The claim is
-// held for as long as the response body is open and released on Close, so a
-// client that gives up early stops the transfer with it.
+// Fetch claims the pieces at the head of the range, then streams it.
+//
+// Only the head is claimed, never the whole requested range. ffmpeg asks for
+// "this offset to the end of the file" and then reads as little of it as it
+// needs - claiming all of that would order the entire file from the swarm to
+// satisfy a request that stops after a few hundred kilobytes. Measured: on a
+// 7.3 MiB file, claiming the full range cost 100% of it to probe. Everything
+// past the head is pulled by the reader's readahead as the client actually
+// reads, which is the profile's job.
 func (c torrentContent) Fetch(ctx context.Context, file int, off, length int64) (io.ReadCloser, error) {
-	window, err := c.t.Claim(file, off, length, c.profile)
+	head := length
+	if c.profile.Window > 0 && head > c.profile.Window {
+		head = c.profile.Window
+	}
+
+	window, err := c.t.Claim(file, off, head, c.profile)
 	if err != nil {
 		return nil, err
 	}
