@@ -51,6 +51,21 @@ type Config struct {
 
 	// ShutdownTimeout bounds how long Close waits for in-flight requests.
 	ShutdownTimeout time.Duration
+
+	// Token gates every request to the API and the event stream (not the
+	// static shell - see Handler and authGuard) with a shared secret carried
+	// as a "token" query parameter. Empty does not necessarily mean
+	// "unprotected": Start decides whether one is required (needsToken) from
+	// the resolved Addr and BasePath, and fills in a random value here when
+	// it is and the caller left this blank.
+	//
+	// Setting Token explicitly - what -web-token does - works on any bind
+	// address, including loopback, and is how an operator pins a token
+	// across restarts: an auto-generated one changes every time the process
+	// starts, which is fine for an interactive run but wrong for a systemd
+	// unit that restarts on its own with nobody watching the log for the new
+	// value (REQUIREMENTS.md section 3.3, section 4.1).
+	Token string
 }
 
 // DefaultConfig serves the desktop case: loopback, fixed port.
@@ -137,6 +152,18 @@ func Start(ctx context.Context, cfg Config, runner Runner) (*Server, error) {
 		return nil, errors.New("web: a runner is required")
 	}
 
+	// A token the caller did not pin is filled in here, not in newServer:
+	// newServer is also what a test drives directly through httptest, and a
+	// test that wants no-auth behaviour (most of them) must not have one
+	// sprung on it. Only the real entry point auto-provides.
+	if cfg.Token == "" && needsToken(cfg.Addr, cfg.BasePath) {
+		token, err := generateToken()
+		if err != nil {
+			return nil, fmt.Errorf("web: generate access token: %w", err)
+		}
+		cfg.Token = token
+	}
+
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("web listen on %s: %w", cfg.Addr, err)
@@ -144,6 +171,12 @@ func Start(ctx context.Context, cfg Config, runner Runner) (*Server, error) {
 
 	s := newServer(ctx, cfg, runner)
 	s.url = "http://" + ln.Addr().String() + s.cfg.BasePath + "/"
+	if s.cfg.Token != "" {
+		// The token is base64.RawURLEncoding output: a fixed alphabet with
+		// no character that needs percent-escaping in a query string, so
+		// this is safe to concatenate directly.
+		s.url += "?token=" + s.cfg.Token
+	}
 	s.server = &http.Server{Handler: s.mountedHandler()}
 
 	go func() {
@@ -190,12 +223,15 @@ func (s *Server) Handler() http.Handler {
 		panic("web: embedded assets are missing: " + err.Error())
 	}
 
+	// Every route that serves the API or the event stream goes through
+	// authGuard; GET / (the embedded shell) deliberately does not - see
+	// authGuard's doc comment for why gating it too would be self-defeating.
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /events", s.handleEvents)
-	mux.HandleFunc("POST /runs", s.handleStartRun)
-	mux.HandleFunc("POST /runs/upload", s.handleUploadTorrent)
-	mux.HandleFunc("POST /runs/cancel", s.handleCancelRun)
-	mux.HandleFunc("GET /files/{id}", s.handleFile)
+	mux.HandleFunc("GET /events", s.authGuard(s.handleEvents))
+	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
+	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
+	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
+	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.Handle("GET /", http.FileServerFS(assets))
 
 	return mountRoot(mux)

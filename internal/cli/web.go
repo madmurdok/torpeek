@@ -43,6 +43,7 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		cfg.Addr = addr
 	}
 	cfg.BasePath = opts.BasePath
+	cfg.Token = opts.Token
 
 	server, err := web.Start(ctx, cfg, runner)
 	if err != nil {

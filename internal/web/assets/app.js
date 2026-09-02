@@ -5,6 +5,19 @@
 //
 // Every URL is resolved against document.baseURI rather than written from the
 // site root, so the page works unchanged under /torpeek behind a proxy.
+//
+// TOKEN is this page's proof of authorization when the server was started
+// with one (TOR-30): the URL printed at startup carries it as a query
+// parameter, since that is the one representation that reaches every kind of
+// request this page makes - a WebSocket handshake included, where the
+// browser gives page script no way to set a custom header. url() below
+// attaches it to everything built through it, so the fetch calls, the
+// WebSocket and every frame image src stay authorized without each call site
+// having to remember to. It is not stripped from the address bar afterwards:
+// doing so would break a plain page reload, and the trade-off - the token
+// sitting in the visible URL and in browser/proxy history for the life of
+// the tab - is accepted rather than worked around (see server.go's Config.Token).
+const TOKEN = new URLSearchParams(location.search).get("token") || "";
 
 const el = {
   status: document.getElementById("status"),
@@ -31,7 +44,9 @@ const el = {
 const state = { active: false, files: new Map() };
 
 function url(path) {
-  return new URL(path, document.baseURI);
+  const u = new URL(path, document.baseURI);
+  if (TOKEN) u.searchParams.set("token", TOKEN);
+  return u;
 }
 
 function setStatus(text, kind) {
