@@ -12,7 +12,8 @@ import (
 )
 
 // serveWeb runs the UI: one binary that serves its own frontend, streams the
-// same events the CLI prints, and opens a browser at itself.
+// same events the CLI prints, and opens a browser at itself - unless
+// -headless says there is nothing to open it on.
 //
 // The web package is handed a runner rather than a configuration, so building
 // a run out of a request stays here, next to the flag defaults it has to
@@ -41,6 +42,7 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
 	}
+	cfg.BasePath = opts.BasePath
 
 	server, err := web.Start(ctx, cfg, runner)
 	if err != nil {
@@ -59,11 +61,18 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		}
 	}
 
-	// A machine with no desktop has nothing to open, and that must not stop it
-	// serving. Section 3.3's explicit headless switch is still to come; until
-	// then the failure is reported and ignored.
-	if err := web.OpenBrowser(server.URL()); err != nil {
-		fmt.Fprintf(stderr, "torpeek: %v; open it yourself\n", err)
+	// -headless is the explicit switch section 3.3 asks for, rather than a
+	// guess from $DISPLAY or $SSH_CONNECTION: either can be set on a machine
+	// that still has a real browser to open (X11 forwarding, a remote
+	// desktop session), and OpenBrowser's failure is already advisory - a
+	// wrong guess would silently skip a browser that was actually available,
+	// where a wrong flag is just a line typed once. On a machine with
+	// nothing to open at all, the failure this skips is harmless anyway: it
+	// is reported and the server keeps serving either way.
+	if !opts.Headless {
+		if err := web.OpenBrowser(server.URL()); err != nil {
+			fmt.Fprintf(stderr, "torpeek: %v; open it yourself\n", err)
+		}
 	}
 
 	<-ctx.Done()
