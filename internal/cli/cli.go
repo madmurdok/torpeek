@@ -20,6 +20,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/version"
+	"github.com/madmurdok/torpeek/internal/web"
 )
 
 // Exit codes. These are an interface: a script calling torpeek reacts to them,
@@ -54,11 +55,13 @@ type Options struct {
 	Parallelism int
 	Port        int
 	BridgePort  int
+	WebPort     int
 	Peers       []string
 	Upload      bool
 	DHT         bool
 	Sequential  bool
 	JSON        bool
+	Web         bool
 	Version     bool
 	List        bool
 	Files       []string
@@ -83,7 +86,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return ExitOK
 	}
 
-	if opts.Source == "" {
+	// The UI is the one mode that starts with nothing to work on: the source
+	// is pasted into the page, not onto the command line.
+	if opts.Source == "" && !opts.Web {
 		fmt.Fprintln(stderr, "torpeek: give a magnet link or a .torrent file")
 		return ExitUsage
 	}
@@ -113,6 +118,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		fmt.Fprintln(stderr, "put ffmpeg and ffprobe next to the torpeek binary, or install them")
 		return ExitFailed
+	}
+
+	if opts.Web {
+		return serveWeb(ctx, opts, cfg, tools, stdout, stderr)
 	}
 
 	events, err := core.NewEngine(tools).Run(ctx, cfg)
@@ -149,10 +158,12 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.IntVar(&opts.Parallelism, "parallel", core.DefaultParallelism, "video files to work on at once")
 	fs.IntVar(&opts.Port, "torrent-port", 0, "BitTorrent listen port (required where a port range is allocated)")
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge")
+	fs.IntVar(&opts.WebPort, "web-port", 0, "port for the web UI (default: "+web.DefaultAddr+")")
 	fs.BoolVar(&opts.Upload, "upload", true, "serve pieces back to the swarm while running")
 	fs.BoolVar(&opts.DHT, "dht", true, "use DHT and PEX (never for a private torrent)")
 	fs.BoolVar(&opts.Sequential, "sequential", false, "when a container has no usable index, degrade to sequential capture from the start instead of failing")
 	fs.BoolVar(&opts.JSON, "json", false, "emit NDJSON events instead of human output")
+	fs.BoolVar(&opts.Web, "web", false, "serve the web UI and open it in a browser instead of running on the command line")
 	fs.BoolVar(&opts.List, "list", false, "list the torrent's video files and exit, without taking frames")
 	fs.BoolVar(&opts.Version, "version", false, "print version and exit")
 
@@ -242,6 +253,7 @@ func splitList(raw string) []string {
 const usage = `torpeek - preview a video torrent without downloading it
 
 usage: torpeek [flags] <magnet-uri | file.torrent>
+       torpeek -web [flags] [magnet-uri | file.torrent]
 
 flags:
 `
