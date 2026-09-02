@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>torpeek</title>
+<!-- Every reference here is relative on purpose. The UI has to work under an
+     arbitrary base path such as /torpeek behind a reverse proxy, and a single
+     leading slash anywhere would break that (REQUIREMENTS.md section 3.3). -->
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <h1>torpeek</h1>
+  <span id="status" class="status">connecting</span>
+</header>
+
+<form id="start" autocomplete="off">
+  <input id="source" name="source" type="text" spellcheck="false"
+         placeholder="magnet:?xt=urn:btih:… or a path to a .torrent file">
+  <select id="mode" name="mode">
+    <option value="min-time">min-time</option>
+    <option value="min-traffic">min-traffic</option>
+  </select>
+  <button id="go" type="submit">Take frames</button>
+  <button id="cancel" type="button" disabled>Cancel</button>
+</form>
+
+<p id="error" class="error" hidden></p>
+<p id="summary" class="summary"></p>
+
+<section id="frames" class="frames"></section>
+
+<h2>Events</h2>
+<pre id="log" class="log"></pre>
+
+<script src="app.js"></script>
+</body>
+</html>

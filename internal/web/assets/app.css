@@ -1,0 +1,43 @@
+:root { color-scheme: light dark; }
+
+body {
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  max-width: 60rem;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header { display: flex; align-items: baseline; gap: .75rem; }
+h1 { font-size: 1.4rem; margin: 0; }
+h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
+
+.status { font-size: .8rem; opacity: .7; }
+.status[data-state="live"] { color: #1a7f37; opacity: 1; }
+.status[data-state="lost"] { color: #b35900; opacity: 1; }
+
+form { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; }
+#source { flex: 1 1 24rem; min-width: 16rem; padding: .45rem .6rem; font: inherit; }
+select, button { padding: .45rem .7rem; font: inherit; }
+button:disabled { opacity: .5; }
+
+.error { color: #b3261e; }
+.summary { opacity: .8; }
+
+.frames {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: .6rem;
+}
+.frames figure { margin: 0; }
+.frames img { width: 100%; display: block; background: #0002; }
+.frames figcaption { font-size: .75rem; opacity: .75; }
+.frames .shifted { color: #b35900; }
+
+.log {
+  max-height: 22rem;
+  overflow: auto;
+  padding: .6rem;
+  background: #0000000d;
+  font-size: .78rem;
+  white-space: pre-wrap;
+}
