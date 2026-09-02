@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -12,9 +13,11 @@ import (
 	"github.com/madmurdok/torpeek/internal/bridge"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
+	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/probe"
 	"github.com/madmurdok/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/version"
 )
 
 // Config is everything one run needs.
@@ -277,6 +280,7 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	produced := 0
 	skipped := 0
 	tolerance := seekTolerance(points)
+	records := make([]manifest.Frame, 0, len(points))
 
 	for i, at := range points {
 		if _, halt := haltReason(ctx, deps.tracker); halt {
@@ -291,6 +295,12 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		shot, err := e.captureOne(ctx, cfg, deps, url, file, info.Duration, at, tolerance/4)
 		if err != nil {
 			skipped++
+			records = append(records, manifest.Frame{
+				Index:       i,
+				RequestedMS: at.Milliseconds(),
+				Shift:       manifest.ShiftFailed,
+				Error:       string(CodeOf(err)),
+			})
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
 				Index:     i,
@@ -313,6 +323,12 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		// two would throw away the frame the shift went to find.
 		if !landedNear(shot.asked, shot.actual, tolerance) {
 			skipped++
+			records = append(records, manifest.Frame{
+				Index:       i,
+				RequestedMS: at.Milliseconds(),
+				Shift:       manifest.ShiftFailed,
+				Error:       string(CodeSeekFailed),
+			})
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
 				Index:     i,
@@ -330,6 +346,19 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			return produced, Fail(CodeStorage, err)
 		}
 		produced++
+
+		actual := shot.actual.Milliseconds()
+		records = append(records, manifest.Frame{
+			Index:       i,
+			RequestedMS: at.Milliseconds(),
+			ActualMS:    &actual,
+			Path:        path,
+			// The two vocabularies are deliberately the same strings, so a
+			// marker never changes meaning on its way to disk.
+			Shift:  manifest.Shift(shot.shift),
+			Width:  shot.frame.Width,
+			Height: shot.frame.Height,
+		})
 
 		// Actual almost never equals Requested: decoding starts at the
 		// keyframe before the wanted moment, which is ordinary behaviour and
@@ -359,6 +388,10 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		})
 	}
 
+	if err := e.writeManifest(deps, file, info, records); err != nil {
+		return produced, Fail(CodeStorage, err)
+	}
+
 	deps.bus.Publish(FileDone{
 		File:    file.Index,
 		Path:    file.Path,
@@ -367,6 +400,91 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	})
 
 	return produced, nil
+}
+
+// availabilityBuckets is how finely the swarm map is recorded. Enough for a UI
+// to draw a bar and for a person to see where the gaps are, without pretending
+// to a precision that changes minute by minute anyway.
+const availabilityBuckets = 64
+
+// writeManifest records what happened to one file, next to its frames.
+//
+// The cost it carries is the run's, not the file's: the budget is shared
+// across files, and a per-file share of it would be a number nothing enforces.
+func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
+	info probe.MediaInfo, records []manifest.Frame) error {
+
+	spent, elapsed := deps.tracker.Spent()
+	limitBytes, limitTime := deps.tracker.Limits()
+	connected, seeds := deps.torrent.Peers()
+
+	limitHit := ""
+	if exhausted, reason := deps.tracker.Exhausted(); exhausted {
+		limitHit = string(reason)
+	}
+
+	m := manifest.Manifest{
+		Version:   manifest.Version,
+		Tool:      version.Version,
+		CreatedAt: time.Now().UTC(),
+		Torrent: manifest.Torrent{
+			InfoHash:     deps.torrent.InfoHash(),
+			Name:         deps.torrent.Name(),
+			PieceLength:  deps.torrent.PieceLength(),
+			Private:      deps.torrent.Private(),
+			Peers:        connected,
+			Seeds:        seeds,
+			Availability: deps.torrent.Availability().Coarse(file, availabilityBuckets),
+		},
+		File: manifest.File{
+			Index:      file.Index,
+			Path:       file.Path,
+			Bytes:      file.Length,
+			DurationMS: info.Duration.Milliseconds(),
+			Container:  info.FormatName,
+		},
+		Video: manifest.Video{
+			Codec:        info.Video.Codec,
+			Profile:      info.Video.Profile,
+			Width:        info.Video.Width,
+			Height:       info.Video.Height,
+			FPS:          info.Video.FPS,
+			BitRate:      info.Video.BitRate,
+			BitsPerPixel: info.Video.BitsPerPixel(),
+		},
+		Audio:     make([]manifest.Audio, 0, len(info.Audio)),
+		Subtitles: make([]manifest.Subtitle, 0, len(info.Subtitles)),
+		Frames:    records,
+		Cost: manifest.Cost{
+			DownloadedBytes: spent,
+			ElapsedMS:       elapsed.Milliseconds(),
+			LimitBytes:      limitBytes,
+			LimitMS:         limitTime.Milliseconds(),
+			LimitHit:        limitHit,
+		},
+	}
+
+	for _, a := range info.Audio {
+		m.Audio = append(m.Audio, manifest.Audio{
+			Index: a.Index, Language: a.Language, Codec: a.Codec,
+			Channels: a.Channels, Title: a.Title, Default: a.Default,
+		})
+	}
+	for _, sub := range info.Subtitles {
+		m.Subtitles = append(m.Subtitles, manifest.Subtitle{
+			Index: sub.Index, Language: sub.Language, Format: sub.Codec,
+			Title: sub.Title, Forced: sub.Forced, Default: sub.Default,
+		})
+	}
+
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode manifest: %w", err)
+	}
+	data = append(data, '\n')
+
+	_, err = deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
+	return err
 }
 
 // minSeekTolerance is the smallest gap worth calling a miss. Keyframes are
