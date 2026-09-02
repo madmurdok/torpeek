@@ -153,14 +153,21 @@ func TestEndToEndTextOutput(t *testing.T) {
 		}
 	}
 
-	var found int
+	var found, sheets int
 	err := filepath.Walk(out, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.HasSuffix(path, ".jpg") {
-			found++
-			if info.Size() == 0 {
-				t.Errorf("frame %s is empty", path)
-			}
+		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".jpg") {
+			return nil
 		}
+		if info.Size() == 0 {
+			t.Errorf("%s is empty", path)
+		}
+		// The contact sheet lands beside the frames, named sheet.jpg (TOR-16)
+		// - a real .jpg, but not one of the four capture points.
+		if filepath.Base(path) == "sheet.jpg" {
+			sheets++
+			return nil
+		}
+		found++
 		return nil
 	})
 	if err != nil {
@@ -168,6 +175,9 @@ func TestEndToEndTextOutput(t *testing.T) {
 	}
 	if found != 4 {
 		t.Errorf("found %d frames on disk, want 4", found)
+	}
+	if sheets != 1 {
+		t.Errorf("found %d contact sheet(s) on disk, want 1", sheets)
 	}
 }
 

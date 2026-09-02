@@ -15,6 +15,10 @@ import (
 	"unicode"
 )
 
+// SheetName is what the contact sheet is called on disk, next to a file's
+// frames and manifest.
+const SheetName = "sheet.jpg"
+
 // Layout decides where a run's results live.
 //
 //	<root>/<infohash>/<params>/
