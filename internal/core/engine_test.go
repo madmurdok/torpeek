@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/bridge"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
+	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
@@ -680,5 +682,56 @@ func TestRunShiftsPastAnUnavailableRegion(t *testing.T) {
 	}
 	if shifted == 0 {
 		t.Error("no frame was marked shifted, so the hole was never noticed")
+	}
+
+	// The other half of the criterion: the shift has to survive into the
+	// record, not just the event stream.
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(ready[0].Path)), manifest.Name))
+	if err != nil {
+		t.Fatalf("no manifest next to the frames: %v", err)
+	}
+	var m manifest.Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("manifest is not readable: %v", err)
+	}
+
+	if len(m.Frames) != cfg.Plan.Count {
+		t.Errorf("manifest lists %d capture points, want all %d", len(m.Frames), cfg.Plan.Count)
+	}
+	var markedShifted int
+	for _, f := range m.Frames {
+		if f.Shift == manifest.ShiftUnavailable {
+			markedShifted++
+			if f.ActualMS == nil || *f.ActualMS == f.RequestedMS {
+				t.Errorf("frame %d is marked shifted but records no different timestamp", f.Index)
+			}
+		}
+	}
+	if markedShifted != shifted {
+		t.Errorf("manifest marks %d frames shifted, the run reported %d", markedShifted, shifted)
+	}
+
+	// The availability map should carry the hole that caused all this.
+	var holes int
+	for _, bucket := range m.Torrent.Availability {
+		if bucket == 0 {
+			holes++
+		}
+	}
+	if len(m.Torrent.Availability) == 0 {
+		t.Error("manifest carries no availability map")
+	} else if holes == 0 {
+		t.Errorf("availability map %v shows no gap, though a third of the file is unserved",
+			m.Torrent.Availability)
+	}
+
+	if m.Cost.DownloadedBytes <= 0 || m.Cost.LimitBytes <= 0 {
+		t.Errorf("manifest cost is empty: %+v", m.Cost)
+	}
+	if m.Video.Width != 640 || m.Video.Height != 360 || m.Video.Codec == "" {
+		t.Errorf("manifest video summary is wrong: %+v", m.Video)
+	}
+	if m.Tool == "" || m.Version != manifest.Version {
+		t.Errorf("manifest does not identify itself: version=%d tool=%q", m.Version, m.Tool)
 	}
 }

@@ -99,6 +99,11 @@ func (t *BudgetTracker) Spent() (bytes int64, elapsed time.Duration) {
 }
 
 // Exhausted reports whether a ceiling has been reached, and which one.
+// Limits are the ceilings this run is held to, for a record of it to name.
+func (t *BudgetTracker) Limits() (bytes int64, wall time.Duration) {
+	return t.budget.MaxBytes, t.budget.MaxTime
+}
+
 func (t *BudgetTracker) Exhausted() (bool, StopReason) {
 	bytes, elapsed := t.Spent()
 
