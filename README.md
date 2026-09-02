@@ -51,12 +51,19 @@ with priorities and readahead, a loopback HTTP bridge that gives ffmpeg a
 seekable file, `ffprobe` media inspection and keyframe lookup, capture point
 planning, frame decode at source resolution, atomic writes, a run budget for
 time and traffic, parallel work across a torrent's video files, contact sheet
-assembly, the CLI with NDJSON output, and a web UI served from the binary
-itself.
+assembly, a JSON manifest per file, a result cache that serves a repeat run
+from disk without touching the network, the CLI with NDJSON output, and a web
+UI with its real screens, sitting on the same `core.Engine` library the CLI
+drives.
 
-Not built yet: the JSON manifest, the result cache and
-resume, the live TUI, the UI's real screens, and release archives with bundled
-ffmpeg. The
+The UI also queues a second torrent instead of refusing it — the client can
+only run one torrent's networking at a time (one BitTorrent port, one
+client-wide DHT switch), so the second waits for the first's slot — and lists
+every torrent it knows about, live ones from memory and finished ones found on
+disk, so the list survives a restart. Opening a finished one from that list
+replays it from disk: no queue slot, no network request.
+
+Not built yet: the live TUI and release archives with bundled ffmpeg. The
 `min-time` and `min-traffic` profiles already differ in readahead and window
 size, but the strategies on top of them are still open. See
 [REQUIREMENTS.md](REQUIREMENTS.md) for what this is meant to become and
@@ -131,11 +138,15 @@ make fmt
 | `-web` | `false` | serve the web UI and open it in a browser instead of running on the command line |
 | `-web-host` | `127.0.0.1` | bind address for the web UI - loopback behind a reverse proxy is the documented setup |
 | `-web-port` | `8765` | port for the web UI |
+| `-base-path` | the site root | path the UI is mounted under behind a reverse proxy, e.g. `/torpeek` |
+| `-web-token` | none on localhost | access token required to use the UI/API; auto-generated and required once reachable beyond localhost (a non-loopback `-web-host` or a `-base-path`) - set this to pin one across restarts, e.g. under systemd |
+| `-headless` | `false` | do not try to open a browser; only serve (for a seedbox with no desktop) |
 | `-peer` | — | comma-separated peers to contact directly |
 | `-upload` | `true` | serve pieces back to the swarm while running |
 | `-dht` | `true` | use DHT and PEX (never for a private torrent) |
 | `-sequential` | `false` | when a container has no usable index, degrade to sequential capture from the start instead of failing |
 | `-json` | `false` | emit NDJSON events instead of human output |
+| `-version` | `false` | print version and exit |
 
 Ctrl+C cancels the run rather than killing it: frames already written stay, and
 the summary still prints.
@@ -161,15 +172,23 @@ worth of budget rather than a share of the pack's.
 
 One binary is both the engine and the UI: the frontend is compiled into it, so
 the folder holds the executable and ffmpeg and nothing else. Paste a magnet
-link or a path to a `.torrent` into the page: it receives the same events
-`-json` writes, over a WebSocket, and fills a grid of frames as they land.
+link or drop a `.torrent` onto the page: it receives the same events `-json`
+writes, over a WebSocket, and fills a live grid of frames as they land, next
+to a summary panel of tracks and quality.
 
-Only one run goes at a time; the page's cancel button stops it and keeps what
-it produced. If no browser can be opened — a headless machine, a seedbox — the
-address is printed and the server keeps serving.
+The client can only run one torrent's networking at a time — a pinned
+BitTorrent port can't be bound twice, and DHT is a client-wide switch, so a
+public and a private torrent can't share it either. A second torrent handed
+to the UI while the first is still going is not refused: it queues, and starts
+as soon as the slot is free. A panel lists every torrent the server knows
+about — the live one, queued or running, and every finished run found by
+walking the output directory — so the list survives a restart. Opening a
+finished run from that panel replays it from its saved frames and manifest:
+no queue slot, no network request.
 
-The UI is deliberately minimal for now: it proves the pipe and little else. The
-real screens are the next task.
+The page's cancel button stops whatever is in the slot, or drops a queued run,
+and keeps what was produced. If no browser can be opened — a headless
+machine, a seedbox — the address is printed and the server keeps serving.
 
 ### Output layout
 

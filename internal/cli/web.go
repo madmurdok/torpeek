@@ -38,14 +38,29 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return engine.Run(ctx, cfg)
 	}
 
+	// Reopening a finished run replays it from disk (TOR-55) through the same
+	// engine the runner above uses, so a cache hit and a live run agree about
+	// what a run looks like without web deciding that itself - it only ever
+	// asks for base.OutputRoot, the one output directory this whole closure
+	// already agrees with GET /runs about (see cfg.OutputRoot below).
+	replayer := func(infoHash, params string) <-chan core.Event {
+		return engine.Replay(base.OutputRoot, infoHash, params)
+	}
+
 	cfg := web.DefaultConfig()
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
 	}
 	cfg.BasePath = opts.BasePath
 	cfg.Token = opts.Token
+	// GET /runs lists what is already on disk (TOR-54) from the same root
+	// the engine writes to and reads cache hits from - base is the one
+	// shared core.Config this closure already reads OutputRoot from for
+	// every run, so the listing and a run agree on where results live
+	// without web deciding that itself.
+	cfg.OutputRoot = base.OutputRoot
 
-	server, err := web.Start(ctx, cfg, runner)
+	server, err := web.Start(ctx, cfg, runner, replayer)
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitFailed
@@ -56,9 +71,18 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 
 	// A source on the command line starts straight away; without one the page
 	// waits for someone to paste a link.
+	//
+	// The run failing to start is no longer an error StartRun returns - a
+	// queued run reaches the engine long after the call that asked for it -
+	// so a source that cannot be opened comes back as a failed run instead.
+	// Reported here anyway: a person who typed the source on the command line
+	// is looking at this terminal, and -headless has no page to read it on.
 	if opts.Source != "" {
-		if err := server.StartRun(web.RunRequest{Source: opts.Source, Mode: opts.Profile}); err != nil {
+		run, err := server.StartRun(web.RunRequest{Source: opts.Source, Mode: opts.Profile})
+		if err != nil {
 			fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		} else if run.State == web.RunFailed {
+			fmt.Fprintf(stderr, "torpeek: %s\n", run.Err)
 		}
 	}
 

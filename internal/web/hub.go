@@ -2,25 +2,42 @@ package web
 
 import "sync"
 
-// hub fans one run's events out to every connected browser and remembers them
-// so a page that connects late, or reloads, sees the whole run rather than
-// only what happens next.
+// hub fans every run's events out to every connected browser and remembers
+// them so a page that connects late, or reloads, sees the runs the server
+// holds rather than only what happens next.
 //
 // It is a transport, not a second place where run logic lives: it copies the
-// bytes the server already encoded and never decides anything about the run
+// bytes the server already encoded and never decides anything about a run
 // (ARCHITECTURE.md - clients only read events).
 type hub struct {
 	mu sync.Mutex
 
-	// history is replayed to a client on connect, in order.
-	history []record
-	// progressAt remembers where each file's last heartbeat sits in history,
-	// so a new one replaces it in place. Ordering is preserved and a ten
-	// minute run does not accumulate hundreds of stale ticks to replay.
-	progressAt map[int]int
+	// head opens every replay. It is the one record that belongs to no run:
+	// it tells a page that what follows is the whole history the server has,
+	// rather than more of what the page already had.
+	head record
+
+	// runs is one history per run. Keeping them apart rather than in one
+	// list is what lets a second run start without erasing the first, lets a
+	// finished run be dropped whole when the registry trims it, and keeps
+	// each run's progress heartbeats collapsing onto its own previous one
+	// instead of onto another run's - two runs both start at file 0.
+	runs map[string]*runHistory
+	// order is the run ids in the order their histories opened, so a replay
+	// is deterministic: every run's own events in order, runs in start order.
+	order []string
 
 	clients map[*client]struct{}
 	closed  bool
+}
+
+// runHistory is one run's replay.
+type runHistory struct {
+	records []record
+	// progressAt remembers where each of this run's files put its last
+	// heartbeat, so a new one replaces it in place. Ordering is preserved and
+	// a ten minute run does not accumulate hundreds of stale ticks to replay.
+	progressAt map[int]int
 }
 
 // record is one message, already encoded. Encoding once and broadcasting the
@@ -28,7 +45,7 @@ type hub struct {
 type record struct {
 	data []byte
 	// progress marks a heartbeat, which collapses onto the previous one for
-	// the same file rather than accumulating.
+	// the same file of the same run rather than accumulating.
 	progress bool
 	file     int
 }
@@ -44,8 +61,12 @@ type client struct {
 // a dropped frame_ready would leave a hole in the grid forever.
 const clientBuffer = 512
 
-func newHub() *hub {
-	return &hub{progressAt: make(map[int]int), clients: make(map[*client]struct{})}
+func newHub(head record) *hub {
+	return &hub{
+		head:    head,
+		runs:    make(map[string]*runHistory),
+		clients: make(map[*client]struct{}),
+	}
 }
 
 // subscribe registers a connection and hands back everything published so far.
@@ -62,9 +83,11 @@ func (h *hub) subscribe() (*client, [][]byte) {
 	}
 	h.clients[c] = struct{}{}
 
-	backlog := make([][]byte, 0, len(h.history))
-	for _, rec := range h.history {
-		backlog = append(backlog, rec.data)
+	backlog := [][]byte{h.head.data}
+	for _, id := range h.order {
+		for _, rec := range h.runs[id].records {
+			backlog = append(backlog, rec.data)
+		}
 	}
 	return c, backlog
 }
@@ -76,46 +99,74 @@ func (h *hub) remove(c *client) {
 	h.dropLocked(c)
 }
 
-// publish records a message and sends it to every connected client.
-func (h *hub) publish(rec record) {
+// begin opens one run's history with its first message, usually the run's
+// state. Connected clients are told; they do not have to reconnect to learn
+// about a run that has just been accepted.
+func (h *hub) begin(run string, rec record) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if h.closed {
 		return
 	}
-
-	if at, ok := h.progressAt[rec.file]; rec.progress && ok {
-		h.history[at] = rec
-	} else {
-		h.history = append(h.history, rec)
-		if rec.progress {
-			h.progressAt[rec.file] = len(h.history) - 1
-		}
+	if _, ok := h.runs[run]; !ok {
+		h.runs[run] = &runHistory{progressAt: make(map[int]int)}
+		h.order = append(h.order, run)
 	}
+	h.appendLocked(run, rec)
+	h.broadcastLocked(rec)
+}
 
-	for c := range h.clients {
-		select {
-		case c.out <- rec.data:
-		default:
-			h.dropLocked(c)
+// publish records a message against its run and sends it to every connected
+// client.
+func (h *hub) publish(run string, rec record) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.closed {
+		return
+	}
+	// A run whose history has been dropped is one the registry has already
+	// forgotten; its late events still reach whoever is watching, but there
+	// is nothing to replay them from later.
+	h.appendLocked(run, rec)
+	h.broadcastLocked(rec)
+}
+
+// drop forgets one run's history. The registry calls it when a finished run
+// falls out of what memory keeps.
+func (h *hub) drop(run string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if _, ok := h.runs[run]; !ok {
+		return
+	}
+	delete(h.runs, run)
+	for i, id := range h.order {
+		if id == run {
+			h.order = append(h.order[:i], h.order[i+1:]...)
+			break
 		}
 	}
 }
 
-// reset starts a new run's history from one message, usually the run's state.
-// Connected clients are told; they do not have to reconnect to follow it.
-func (h *hub) reset(rec record) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.closed {
+func (h *hub) appendLocked(run string, rec record) {
+	history, ok := h.runs[run]
+	if !ok {
 		return
 	}
+	if at, ok := history.progressAt[rec.file]; rec.progress && ok {
+		history.records[at] = rec
+		return
+	}
+	history.records = append(history.records, rec)
+	if rec.progress {
+		history.progressAt[rec.file] = len(history.records) - 1
+	}
+}
 
-	h.history = []record{rec}
-	h.progressAt = make(map[int]int)
-
+func (h *hub) broadcastLocked(rec record) {
 	for c := range h.clients {
 		select {
 		case c.out <- rec.data:

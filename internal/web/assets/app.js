@@ -25,13 +25,14 @@ const el = {
   source: document.getElementById("source"),
   mode: document.getElementById("mode"),
   go: document.getElementById("go"),
-  cancel: document.getElementById("cancel"),
   error: document.getElementById("error"),
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
   dropOverlay: document.getElementById("drop-overlay"),
-  torrentSummary: document.getElementById("torrent-summary"),
-  files: document.getElementById("files"),
+  runList: document.getElementById("run-list"),
+  runListEmpty: document.getElementById("run-list-empty"),
+  detail: document.getElementById("detail"),
+  detailEmpty: document.getElementById("detail-empty"),
   log: document.getElementById("log"),
   lightbox: document.getElementById("lightbox"),
   lightboxImg: document.getElementById("lightbox-img"),
@@ -39,9 +40,14 @@ const el = {
   lightboxClose: document.getElementById("lightbox-close"),
 };
 
-// state.files maps a torrent's file index to the DOM for that file's summary
-// panel and frame grid, built the first time file_started names it.
-const state = { active: false, files: new Map() };
+// Every torrent this page knows about lives here, keyed by run id - or, for a
+// run known only from disk (GET /runs found it, but this process never
+// minted an id for it), by a synthetic "disk:<infohash>:<params>" key until
+// it is reopened. Nothing is ever destroyed wholesale any more: a second
+// torrent must not erase the first, and a finished one must stay clickable
+// for as long as the page remembers it. state.selected is the one entry
+// shown on the right.
+const state = { runs: new Map(), selected: null };
 
 function url(path) {
   const u = new URL(path, document.baseURI);
@@ -54,15 +60,13 @@ function setStatus(text, kind) {
   el.status.dataset.state = kind;
 }
 
-function setActive(active) {
-  state.active = active;
-  el.go.disabled = active;
-  el.cancel.disabled = !active;
-}
-
 function showError(message) {
   el.error.textContent = message || "";
   el.error.hidden = !message;
+}
+
+function shortId(id) {
+  return (id || "").replace(/^disk:/, "").slice(0, 8);
 }
 
 function log(line) {
@@ -70,14 +74,11 @@ function log(line) {
   el.log.scrollTop = el.log.scrollHeight;
 }
 
-function clearRun() {
-  el.files.replaceChildren();
-  el.log.textContent = "";
-  el.torrentSummary.hidden = true;
-  el.torrentSummary.textContent = "";
-  state.files.clear();
-  showError("");
-  if (el.lightbox.open) el.lightbox.close();
+// logFor tags every line with which torrent it is about - the log now spans
+// every run on the page, not just one, and an untagged line would be
+// unreadable the moment a second torrent is added.
+function logFor(entry, line) {
+  log("[" + shortId(entry.id) + "] " + line);
 }
 
 function seconds(ms) {
@@ -117,38 +118,246 @@ function langLabel(code) {
   return code && code !== "und" ? code : "unknown language";
 }
 
-// fileBlock returns the section for one torrent file, building it the first
-// time it is needed. Each video file gets its own summary panel and its own
-// frame grid, since a multi-file torrent should not mix their frames or
-// their tracks in one place.
-function fileBlock(index) {
-  let entry = state.files.get(index);
-  if (entry) return entry;
+// A run can still be cancelled while it is queued or running; every other
+// state is final (runs.go's RunState.final), and "replaying" is a cache hit
+// already well underway by the time this page can react to it.
+function cancellable(state) {
+  return state === "queued" || state === "running";
+}
 
-  const article = document.createElement("article");
-  article.className = "file";
-  article.innerHTML =
-    '<header class="file-header">' +
-      '<h2 class="file-title"></h2>' +
-      '<dl class="specs"></dl>' +
-      '<div class="tracks"></div>' +
-      '<p class="file-links" hidden></p>' +
+function badgeLabel(entry) {
+  if (entry.disk) return entry.complete && entry.complete === entry.files ? "on disk" : "on disk (partial)";
+  switch (entry.state) {
+    case "queued": return "queued";
+    case "running": return "running";
+    case "replaying": return "reopening…";
+    case "done": return "done";
+    case "failed": return "failed";
+    case "cancelled": return "cancelled";
+    default: return entry.state || "…";
+  }
+}
+
+function metaLabel(entry) {
+  if (entry.progress) return entry.progress;
+  if (entry.disk) return entry.complete + " / " + entry.files + " file(s) complete";
+  if (entry.error) return entry.error;
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Run entries: one per torrent, live or on disk. Each owns its own row in the
+// left panel and its own container on the right, built once and updated in
+// place - selecting a different torrent never rebuilds anything, it only
+// shows and hides what is already there.
+
+function newRunEntry(id) {
+  const row = document.createElement("li");
+  row.className = "run-row";
+
+  const main = document.createElement("button");
+  main.type = "button";
+  main.className = "run-row-main";
+  const badge = document.createElement("span");
+  badge.className = "run-badge";
+  const name = document.createElement("span");
+  name.className = "run-name";
+  const meta = document.createElement("span");
+  meta.className = "run-meta";
+  main.append(badge, name, meta);
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "run-cancel";
+  cancel.title = "Cancel";
+  cancel.textContent = "✕";
+  cancel.hidden = true;
+
+  row.append(main, cancel);
+  el.runList.append(row);
+  el.runListEmpty.hidden = true;
+
+  const detailEl = document.createElement("div");
+  detailEl.className = "run-detail";
+  detailEl.hidden = true;
+  detailEl.innerHTML =
+    '<header class="run-detail-header">' +
+      '<span class="run-badge"></span>' +
+      '<h2 class="run-detail-title"></h2>' +
+      '<button class="run-detail-cancel" type="button" hidden>Cancel</button>' +
     "</header>" +
-    '<p class="file-progress" hidden></p>' +
-    '<div class="grid"></div>';
-  el.files.append(article);
+    '<p class="run-detail-error" hidden></p>' +
+    '<p class="torrent-summary" hidden></p>' +
+    '<section class="files"></section>';
+  el.detail.append(detailEl);
 
-  entry = {
-    article,
-    title: article.querySelector(".file-title"),
-    specs: article.querySelector(".specs"),
-    tracks: article.querySelector(".tracks"),
-    links: article.querySelector(".file-links"),
-    progress: article.querySelector(".file-progress"),
-    grid: article.querySelector(".grid"),
+  const entry = {
+    id, disk: false, infohash: "", params: "",
+    state: "", source: "", name: "", error: "", progress: "",
+    files: 0, complete: 0,
+    reopening: false,
+    fileEntries: new Map(),
+    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowCancel: cancel,
+    detailEl,
+    detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
+    detailTitle: detailEl.querySelector(".run-detail-title"),
+    detailCancel: detailEl.querySelector(".run-detail-cancel"),
+    detailError: detailEl.querySelector(".run-detail-error"),
+    torrentSummary: detailEl.querySelector(".torrent-summary"),
+    filesEl: detailEl.querySelector(".files"),
   };
-  state.files.set(index, entry);
+
+  main.addEventListener("click", () => selectOrReopen(entry));
+  cancel.addEventListener("click", (event) => {
+    event.stopPropagation();
+    cancelRun(entry.id);
+  });
+  entry.detailCancel.addEventListener("click", () => cancelRun(entry.id));
+
   return entry;
+}
+
+// ensureRun finds a torrent by key, creating it - at the top of the list,
+// since a key that does not exist yet is always something just starting -
+// the first time it is needed.
+function ensureRun(id) {
+  let entry = state.runs.get(id);
+  if (!entry) {
+    entry = newRunEntry(id);
+    state.runs.set(id, entry);
+  }
+  return entry;
+}
+
+// resetRunContent clears one run's files and frames without touching its row
+// or detail container - what a run_state "reset" means now: this run's own
+// history is starting over (a fresh start, or a reconnecting page about to
+// replay it from the beginning), not "every torrent on the page is gone".
+function resetRunContent(entry) {
+  entry.filesEl.replaceChildren();
+  entry.fileEntries.clear();
+  entry.torrentSummary.hidden = true;
+  entry.torrentSummary.textContent = "";
+  entry.error = "";
+}
+
+function syncEntry(entry) {
+  entry.rowEl.dataset.state = entry.disk ? "disk" : entry.state;
+  entry.rowBadge.textContent = badgeLabel(entry);
+  entry.rowBadge.dataset.state = entry.disk ? "disk" : entry.state;
+  entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
+  entry.rowMeta.textContent = metaLabel(entry);
+  entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
+
+  entry.detailBadge.textContent = badgeLabel(entry);
+  entry.detailBadge.dataset.state = entry.disk ? "disk" : entry.state;
+  entry.detailTitle.textContent = entry.name || entry.source || shortId(entry.id);
+  entry.detailCancel.hidden = entry.disk || !cancellable(entry.state);
+  entry.detailError.hidden = !entry.error;
+  entry.detailError.textContent = entry.error || "";
+}
+
+function selectRun(id) {
+  if (state.selected === id) return;
+  const previous = state.runs.get(state.selected);
+  if (previous) previous.rowEl.classList.remove("selected");
+  state.selected = id;
+  const entry = state.runs.get(id);
+  el.detailEmpty.hidden = !!entry;
+  for (const e of state.runs.values()) e.detailEl.hidden = e !== entry;
+  if (entry) entry.rowEl.classList.add("selected");
+}
+
+// claimReopenedRun trades a disk entry's synthetic key for the real run id
+// the server minted for it, keeping its DOM - its row, its detail container,
+// its place in the list - exactly as it was, so the run_state and events
+// that follow for that id land on this same entry instead of spawning a
+// duplicate row.
+//
+// It is idempotent by design: the reopen response and the socket message
+// that announces the same new run race each other (server.go's ReopenRun
+// runs the whole replay, publishing every event, before the HTTP handler
+// even writes its response - see resolveIncomingRun), and either one can
+// arrive first. Whichever gets here first does the swap; the other finds
+// entry.id already equal to newId and does nothing.
+function claimReopenedRun(entry, newId) {
+  if (entry.id !== newId) {
+    const oldKey = entry.id;
+    state.runs.delete(oldKey);
+    entry.id = newId;
+    entry.disk = false;
+    entry.reopening = false;
+    state.runs.set(entry.id, entry);
+    if (state.selected === oldKey) state.selected = entry.id;
+    syncEntry(entry);
+  }
+}
+
+// resolveIncomingRun is ensureRun's counterpart for a run_state message: a
+// brand new id might not be a brand new torrent. If some disk entry is
+// mid-reopen and shares this message's infohash, this id is what that
+// reopen minted, and claimReopenedRun folds the message into that entry
+// instead of ensureRun spawning a second row for the same torrent. Matching
+// on infohash alone cannot tell apart two different plans of the very same
+// torrent (TOR-54) both being reopened at once - a rare case this picks the
+// first match for, rather than handling.
+function resolveIncomingRun(id, infohash) {
+  const existing = state.runs.get(id);
+  if (existing) return existing;
+
+  if (infohash) {
+    for (const candidate of state.runs.values()) {
+      if (candidate.reopening && candidate.infohash === infohash) {
+        claimReopenedRun(candidate, id);
+        return candidate;
+      }
+    }
+  }
+
+  return ensureRun(id);
+}
+
+// selectOrReopen is what clicking a row does. A live or already-live-again
+// entry just needs showing - its files and frames, if any exist yet, are
+// already sitting in its own container. A disk-only entry has nothing to
+// show until it is replayed (TOR-55): reopening asks the server to read it
+// back from disk under a fresh id, and that id's own run_state/file/frame
+// events - arriving over the socket this page already holds open - fill the
+// same container in, moments later.
+function selectOrReopen(entry) {
+  if (!entry.disk) {
+    selectRun(entry.id);
+    return;
+  }
+  if (entry.reopening) return;
+  entry.reopening = true;
+  entry.state = "replaying";
+  syncEntry(entry);
+  selectRun(entry.id);
+
+  post("runs/reopen", { infohash: entry.infohash, params: entry.params })
+    .then((info) => {
+      claimReopenedRun(entry, info.id);
+      selectRun(entry.id);
+    })
+    .catch((err) => {
+      entry.reopening = false;
+      entry.state = "failed";
+      // A results tree that was moved or copied since it was captured cannot
+      // be replayed - its manifest still points at the old, absolute paths
+      // (TOR-60) - and this is where that surfaces: a reopen that fails.
+      entry.error = String(err.message || err);
+      syncEntry(entry);
+      logFor(entry, "reopen failed: " + entry.error);
+    });
+}
+
+async function cancelRun(id) {
+  try {
+    await post("runs/cancel", { id });
+  } catch (err) {
+    showError(String(err.message || err));
+  }
 }
 
 function addSpec(dl, label, value) {
@@ -192,35 +401,66 @@ function trackGroup(label, tracks, formatter) {
   return section;
 }
 
-// The summary panel this task requires: audio tracks, subtitles, bitrate,
-// resolution, filled the moment the file's media is known - before a single
-// frame exists.
-function onFileStarted(ev) {
-  const entry = fileBlock(ev.file);
-  entry.title.textContent = ev.path;
+// fileBlock returns the section for one file of one torrent, building it the
+// first time it is needed. Each video file gets its own summary panel and
+// its own frame grid, since a multi-file torrent should not mix their frames
+// or their tracks in one place - and one torrent's files must never mix with
+// another's now that the page can hold several at once.
+function fileBlock(entry, index) {
+  let fentry = entry.fileEntries.get(index);
+  if (fentry) return fentry;
 
-  entry.specs.replaceChildren();
-  addSpec(entry.specs, "Resolution", ev.width && ev.height ? ev.width + "×" + ev.height : "");
-  addSpec(entry.specs, "Video",
+  const article = document.createElement("article");
+  article.className = "file";
+  article.innerHTML =
+    '<header class="file-header">' +
+      '<h2 class="file-title"></h2>' +
+      '<dl class="specs"></dl>' +
+      '<div class="tracks"></div>' +
+      '<p class="file-links" hidden></p>' +
+    "</header>" +
+    '<p class="file-progress" hidden></p>' +
+    '<div class="grid"></div>';
+  entry.filesEl.append(article);
+
+  fentry = {
+    article,
+    title: article.querySelector(".file-title"),
+    specs: article.querySelector(".specs"),
+    tracks: article.querySelector(".tracks"),
+    links: article.querySelector(".file-links"),
+    progress: article.querySelector(".file-progress"),
+    grid: article.querySelector(".grid"),
+  };
+  entry.fileEntries.set(index, fentry);
+  return fentry;
+}
+
+// The summary panel: audio tracks, subtitles, bitrate, resolution, filled the
+// moment the file's media is known - before a single frame exists.
+function onFileStarted(entry, ev) {
+  const fentry = fileBlock(entry, ev.file);
+  fentry.title.textContent = ev.path;
+
+  fentry.specs.replaceChildren();
+  addSpec(fentry.specs, "Resolution", ev.width && ev.height ? ev.width + "×" + ev.height : "");
+  addSpec(fentry.specs, "Video",
     [ev.codec, ev.profile, ev.fps ? ev.fps.toFixed(2) + " fps" : "", bitrateLabel(ev.video_bitrate)]
       .filter(Boolean).join(" · "));
-  addSpec(entry.specs, "Overall bitrate", bitrateLabel(ev.bitrate));
-  addSpec(entry.specs, "Duration", seconds(ev.duration_ms));
+  addSpec(fentry.specs, "Overall bitrate", bitrateLabel(ev.bitrate));
+  addSpec(fentry.specs, "Duration", seconds(ev.duration_ms));
 
-  entry.tracks.replaceChildren(
+  fentry.tracks.replaceChildren(
     trackGroup("Audio", ev.audio || [], audioLine),
     trackGroup("Subtitles", ev.subtitles || [], subtitleLine),
   );
 
-  log("file " + ev.file + ": " + ev.path + " — " + seconds(ev.duration_ms) +
+  logFor(entry, "file " + ev.file + ": " + ev.path + " — " + seconds(ev.duration_ms) +
       ", " + ev.width + "x" + ev.height + " " + ev.codec + ", " + ev.planned + " points");
 }
 
-// A deliberately plain grid grew here in TOR-24 as proof that a frame reaches
-// the browser the moment it is written. This replaces it with the real
-// screen: frames grouped by file, click for full size.
-function addFrame(ev) {
-  const entry = fileBlock(ev.file);
+function addFrame(entry, ev) {
+  const fentry = fileBlock(entry, ev.file);
 
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
@@ -242,7 +482,7 @@ function addFrame(ev) {
   }
 
   figure.append(img, caption);
-  entry.grid.append(figure);
+  fentry.grid.append(figure);
 
   const open = () => openLightbox(img.src, caption.textContent);
   figure.addEventListener("click", open);
@@ -253,7 +493,7 @@ function addFrame(ev) {
     }
   });
 
-  log("frame " + ev.index + " at " + seconds(ev.actual_ms) + (ev.shift ? " (" + ev.shift + ")" : ""));
+  logFor(entry, "frame " + ev.index + " at " + seconds(ev.actual_ms) + (ev.shift ? " (" + ev.shift + ")" : ""));
 }
 
 function openLightbox(src, caption) {
@@ -269,19 +509,19 @@ el.lightbox.addEventListener("click", (event) => {
   if (event.target === el.lightbox) el.lightbox.close();
 });
 
-function onFileDone(ev) {
-  const entry = fileBlock(ev.file);
-  entry.progress.hidden = true;
+function onFileDone(entry, ev) {
+  const fentry = fileBlock(entry, ev.file);
+  fentry.progress.hidden = true;
 
   const links = [];
   if (ev.sheet_url) links.push(link(ev.sheet_url, "contact sheet"));
   if (ev.manifest_url) links.push(link(ev.manifest_url, "manifest"));
   if (links.length) {
-    entry.links.replaceChildren(...links);
-    entry.links.hidden = false;
+    fentry.links.replaceChildren(...links);
+    fentry.links.hidden = false;
   }
 
-  log("file " + ev.file + " done: " + ev.frames + " frames, " + ev.skipped + " skipped");
+  logFor(entry, "file " + ev.file + " done: " + ev.frames + " frames, " + ev.skipped + " skipped");
 }
 
 function link(href, text) {
@@ -294,65 +534,92 @@ function link(href, text) {
 }
 
 function apply(ev) {
-  switch (ev.type) {
-    case "run_state":
-      if (ev.reset) clearRun();
-      setActive(ev.active);
-      if (ev.source) el.source.value = ev.source;
-      break;
+  if (ev.type === "run_state") {
+    // The one message with no "run" key is the connection marker: it opens
+    // the whole replay a fresh (or reconnected) socket is about to send, but
+    // it is not itself about any torrent, so there is nothing on the page to
+    // update for it - the per-run reset that follows for each run already
+    // rebuilds that run's own content from scratch.
+    if (!ev.run) return;
 
+    const entry = resolveIncomingRun(ev.run, ev.infohash);
+    if (ev.reset) resetRunContent(entry);
+    entry.disk = false;
+    entry.state = ev.state;
+    if (ev.source) entry.source = ev.source;
+    if (ev.infohash) entry.infohash = ev.infohash;
+    entry.error = ev.error || "";
+    if (!cancellable(entry.state)) entry.progress = "";
+    syncEntry(entry);
+    return;
+  }
+
+  const entry = ev.run ? state.runs.get(ev.run) : null;
+  if (!entry) return;
+
+  switch (ev.type) {
     case "metadata_ready":
-      el.torrentSummary.hidden = false;
-      el.torrentSummary.textContent =
+      entry.name = ev.name;
+      entry.torrentSummary.hidden = false;
+      entry.torrentSummary.textContent =
         ev.name + " — " + ev.selected.length + " of " + ev.videos + " video file(s) selected";
-      log("metadata: " + ev.name + " (" + ev.infohash + ")");
+      syncEntry(entry);
+      logFor(entry, "metadata: " + ev.name + " (" + ev.infohash + ")");
       break;
 
     case "file_started":
-      onFileStarted(ev);
+      onFileStarted(entry, ev);
       break;
 
     case "frame_ready":
-      addFrame(ev);
+      addFrame(entry, ev);
       break;
 
     case "frame_skipped":
-      log("frame " + ev.index + " skipped: " + ev.code + " " + ev.reason);
+      logFor(entry, "frame " + ev.index + " skipped: " + ev.code + " " + ev.reason);
       break;
 
     case "progress": {
-      const entry = fileBlock(ev.file);
-      entry.progress.hidden = false;
-      entry.progress.textContent =
+      const fentry = fileBlock(entry, ev.file);
+      fentry.progress.hidden = false;
+      fentry.progress.textContent =
         ev.frames_done + " / " + ev.frames_total + " frames · " +
         bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
-      log("progress: " + ev.frames_done + "/" + ev.frames_total +
+      entry.progress = ev.frames_done + "/" + ev.frames_total + " frames";
+      syncEntry(entry);
+      logFor(entry, "progress: " + ev.frames_done + "/" + ev.frames_total +
           ", " + ev.downloaded + " bytes, " + ev.peers + " peers");
       break;
     }
 
     case "budget_warning":
-      log("warning: " + ev.spent + " of " + ev.limit + " bytes used");
+      logFor(entry, "warning: " + ev.spent + " of " + ev.limit + " bytes used");
       break;
 
     case "file_done":
-      onFileDone(ev);
+      onFileDone(entry, ev);
       break;
 
     case "done":
-      log("done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
+      entry.progress = "";
+      syncEntry(entry);
+      logFor(entry, "done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
           " file(s), " + ev.downloaded + " bytes in " + seconds(ev.elapsed_ms));
       break;
 
     case "failed":
-      showError(ev.code + ": " + ev.error);
-      log("failed: " + ev.code + " " + ev.error);
+      entry.progress = "";
+      syncEntry(entry);
+      logFor(entry, "failed: " + ev.code + " " + ev.error);
       break;
   }
 }
 
-// The socket carries events only. Reconnecting replays the run from the start,
-// so a dropped connection costs nothing but a redraw.
+// The socket carries events only. Reconnecting replays every run the server
+// still holds from the start, so a dropped connection costs nothing but a
+// redraw of what it covers - a torrent this page never heard of before
+// reconnecting (or one whose history the server has since trimmed,
+// keepFinishedRuns) is unaffected either way.
 function connect() {
   const address = url("events");
   address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
@@ -379,9 +646,45 @@ async function post(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
-  if (!response.ok) {
-    const detail = await response.json().catch(() => ({}));
-    throw new Error(detail.error || response.statusText);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+// loadRuns populates the panel with every torrent GET /runs already knows
+// about - what is still live in this process, and everything on disk under
+// OutputRoot - so a page that loads after a restart still finds them
+// (TOR-54): the socket's own replay only ever covers runs the server still
+// holds in memory, never what a previous process left behind.
+async function loadRuns() {
+  let data;
+  try {
+    const response = await fetch(url("runs"));
+    data = await response.json();
+  } catch (err) {
+    log("could not load the torrent list: " + err);
+    return;
+  }
+
+  for (const row of data.runs || []) {
+    const disk = !row.id;
+    // A disk-only row has no run id to key on - nothing ever minted one for
+    // it - so infohash+params, the same pair that addresses it for reopening,
+    // stands in. TOR-54 documented that the same torrent captured under two
+    // different plans shows up as two rows; keying this way is what keeps
+    // them two separate rows here too, rather than one clobbering the other.
+    const key = row.id || ("disk:" + row.infohash + ":" + row.params);
+    const entry = ensureRun(key);
+    entry.disk = disk;
+    entry.infohash = row.infohash || entry.infohash;
+    entry.params = row.params || entry.params;
+    entry.source = row.source || entry.source;
+    entry.name = row.name || entry.name;
+    entry.files = row.files || 0;
+    entry.complete = row.complete || 0;
+    if (!disk) entry.state = row.state || entry.state;
+    entry.error = row.error || entry.error;
+    syncEntry(entry);
   }
 }
 
@@ -396,30 +699,42 @@ async function uploadTorrent(file) {
   body.append("mode", el.mode.value);
   try {
     const response = await fetch(url("runs/upload"), { method: "POST", body });
-    if (!response.ok) {
-      const detail = await response.json().catch(() => ({}));
-      throw new Error(detail.error || response.statusText);
-    }
+    const info = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(info.error || response.statusText);
+    began(info);
   } catch (err) {
     showError(String(err.message || err));
   }
 }
 
+// began is what every successful start has in common: the torrent gets a row
+// straight away, from the id the POST already answered with, and it becomes
+// the one shown on the right - "Take frames" should show something happening
+// immediately, not leave a person staring at whatever was on screen before.
+function began(info) {
+  const entry = ensureRun(info.id);
+  entry.disk = false;
+  entry.state = info.state;
+  syncEntry(entry);
+  selectRun(info.id);
+}
+
 el.form.addEventListener("submit", async (event) => {
   event.preventDefault();
   showError("");
+  const source = el.source.value;
+  el.go.disabled = true;
   try {
-    await post("runs", { source: el.source.value, mode: el.mode.value });
+    const info = await post("runs", { source, mode: el.mode.value });
+    // Cleared the moment the server has accepted the run, not when it
+    // finishes - that is the whole point: a second torrent can be queued up
+    // right behind the first without waiting for anything.
+    el.source.value = "";
+    began(info);
   } catch (err) {
     showError(String(err.message || err));
-  }
-});
-
-el.cancel.addEventListener("click", async () => {
-  try {
-    await post("runs/cancel");
-  } catch (err) {
-    showError(String(err.message || err));
+  } finally {
+    el.go.disabled = false;
   }
 });
 
@@ -463,5 +778,5 @@ document.addEventListener("drop", async (event) => {
   if (file) await uploadTorrent(file);
 });
 
-setActive(false);
+loadRuns();
 connect();

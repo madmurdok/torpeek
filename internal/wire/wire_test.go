@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func TestFileStartedCarriesTrackDetail(t *testing.T) {
 		Plan: []time.Duration{0, time.Second},
 	}
 
-	m := Event(ev)
+	m := Event("", ev)
 
 	if m["type"] != "file_started" {
 		t.Fatalf("type = %v, want file_started", m["type"])
@@ -72,7 +73,7 @@ func TestFileStartedCarriesTrackDetail(t *testing.T) {
 // file has no audio or subtitles: an empty array, not a null field a client
 // would have to special-case.
 func TestFileStartedWithNoTracksIsEmptyNotNil(t *testing.T) {
-	m := Event(core.FileStarted{File: 0, Path: "x.mkv"})
+	m := Event("", core.FileStarted{File: 0, Path: "x.mkv"})
 
 	audio, ok := m["audio"].([]map[string]any)
 	if !ok || audio == nil || len(audio) != 0 {
@@ -81,5 +82,40 @@ func TestFileStartedWithNoTracksIsEmptyNotNil(t *testing.T) {
 	subs, ok := m["subtitles"].([]map[string]any)
 	if !ok || subs == nil || len(subs) != 0 {
 		t.Errorf("subtitles = %#v, want an empty, non-nil slice", m["subtitles"])
+	}
+}
+
+// TestEveryEventCarriesTheRun is what a server holding more than one run at a
+// time needs: not "most events" but every one of them. Nothing else in the
+// vocabulary can stand in - "file" restarts at 0 in every run, "index" is a
+// frame, and "infohash" names a torrent, which two runs can share.
+func TestEveryEventCarriesTheRun(t *testing.T) {
+	events := []core.Event{
+		core.MetadataReady{Name: "Release", InfoHash: "abc", Selected: []int{0}},
+		core.FileStarted{File: 0, Path: "movie.mkv"},
+		core.FrameReady{File: 0, Index: 1, Path: "001.jpg"},
+		core.FrameSkipped{File: 0, Index: 2, Code: core.CodeInternal},
+		core.Progress{File: 0, FramesDone: 1, FramesTotal: 2},
+		core.BudgetWarning{SpentBytes: 1, LimitBytes: 2},
+		core.FileDone{File: 0, Path: "movie.mkv", Frames: 2},
+		core.Done{Reason: core.StopCompleted},
+		core.Failed{File: -1, Code: core.CodeInternal, Err: errors.New("boom")},
+	}
+
+	for _, ev := range events {
+		m := Event("run-7", ev)
+		if m["run"] != "run-7" {
+			t.Errorf("%T rendered as %v, which does not say which run it belongs to", ev, m)
+		}
+	}
+}
+
+// TestNoRunLeavesTheKeyOut keeps the CLI's NDJSON as it was: a stream that is
+// one run by construction has nothing to disambiguate, and "run":"" would
+// read as a run whose id is empty.
+func TestNoRunLeavesTheKeyOut(t *testing.T) {
+	m := Event("", core.Done{Reason: core.StopCompleted})
+	if _, ok := m["run"]; ok {
+		t.Errorf("event rendered with no run still carries %v", m)
 	}
 }

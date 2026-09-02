@@ -157,17 +157,26 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.StartRun(req); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, ErrRunInProgress) {
-			status = http.StatusConflict
-		}
-		writeError(w, status, err.Error())
+	info, err := s.StartRun(req)
+	if err != nil {
+		writeError(w, startStatus(err), err.Error())
 		return
 	}
 
-	// The result arrives as events, not as this response's body.
-	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+	// The id is the answer: the result arrives as events on that run's
+	// stream, not in this response's body. state says whether the run took
+	// the slot or is waiting for it - never a refusal, which is the whole
+	// point of the queue.
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// startStatus maps the two ways a start can be turned away. Neither is "a run
+// is already going": that answer no longer exists.
+func startStatus(err error) int {
+	if errors.Is(err, errClosed) || errors.Is(err, errReplayUnavailable) {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusBadRequest
 }
 
 // handleUploadTorrent begins a run for a .torrent dropped onto the page.
@@ -227,27 +236,84 @@ func (s *Server) handleUploadTorrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req := RunRequest{Source: path, Mode: r.FormValue("mode"), Label: "dropped .torrent"}
-	// startRun (via done()) runs cleanup itself on every path that does not
-	// end up starting a run; a run that does start defers cleanup to pump.
-	if err := s.startRun(req, cleanup); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, ErrRunInProgress) {
-			status = http.StatusConflict
+	// startRun runs cleanup itself on every path that does not end up owning
+	// the file: a request it refuses, a run cancelled while it waits, a
+	// server that closes under it. A run that reaches the slot defers cleanup
+	// to pump, after its event stream ends.
+	info, err := s.startRun(req, cleanup)
+	if err != nil {
+		writeError(w, startStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// reopenRequest addresses a run already on disk. It carries no id on
+// purpose: infohash and params are exactly what a GET /runs disk-only row
+// gives a panel for a run this process may never have minted an id for (a
+// previous process's run, or one this process itself trimmed from memory -
+// see keepFinishedRuns).
+type reopenRequest struct {
+	InfoHash string `json:"infohash"`
+	Params   string `json:"params"`
+}
+
+// handleReopenRun replays a finished run from disk under a fresh registry
+// entry - see Server.ReopenRun for why it never waits for the queue slot,
+// and for why the response already carries the run's real outcome rather
+// than "queued" or "running".
+func (s *Server) handleReopenRun(w http.ResponseWriter, r *http.Request) {
+	var req reopenRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.ReopenRun(req.InfoHash, req.Params)
+	if err != nil {
+		writeError(w, startStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// cancelRequest names the run to stop. An absent id means the run in the
+// slot, which is what a page showing a single run asks for.
+type cancelRequest struct {
+	ID string `json:"id"`
+}
+
+// handleCancelRun stops one run, keeping what it produced. It reaches a
+// queued run as well as a running one - a queued run has no context to
+// cancel, so leaving it to the run to notice would never stop it.
+func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
+	var req cancelRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.CancelRun(strings.TrimSpace(req.ID))
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, ErrNoSuchRun) {
+			status = http.StatusNotFound
 		}
 		writeError(w, status, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"cancelling": true, "id": info.ID, "state": string(info.State),
+	})
 }
 
-// handleCancelRun stops the run in progress, keeping what it produced.
-func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
-	if err := s.CancelRun(); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"cancelling": true})
+// handleListRuns answers the panel with the live queue plus everything
+// already on disk - see Server.listRuns for how the two are merged.
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"runs": s.listRuns()})
 }
 
 // handleFile serves one file the run announced: a frame, a contact sheet or a

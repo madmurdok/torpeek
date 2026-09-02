@@ -16,6 +16,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/manifest"
+	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
@@ -976,6 +977,25 @@ func TestRerunIsServedFromDiskWithoutTheSwarm(t *testing.T) {
 			t.Errorf("cached run served %q where the first run wrote %q", secondPaths[i], paths[i])
 		}
 	}
+
+	// TOR-52: the record the first run left behind must carry the source it
+	// came from and its plan in readable form - not just what serving a
+	// rerun from disk needs, which is everything asserted above already.
+	layout := output.Layout{Root: first.OutputRoot, InfoHash: metadata.InfoHash, Params: ParamsKey(first)}
+	record, ok := cache.LoadRun(layout.RunDir())
+	if !ok {
+		t.Fatal("no run record for the first run")
+	}
+	if record.Source != torrentPath {
+		t.Errorf("record source = %q, want the path a person could rerun: %q", record.Source, torrentPath)
+	}
+	wantPlan := cache.Plan{
+		Count: first.Plan.Count, Start: first.Plan.Start, End: first.Plan.End,
+		Profile: first.Profile.Name, Format: string(first.Format), Sequential: first.Sequential,
+	}
+	if record.Plan != wantPlan {
+		t.Errorf("record plan = %+v, want %+v", record.Plan, wantPlan)
+	}
 }
 
 // TestCacheMissesWhenAFrameIsGone: a manifest is a promise about files on
@@ -1026,9 +1046,11 @@ func TestCacheMissesWhenAFrameIsGone(t *testing.T) {
 		t.Fatal("second run produced no terminal event")
 	}
 
-	// Downloaded bytes cannot tell the two apart here - the piece directory is
-	// still warm, so a live rerun fetches nothing either. What settles it is
-	// the file: a cache hit would have served the manifest and left the gap.
+	// Downloaded bytes cannot tell the two apart here - a cache hit would also
+	// download nothing, and (TOR-56) the first run's own pieces are gone by
+	// the time this second run starts anyway, so a live rerun downloads the
+	// missing point again from the seeder, still live. What settles it is the
+	// file: a cache hit would have served the manifest and left the gap.
 	info, err := os.Stat(written[0])
 	if err != nil {
 		t.Fatalf("the deleted frame was not produced again: %v", err)
@@ -1164,6 +1186,131 @@ func TestSecondRunFillsTheGapsRatherThanStartingOver(t *testing.T) {
 	for _, f := range m.Frames {
 		if f.Shift == manifest.ShiftFailed {
 			t.Errorf("point %d is still unfilled: %s", f.Index, f.Error)
+		}
+	}
+}
+
+// TestRunDiscardsItsOwnPiecesButKeepsResults is the acceptance criterion for
+// TOR-56: a run's raw pieces are staging data (REQUIREMENTS.md 2.9), and by
+// the time the run has reported Done, its own <DataDir>/<infohash>/ subtree
+// must be gone - not merely correct in theory, but actually gone from the
+// tree - while its frames and manifest, and the data directory itself
+// (unlike the old behaviour, described only as "when the process exits"),
+// survive it. It measures the tree before and after, not the code.
+func TestRunDiscardsItsOwnPiecesButKeepsResults(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 20, "200k")
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	dataDir := cfg.Swarm.DataDir
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var (
+		infoHash string
+		frame    string
+		done     *Done
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case MetadataReady:
+			infoHash = e.InfoHash
+		case FrameReady:
+			frame = e.Path
+		case Failed:
+			t.Errorf("unexpected failure: %s: %v", e.Code, e.Err)
+		case Done:
+			done = &e
+		}
+	}
+	if infoHash == "" {
+		t.Fatal("no MetadataReady event, so there is no infohash to check")
+	}
+	if frame == "" || done == nil {
+		t.Fatal("run produced no frame or no terminal event")
+	}
+
+	pieces := filepath.Join(dataDir, infoHash)
+	if _, err := os.Stat(pieces); !os.IsNotExist(err) {
+		t.Errorf("piece directory %s still exists after the run ended: %v", pieces, err)
+	}
+	if _, err := os.Stat(dataDir); err != nil {
+		t.Errorf("the data directory itself was removed, but it is not this run's to remove: %v", err)
+	}
+	if info, err := os.Stat(frame); err != nil || info.Size() == 0 {
+		t.Errorf("frame %s did not survive piece cleanup: %v", frame, err)
+	}
+	manifestPath := filepath.Join(filepath.Dir(filepath.Dir(frame)), manifest.Name)
+	if info, err := os.Stat(manifestPath); err != nil || info.Size() == 0 {
+		t.Errorf("manifest %s did not survive piece cleanup: %v", manifestPath, err)
+	}
+}
+
+// TestCancelledRunAlsoDiscardsItsPieces: a run stopped halfway is not exempt
+// - REQUIREMENTS.md 2.10 only promises that its frames survive, never that
+// its pieces do, and resume (serveFromCache, reusableFrames) reads only the
+// output directory, never the piece cache, so there is nothing for a later
+// run to lose by this.
+func TestCancelledRunAlsoDiscardsItsPieces(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 60, "1500k")
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Plan = frames.Plan{Count: 12, Start: 0.05, End: 0.95}
+	dataDir := cfg.Swarm.DataDir
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var (
+		infoHash string
+		kept     []string
+		done     *Done
+	)
+	for ev := range events {
+		switch e := ev.(type) {
+		case MetadataReady:
+			infoHash = e.InfoHash
+		case FrameReady:
+			kept = append(kept, e.Path)
+			if len(kept) == 2 {
+				cancel()
+			}
+		case Done:
+			done = &e
+		}
+	}
+
+	if infoHash == "" {
+		t.Fatal("no MetadataReady event")
+	}
+	if done == nil || done.Reason != StopCancelled {
+		t.Fatalf("run did not report itself cancelled: %+v", done)
+	}
+	if len(kept) < 2 {
+		t.Fatalf("only %d frames arrived before cancelling", len(kept))
+	}
+
+	pieces := filepath.Join(dataDir, infoHash)
+	if _, err := os.Stat(pieces); !os.IsNotExist(err) {
+		t.Errorf("piece directory %s still exists after a cancelled run: %v", pieces, err)
+	}
+	for _, p := range kept {
+		if info, err := os.Stat(p); err != nil || info.Size() == 0 {
+			t.Errorf("frame %s was lost when pieces were discarded: %v", p, err)
 		}
 	}
 }

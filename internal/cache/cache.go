@@ -30,9 +30,21 @@ type Run struct {
 	Tool      string    `json:"tool"`
 	CreatedAt time.Time `json:"created_at"`
 
+	// Source is the magnet URI or .torrent path this run was given - the
+	// string a person could paste back in to run it again. Absent from a
+	// record written before this field existed, in which case it reads back
+	// as "": a run found on disk that cannot say what it was asked for.
+	Source string `json:"source"`
+
 	InfoHash string `json:"infohash"`
 	Name     string `json:"name"`
 	Private  bool   `json:"private"`
+
+	// Plan is what was asked for, in the form a person described it - not
+	// ParamsKey's sha256 prefix, which names the directory but cannot be
+	// turned back into a description. Absent from an older record, in which
+	// case it reads back as the zero value.
+	Plan Plan `json:"plan"`
 
 	// Videos is every video file the torrent holds, not only the ones this
 	// run worked on. Without it a rerun could not tell "all files" from "the
@@ -42,6 +54,18 @@ type Run struct {
 	// with a failed capture point is deliberately absent: a rerun should try
 	// it again rather than serve a gap as a result.
 	Complete []int `json:"complete"`
+}
+
+// Plan is a run's parameters in the form they were asked for, since
+// ParamsKey only ever stores their sha256 prefix in the directory name and a
+// directory cannot be turned back into a description of what was requested.
+type Plan struct {
+	Count      int     `json:"count"`
+	Start      float64 `json:"start"`
+	End        float64 `json:"end"`
+	Profile    string  `json:"profile"`
+	Format     string  `json:"format"`
+	Sequential bool    `json:"sequential"`
 }
 
 // File is one video file as the torrent numbers it.

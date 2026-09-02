@@ -16,7 +16,7 @@ func tokenServer(t *testing.T, runner Runner, token string) *httptest.Server {
 
 	cfg := DefaultConfig()
 	cfg.Token = token
-	srv := newServer(context.Background(), cfg, runner)
+	srv := newServer(context.Background(), cfg, runner, nil)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -60,6 +60,21 @@ func TestUnauthenticatedSocketIsRejectedWithATokenSet(t *testing.T) {
 			status = resp.StatusCode
 		}
 		t.Errorf("status = %d, want 401", status)
+	}
+}
+
+// TestGETRunsRequiresAuth is GET /runs' share of TOR-30's rule: authGuard
+// wraps every route that serves the API, this one included - the listing is
+// as much a way to see what the owner is doing as the event stream is.
+func TestGETRunsRequiresAuth(t *testing.T) {
+	fake := &fakeRun{}
+	ts := tokenServer(t, fake.runner, "s3cret")
+
+	if resp := get(t, ts.URL, "/runs"); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /runs with no token: status %d, want 401", resp.StatusCode)
+	}
+	if resp := get(t, ts.URL, "/runs?token=s3cret"); resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /runs?token=s3cret: status %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -135,7 +150,7 @@ func TestStartLeavesLoopbackUnprotectedByDefault(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = net.JoinHostPort("127.0.0.1", port)
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -162,7 +177,7 @@ func TestStartHonoursAPinnedToken(t *testing.T) {
 	cfg.Addr = net.JoinHostPort("127.0.0.1", port)
 	cfg.Token = "pinned-value"
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
