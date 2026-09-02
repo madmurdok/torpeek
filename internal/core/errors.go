@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/madmurdok/torpeek/internal/bridge"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/probe"
 	"github.com/madmurdok/torpeek/internal/swarm"
@@ -34,6 +35,14 @@ const (
 	// CodeUnprobeable: ffprobe could not make sense of the container, so
 	// there is no index to seek with.
 	CodeUnprobeable ErrorCode = "unprobeable"
+	// CodeReadStalled: a read through the bridge ran out of time, so the tool
+	// on the other end was answering about a file it never finished reading.
+	// Deliberately distinct from CodeUnprobeable: what ffprobe reports in that
+	// situation - no streams, no packets, no keyframe with a position - is
+	// indistinguishable from a container defect, and blaming the container
+	// both accuses a healthy file and gates the sequential fallback on a
+	// verdict nothing supports (TOR-45).
+	CodeReadStalled ErrorCode = "read_stalled"
 	// CodeUnavailable: the pieces needed are not held by any connected peer.
 	CodeUnavailable ErrorCode = "unavailable"
 	// CodeDecodeFailed: ffmpeg read the data but produced no usable frame.
@@ -83,6 +92,11 @@ func CodeOf(err error) ErrorCode {
 	}
 
 	switch {
+	// Before the context cases on purpose: a stall is a deadline that expired
+	// inside the bridge, not the caller stopping the run, and the two must not
+	// be reported as the same thing.
+	case errors.Is(err, bridge.ErrStalled):
+		return CodeReadStalled
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return CodeCancelled
 	case errors.Is(err, swarm.ErrNoMetadata):
