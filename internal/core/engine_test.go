@@ -1167,3 +1167,140 @@ func TestSecondRunFillsTheGapsRatherThanStartingOver(t *testing.T) {
 		}
 	}
 }
+
+// indexlessTorrent renders a raw MPEG-4 Part 2 elementary stream: ffprobe
+// opens it fine and reports the video track's codec, resolution and frame
+// rate, but no "duration" field at all - exactly the container-with-no-index
+// case REQUIREMENTS.md 2.7 gates the sequential fallback on.
+//
+// This is deliberately not a raw H.264 (-f h264) stream, which was tried
+// first: ffprobe reports no per-packet timestamp whatsoever for one (not
+// even for the keyframe at byte 0), and ffmpeg's own input seeking ("-ss"
+// before "-i", exactly what frames.Extractor uses) fails outright against
+// it - "could not seek to position 0.000" - even asking for the very start.
+// A raw h264 stream cannot be sequentially sampled through the existing,
+// unchanged capture pipeline at all, only decoded start-to-finish as one
+// long pass, which is a second decode path the task explicitly rules out.
+// Raw m4v does not have that problem: ffmpeg derives real, seekable
+// per-keyframe presentation timestamps from the bitstream's own timing, so
+// KeyframeAt and frames.Extractor.Frame work on it exactly as they do on any
+// other file - only Inspect's duration is missing.
+func indexlessTorrent(t *testing.T, tools ffmpeg.Tools, seconds, gop int) (torrentPath, seeder string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	if _, err := tools.Run(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration="+strconv.Itoa(seconds),
+		"-c:v", "mpeg4", "-g", strconv.Itoa(gop), "-pix_fmt", "yuv420p",
+		"-f", "m4v",
+		filepath.Join(dir, "movie.m4v"),
+	); err != nil {
+		t.Fatalf("render indexless clip: %v", err)
+	}
+
+	fixture := torrenttest.BuildDir(t, dir, 256<<10)
+	return fixture.TorrentPath, fixture.StartSeeder(t)
+}
+
+// TestSequentialFallbackGatesOnTheFlag is the acceptance criterion for
+// TOR-8: the same indexless file must fail with a stable, typed error by
+// default, and produce frames once -sequential opts into spending traffic on
+// a guess.
+func TestSequentialFallbackGatesOnTheFlag(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := indexlessTorrent(t, tools, 10, 25)
+
+	run := func(t *testing.T, sequential bool) []Event {
+		t.Helper()
+
+		cfg := runConfig(t, torrentPath, seeder)
+		cfg.Swarm.Peers = []string{seeder}
+		cfg.Plan = frames.Plan{Count: 3, Start: 0.05, End: 0.95}
+		cfg.Sequential = sequential
+
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+
+		events, err := NewEngine(tools).Run(ctx, cfg)
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		return collect(t, events)
+	}
+
+	t.Run("without the flag, a stable typed error", func(t *testing.T) {
+		var failed *Failed
+		for _, ev := range run(t, false) {
+			switch e := ev.(type) {
+			case Failed:
+				failed = &e
+			case FrameReady:
+				t.Errorf("produced frame %+v without -sequential", e)
+			}
+		}
+		if failed == nil {
+			t.Fatal("no Failed event, though the file has no usable index")
+		}
+		if failed.Code != CodeUnprobeable {
+			t.Errorf("Code = %q, want %q", failed.Code, CodeUnprobeable)
+		}
+		t.Logf("failed as expected: %s: %v", failed.Code, failed.Err)
+	})
+
+	t.Run("with the flag, a non-empty frame set", func(t *testing.T) {
+		var (
+			ready []FrameReady
+			done  *Done
+		)
+		for _, ev := range run(t, true) {
+			switch e := ev.(type) {
+			case FrameReady:
+				ready = append(ready, e)
+			case Failed:
+				t.Errorf("unexpected failure: %s: %v", e.Code, e.Err)
+			case Done:
+				done = &e
+			}
+		}
+		if len(ready) == 0 {
+			t.Fatal("no frames produced with -sequential, though the fixture has keyframes to read")
+		}
+		if done == nil {
+			t.Fatal("no Done event")
+		}
+		for _, f := range ready {
+			info, err := os.Stat(f.Path)
+			if err != nil {
+				t.Errorf("frame %d is not on disk: %v", f.Index, err)
+				continue
+			}
+			if info.Size() == 0 {
+				t.Errorf("frame %d is empty", f.Index)
+			}
+			t.Logf("frame %d requested %s, taken at %s", f.Index, f.Requested, f.Actual)
+		}
+
+		// The frames are real, but the file's own timeline is nonexistent -
+		// the points therefore have to cluster near the start rather than
+		// spread out, which is the whole reason a reader needs the manifest
+		// to say so.
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(ready[0].Path)), manifest.Name))
+		if err != nil {
+			t.Fatalf("no manifest next to the frames: %v", err)
+		}
+		var m manifest.Manifest
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("manifest is not readable: %v", err)
+		}
+		if !m.Cost.Sequential {
+			t.Error("manifest does not mark the run as sequential")
+		}
+		if len(m.Frames) == 0 {
+			t.Error("manifest lists no frames")
+		}
+	})
+}

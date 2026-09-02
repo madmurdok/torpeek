@@ -129,6 +129,7 @@ make fmt
 | `-peer` | — | comma-separated peers to contact directly |
 | `-upload` | `true` | serve pieces back to the swarm while running |
 | `-dht` | `true` | use DHT and PEX (never for a private torrent) |
+| `-sequential` | `false` | when a container has no usable index, degrade to sequential capture from the start instead of failing |
 | `-json` | `false` | emit NDJSON events instead of human output |
 
 Ctrl+C cancels the run rather than killing it: frames already written stay, and
