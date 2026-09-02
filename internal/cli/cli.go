@@ -36,6 +36,10 @@ const (
 )
 
 // Options are the parsed command line.
+//
+// scratch records a piece directory this program created and therefore owns.
+// A directory the caller named is theirs: keeping their pieces or removing
+// them is their decision, not ours.
 type Options struct {
 	Source      string
 	Output      string
@@ -57,6 +61,8 @@ type Options struct {
 	Version     bool
 	List        bool
 	Files       []string
+
+	scratch string
 }
 
 // Run parses arguments, executes the job and reports it. It returns an exit
@@ -85,6 +91,13 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitUsage
+	}
+
+	// Results are the thing worth keeping; the pieces they were made from are
+	// not (REQUIREMENTS.md section 2.9). Only a directory this run created is
+	// removed - one the caller named belongs to them.
+	if opts.scratch != "" {
+		defer os.RemoveAll(opts.scratch)
 	}
 
 	// Listing needs no decoder, so it must not require one to be installed:
@@ -158,14 +171,14 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	return opts, nil
 }
 
-func (o Options) config() (core.Config, error) {
+func (o *Options) config() (core.Config, error) {
 	dataDir := o.DataDir
 	if dataDir == "" {
 		dir, err := os.MkdirTemp("", "torpeek-pieces-*")
 		if err != nil {
 			return core.Config{}, fmt.Errorf("create piece directory: %w", err)
 		}
-		dataDir = dir
+		dataDir, o.scratch = dir, dir
 	}
 
 	profile, err := swarm.ProfileByName(o.Profile)
