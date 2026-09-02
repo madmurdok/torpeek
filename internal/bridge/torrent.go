@@ -46,8 +46,8 @@ func (c torrentContent) Name(file int) string {
 // reads, which is the profile's job.
 func (c torrentContent) Fetch(ctx context.Context, file int, off, length int64) (io.ReadCloser, error) {
 	head := length
-	if c.profile.Window > 0 && head > c.profile.Window {
-		head = c.profile.Window
+	if window := c.profile.WindowSize(c.t.PieceLength()); window > 0 && head > window {
+		head = window
 	}
 
 	window, err := c.t.Claim(file, off, head, c.profile)
