@@ -114,12 +114,30 @@ type RunRequest struct {
 // from the same input. The web package stays a consumer of events.
 type Runner func(ctx context.Context, req RunRequest) (<-chan core.Event, error)
 
+// Replayer replays a finished run from disk and returns its event stream,
+// the same shape Runner returns for a live one - a channel that closes when
+// the replay is over, its last event always Done or Failed (core.Engine's
+// Replay method is the one real implementation; see its doc for why a miss
+// is reported as a Failed event rather than a Go error here).
+//
+// It takes no context: unlike a live run, nothing here is worth cancelling -
+// it is a handful of local file reads, never a network wait - and it takes
+// no RunRequest, because reopening addresses a run by where it lives
+// (infoHash, params - the pair a disk-only GET /runs row carries, TOR-54)
+// rather than by what a fresh run would be asked to do.
+type Replayer func(infoHash, params string) <-chan core.Event
+
 // ErrNoSuchRun is returned when a request names a run this server does not
 // hold - never did, or held and has since forgotten (see keepFinishedRuns).
 var ErrNoSuchRun = errors.New("no such run")
 
 // errClosed is what a request gets once Close has run.
 var errClosed = errors.New("web: server is closed")
+
+// errReplayUnavailable is what ReopenRun returns when the server was built
+// with no Replayer - a test driving newServer directly, most often, since the
+// real entry point (cli/web.go) always supplies one alongside its Runner.
+var errReplayUnavailable = errors.New("web: reopening a run from disk is not available")
 
 // keepFinishedRuns bounds how many finished runs stay in memory.
 //
@@ -145,9 +163,10 @@ const keepFinishedRuns = 10
 // second concurrent run could not even start. What changed is what happens to
 // the second request - it waits its turn instead of being refused.
 type Server struct {
-	cfg     Config
-	runner  Runner
-	baseCtx context.Context
+	cfg      Config
+	runner   Runner
+	replayer Replayer
+	baseCtx  context.Context
 
 	server *http.Server
 	url    string
@@ -174,7 +193,12 @@ type Server struct {
 //
 // It does not open a browser: on a seedbox there is nothing to open, and a
 // test must never depend on one. The caller decides, with OpenBrowser.
-func Start(ctx context.Context, cfg Config, runner Runner) (*Server, error) {
+//
+// replayer may be nil - ReopenRun then answers errReplayUnavailable rather
+// than refusing to start, the same tolerance Config.OutputRoot's own doc
+// describes for a caller with no disk-backed run to speak of. The real
+// entry point (cli/web.go) always supplies one, paired with runner.
+func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer) (*Server, error) {
 	if cfg.Addr == "" {
 		cfg.Addr = DefaultAddr
 	}
@@ -202,7 +226,7 @@ func Start(ctx context.Context, cfg Config, runner Runner) (*Server, error) {
 		return nil, fmt.Errorf("web listen on %s: %w", cfg.Addr, err)
 	}
 
-	s := newServer(ctx, cfg, runner)
+	s := newServer(ctx, cfg, runner, replayer)
 	s.url = "http://" + ln.Addr().String() + s.cfg.BasePath + "/"
 	if s.cfg.Token != "" {
 		// The token is base64.RawURLEncoding output: a fixed alphabet with
@@ -222,18 +246,19 @@ func Start(ctx context.Context, cfg Config, runner Runner) (*Server, error) {
 
 // newServer builds a server without listening, which is what a test wants
 // when it drives the handler through httptest.
-func newServer(ctx context.Context, cfg Config, runner Runner) *Server {
+func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer) *Server {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	cfg.BasePath = normalizeBasePath(cfg.BasePath)
 	return &Server{
-		cfg:     cfg,
-		runner:  runner,
-		baseCtx: ctx,
-		files:   newFileSet(),
-		hub:     newHub(connectRecord()),
-		runs:    make(map[string]*runEntry),
+		cfg:      cfg,
+		runner:   runner,
+		replayer: replayer,
+		baseCtx:  ctx,
+		files:    newFileSet(),
+		hub:      newHub(connectRecord()),
+		runs:     make(map[string]*runEntry),
 	}
 }
 
@@ -263,6 +288,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
+	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.Handle("GET /", http.FileServerFS(assets))
@@ -457,6 +483,69 @@ func (s *Server) dispatch() {
 	}
 }
 
+// ReopenRun replays a finished run from disk under a fresh registry entry, so
+// its frames reach a client the same way a live run's do: by id, over the
+// event stream, each file carrying a URL (Server.record does that for every
+// run alike, live or replayed).
+//
+// infoHash and params address the run the way GET /runs already describes
+// one for a disk-only row (TOR-54) - never an id, because the run being
+// reopened may never have had one in this process: it may be a previous
+// process's run entirely, or one this process itself ran and later trimmed
+// from keepFinishedRuns.
+//
+// It never touches s.waiting or s.running: a cache hit costs no network and
+// competes for neither the traffic budget nor the pinned port the queue
+// exists to protect, so making it wait behind a live download would defend
+// against a conflict that cannot happen. Unlike startRun, this runs
+// pump synchronously rather than handing it to a goroutine - a replay is a
+// handful of local file reads, not a wait on the network, so there is
+// nothing to gain by returning before it is done, and the caller gets back
+// the run's actual outcome (done or failed) instead of having to watch the
+// stream to learn it.
+func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
+	infoHash = strings.TrimSpace(infoHash)
+	params = strings.TrimSpace(params)
+	if infoHash == "" || params == "" {
+		return RunInfo{}, errors.New("give the infohash and params of a run on disk")
+	}
+	if s.replayer == nil {
+		return RunInfo{}, errReplayUnavailable
+	}
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := &runEntry{
+		id: newRunID(), source: "reopened", state: RunReplaying,
+		infoHash: infoHash, cancel: func() {},
+		queuedAt: time.Now(), startedAt: time.Now(),
+	}
+	s.runs[entry.id] = entry
+	s.order = append(s.order, entry.id)
+	rec := s.runStateRecordLocked(entry, true)
+	s.mu.Unlock()
+
+	// Opens this run's history before anything is published against it - the
+	// same reason startRun calls begin before dispatch: hub.publish on a run
+	// with no history yet still reaches a client connected right now, but
+	// forgets the message rather than keeping it to replay to one that
+	// connects a moment later, which would defeat the entire point of
+	// reopening a run for a page that is not even open yet.
+	s.hub.begin(entry.id, rec)
+
+	events := s.replayer(infoHash, params)
+	s.pump(entry, events)
+
+	s.mu.Lock()
+	info := entry.info()
+	s.mu.Unlock()
+	return info, nil
+}
+
 // CancelRun stops one run: the one in the slot, or one still waiting for it.
 // Frames already written stay on disk, which is the whole point of cancelling
 // rather than killing (section 2.10).
@@ -542,6 +631,13 @@ func (s *Server) snapshot() []RunInfo {
 
 // pump moves one run's events onto its own history and announces the end of
 // the run, then hands the slot to whoever is next.
+//
+// dispatch is its usual caller, in its own goroutine, for the entry that
+// currently holds the slot; ReopenRun also calls it, synchronously and for
+// an entry that never held the slot at all. Both are safe: the "hands the
+// slot to whoever is next" step only fires `if s.running == entry`, which is
+// never true for a replay, so it is simply a no-op dispatch() call there
+// rather than a special case this function has to know about.
 func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 	outcome, failure := RunDone, error(nil)
 
@@ -674,7 +770,9 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 //
 // state is the whole answer; active is the same answer for a client that only
 // asks "is this one going", kept because it is what run_state has always
-// meant. reset marks the message that opens a run's history: a page clears
+// meant - true for running and replaying alike, since both mean more events
+// are still coming for this run, and false the moment either reaches a final
+// state. reset marks the message that opens a run's history: a page clears
 // what it shows for that run when it sees one. It is what tells a
 // reconnecting page that what follows is the whole run, rather than more of
 // what it already has.
@@ -683,7 +781,8 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 func (s *Server) runStateRecordLocked(entry *runEntry, reset bool) record {
 	m := map[string]any{
 		"type": "run_state", "run": entry.id, "state": string(entry.state),
-		"active": entry.state == RunRunning, "source": entry.source, "reset": reset,
+		"active": entry.state == RunRunning || entry.state == RunReplaying,
+		"source": entry.source, "reset": reset,
 	}
 	if entry.infoHash != "" {
 		m["infohash"] = entry.infoHash

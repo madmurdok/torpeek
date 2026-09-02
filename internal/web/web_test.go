@@ -60,11 +60,20 @@ func newTestServer(t *testing.T, runner Runner) (*Server, *httptest.Server) {
 
 // newTestServerWithConfig is newTestServer for a test that needs a
 // non-default Config - OutputRoot, most often, for the GET /runs tests that
-// need a server pointed at a specific directory.
+// need a server pointed at a specific directory. Its replayer is nil: a test
+// that exercises reopening a run (TOR-55) wants newTestServerWithReplayer
+// instead.
 func newTestServerWithConfig(t *testing.T, cfg Config, runner Runner) (*Server, *httptest.Server) {
 	t.Helper()
+	return newTestServerWithReplayer(t, cfg, runner, nil)
+}
 
-	srv := newServer(context.Background(), cfg, runner)
+// newTestServerWithReplayer is newTestServerWithConfig plus a Replayer, for
+// the tests that reopen a run from disk (TOR-55).
+func newTestServerWithReplayer(t *testing.T, cfg Config, runner Runner, replayer Replayer) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), cfg, runner, replayer)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -666,7 +675,7 @@ func TestRunnerFailureIsReported(t *testing.T) {
 // reference, no absolute socket URL (REQUIREMENTS.md section 3.3).
 func TestWorksUnderABasePath(t *testing.T) {
 	fake := &fakeRun{}
-	srv := newServer(context.Background(), DefaultConfig(), fake.runner)
+	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil)
 	t.Cleanup(func() { srv.Close() })
 
 	mounted := http.NewServeMux()
@@ -757,7 +766,7 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 	cfg.Addr = addr
 	cfg.BasePath = "torpeek" // no leading slash: normalizeBasePath's job
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -962,7 +971,7 @@ func TestStartHonoursThePinnedAddr(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -995,7 +1004,7 @@ func TestStartFailsLoudlyWhenAddrIsTaken(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err == nil {
 		srv.Close()
 		t.Fatalf("Start on the already-occupied %s succeeded, want an error", addr)
