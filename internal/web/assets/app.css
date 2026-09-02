@@ -182,14 +182,52 @@ button:disabled { opacity: .5; }
 .run-detail-cancel { margin-left: auto; }
 .run-detail-error { color: #b3261e; }
 
-/* One block per torrent file: its summary panel, its progress, its grid. */
-.files { display: flex; flex-direction: column; gap: 1.75rem; margin-top: 1rem; }
+/* One block per torrent file: its summary panel, its progress, its grid -
+   collapsed to a single clickable row by default (TOR-63), except the first
+   file of the torrent, which opens expanded. */
+.files { display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem; }
 
-.file { border-top: 1px solid #8884; padding-top: 1rem; }
+.file { border-top: 1px solid #8884; padding-top: .5rem; }
 
-.file-title {
-  overflow-wrap: anywhere;
+.file-title { margin: 0; font-size: 1rem; }
+
+/* The whole collapsed row is the click target - name plus whatever of
+   resolution/frame-count is already known, so a file can be chosen by
+   without opening it first. */
+.file-toggle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .25rem .6rem;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: .3rem .35rem;
+  border: none;
+  border-radius: .35rem;
+  background: none;
+  font: inherit;
+  font-weight: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.file-toggle:hover { background: #8882; }
+.file-toggle:focus-visible { outline: 2px solid #1a7f37; outline-offset: -2px; }
+
+.file-toggle-icon {
+  flex: 0 0 auto;
+  width: .7em;
+  opacity: .6;
+}
+.file-toggle-icon::before { content: "▸"; }
+.file-toggle[aria-expanded="true"] .file-toggle-icon::before { content: "▾"; }
+
+.file-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+
+.file-summary { flex: 0 0 auto; font-size: .78rem; opacity: .65; }
+
+.file-body { padding: .5rem .35rem 0; }
 
 .specs {
   display: grid;

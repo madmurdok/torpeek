@@ -199,6 +199,9 @@ function newRunEntry(id) {
     files: 0, complete: 0,
     reopening: false,
     fileEntries: new Map(),
+    // Set once this run's first file block is built, so every file after it
+    // defaults to collapsed - only the first one earns the auto-expand.
+    autoExpanded: false,
     rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowCancel: cancel,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
@@ -238,6 +241,7 @@ function ensureRun(id) {
 function resetRunContent(entry) {
   entry.filesEl.replaceChildren();
   entry.fileEntries.clear();
+  entry.autoExpanded = false;
   entry.torrentSummary.hidden = true;
   entry.torrentSummary.textContent = "";
   entry.error = "";
@@ -408,6 +412,22 @@ function trackGroup(label, tracks, formatter) {
 // its own frame grid, since a multi-file torrent should not mix their frames
 // or their tracks in one place - and one torrent's files must never mix with
 // another's now that the page can hold several at once.
+//
+// Everything below the title - specs, tracks, links, progress, the frame
+// grid - is built and filled in exactly as before, whether or not the file
+// is expanded; only file-body's `hidden` attribute decides what is on
+// screen. A frame_ready for a collapsed file still appends its figure to
+// .grid (addFrame never checks expanded state), so expanding it later shows
+// everything that arrived while it was closed - nothing is built lazily,
+// there is nothing to replay.
+//
+// Only the first file built for a run is auto-expanded (entry.autoExpanded
+// latches on the first call and never resets except on a full
+// resetRunContent). Every file after that starts collapsed, and a file's
+// expanded state changes from then on only in response to its own toggle
+// button - never from a later file_started/frame_ready/progress event - so
+// a person's click can neither be collapsed out from under them nor have
+// the expansion stolen back to file zero.
 function fileBlock(entry, index) {
   let fentry = entry.fileEntries.get(index);
   if (fentry) return fentry;
@@ -415,34 +435,79 @@ function fileBlock(entry, index) {
   const article = document.createElement("article");
   article.className = "file";
   article.innerHTML =
-    '<header class="file-header">' +
-      '<h2 class="file-title"></h2>' +
+    '<h2 class="file-title">' +
+      '<button type="button" class="file-toggle" aria-expanded="false">' +
+        '<span class="file-toggle-icon" aria-hidden="true"></span>' +
+        '<span class="file-name"></span>' +
+        '<span class="file-summary"></span>' +
+      "</button>" +
+    "</h2>" +
+    '<div class="file-body">' +
       '<dl class="specs"></dl>' +
       '<div class="tracks"></div>' +
       '<p class="file-links" hidden></p>' +
-    "</header>" +
-    '<p class="file-progress" hidden></p>' +
-    '<div class="grid"></div>';
+      '<p class="file-progress" hidden></p>' +
+      '<div class="grid"></div>' +
+    "</div>";
   entry.filesEl.append(article);
 
   fentry = {
     article,
-    title: article.querySelector(".file-title"),
+    toggle: article.querySelector(".file-toggle"),
+    name: article.querySelector(".file-name"),
+    summary: article.querySelector(".file-summary"),
+    body: article.querySelector(".file-body"),
     specs: article.querySelector(".specs"),
     tracks: article.querySelector(".tracks"),
     links: article.querySelector(".file-links"),
     progress: article.querySelector(".file-progress"),
     grid: article.querySelector(".grid"),
+    expanded: false,
+    frameCount: 0,
+    width: 0,
+    height: 0,
   };
   entry.fileEntries.set(index, fentry);
+
+  fentry.toggle.addEventListener("click", () => setFileExpanded(fentry, !fentry.expanded));
+  setFileExpanded(fentry, !entry.autoExpanded);
+  entry.autoExpanded = true;
+  updateFileSummary(fentry);
+
   return fentry;
+}
+
+function setFileExpanded(fentry, expanded) {
+  fentry.expanded = expanded;
+  fentry.article.dataset.expanded = String(expanded);
+  fentry.toggle.setAttribute("aria-expanded", String(expanded));
+  fentry.body.hidden = !expanded;
+  // The collapsed-only summary line and the specs panel say the same thing
+  // two different ways; showing both at once would just repeat resolution.
+  fentry.summary.hidden = expanded;
+}
+
+// updateFileSummary keeps a collapsed row worth choosing by without opening
+// it: the file name is always visible on the toggle itself, and this adds
+// whatever of resolution and frame count are already known - both update
+// live (resolution the moment file_started arrives, the frame count on
+// every frame_ready) whether or not the file happens to be expanded right
+// now.
+function updateFileSummary(fentry) {
+  const parts = [];
+  if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
+  parts.push(fentry.frameCount === 1 ? "1 frame" : fentry.frameCount + " frames");
+  fentry.summary.textContent = parts.join(" · ");
 }
 
 // The summary panel: audio tracks, subtitles, bitrate, resolution, filled the
 // moment the file's media is known - before a single frame exists.
 function onFileStarted(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
-  fentry.title.textContent = ev.path;
+  fentry.name.textContent = ev.path;
+  fentry.width = ev.width;
+  fentry.height = ev.height;
+  updateFileSummary(fentry);
 
   fentry.specs.replaceChildren();
   addSpec(fentry.specs, "Resolution", ev.width && ev.height ? ev.width + "×" + ev.height : "");
@@ -463,6 +528,8 @@ function onFileStarted(entry, ev) {
 
 function addFrame(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
+  fentry.frameCount++;
+  updateFileSummary(fentry);
 
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
