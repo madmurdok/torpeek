@@ -131,7 +131,24 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		bus.Publish(Failed{File: -1, Code: CodeOf(err), Err: err})
 		return
 	}
-	defer session.Close()
+	defer func() {
+		// Order matters: DiscardPieces is only safe to call once Close has
+		// returned (see its doc comment on why that is the real boundary,
+		// not merely a convenient one).
+		session.Close()
+
+		// Every exit from here down goes through this defer - completed,
+		// budget-stopped or cancelled alike - and discards this run's own
+		// pieces every time. A run that was cut short still gets to keep
+		// what matters: resume (serveFromCache and reusableFrames, both in
+		// this package) reads only the output directory's manifests and
+		// frames, never the swarm's piece cache, so a stopped run loses
+		// nothing a later run could have reused by leaving pieces in place.
+		// This is what makes a long-lived web session, not just a one-shot
+		// CLI run, actually drop pieces after every torrent instead of
+		// piling them up for however long the process stays up.
+		_ = session.DiscardPieces(torrent.InfoHash())
+	}()
 
 	videos := torrent.Videos()
 

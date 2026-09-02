@@ -11,6 +11,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	alog "github.com/anacrolix/log"
@@ -297,4 +299,41 @@ func (s *Session) Close() error {
 	errs := s.cl.Close()
 	s.cl = nil
 	return errors.Join(errs...)
+}
+
+// DiscardPieces removes this run's own piece subtree for one torrent, never
+// the data directory itself (REQUIREMENTS.md 2.9: raw pieces are staging
+// data, not a result worth keeping).
+//
+// storage.NewFileByInfoHash, which newSession always configures as the
+// client's storage, namespaces every torrent under <DataDir>/<infohash>/ -
+// see anacrolix's storage/file-paths.go infoHashPathMaker. That is exactly
+// what makes dropping one run's own subtree safe: it cannot reach a sibling
+// torrent's pieces, and a directory the caller named with -data keeps
+// existing, only lighter.
+//
+// Call only after Close has returned, and only then: while the client is
+// live, pieces are still being written to (and, with Upload on, read from
+// for peers) by goroutines this call knows nothing about. Close is safe to
+// treat as that boundary - not by assumption, but because of what was
+// actually traced through anacrolix v1.61.0's client.go and torrent.go:
+// Client.Close() drops every torrent via dropTorrent(t, &closeGroup), and
+// Torrent.close() queues its storage.Close call onto that same
+// *sync.WaitGroup rather than firing it and forgetting it; Client.Close()
+// calls closeGroup.Wait() before it returns. So by the time Close returns,
+// every torrent's storage.Close has already run. (Client.Close() does also
+// contain a literal `func() { go s.Close() }` in its onClose list, and ruling
+// out "that's the async storage close" was the first thing worth checking -
+// but that s is a listen socket from client.go's own sockets loop, not
+// storage; it does not apply here.) The file storage backend itself holds nothing
+// open between calls anyway: storage/file-io-classic.go opens and closes an
+// os.File around each individual read or write rather than keeping one for
+// the run's lifetime, so there is no lingering handle on a piece file for
+// Close's wait to even need to cover - it is a genuine guarantee, not one
+// this happens to lean on without headroom.
+func (s *Session) DiscardPieces(infoHash string) error {
+	if s.cfg.DataDir == "" || infoHash == "" {
+		return nil
+	}
+	return os.RemoveAll(filepath.Join(s.cfg.DataDir, infoHash))
 }

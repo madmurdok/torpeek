@@ -106,6 +106,19 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	// Results are the thing worth keeping; the pieces they were made from are
 	// not (REQUIREMENTS.md section 2.9). Only a directory this run created is
 	// removed - one the caller named belongs to them.
+	//
+	// This complements, rather than replaces, core.Engine's own per-run
+	// cleanup (see swarm.Session.DiscardPieces): the engine drops each run's
+	// <scratch>/<infohash>/ subtree as soon as that run ends, which is what
+	// actually matters for -web - a session can hold this process open for
+	// hours, so waiting for process exit would defeat the point. What this
+	// defer still covers on its own: -list, which never opens a session and
+	// so never reaches the engine's cleanup at all; a run that fails before
+	// a session opens; and simply removing the now-empty scratch directory
+	// itself, which the engine deliberately leaves standing (it only ever
+	// drops its own subtree, on the theory that -data named a directory that
+	// belongs to the caller - here there is no caller, so removing the whole
+	// thing is fine, and tidier than leaving an empty temp directory behind).
 	if opts.scratch != "" {
 		defer os.RemoveAll(opts.scratch)
 	}
