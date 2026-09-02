@@ -40,11 +40,26 @@ type Profile struct {
 // The numbers are intents. What reaches the swarm is these rounded up to whole
 // pieces, which is why they read as byte sizes rather than piece counts: the
 // intent is "about this much", and the torrent decides what that means.
+//
+// What a capture point costs is set by how far the two reach past the wanted
+// offset together, not by either alone. Measured on the local seeder, per
+// frame: 2+2 MiB cost 4.65 MiB, 2+4 cost 5.76, 4+4 cost 6.98, 8+6 cost 9.61.
+// Readahead beyond the window is the part that buys nothing - a 1 MiB and a
+// 2 MiB readahead behind a 4 MiB window both cost 5.76, because the window
+// already covers them - so min-time trails its readahead inside its claim
+// rather than past it.
 var (
 	MinTime = Profile{
-		Name:       "min-time",
-		Readahead:  8 << 20,
-		Window:     6 << 20,
+		Name: "min-time",
+		// Deliberately no further than the window: past it, readahead
+		// pulls pieces the decoder never asks for. 8 MiB behind a 2 MiB
+		// window cost 8.26 MiB/frame against 4.65 for 2 MiB.
+		Readahead: 2 << 20,
+		// Four pieces on the acceptance torrent: enough in flight at once
+		// to be the fast profile, where six put 20 capture points 22 MiB
+		// over the 150 MB criterion for five seconds of the two minutes
+		// allowed.
+		Window:     4 << 20,
 		Responsive: true,
 	}
 

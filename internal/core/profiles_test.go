@@ -62,6 +62,13 @@ func TestMinTrafficCostsLessThanMinTime(t *testing.T) {
 			switch e := ev.(type) {
 			case FrameReady:
 				got++
+			case FrameSkipped:
+				// Not a failure on its own - the frame-count check below
+				// decides that - but never silent. A skipped point is the
+				// one way this test can measure two different runs and
+				// still look like it compared them.
+				t.Logf("%s: skipped frame %d at %s: %s: %s",
+					profile.Name, e.Index, e.Requested.Round(time.Second), e.Code, e.Reason)
 			case Failed:
 				t.Errorf("%s: %s: %v", profile.Name, e.Code, e.Err)
 			case Done:
@@ -92,5 +99,33 @@ func TestMinTrafficCostsLessThanMinTime(t *testing.T) {
 	if trafficBytes >= timeBytes {
 		t.Errorf("min-traffic took %d bytes and min-time %d; the thrifty profile must cost less",
 			trafficBytes, timeBytes)
+	}
+
+	// The ceilings below are what stands in for the acceptance run, which
+	// costs real traffic on a real swarm and gets run once per release. What
+	// transfers between the two is the cost of a capture point, not the cost
+	// of a run: the profiles pull a fixed neighbourhood around each point
+	// regardless of how big the file is or how many points there are. At the
+	// 8+6 MiB constants this harness measured 9.61 MiB/frame where the
+	// acceptance torrent measured 8.6, so a frame here is about 12% dearer
+	// than a frame there, and a ceiling here is the stricter of the two.
+	//
+	// 7.0 MiB/frame is the guard for min-time. It is not the criterion
+	// converted - 150 MB over 20 frames would allow 7.15 - but the measured
+	// 5.76 with a fifth of headroom for run-to-run variance, which lands the
+	// acceptance run near 103 MiB. The old 8+6 constants measure 9.61 here
+	// and fail it, which is the regression this exists to catch.
+	perFrame := func(bytes int64, frames int) float64 {
+		return float64(bytes) / (1 << 20) / float64(frames)
+	}
+	if got := perFrame(timeBytes, timeFrames); got > 7.0 {
+		t.Errorf("min-time cost %.2f MiB/frame, over the 7.0 ceiling; "+
+			"20 frames at this price miss the 150 MB acceptance criterion", got)
+	}
+	// min-traffic is not what this task tunes, but it must not pay for
+	// min-time's cut. Measured 3.44-3.61 MiB/frame across runs.
+	if got := perFrame(trafficBytes, trafficFrames); got > 4.5 {
+		t.Errorf("min-traffic cost %.2f MiB/frame, over the 4.5 ceiling; "+
+			"the thrifty profile regressed", got)
 	}
 }
