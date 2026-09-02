@@ -18,6 +18,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/sheet"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/version"
 )
@@ -32,6 +33,13 @@ type Config struct {
 	Plan    frames.Plan
 	Profile swarm.Profile
 	Budget  Budget
+
+	// Sequential opts into degrading to sequential reading from the start
+	// when a container states no duration to plan capture points across
+	// (REQUIREMENTS.md 2.7). Off by default: a container with no index gets
+	// a typed error naming why instead, since spending traffic on a guess is
+	// a decision the caller makes, never one taken silently.
+	Sequential bool
 
 	// Parallelism is how many video files are worked on at once. On a shared
 	// seedbox this belongs at 1-2 rather than the desktop default (section 4.1).
@@ -283,13 +291,41 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	defer withdraw()
 
 	info, err := deps.prober.Inspect(ctx, url)
+	var points []time.Duration
+	sequential := false
 	if err != nil {
-		return 0, false, err
-	}
+		// A container with no duration is the one case the sequential
+		// fallback exists for (REQUIREMENTS.md 2.7); anything else - no
+		// video stream at all, or the file not opening as media - stays a
+		// hard failure regardless of the flag, since there is no frame to
+		// read sequentially either way.
+		var niErr *probe.NoIndexError
+		if !cfg.Sequential || !errors.As(err, &niErr) || niErr.Reason != probe.ReasonNoDuration {
+			return 0, false, err
+		}
 
-	points, err := cfg.Plan.Points(info.Duration)
-	if err != nil {
-		return 0, false, err
+		keyframes, seqErr := deps.prober.SequentialKeyframes(ctx, url, cfg.Plan.Count)
+		if seqErr != nil {
+			// The fallback found nothing to work with either; the original
+			// error is still the honest one to report.
+			return 0, false, err
+		}
+
+		points = make([]time.Duration, len(keyframes))
+		for i, kf := range keyframes {
+			points[i] = kf.PTS
+		}
+		// Duration becomes the last point actually found, so everything
+		// downstream - shift candidates, the manifest's file duration, the
+		// availability ratio - sees a file that ends where the sequential
+		// read stopped rather than a nonexistent length.
+		info.Duration = points[len(points)-1]
+		sequential = true
+	} else {
+		points, err = cfg.Plan.Points(info.Duration)
+		if err != nil {
+			return 0, false, err
+		}
 	}
 
 	deps.bus.Publish(FileStarted{
@@ -389,6 +425,14 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			continue
 		}
 
+		// Blank rejection happens here, after the seek is confirmed real and
+		// before anything reaches disk - the only point where a wasted decode
+		// is free to retry. It is judged against the picture, not the swarm,
+		// so it runs after decoding rather than alongside the availability
+		// shift above: that one moves before any traffic is spent, this one
+		// can only be judged once a frame exists to look at.
+		shot = e.rejectBlank(ctx, deps, url, tolerance/4, shot)
+
 		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, shot.frame.Data, extensionFor(cfg.Format))
 		if err != nil {
 			return produced, false, Fail(CodeStorage, err)
@@ -436,15 +480,26 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		})
 	}
 
-	if err := e.writeManifest(deps, file, info, records); err != nil {
+	manifestPath, err := e.writeManifest(deps, file, info, records, sequential)
+	if err != nil {
+		return produced, false, Fail(CodeStorage, err)
+	}
+
+	// The sheet is assembled last, from whatever frames landed on disk during
+	// the loop above - never accumulated as they arrived - so a run stopped
+	// partway still gets a sheet from what it actually has (section 2.11).
+	sheetPath, err := e.writeSheet(deps, file, info, points, records)
+	if err != nil {
 		return produced, false, Fail(CodeStorage, err)
 	}
 
 	deps.bus.Publish(FileDone{
-		File:    file.Index,
-		Path:    file.Path,
-		Frames:  produced,
-		Skipped: skipped,
+		File:         file.Index,
+		Path:         file.Path,
+		Frames:       produced,
+		Skipped:      skipped,
+		ManifestPath: manifestPath,
+		SheetPath:    sheetPath,
 	})
 
 	// Complete means every point planned for this file produced a frame. A
@@ -521,7 +576,7 @@ const availabilityBuckets = 64
 // The cost it carries is the run's, not the file's: the budget is shared
 // across files, and a per-file share of it would be a number nothing enforces.
 func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
-	info probe.MediaInfo, records []manifest.Frame) error {
+	info probe.MediaInfo, records []manifest.Frame, sequential bool) (string, error) {
 
 	spent, elapsed := deps.tracker.Spent()
 	limitBytes, limitTime := deps.tracker.Limits()
@@ -570,6 +625,7 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 			LimitBytes:      limitBytes,
 			LimitMS:         limitTime.Milliseconds(),
 			LimitHit:        limitHit,
+			Sequential:      sequential,
 		},
 	}
 
@@ -588,12 +644,27 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode manifest: %w", err)
+		return "", fmt.Errorf("encode manifest: %w", err)
 	}
 	data = append(data, '\n')
 
-	_, err = deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
-	return err
+	return deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
+}
+
+// writeSheet composes the contact sheet from whatever frames this file's
+// records point to and writes it beside the manifest. It reads tiles from
+// disk rather than from anything held in memory as frames arrived, per
+// section 2.11 - and tolerates records shorter than points (a run stopped
+// between capture points) and individual records with no frame (an
+// unavailable or rejected point), per section 2.3.
+func (e *Engine) writeSheet(deps fileDeps, file swarm.FileInfo,
+	info probe.MediaInfo, points []time.Duration, records []manifest.Frame) (string, error) {
+
+	data, err := sheet.Build(points, records, info.Video.Width, info.Video.Height)
+	if err != nil {
+		return "", fmt.Errorf("compose sheet: %w", err)
+	}
+	return deps.writer.WriteFile(file.Index, file.Path, output.SheetName, data)
 }
 
 // minSeekTolerance is the smallest gap worth calling a miss. Keyframes are
@@ -641,6 +712,71 @@ type capture struct {
 // far enough to escape a hole, near enough that the frame still represents the
 // moment it was planned for.
 const maxShift = 2
+
+// maxBlankSteps is how many neighbouring keyframes a blank frame may be
+// stepped past before it is kept as it is. Unlike a shift, each attempt here
+// costs a real decode - it is judged after the frame is already in hand - so
+// it is bounded the same way and for the same reason: escape a hole in the
+// picture without hunting forever.
+const maxBlankSteps = 2
+
+// rejectBlank detects a black or near-monotone frame (REQUIREMENTS.md 2.3)
+// and steps forward through neighbouring keyframes to escape it, up to
+// maxBlankSteps attempts. When every attempt is still blank, the last frame
+// reached is kept rather than the point being failed - ARCHITECTURE.md's
+// Stepping state is explicit about this: "attempts exhausted, take it as
+// is." The marker only ever says ShiftBlank when a step actually happened;
+// a frame that was never blank, or that failed every retry, leaves shot's
+// own shift untouched.
+//
+// Stepping only moves forward. KeyframeAt seeks backwards to the keyframe at
+// or before its argument, so a request strictly after the timestamp already
+// held is how the next keyframe is reached - there is no "next keyframe"
+// query. When a request lands on the same pts already held, nothing moved,
+// and the next attempt tries a larger step instead of repeating the same
+// request; a genuine probe or decode failure stops retrying rather than
+// spending the remaining attempts on requests unlikely to do better.
+func (e *Engine) rejectBlank(ctx context.Context, deps fileDeps, url string, step time.Duration, shot capture) capture {
+	blank, err := frames.IsBlank(shot.frame.Data)
+	if err != nil || !blank {
+		return shot
+	}
+	if step <= 0 {
+		step = minSeekTolerance / 4
+	}
+
+	best := shot
+	advance := step
+	for attempt := 1; attempt <= maxBlankSteps; attempt++ {
+		candidate := best.actual + advance
+
+		keyframe, err := deps.prober.KeyframeAt(ctx, url, candidate)
+		if err != nil {
+			break
+		}
+		if keyframe.PTS <= best.actual {
+			// Did not reach a new keyframe; try further out next time,
+			// without spending a decode on a frame already held.
+			advance *= 2
+			continue
+		}
+		advance = step
+
+		frame, err := deps.extractor.Frame(ctx, url, keyframe.PTS)
+		if err != nil {
+			break
+		}
+
+		best = capture{frame: frame, asked: shot.asked, actual: keyframe.PTS, shift: ShiftBlank}
+
+		blank, err = frames.IsBlank(frame.Data)
+		if err != nil || !blank {
+			break
+		}
+	}
+
+	return best
+}
 
 // captureOne takes the frame for one capture point, moving it if the swarm
 // cannot serve the pieces there.
@@ -739,7 +875,7 @@ func reachable(avail availabilityMap, profile swarm.Profile,
 
 	span := avail.PieceLength() * reachStart
 	if span <= 0 {
-		span = profile.Window
+		span = profile.WindowSize(0)
 	}
 
 	offset := int64(float64(file.Length) * (float64(at) / float64(duration)))
@@ -798,8 +934,8 @@ func indicesOf(files []swarm.FileInfo) []int {
 // keying on it would scatter the same file's frames across directories - and
 // stop a later run from reusing what an earlier, narrower one already fetched.
 func ParamsKey(cfg Config) string {
-	raw := fmt.Sprintf("n=%d;start=%.4f;end=%.4f;profile=%s;format=%s",
-		cfg.Plan.Count, cfg.Plan.Start, cfg.Plan.End, cfg.Profile.Name, cfg.Format)
+	raw := fmt.Sprintf("n=%d;start=%.4f;end=%.4f;profile=%s;format=%s;sequential=%v",
+		cfg.Plan.Count, cfg.Plan.Start, cfg.Plan.End, cfg.Profile.Name, cfg.Format, cfg.Sequential)
 
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:8])

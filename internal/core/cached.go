@@ -1,6 +1,8 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
@@ -105,10 +107,23 @@ func (e *Engine) serveFromCache(cfg Config, src swarm.Source, bus *Bus, started 
 			frames++
 		}
 
+		// A cached rerun serves the same artefacts a live run would have
+		// written, sheet included - but the sheet is a newer artefact than
+		// the manifest format itself, so a result cached before TOR-16
+		// simply won't have one on disk. Reporting a path only when it is
+		// actually there keeps a stale cache a hit rather than a miss.
+		dir := layout.FileDir(m.File.Index, m.File.Path)
+		sheetPath := filepath.Join(dir, output.SheetName)
+		if _, err := os.Stat(sheetPath); err != nil {
+			sheetPath = ""
+		}
+
 		bus.Publish(FileDone{
-			File:   m.File.Index,
-			Path:   m.File.Path,
-			Frames: len(m.Frames),
+			File:         m.File.Index,
+			Path:         m.File.Path,
+			Frames:       len(m.Frames),
+			ManifestPath: filepath.Join(dir, manifest.Name),
+			SheetPath:    sheetPath,
 		})
 	}
 

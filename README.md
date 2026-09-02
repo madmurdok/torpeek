@@ -50,10 +50,10 @@ Working today: torrent session and metadata over BEP 9, piece window fetching
 with priorities and readahead, a loopback HTTP bridge that gives ffmpeg a
 seekable file, `ffprobe` media inspection and keyframe lookup, capture point
 planning, frame decode at source resolution, atomic writes, a run budget for
-time and traffic, parallel work across a torrent's video files, and the CLI with
-NDJSON output.
+time and traffic, parallel work across a torrent's video files, contact sheet
+assembly, and the CLI with NDJSON output.
 
-Not built yet: contact sheet assembly, the JSON manifest, the result cache and
+Not built yet: the JSON manifest, the result cache and
 resume, the live TUI, the web UI, and release archives with bundled ffmpeg. The
 `min-time` and `min-traffic` profiles already differ in readahead and window
 size, but the strategies on top of them are still open. See
@@ -129,6 +129,7 @@ make fmt
 | `-peer` | — | comma-separated peers to contact directly |
 | `-upload` | `true` | serve pieces back to the swarm while running |
 | `-dht` | `true` | use DHT and PEX (never for a private torrent) |
+| `-sequential` | `false` | when a container has no usable index, degrade to sequential capture from the start instead of failing |
 | `-json` | `false` | emit NDJSON events instead of human output |
 
 Ctrl+C cancels the run rather than killing it: frames already written stay, and

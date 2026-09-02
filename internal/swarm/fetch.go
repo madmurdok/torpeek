@@ -30,11 +30,36 @@ type Profile struct {
 }
 
 // The two profiles from REQUIREMENTS.md section 2.5.
+//
+// What a profile actually controls is how much is claimed around each capture
+// point and how eagerly it is handed to the decoder. It does not control how
+// many requests are in flight - that is the torrent library's own scheduling,
+// and section 2.5's "more parallel requests" is served by claiming a wider
+// window, which is what gives the library more to ask for at once.
+//
+// The numbers are intents. What reaches the swarm is these rounded up to whole
+// pieces, which is why they read as byte sizes rather than piece counts: the
+// intent is "about this much", and the torrent decides what that means.
+//
+// What a capture point costs is set by how far the two reach past the wanted
+// offset together, not by either alone. Measured on the local seeder, per
+// frame: 2+2 MiB cost 4.65 MiB, 2+4 cost 5.76, 4+4 cost 6.98, 8+6 cost 9.61.
+// Readahead beyond the window is the part that buys nothing - a 1 MiB and a
+// 2 MiB readahead behind a 4 MiB window both cost 5.76, because the window
+// already covers them - so min-time trails its readahead inside its claim
+// rather than past it.
 var (
 	MinTime = Profile{
-		Name:       "min-time",
-		Readahead:  8 << 20,
-		Window:     6 << 20,
+		Name: "min-time",
+		// Deliberately no further than the window: past it, readahead
+		// pulls pieces the decoder never asks for. 8 MiB behind a 2 MiB
+		// window cost 8.26 MiB/frame against 4.65 for 2 MiB.
+		Readahead: 2 << 20,
+		// Four pieces on the acceptance torrent: enough in flight at once
+		// to be the fast profile, where six put 20 capture points 22 MiB
+		// over the 150 MB criterion for five seconds of the two minutes
+		// allowed.
+		Window:     4 << 20,
 		Responsive: true,
 	}
 
@@ -45,6 +70,34 @@ var (
 		Responsive: false,
 	}
 )
+
+// WindowSize is how many bytes to claim around a read, resolved against the
+// torrent's own geometry rather than taken as written.
+//
+// Pieces are the unit the swarm actually trades in, so an intent expressed in
+// bytes is rounded up to whole ones - claiming half a piece costs the whole
+// piece anyway, and asking for less than one is worse than asking for one.
+// Measured: a 512 KiB window on a torrent with 1 MiB pieces took 62.7s where a
+// 1 MiB window took 3.4s, because the decoder kept coming back for the rest of
+// a piece already being fetched.
+func (p Profile) WindowSize(pieceLength int64) int64 {
+	return alignUp(p.Window, pieceLength)
+}
+
+// ReadaheadSize resolves the readahead intent the same way.
+func (p Profile) ReadaheadSize(pieceLength int64) int64 {
+	return alignUp(p.Readahead, pieceLength)
+}
+
+func alignUp(intent, pieceLength int64) int64 {
+	if pieceLength <= 0 {
+		return intent
+	}
+	if intent <= pieceLength {
+		return pieceLength
+	}
+	return ((intent + pieceLength - 1) / pieceLength) * pieceLength
+}
 
 // ProfileByName resolves a profile from a flag value.
 func ProfileByName(name string) (Profile, error) {
@@ -117,8 +170,8 @@ type Window struct {
 // Kept separate from Claim so the geometry is testable without a client - it is
 // the only thing the profile actually controls at fetch time.
 func (t *Torrent) WindowFor(file int, off, length int64, p Profile) (PieceRange, error) {
-	if p.Window > length {
-		length = p.Window
+	if window := p.WindowSize(t.pieceLength); window > length {
+		length = window
 	}
 	return t.PieceRangeFor(file, off, length)
 }
@@ -165,7 +218,7 @@ func (t *Torrent) Reader(ctx context.Context, file int, p Profile) (torrent.Read
 
 	r := t.t.Files()[file].NewReader()
 	r.SetContext(ctx)
-	r.SetReadahead(p.Readahead)
+	r.SetReadahead(p.ReadaheadSize(t.pieceLength))
 	if p.Responsive {
 		r.SetResponsive()
 	}

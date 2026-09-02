@@ -126,6 +126,12 @@ type Cost struct {
 	LimitMS         int64 `json:"limit_ms"`
 	// LimitHit names the ceiling that stopped the run, empty if none did.
 	LimitHit string `json:"limit_hit"`
+	// Sequential marks a run that degraded to sequential reading from the
+	// start because the container carried no duration (REQUIREMENTS.md
+	// 2.7). Its frames sit clustered near the front of the file rather than
+	// spread across it - this is what tells a reader of the manifest alone,
+	// without re-deriving it from the timestamps, not to expect otherwise.
+	Sequential bool `json:"sequential"`
 }
 
 // Name is what a manifest is called on disk, next to the frames it describes.

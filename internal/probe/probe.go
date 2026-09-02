@@ -26,6 +26,51 @@ import (
 // the condition that gates the sequential fallback (requirements 2.7).
 var ErrNoIndex = errors.New("container has no usable index")
 
+// Reason names, in a form a caller can switch on, why a container had no
+// usable index. The message text in Error() may be reworded; Reason will not
+// change under it - it is what core.processFile matches on to decide whether
+// the sequential fallback even applies (only ReasonNoDuration means the file
+// still has readable frames, merely no length to plan them across), and what
+// it would report as the honest reason a run refused to guess.
+type Reason string
+
+const (
+	// ReasonNoVideoStream: nothing to take a frame from - a container, but
+	// not a video one.
+	ReasonNoVideoStream Reason = "no_video_stream"
+	// ReasonNoDuration: ffprobe named no length to spread capture points
+	// over. The file itself may be perfectly readable start to finish; this
+	// is the one reason the sequential fallback exists for.
+	ReasonNoDuration Reason = "no_duration"
+	// ReasonKeyframeTimestamp: a keyframe packet was found but states
+	// neither a PTS nor a DTS, so it cannot be placed in time.
+	ReasonKeyframeTimestamp Reason = "keyframe_no_timestamp"
+	// ReasonKeyframePosition: no keyframe with a usable byte position was
+	// found where one was looked for.
+	ReasonKeyframePosition Reason = "keyframe_no_position"
+)
+
+// NoIndexError is ErrNoIndex carrying a machine-readable Reason, so a caller
+// can act on why probing failed without parsing Error's free text.
+//
+// Unwrap returns the ErrNoIndex sentinel itself rather than a wrapped copy,
+// so errors.Is(err, ErrNoIndex) keeps working for every caller that only
+// checks the sentinel - core.CodeOf among them.
+type NoIndexError struct {
+	Reason Reason
+	// Detail is free text: what ffprobe reported, or where. May be empty.
+	Detail string
+}
+
+func (e *NoIndexError) Error() string {
+	if e.Detail == "" {
+		return fmt.Sprintf("%s: %s", ErrNoIndex, e.Reason)
+	}
+	return fmt.Sprintf("%s: %s: %s", ErrNoIndex, e.Reason, e.Detail)
+}
+
+func (e *NoIndexError) Unwrap() error { return ErrNoIndex }
+
 // Prober runs ffprobe against bridge URLs.
 type Prober struct {
 	tools ffmpeg.Tools
@@ -203,17 +248,54 @@ func (p *Prober) Inspect(ctx context.Context, url string) (MediaInfo, error) {
 	}
 
 	if !haveVideo {
-		return info, fmt.Errorf("%w: no video stream", ErrNoIndex)
+		return info, &NoIndexError{Reason: ReasonNoVideoStream}
 	}
 	if info.Duration <= 0 {
 		// Without a duration there is nothing to spread capture points over.
-		return info, fmt.Errorf("%w: no duration", ErrNoIndex)
+		return info, &NoIndexError{Reason: ReasonNoDuration}
 	}
 	// A container with no video bitrate of its own still has the format's.
 	if info.Video.BitRate == 0 {
 		info.Video.BitRate = info.BitRate
 	}
 	return info, nil
+}
+
+// packetRow is one row of the packet=pts_time,dts_time,pos,flags query that
+// KeyframeAt and SequentialKeyframes both read - the fields either needs to
+// place a keyframe in time and in bytes.
+type packetRow struct {
+	PTSTime string `json:"pts_time"`
+	DTSTime string `json:"dts_time"`
+	Pos     string `json:"pos"`
+	Flags   string `json:"flags"`
+}
+
+// readPackets runs the packet query shared by KeyframeAt and
+// SequentialKeyframes, for the given -read_intervals spec.
+func (p *Prober) readPackets(ctx context.Context, url, intervals string) ([]packetRow, error) {
+	args := append(p.limits(),
+		"-select_streams", "v:0",
+		// AVI often carries no PTS on a packet, only DTS. Asking for both
+		// is the difference between a real timestamp and none at all.
+		"-show_entries", "packet=pts_time,dts_time,pos,flags",
+		"-read_intervals", intervals,
+		"-print_format", "json",
+		url,
+	)
+
+	out, err := p.tools.Run(ctx, "ffprobe", args...)
+	if err != nil {
+		return nil, fmt.Errorf("read packets: %w", err)
+	}
+
+	var raw struct {
+		Packets []packetRow `json:"packets"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parse ffprobe packets: %w", err)
+	}
+	return raw.Packets, nil
 }
 
 // KeyframeAt finds the keyframe at or before a timestamp, and where it sits in
@@ -226,36 +308,14 @@ func (p *Prober) KeyframeAt(ctx context.Context, url string, at time.Duration) (
 		at = 0
 	}
 
-	args := append(p.limits(),
-		"-select_streams", "v:0",
-		// AVI often carries no PTS on a packet, only DTS. Asking for both
-		// is the difference between a real timestamp and none at all.
-		"-show_entries", "packet=pts_time,dts_time,pos,flags",
-		// A handful of packets is enough to find the keyframe the seek landed
-		// on, without asking ffprobe to walk the file.
-		"-read_intervals", fmt.Sprintf("%.3f%%+#8", at.Seconds()),
-		"-print_format", "json",
-		url,
-	)
-
-	out, err := p.tools.Run(ctx, "ffprobe", args...)
+	// A handful of packets is enough to find the keyframe the seek landed
+	// on, without asking ffprobe to walk the file.
+	packets, err := p.readPackets(ctx, url, fmt.Sprintf("%.3f%%+#8", at.Seconds()))
 	if err != nil {
 		return Keyframe{}, fmt.Errorf("keyframe at %s: %w", at, err)
 	}
 
-	var raw struct {
-		Packets []struct {
-			PTSTime string `json:"pts_time"`
-			DTSTime string `json:"dts_time"`
-			Pos     string `json:"pos"`
-			Flags   string `json:"flags"`
-		} `json:"packets"`
-	}
-	if err := json.Unmarshal(out, &raw); err != nil {
-		return Keyframe{}, fmt.Errorf("parse ffprobe packets: %w", err)
-	}
-
-	for _, pkt := range raw.Packets {
+	for _, pkt := range packets {
 		if !strings.HasPrefix(pkt.Flags, "K") {
 			continue
 		}
@@ -274,15 +334,89 @@ func (p *Prober) KeyframeAt(ctx context.Context, url string, at time.Duration) (
 		pts, ok := parseSeconds(pkt.PTSTime)
 		if !ok {
 			if pts, ok = parseSeconds(pkt.DTSTime); !ok {
-				return Keyframe{}, fmt.Errorf("%w: keyframe at byte %d near %s carries no timestamp",
-					ErrNoIndex, pos, at)
+				return Keyframe{}, &NoIndexError{
+					Reason: ReasonKeyframeTimestamp,
+					Detail: fmt.Sprintf("keyframe at byte %d near %s carries no timestamp", pos, at),
+				}
 			}
 		}
 
 		return Keyframe{PTS: pts, BytePos: pos}, nil
 	}
 
-	return Keyframe{}, fmt.Errorf("%w: no keyframe with a byte position near %s", ErrNoIndex, at)
+	return Keyframe{}, &NoIndexError{
+		Reason: ReasonKeyframePosition,
+		Detail: fmt.Sprintf("no keyframe with a byte position near %s", at),
+	}
+}
+
+// sequentialWindow is how many packets SequentialKeyframes reads on its
+// first attempt; sequentialRetries is how many times that window widens,
+// fourfold, when it did not hold enough keyframes. A GOP can be anywhere
+// from a handful of frames to several hundred - exactly the thing not known
+// without an index - so this converges on either end rather than assuming a
+// cadence.
+const (
+	sequentialWindow  = 200
+	sequentialRetries = 4
+)
+
+// SequentialKeyframes lists up to count keyframes from the start of the
+// file, in presentation order - the index-free way to place capture points
+// when a container states no duration (REQUIREMENTS.md 2.7).
+//
+// It shares KeyframeAt's packet query, but not its all-or-nothing per-packet
+// decision: a packet lacking a timestamp or position here is simply not a
+// candidate, and the scan keeps going, because the goal is to gather as many
+// usable keyframes as the window holds rather than to answer for one
+// specific moment.
+func (p *Prober) SequentialKeyframes(ctx context.Context, url string, count int) ([]Keyframe, error) {
+	if count < 1 {
+		count = 1
+	}
+
+	window := sequentialWindow
+	for attempt := 0; ; attempt++ {
+		packets, err := p.readPackets(ctx, url, fmt.Sprintf("%%+#%d", window))
+		if err != nil {
+			return nil, fmt.Errorf("sequential keyframes: %w", err)
+		}
+
+		var out []Keyframe
+		for _, pkt := range packets {
+			if !strings.HasPrefix(pkt.Flags, "K") {
+				continue
+			}
+			pos := parseInt(pkt.Pos)
+			if pos < 0 {
+				continue
+			}
+			pts, ok := parseSeconds(pkt.PTSTime)
+			if !ok {
+				if pts, ok = parseSeconds(pkt.DTSTime); !ok {
+					continue
+				}
+			}
+			out = append(out, Keyframe{PTS: pts, BytePos: pos})
+			if len(out) == count {
+				return out, nil
+			}
+		}
+
+		// Fewer packets came back than were asked for: the file ran out
+		// before the window did, so reading a wider window would not find
+		// anything more.
+		if len(packets) < window || attempt >= sequentialRetries {
+			if len(out) == 0 {
+				return nil, &NoIndexError{
+					Reason: ReasonKeyframePosition,
+					Detail: fmt.Sprintf("no keyframe found in the first %d packets", len(packets)),
+				}
+			}
+			return out, nil
+		}
+		window *= 4
+	}
 }
 
 // limits are the arguments every invocation shares.

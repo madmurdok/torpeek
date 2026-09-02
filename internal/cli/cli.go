@@ -57,6 +57,7 @@ type Options struct {
 	Peers       []string
 	Upload      bool
 	DHT         bool
+	Sequential  bool
 	JSON        bool
 	Version     bool
 	List        bool
@@ -150,6 +151,7 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge")
 	fs.BoolVar(&opts.Upload, "upload", true, "serve pieces back to the swarm while running")
 	fs.BoolVar(&opts.DHT, "dht", true, "use DHT and PEX (never for a private torrent)")
+	fs.BoolVar(&opts.Sequential, "sequential", false, "when a container has no usable index, degrade to sequential capture from the start instead of failing")
 	fs.BoolVar(&opts.JSON, "json", false, "emit NDJSON events instead of human output")
 	fs.BoolVar(&opts.List, "list", false, "list the torrent's video files and exit, without taking frames")
 	fs.BoolVar(&opts.Version, "version", false, "print version and exit")
@@ -207,6 +209,8 @@ func (o *Options) config() (core.Config, error) {
 	cfg.Parallelism = o.Parallelism
 
 	cfg.Files = o.Files
+
+	cfg.Sequential = o.Sequential
 
 	cfg.Swarm.Upload = o.Upload
 	cfg.Swarm.DHT = o.DHT

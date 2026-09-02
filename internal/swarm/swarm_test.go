@@ -291,3 +291,54 @@ func TestSelectRefusesASpecThatMatchesNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestProfileGeometryRoundsToWholePieces: an intent in bytes becomes a claim in
+// pieces, because pieces are what the swarm trades in. The floor matters most -
+// a window under one piece was measured at 62.7s against 3.4s, since the
+// decoder keeps returning for the rest of a piece already on its way.
+func TestProfileGeometryRoundsToWholePieces(t *testing.T) {
+	const mib = 1 << 20
+
+	for _, c := range []struct {
+		name        string
+		intent      int64
+		pieceLength int64
+		want        int64
+	}{
+		{"exactly one piece", 1 * mib, 1 * mib, 1 * mib},
+		{"under a piece is raised to one", 512 << 10, 1 * mib, 1 * mib},
+		{"far under a piece is still one", 64 << 10, 4 * mib, 4 * mib},
+		{"rounded up to the next whole piece", 3 * mib, 2 * mib, 4 * mib},
+		{"already whole is left alone", 6 * mib, 2 * mib, 6 * mib},
+		{"an unknown piece length leaves the intent", 3 * mib, 0, 3 * mib},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := Profile{Window: c.intent, Readahead: c.intent}
+			if got := p.WindowSize(c.pieceLength); got != c.want {
+				t.Errorf("WindowSize(%d) = %d, want %d", c.pieceLength, got, c.want)
+			}
+			if got := p.ReadaheadSize(c.pieceLength); got != c.want {
+				t.Errorf("ReadaheadSize(%d) = %d, want %d", c.pieceLength, got, c.want)
+			}
+		})
+	}
+}
+
+// TestProfilesDifferInWhatTheyClaim pins the trade the two profiles exist to
+// make. The numbers themselves belong to TOR-44; what must not drift is the
+// direction.
+func TestProfilesDifferInWhatTheyClaim(t *testing.T) {
+	const pieceLength = 1 << 20
+
+	if MinTime.WindowSize(pieceLength) <= MinTraffic.WindowSize(pieceLength) {
+		t.Errorf("min-time claims %d, min-traffic %d; the fast profile must claim more",
+			MinTime.WindowSize(pieceLength), MinTraffic.WindowSize(pieceLength))
+	}
+	if MinTime.ReadaheadSize(pieceLength) <= MinTraffic.ReadaheadSize(pieceLength) {
+		t.Errorf("min-time reads ahead %d, min-traffic %d; the fast profile must read further",
+			MinTime.ReadaheadSize(pieceLength), MinTraffic.ReadaheadSize(pieceLength))
+	}
+	if !MinTime.Responsive || MinTraffic.Responsive {
+		t.Error("min-time trades verification for latency, min-traffic does not")
+	}
+}
