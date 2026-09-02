@@ -56,9 +56,18 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 
 	// A source on the command line starts straight away; without one the page
 	// waits for someone to paste a link.
+	//
+	// The run failing to start is no longer an error StartRun returns - a
+	// queued run reaches the engine long after the call that asked for it -
+	// so a source that cannot be opened comes back as a failed run instead.
+	// Reported here anyway: a person who typed the source on the command line
+	// is looking at this terminal, and -headless has no page to read it on.
 	if opts.Source != "" {
-		if err := server.StartRun(web.RunRequest{Source: opts.Source, Mode: opts.Profile}); err != nil {
+		run, err := server.StartRun(web.RunRequest{Source: opts.Source, Mode: opts.Profile})
+		if err != nil {
 			fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		} else if run.State == web.RunFailed {
+			fmt.Fprintf(stderr, "torpeek: %s\n", run.Err)
 		}
 	}
 

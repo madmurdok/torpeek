@@ -131,7 +131,7 @@ func reportJSON(events <-chan core.Event, stdout, stderr io.Writer) int {
 			}
 		}
 
-		if err := enc.Encode(wire.Event(ev)); err != nil {
+		if err := enc.Encode(wire.Event("", ev)); err != nil {
 			fmt.Fprintf(stderr, "torpeek: writing events: %v\n", err)
 			return ExitFailed
 		}
