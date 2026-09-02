@@ -55,6 +55,7 @@ type Options struct {
 	Parallelism int
 	Port        int
 	BridgePort  int
+	WebHost     string
 	WebPort     int
 	Peers       []string
 	Upload      bool
@@ -156,9 +157,10 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.Int64Var(&opts.MaxBytes, "max-bytes", 0, "traffic ceiling for the run (default: scaled to the file count)")
 	fs.DurationVar(&opts.MaxTime, "max-time", 0, "time ceiling for the run (default: 10m)")
 	fs.IntVar(&opts.Parallelism, "parallel", core.DefaultParallelism, "video files to work on at once")
-	fs.IntVar(&opts.Port, "torrent-port", 0, "BitTorrent listen port (required where a port range is allocated)")
-	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge")
-	fs.IntVar(&opts.WebPort, "web-port", 0, "port for the web UI (default: "+web.DefaultAddr+")")
+	fs.IntVar(&opts.Port, "torrent-port", 0, "BitTorrent listen port - also pins DHT and uTP, which share it (default: an OS-assigned port; required where a port range is allocated)")
+	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge (default: an OS-assigned port; required where a port range is allocated)")
+	fs.StringVar(&opts.WebHost, "web-host", "", "bind address for the web UI (default: "+web.DefaultHost+"; a reverse proxy on the same host is the documented way to expose it, section 3.3)")
+	fs.IntVar(&opts.WebPort, "web-port", 0, fmt.Sprintf("port for the web UI (default: %d)", web.DefaultPort))
 	fs.BoolVar(&opts.Upload, "upload", true, "serve pieces back to the swarm while running")
 	fs.BoolVar(&opts.DHT, "dht", true, "use DHT and PEX (never for a private torrent)")
 	fs.BoolVar(&opts.Sequential, "sequential", false, "when a container has no usable index, degrade to sequential capture from the start instead of failing")

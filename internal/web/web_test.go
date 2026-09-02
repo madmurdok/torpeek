@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -453,6 +454,76 @@ func readAll(t *testing.T, resp *http.Response) string {
 		}
 	}
 	return sb.String()
+}
+
+// TestStartHonoursThePinnedAddr is the web half of TOR-28's acceptance
+// criterion: Start must bind exactly the Addr it was given, not something
+// nearby - a managed host tells a person "this is your port", and that has
+// to be provably true, not asserted.
+func TestStartHonoursThePinnedAddr(t *testing.T) {
+	fake := &fakeRun{}
+
+	port := freeWebPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+
+	cfg := DefaultConfig()
+	cfg.Addr = addr
+
+	srv, err := Start(context.Background(), cfg, fake.runner)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Close()
+
+	if want := "http://" + addr + "/"; srv.URL() != want {
+		t.Errorf("URL() = %q, want %q", srv.URL(), want)
+	}
+
+	// Prove it by connecting to the pinned address, not by trusting the
+	// string Start reported.
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial the pinned addr %s: %v", addr, err)
+	}
+	conn.Close()
+}
+
+// TestStartFailsLoudlyWhenAddrIsTaken: a pinned port already in use must be a
+// startup error, never a silent bind elsewhere.
+func TestStartFailsLoudlyWhenAddrIsTaken(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy a port: %v", err)
+	}
+	defer ln.Close()
+	addr := ln.Addr().String()
+
+	fake := &fakeRun{}
+	cfg := DefaultConfig()
+	cfg.Addr = addr
+
+	srv, err := Start(context.Background(), cfg, fake.runner)
+	if err == nil {
+		srv.Close()
+		t.Fatalf("Start on the already-occupied %s succeeded, want an error", addr)
+	}
+}
+
+// freeWebPort asks the OS for a free port and releases it immediately - the
+// caller rebinds it right away, so the gap is not a practical race here.
+func freeWebPort(t *testing.T) string {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find a free port: %v", err)
+	}
+	defer ln.Close()
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+	return port
 }
 
 // waitFor polls until cond holds, so a test never depends on a sleep being

@@ -34,9 +34,14 @@ type Config struct {
 	// private flag overrides this to off, whatever the value here.
 	DHT bool
 
-	// ListenPort is the BitTorrent port. Zero lets the OS choose, which is
-	// fine locally but not on a managed host that allocates a fixed range
-	// (section 4.1), so callers there must set it.
+	// ListenPort is the BitTorrent port. anacrolix binds TCP, uTP and (when
+	// DHT is on) the DHT server to this same port - pinning it pins all
+	// three, which is what section 4.1's "no port outside the allocated
+	// range" actually requires. Zero lets the OS choose one port for all of
+	// them, which is fine locally but not on a managed host with a fixed
+	// range, so callers there must set it. A pinned port already taken is a
+	// startup error, not silently retried on a different one - anacrolix
+	// only falls back to another port when ListenPort is zero.
 	ListenPort int
 
 	// MetadataTimeout bounds the wait for metadata.
@@ -165,6 +170,15 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// We only ever hold slivers of a file, so there is nothing to seed once
 	// the run is over.
 	tc.Seed = false
+	// Left at its default, anacrolix probes the LAN for a UPnP/NAT-PMP router
+	// on every session (an SSDP broadcast per interface, from an OS-assigned
+	// UDP port) to open an inbound mapping for ListenPort. That is traffic
+	// with no torrent in it - section 4 promises none - and on the seedbox
+	// this whole feature targets (section 4.1) there is no home router to
+	// answer it anyway. It also means "pin the port" would not actually be
+	// "nothing else is listening" (TOR-28's acceptance criterion): these
+	// probes bind their own ephemeral port each time, unpinned by design.
+	tc.NoDefaultPortForwarding = true
 
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
@@ -218,6 +232,12 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 
 // DHTEnabled reports whether this session's client has DHT and PEX on.
 func (s *Session) DHTEnabled() bool { return s.dhtOn }
+
+// ListenPort reports the port this session's client is actually bound to -
+// what Config.ListenPort resolved to, whether it was pinned or left at zero
+// for the OS to assign. Exists so a caller (or a test) can observe the real
+// socket rather than trust the config that asked for it.
+func (s *Session) ListenPort() int { return s.cl.LocalPort() }
 
 // WentOnlineBlind reports that DHT was used before the private flag could be
 // checked - only possible for a magnet carrying no trackers. Callers should

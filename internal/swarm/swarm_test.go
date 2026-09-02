@@ -3,6 +3,7 @@ package swarm
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,20 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 )
+
+// freePort asks the OS for a port nothing is listening on, then releases it -
+// good enough for a test that immediately rebinds it itself; a real race
+// against another process grabbing it first is not a concern here.
+func freePort(t *testing.T) int {
+	t.Helper()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("find a free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
 
 // writeTorrentFile builds a real .torrent over a small payload directory.
 func writeTorrentFile(t *testing.T, private bool, announce string) string {
@@ -180,6 +195,70 @@ func TestOpenPrivateTorrentStaysOffDHT(t *testing.T) {
 	}
 	if tor.Downloaded() != 0 {
 		t.Errorf("Downloaded() = %d, want 0 - metadata must cost no payload bytes", tor.Downloaded())
+	}
+}
+
+// TestListenPortIsHonoured is the swarm half of TOR-28's acceptance
+// criterion: pin ListenPort and check the client actually ends up on that
+// port, not a random one. Offline, like TestOpenPrivateTorrentStaysOffDHT -
+// a .torrent file needs no network for metadata.
+func TestListenPortIsHonoured(t *testing.T) {
+	src, err := ParseSource(writeTorrentFile(t, false, ""))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+
+	port := freePort(t)
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false // no network wanted; the pin is what is under test
+	cfg.ListenPort = port
+	cfg.MetadataTimeout = 10 * time.Second
+
+	session, _, err := Open(context.Background(), cfg, src)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer session.Close()
+
+	if got := session.ListenPort(); got != port {
+		t.Errorf("session listens on %d, want the pinned %d", got, port)
+	}
+}
+
+// TestPinnedListenPortFailsLoudlyWhenTaken is the other half: a managed host
+// pinning a port expects a clash to be a startup error, not a silent fall
+// back to some other port anacrolix happened to find free.
+func TestPinnedListenPortFailsLoudlyWhenTaken(t *testing.T) {
+	port := freePort(t)
+
+	src1, err := ParseSource(writeTorrentFile(t, false, ""))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false
+	cfg.ListenPort = port
+	cfg.MetadataTimeout = 10 * time.Second
+
+	first, _, err := Open(context.Background(), cfg, src1)
+	if err != nil {
+		t.Fatalf("first session (pinning the port): %v", err)
+	}
+	defer first.Close()
+
+	src2, err := ParseSource(writeTorrentFile(t, false, ""))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+	cfg2 := cfg
+	cfg2.DataDir = t.TempDir()
+
+	second, _, err := Open(context.Background(), cfg2, src2)
+	if err == nil {
+		second.Close()
+		t.Fatalf("second session on the already-pinned port %d opened without error, want a bind failure", port)
 	}
 }
 

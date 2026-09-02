@@ -126,9 +126,10 @@ make fmt
 | `-file` | all of them | which video files to process: torrent index or path pattern, comma-separated |
 | `-list` | `false` | list the torrent's video files and exit, without taking frames |
 | `-parallel` | `4` | video files to work on at once |
-| `-torrent-port` | any free port | BitTorrent listen port, for a fixed port range |
-| `-bridge-port` | any free port | loopback port for the internal HTTP bridge |
+| `-torrent-port` | an OS-assigned port | BitTorrent listen port - also pins DHT and uTP, which share it; set this on a host with a fixed allocated range |
+| `-bridge-port` | an OS-assigned port | loopback port for the internal HTTP bridge; set this on a host with a fixed allocated range |
 | `-web` | `false` | serve the web UI and open it in a browser instead of running on the command line |
+| `-web-host` | `127.0.0.1` | bind address for the web UI - loopback behind a reverse proxy is the documented setup |
 | `-web-port` | `8765` | port for the web UI |
 | `-peer` | — | comma-separated peers to contact directly |
 | `-upload` | `true` | serve pieces back to the swarm while running |

@@ -38,8 +38,8 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	}
 
 	cfg := web.DefaultConfig()
-	if opts.WebPort > 0 {
-		cfg.Addr = fmt.Sprintf("127.0.0.1:%d", opts.WebPort)
+	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
+		cfg.Addr = addr
 	}
 
 	server, err := web.Start(ctx, cfg, runner)
@@ -69,4 +69,22 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	<-ctx.Done()
 	fmt.Fprintln(stdout, "torpeek: stopping")
 	return ExitOK
+}
+
+// webAddr turns -web-host/-web-port into a listen address, leaving the
+// decision to web.DefaultConfig() (loopback, a fixed documented port) when
+// neither flag was given. A host without a port keeps the documented default
+// port; a port without a host keeps loopback - either flag alone still does
+// something useful rather than requiring both.
+func webAddr(host string, port int) string {
+	if host == "" && port <= 0 {
+		return ""
+	}
+	if host == "" {
+		host = web.DefaultHost
+	}
+	if port <= 0 {
+		port = web.DefaultPort
+	}
+	return fmt.Sprintf("%s:%d", host, port)
 }

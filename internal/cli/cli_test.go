@@ -70,6 +70,83 @@ func TestParseCollectsPeers(t *testing.T) {
 	}
 }
 
+// TestPortFlagsFlowIntoConfig is the CLI half of TOR-28's plumbing: a pinned
+// -torrent-port and -bridge-port must land, unaltered, in the config the
+// engine actually runs with.
+func TestPortFlagsFlowIntoConfig(t *testing.T) {
+	opts, err := parse([]string{
+		"-data", t.TempDir(),
+		"-torrent-port", "51413",
+		"-bridge-port", "51500",
+		"magnet:?xt=urn:btih:abc",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	cfg, err := opts.config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	if cfg.Swarm.ListenPort != 51413 {
+		t.Errorf("Swarm.ListenPort = %d, want 51413", cfg.Swarm.ListenPort)
+	}
+	if want := "127.0.0.1:51500"; cfg.Bridge.Addr != want {
+		t.Errorf("Bridge.Addr = %q, want %q", cfg.Bridge.Addr, want)
+	}
+}
+
+// TestPortFlagsDefaultToZero: with nothing pinned, the config carries zero
+// through rather than a hardcoded port - the OS picks, which REQUIREMENTS.md
+// section 4.1 requires callers on a managed host to override.
+func TestPortFlagsDefaultToZero(t *testing.T) {
+	opts, err := parse([]string{
+		"-data", t.TempDir(),
+		"magnet:?xt=urn:btih:abc",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	cfg, err := opts.config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	if cfg.Swarm.ListenPort != 0 {
+		t.Errorf("Swarm.ListenPort = %d, want 0 (OS-assigned)", cfg.Swarm.ListenPort)
+	}
+	if want := "127.0.0.1:0"; cfg.Bridge.Addr != want {
+		t.Errorf("Bridge.Addr = %q, want %q (bridge.DefaultConfig: an OS-assigned loopback port)", cfg.Bridge.Addr, want)
+	}
+}
+
+// TestWebAddr covers the web bind-address reconciliation: -web-port alone
+// keeps the old behaviour, -web-host alone still does something useful with
+// the documented default port, and with neither the caller keeps
+// web.DefaultConfig()'s address rather than being handed an empty one.
+func TestWebAddr(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		port int
+		want string
+	}{
+		{name: "neither set", host: "", port: 0, want: ""},
+		{name: "port only", host: "", port: 9000, want: "127.0.0.1:9000"},
+		{name: "host only", host: "0.0.0.0", port: 0, want: "0.0.0.0:8765"},
+		{name: "both set", host: "0.0.0.0", port: 9000, want: "0.0.0.0:9000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := webAddr(tc.host, tc.port); got != tc.want {
+				t.Errorf("webAddr(%q, %d) = %q, want %q", tc.host, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
 // sampleTorrent renders a clip, makes a torrent of it and starts a seeder.
 func sampleTorrent(t *testing.T) (torrentPath, seeder string) {
 	t.Helper()
