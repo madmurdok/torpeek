@@ -273,3 +273,23 @@ func BuildDir(t *testing.T, dir string, pieceLength int64) Fixture {
 
 	return Fixture{Dir: dir, TorrentPath: torrentPath}
 }
+
+// Magnet is the fixture as a magnet URI: an infohash and nothing else that
+// matters, so a session opened from it reaches add() with no metadata yet.
+//
+// That is the state a .torrent fixture can never reproduce - it hands over the
+// info bytes at add time - and it is the state a magnet always starts in. The
+// tracker in the URI is a dead loopback address included only to satisfy the
+// privacy routing, which refuses a trackerless magnet unless DHT is allowed;
+// nothing in a test should reach a tracker, and nothing here does. Metadata
+// arrives over BEP 9 from whatever peer the caller supplies.
+func (f Fixture) Magnet(t *testing.T) string {
+	t.Helper()
+
+	mi, err := metainfo.LoadFromFile(f.TorrentPath)
+	if err != nil {
+		t.Fatalf("load fixture torrent: %v", err)
+	}
+	return "magnet:?xt=urn:btih:" + mi.HashInfoBytes().HexString() +
+		"&tr=http://127.0.0.1:1/announce"
+}
