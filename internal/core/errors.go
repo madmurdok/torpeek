@@ -28,6 +28,9 @@ const (
 	CodePrivacyUnresolvable ErrorCode = "privacy_unresolvable"
 	// CodeNoVideo: the torrent holds nothing worth taking frames from.
 	CodeNoVideo ErrorCode = "no_video_files"
+	// CodeNoFileMatch: the file selection named something the torrent does
+	// not hold.
+	CodeNoFileMatch ErrorCode = "no_file_match"
 	// CodeUnprobeable: ffprobe could not make sense of the container, so
 	// there is no index to seek with.
 	CodeUnprobeable ErrorCode = "unprobeable"
@@ -86,6 +89,8 @@ func CodeOf(err error) ErrorCode {
 		return CodeNoMetadata
 	case errors.Is(err, swarm.ErrPrivacyUnresolvable):
 		return CodePrivacyUnresolvable
+	case errors.Is(err, swarm.ErrNoFileMatch):
+		return CodeNoFileMatch
 	case errors.Is(err, probe.ErrNoIndex):
 		return CodeUnprobeable
 	case errors.Is(err, ffmpeg.ErrNotFound):

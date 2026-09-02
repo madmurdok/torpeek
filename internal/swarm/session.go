@@ -143,6 +143,13 @@ func openBlind(ctx context.Context, cfg Config, src Source) (*Session, *Torrent,
 	return s, t, nil
 }
 
+// UsesDHT reports whether this session's client has DHT running. For a private
+// torrent it must be false - that is BEP 27, and it is checkable rather than
+// merely intended.
+func (s *Session) UsesDHT() bool {
+	return s.dhtOn && len(s.cl.DhtServers()) > 0
+}
+
 func newSession(cfg Config, dht bool) (*Session, error) {
 	tc := torrent.NewDefaultClientConfig()
 	// The library logs read failures to stderr, including the ones we cause

@@ -2,8 +2,10 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,5 +213,81 @@ func TestSelectVideosKeepsLargeSampleNamedFile(t *testing.T) {
 	}
 	if got := len(SelectVideos(files)); got != 2 {
 		t.Fatalf("SelectVideos() = %d files, want 2 - a large file named sample is not a sample", got)
+	}
+}
+
+func TestSelectNamesFilesByIndexAndPattern(t *testing.T) {
+	files := []FileInfo{
+		{Index: 2, Path: "Season 1/S01E01 - Pilot.mkv", Length: 900},
+		{Index: 5, Path: "Season 1/S01E02 - Second.mkv", Length: 950},
+		{Index: 8, Path: "Extras/Behind The Scenes.MP4", Length: 300},
+	}
+
+	indices := func(got []FileInfo) []int {
+		out := make([]int, 0, len(got))
+		for _, f := range got {
+			out = append(out, f.Index)
+		}
+		return out
+	}
+	equal := func(a, b []int) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	for _, c := range []struct {
+		name  string
+		specs []string
+		want  []int
+	}{
+		{"no specs keeps everything", nil, []int{2, 5, 8}},
+		{"torrent index", []string{"5"}, []int{5}},
+		{"substring", []string{"pilot"}, []int{2}},
+		{"substring is case-insensitive", []string{"BEHIND"}, []int{8}},
+		{"glob on the base name", []string{"*.mkv"}, []int{2, 5}},
+		{"glob on the whole path", []string{"Extras/*"}, []int{8}},
+		{"several specs keep torrent order", []string{"8", "pilot"}, []int{2, 8}},
+		{"overlapping specs do not duplicate", []string{"2", "pilot", "*.mkv"}, []int{2, 5}},
+		{"blank specs are ignored", []string{"", "  ", "5"}, []int{5}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := Select(files, c.specs)
+			if err != nil {
+				t.Fatalf("Select(%v): %v", c.specs, err)
+			}
+			if !equal(indices(got), c.want) {
+				t.Errorf("Select(%v) = %v, want %v", c.specs, indices(got), c.want)
+			}
+		})
+	}
+}
+
+// TestSelectRefusesASpecThatMatchesNothing: an empty result and a run that
+// found nothing worth taking look identical from outside, so the caller has to
+// be told which happened - and told what it could have asked for.
+func TestSelectRefusesASpecThatMatchesNothing(t *testing.T) {
+	files := []FileInfo{
+		{Index: 2, Path: "Season 1/S01E01 - Pilot.mkv"},
+		{Index: 5, Path: "Season 1/S01E02 - Second.mkv"},
+	}
+
+	_, err := Select(files, []string{"pilot", "S01E09"})
+	if err == nil {
+		t.Fatal("Select accepted a spec matching nothing")
+	}
+	if !errors.Is(err, ErrNoFileMatch) {
+		t.Errorf("error %v is not ErrNoFileMatch, so callers cannot classify it", err)
+	}
+	for _, want := range []string{"S01E09", "2:S01E01 - Pilot.mkv", "5:S01E02 - Second.mkv"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }

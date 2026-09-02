@@ -36,6 +36,10 @@ const (
 )
 
 // Options are the parsed command line.
+//
+// scratch records a piece directory this program created and therefore owns.
+// A directory the caller named is theirs: keeping their pieces or removing
+// them is their decision, not ours.
 type Options struct {
 	Source      string
 	Output      string
@@ -55,6 +59,10 @@ type Options struct {
 	DHT         bool
 	JSON        bool
 	Version     bool
+	List        bool
+	Files       []string
+
+	scratch string
 }
 
 // Run parses arguments, executes the job and reports it. It returns an exit
@@ -79,17 +87,31 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 
+	cfg, err := opts.config()
+	if err != nil {
+		fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		return ExitUsage
+	}
+
+	// Results are the thing worth keeping; the pieces they were made from are
+	// not (REQUIREMENTS.md section 2.9). Only a directory this run created is
+	// removed - one the caller named belongs to them.
+	if opts.scratch != "" {
+		defer os.RemoveAll(opts.scratch)
+	}
+
+	// Listing needs no decoder, so it must not require one to be installed:
+	// choosing which file to look at is exactly what someone does before
+	// setting the rest up.
+	if opts.List {
+		return listFiles(ctx, cfg, opts.JSON, stdout, stderr)
+	}
+
 	tools, err := ffmpeg.Locate()
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		fmt.Fprintln(stderr, "put ffmpeg and ffprobe next to the torpeek binary, or install them")
 		return ExitFailed
-	}
-
-	cfg, err := opts.config()
-	if err != nil {
-		fmt.Fprintf(stderr, "torpeek: %v\n", err)
-		return ExitUsage
 	}
 
 	events, err := core.NewEngine(tools).Run(ctx, cfg)
@@ -129,35 +151,34 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.BoolVar(&opts.Upload, "upload", true, "serve pieces back to the swarm while running")
 	fs.BoolVar(&opts.DHT, "dht", true, "use DHT and PEX (never for a private torrent)")
 	fs.BoolVar(&opts.JSON, "json", false, "emit NDJSON events instead of human output")
+	fs.BoolVar(&opts.List, "list", false, "list the torrent's video files and exit, without taking frames")
 	fs.BoolVar(&opts.Version, "version", false, "print version and exit")
 
 	var peers string
 	fs.StringVar(&peers, "peer", "", "comma-separated peer addresses to contact directly")
 
+	var files string
+	fs.StringVar(&files, "file", "", "which video files to process: torrent index or path pattern, comma-separated (default: all of them)")
+
 	if err := fs.Parse(args); err != nil {
 		return opts, err
 	}
 
-	if peers != "" {
-		for _, p := range strings.Split(peers, ",") {
-			if p = strings.TrimSpace(p); p != "" {
-				opts.Peers = append(opts.Peers, p)
-			}
-		}
-	}
+	opts.Peers = splitList(peers)
+	opts.Files = splitList(files)
 
 	opts.Source = fs.Arg(0)
 	return opts, nil
 }
 
-func (o Options) config() (core.Config, error) {
+func (o *Options) config() (core.Config, error) {
 	dataDir := o.DataDir
 	if dataDir == "" {
 		dir, err := os.MkdirTemp("", "torpeek-pieces-*")
 		if err != nil {
 			return core.Config{}, fmt.Errorf("create piece directory: %w", err)
 		}
-		dataDir = dir
+		dataDir, o.scratch = dir, dir
 	}
 
 	profile, err := swarm.ProfileByName(o.Profile)
@@ -185,6 +206,8 @@ func (o Options) config() (core.Config, error) {
 	cfg.Format = format
 	cfg.Parallelism = o.Parallelism
 
+	cfg.Files = o.Files
+
 	cfg.Swarm.Upload = o.Upload
 	cfg.Swarm.DHT = o.DHT
 	cfg.Swarm.ListenPort = o.Port
@@ -198,6 +221,18 @@ func (o Options) config() (core.Config, error) {
 	cfg.Budget = core.Budget{MaxBytes: o.MaxBytes, MaxTime: o.MaxTime, WarnAt: 0.8}
 
 	return cfg, nil
+}
+
+// splitList reads a comma-separated flag value, dropping blanks so a trailing
+// comma or a stray space is not taken for an entry.
+func splitList(raw string) []string {
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 const usage = `torpeek - preview a video torrent without downloading it

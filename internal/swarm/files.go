@@ -1,7 +1,10 @@
 package swarm
 
 import (
+	"errors"
+	"fmt"
 	"path"
+	"strconv"
 	"strings"
 )
 
@@ -68,4 +71,88 @@ func looksLikeSample(f FileInfo, largest int64) bool {
 	name := strings.ToLower(f.Path)
 	named := strings.Contains(name, "sample") || strings.Contains(name, "trailer")
 	return named && float64(f.Length) < float64(largest)*sampleFraction
+}
+
+// ErrNoFileMatch means a selection named something the torrent does not hold.
+var ErrNoFileMatch = errors.New("no file matches the selection")
+
+// Select narrows a list of files to those named by specs, keeping torrent
+// order and dropping duplicates. With no specs the list is returned unchanged.
+//
+// A spec is either an index as the torrent numbers its files - the same number
+// that appears in events and in output directory names - or a pattern matched
+// against the path, case-insensitively: a glob if it contains one of * ? [,
+// otherwise a substring. Nobody reads a torrent to learn that episode 3 is
+// index 11, so the pattern form is the one people will use.
+//
+// A spec matching nothing is an error rather than an empty result: silently
+// producing no frames looks identical to a run that found nothing worth
+// taking, and the caller cannot tell which happened.
+func Select(files []FileInfo, specs []string) ([]FileInfo, error) {
+	if len(specs) == 0 {
+		return files, nil
+	}
+
+	keep := make(map[int]bool, len(files))
+	for _, spec := range specs {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+
+		matched := false
+		for _, f := range files {
+			if matches(f, spec) {
+				keep[f.Index] = true
+				matched = true
+			}
+		}
+		if !matched {
+			return nil, fmt.Errorf("%w: %q does not name any of %s",
+				ErrNoFileMatch, spec, describe(files))
+		}
+	}
+
+	out := files[:0:0]
+	for _, f := range files {
+		if keep[f.Index] {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func matches(f FileInfo, spec string) bool {
+	if n, err := strconv.Atoi(spec); err == nil {
+		return f.Index == n
+	}
+
+	spec = strings.ToLower(spec)
+	full := strings.ToLower(f.Path)
+
+	if strings.ContainsAny(spec, "*?[") {
+		// A glob never crosses a separator, so a pattern like *.mkv has to be
+		// offered the base name as well as the whole path to behave the way
+		// someone typing it expects.
+		if ok, err := path.Match(spec, full); err == nil && ok {
+			return true
+		}
+		ok, err := path.Match(spec, strings.ToLower(f.Name()))
+		return err == nil && ok
+	}
+
+	return strings.Contains(full, spec)
+}
+
+// describe lists what was on offer, so a failed selection says what could have
+// been named instead of only what could not.
+func describe(files []FileInfo) string {
+	if len(files) == 0 {
+		return "(no video files)"
+	}
+	parts := make([]string, 0, len(files))
+	for _, f := range files {
+		parts = append(parts, fmt.Sprintf("%d:%s", f.Index, f.Name()))
+	}
+	return strings.Join(parts, ", ")
 }

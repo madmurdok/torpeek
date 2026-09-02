@@ -4,17 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
+	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/probe"
 	"github.com/madmurdok/torpeek/internal/swarm"
+	"github.com/madmurdok/torpeek/internal/version"
 )
 
 // Config is everything one run needs.
@@ -34,6 +39,10 @@ type Config struct {
 
 	// Format is the image encoding for frames.
 	Format frames.Format
+
+	// Files narrows the run to some of the torrent's video files, by torrent
+	// index or by path pattern (see swarm.Select). Empty means all of them.
+	Files []string
 
 	Swarm  swarm.Config
 	Bridge bridge.Config
@@ -102,6 +111,13 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (<-chan Event, error) {
 func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus) {
 	started := time.Now()
 
+	// Before anything else, and before any session exists: an identical rerun
+	// is required to make no network request at all, and the only way to be
+	// certain of that is not to connect.
+	if e.serveFromCache(cfg, src, bus, started) {
+		return
+	}
+
 	session, torrent, err := swarm.Open(ctx, cfg.Swarm, src)
 	if err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeOf(err), Err: err})
@@ -110,11 +126,18 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	defer session.Close()
 
 	videos := torrent.Videos()
+
+	// Resolved before the event so it can say what is being worked on, but
+	// reported after it either way: a caller whose selection matched nothing
+	// still wants to see what the torrent held.
+	selected, selErr := swarm.Select(videos, cfg.Files)
+
 	bus.Publish(MetadataReady{
 		Name:     torrent.Name(),
 		InfoHash: torrent.InfoHash(),
 		Private:  torrent.Private(),
 		Videos:   videos,
+		Selected: indicesOf(selected),
 		BlindDHT: session.WentOnlineBlind(),
 	})
 
@@ -123,13 +146,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		bus.Publish(Failed{File: -1, Code: CodeNoVideo, Err: err})
 		return
 	}
+	if selErr != nil {
+		bus.Publish(Failed{File: -1, Code: CodeOf(selErr), Err: selErr})
+		return
+	}
 
 	// The budget covers the whole run, so every file shares one tracker.
-	budget := cfg.Budget
-	if budget.MaxBytes == 0 && budget.MaxTime == 0 {
-		budget = DefaultBudget(len(videos))
-	}
-	tracker := NewBudgetTracker(budget, torrent)
+	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent)
 
 	runCtx, cancel := tracker.Context(ctx)
 	defer cancel()
@@ -160,12 +183,15 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		made    int
 		done    int
 		stopped StopReason = StopCompleted
+		// finished are the files whose frame set came out whole, which is what
+		// a later run may be served from disk.
+		finished []int
 	)
 
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
-	for _, video := range videos {
+	for _, video := range selected {
 		if reason, halt := haltReason(runCtx, tracker); halt {
 			mu.Lock()
 			stopped = reason
@@ -180,7 +206,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			produced, err := e.processFile(runCtx, cfg, fileDeps{
+			produced, complete, err := e.processFile(runCtx, cfg, fileDeps{
 				torrent:   torrent,
 				bridge:    srv,
 				prober:    prober,
@@ -195,6 +221,9 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 			made += produced
 			if err == nil {
 				done++
+				if complete {
+					finished = append(finished, file.Index)
+				}
 				return
 			}
 			if reason, halt := haltReason(runCtx, tracker); halt {
@@ -215,6 +244,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		mu.Lock()
 		stopped = reason
 		mu.Unlock()
+	}
+
+	// Written even for a stopped run: what it did finish is still worth
+	// serving from disk next time, and a partial record is what resume will
+	// read to know where to pick up.
+	if err := saveRunRecord(writer.Layout(), torrent, videos, finished); err != nil {
+		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	}
 
 	spent, _ := tracker.Spent()
@@ -239,21 +275,21 @@ type fileDeps struct {
 	bus       *Bus
 }
 
-func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, file swarm.FileInfo) (int, error) {
+func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, file swarm.FileInfo) (produced int, complete bool, err error) {
 	url, withdraw, err := deps.bridge.Publish(bridge.FromTorrent(deps.torrent, cfg.Profile), file.Index)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer withdraw()
 
 	info, err := deps.prober.Inspect(ctx, url)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	points, err := cfg.Plan.Points(info.Duration)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	deps.bus.Publish(FileStarted{
@@ -263,11 +299,38 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		Plan:  points,
 	})
 
-	produced := 0
 	skipped := 0
 	tolerance := seekTolerance(points)
+	records := make([]manifest.Frame, 0, len(points))
+
+	// What an earlier run already produced for this file. A stopped run keeps
+	// its frames, so finishing the job means taking the points it never got
+	// to - not paying for the ones it did.
+	prior, _ := cache.LoadManifest(deps.writer.Layout().FileDir(file.Index, file.Path))
+	done := reusableFrames(prior, points)
 
 	for i, at := range points {
+		if earlier, ok := done[i]; ok {
+			produced++
+			records = append(records, earlier)
+
+			actual := time.Duration(0)
+			if earlier.ActualMS != nil {
+				actual = time.Duration(*earlier.ActualMS) * time.Millisecond
+			}
+			deps.bus.Publish(FrameReady{
+				File:      file.Index,
+				Index:     i,
+				Requested: at,
+				Actual:    actual,
+				Shift:     ShiftReason(earlier.Shift),
+				Path:      earlier.Path,
+				Width:     earlier.Width,
+				Height:    earlier.Height,
+			})
+			continue
+		}
+
 		if _, halt := haltReason(ctx, deps.tracker); halt {
 			// Stopping between capture points, never mid-write: the frame in
 			// flight is finished and kept.
@@ -277,9 +340,15 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			deps.bus.Publish(*warning)
 		}
 
-		frame, actual, err := e.captureOne(ctx, deps, url, at)
+		shot, err := e.captureOne(ctx, cfg, deps, url, file, info.Duration, at, tolerance/4)
 		if err != nil {
 			skipped++
+			records = append(records, manifest.Frame{
+				Index:       i,
+				RequestedMS: at.Milliseconds(),
+				Shift:       manifest.ShiftFailed,
+				Error:       string(CodeOf(err)),
+			})
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
 				Index:     i,
@@ -297,40 +366,61 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		// a plausible-looking wrong answer on disk and report it as a success,
 		// which is exactly how a run once wrote the same opening frame twenty
 		// times over.
-		if !landedNear(at, actual, tolerance) {
+		// Compared against what was actually asked for, not the original
+		// point: a deliberate shift is not a failed seek, and confusing the
+		// two would throw away the frame the shift went to find.
+		if !landedNear(shot.asked, shot.actual, tolerance) {
 			skipped++
+			records = append(records, manifest.Frame{
+				Index:       i,
+				RequestedMS: at.Milliseconds(),
+				Shift:       manifest.ShiftFailed,
+				Error:       string(CodeSeekFailed),
+			})
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
 				Index:     i,
 				Requested: at,
 				Code:      CodeSeekFailed,
 				Reason: fmt.Sprintf("decoded at %s, %s away from the requested %s",
-					actual.Round(time.Second), (at - actual).Abs().Round(time.Second), at.Round(time.Second)),
+					shot.actual.Round(time.Second), (shot.asked - shot.actual).Abs().Round(time.Second),
+					shot.asked.Round(time.Second)),
 			})
 			continue
 		}
 
-		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, frame.Data, extensionFor(cfg.Format))
+		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, shot.frame.Data, extensionFor(cfg.Format))
 		if err != nil {
-			return produced, Fail(CodeStorage, err)
+			return produced, false, Fail(CodeStorage, err)
 		}
 		produced++
 
+		actual := shot.actual.Milliseconds()
+		records = append(records, manifest.Frame{
+			Index:       i,
+			RequestedMS: at.Milliseconds(),
+			ActualMS:    &actual,
+			Path:        path,
+			// The two vocabularies are deliberately the same strings, so a
+			// marker never changes meaning on its way to disk.
+			Shift:  manifest.Shift(shot.shift),
+			Width:  shot.frame.Width,
+			Height: shot.frame.Height,
+		})
+
 		// Actual almost never equals Requested: decoding starts at the
 		// keyframe before the wanted moment, which is ordinary behaviour and
-		// not a shift. ShiftUnavailable means something else entirely - that
-		// the swarm could not serve the pieces there and another position was
-		// chosen instead - and it is set by the availability logic (TOR-13),
-		// not inferred from the timestamps differing.
+		// not a shift. Shift says only whether the capture point itself was
+		// moved, which is a decision, not a side effect of how keyframes fall.
 		deps.bus.Publish(FrameReady{
 			File:      file.Index,
 			Index:     i,
 			Requested: at,
-			Actual:    actual,
-			Shift:     ShiftNone,
+			Actual:    shot.actual,
+			Shift:     shot.shift,
 			Path:      path,
-			Width:     frame.Width,
-			Height:    frame.Height,
+			Width:     shot.frame.Width,
+			Height:    shot.frame.Height,
 		})
 
 		spent, elapsed := deps.tracker.Spent()
@@ -346,6 +436,10 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		})
 	}
 
+	if err := e.writeManifest(deps, file, info, records); err != nil {
+		return produced, false, Fail(CodeStorage, err)
+	}
+
 	deps.bus.Publish(FileDone{
 		File:    file.Index,
 		Path:    file.Path,
@@ -353,7 +447,153 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		Skipped: skipped,
 	})
 
-	return produced, nil
+	// Complete means every point planned for this file produced a frame. A
+	// file with a gap is not a cacheable result: a later run should try the
+	// missing points again rather than be served the gap as an answer.
+	return produced, produced == len(points), nil
+}
+
+// saveRunRecord writes what this run covered, so a later one can tell a whole
+// result from a partial one without opening a session to find out.
+func saveRunRecord(layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, finished []int) error {
+	record := cache.Run{
+		Version:   cache.Version,
+		Tool:      version.Version,
+		CreatedAt: time.Now().UTC(),
+		InfoHash:  torrent.InfoHash(),
+		Name:      torrent.Name(),
+		Private:   torrent.Private(),
+		Videos:    make([]cache.File, 0, len(videos)),
+		Complete:  finished,
+	}
+	for _, v := range videos {
+		record.Videos = append(record.Videos, cache.File{
+			Index: v.Index, Path: v.Path, Bytes: v.Length, Offset: v.Offset,
+		})
+	}
+	if record.Complete == nil {
+		record.Complete = []int{}
+	}
+	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// reusableFrames picks out the capture points an earlier run already took,
+// keyed by their position in the plan.
+//
+// A point is only reused when its recorded request matches the one planned
+// now. The parameters that decide where points fall are part of the result's
+// key, so they cannot have changed - but an index is a weak thing to trust a
+// frame to, and comparing the timestamp costs nothing.
+//
+// Points that failed last time are deliberately not reused: a gap is what a
+// second run exists to fill.
+func reusableFrames(prior manifest.Manifest, points []time.Duration) map[int]manifest.Frame {
+	if len(prior.Frames) == 0 {
+		return nil
+	}
+
+	out := make(map[int]manifest.Frame, len(prior.Frames))
+	for _, f := range prior.Frames {
+		if f.Index < 0 || f.Index >= len(points) {
+			continue
+		}
+		if f.Shift == manifest.ShiftFailed || f.ActualMS == nil || f.Path == "" {
+			continue
+		}
+		if f.RequestedMS != points[f.Index].Milliseconds() {
+			continue
+		}
+		if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
+			continue
+		}
+		out[f.Index] = f
+	}
+	return out
+}
+
+// availabilityBuckets is how finely the swarm map is recorded. Enough for a UI
+// to draw a bar and for a person to see where the gaps are, without pretending
+// to a precision that changes minute by minute anyway.
+const availabilityBuckets = 64
+
+// writeManifest records what happened to one file, next to its frames.
+//
+// The cost it carries is the run's, not the file's: the budget is shared
+// across files, and a per-file share of it would be a number nothing enforces.
+func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
+	info probe.MediaInfo, records []manifest.Frame) error {
+
+	spent, elapsed := deps.tracker.Spent()
+	limitBytes, limitTime := deps.tracker.Limits()
+	connected, seeds := deps.torrent.Peers()
+
+	limitHit := ""
+	if exhausted, reason := deps.tracker.Exhausted(); exhausted {
+		limitHit = string(reason)
+	}
+
+	m := manifest.Manifest{
+		Version:   manifest.Version,
+		Tool:      version.Version,
+		CreatedAt: time.Now().UTC(),
+		Torrent: manifest.Torrent{
+			InfoHash:     deps.torrent.InfoHash(),
+			Name:         deps.torrent.Name(),
+			PieceLength:  deps.torrent.PieceLength(),
+			Private:      deps.torrent.Private(),
+			Peers:        connected,
+			Seeds:        seeds,
+			Availability: deps.torrent.Availability().Coarse(file, availabilityBuckets),
+		},
+		File: manifest.File{
+			Index:      file.Index,
+			Path:       file.Path,
+			Bytes:      file.Length,
+			DurationMS: info.Duration.Milliseconds(),
+			Container:  info.FormatName,
+		},
+		Video: manifest.Video{
+			Codec:        info.Video.Codec,
+			Profile:      info.Video.Profile,
+			Width:        info.Video.Width,
+			Height:       info.Video.Height,
+			FPS:          info.Video.FPS,
+			BitRate:      info.Video.BitRate,
+			BitsPerPixel: info.Video.BitsPerPixel(),
+		},
+		Audio:     make([]manifest.Audio, 0, len(info.Audio)),
+		Subtitles: make([]manifest.Subtitle, 0, len(info.Subtitles)),
+		Frames:    records,
+		Cost: manifest.Cost{
+			DownloadedBytes: spent,
+			ElapsedMS:       elapsed.Milliseconds(),
+			LimitBytes:      limitBytes,
+			LimitMS:         limitTime.Milliseconds(),
+			LimitHit:        limitHit,
+		},
+	}
+
+	for _, a := range info.Audio {
+		m.Audio = append(m.Audio, manifest.Audio{
+			Index: a.Index, Language: a.Language, Codec: a.Codec,
+			Channels: a.Channels, Title: a.Title, Default: a.Default,
+		})
+	}
+	for _, sub := range info.Subtitles {
+		m.Subtitles = append(m.Subtitles, manifest.Subtitle{
+			Index: sub.Index, Language: sub.Language, Format: sub.Codec,
+			Title: sub.Title, Forced: sub.Forced, Default: sub.Default,
+		})
+	}
+
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode manifest: %w", err)
+	}
+	data = append(data, '\n')
+
+	_, err = deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
+	return err
 }
 
 // minSeekTolerance is the smallest gap worth calling a miss. Keyframes are
@@ -386,20 +626,124 @@ func landedNear(requested, actual, tolerance time.Duration) bool {
 	return requested-actual <= tolerance
 }
 
-// captureOne locates the keyframe for a timestamp and decodes it. The keyframe
-// lookup comes first and costs almost nothing, which is what lets a decision
-// about a point be made before spending traffic on its window.
-func (e *Engine) captureOne(ctx context.Context, deps fileDeps, url string, at time.Duration) (frames.Frame, time.Duration, error) {
-	keyframe, err := deps.prober.KeyframeAt(ctx, url, at)
-	if err != nil {
-		return frames.Frame{}, 0, err
+// capture is one frame and the story of where it came from.
+type capture struct {
+	frame frames.Frame
+	// asked is the timestamp finally requested, which is the capture point
+	// unless it had to be moved; actual is where the decoder landed.
+	asked  time.Duration
+	actual time.Duration
+	shift  ShiftReason
+}
+
+// maxShift is how far a capture point may be moved, as a multiple of step.
+// Two steps is a quarter of the way to the neighbouring point on either side:
+// far enough to escape a hole, near enough that the frame still represents the
+// moment it was planned for.
+const maxShift = 2
+
+// captureOne takes the frame for one capture point, moving it if the swarm
+// cannot serve the pieces there.
+//
+// Reachability is judged from an offset estimated by time, before anything is
+// read. Asking ffprobe where the keyframe is would be more accurate and would
+// defeat the purpose: that question is itself a read, and on a region no peer
+// holds it stalls until the deadline - which is exactly the wait the shift
+// exists to avoid.
+func (e *Engine) captureOne(ctx context.Context, cfg Config, deps fileDeps, url string,
+	file swarm.FileInfo, duration, at, step time.Duration) (capture, error) {
+
+	avail := deps.torrent.Availability()
+
+	for _, candidate := range shiftCandidates(at, step, duration) {
+		if !reachable(avail, cfg.Profile, file, duration, candidate) {
+			continue
+		}
+
+		keyframe, err := deps.prober.KeyframeAt(ctx, url, candidate)
+		if err != nil {
+			return capture{}, err
+		}
+		frame, err := deps.extractor.Frame(ctx, url, keyframe.PTS)
+		if err != nil {
+			return capture{}, err
+		}
+
+		shift := ShiftNone
+		if candidate != at {
+			shift = ShiftUnavailable
+		}
+		return capture{frame: frame, asked: candidate, actual: keyframe.PTS, shift: shift}, nil
 	}
 
-	frame, err := deps.extractor.Frame(ctx, url, keyframe.PTS)
-	if err != nil {
-		return frames.Frame{}, 0, err
+	return capture{}, Fail(CodeUnavailable, fmt.Errorf(
+		"no peer holds the pieces at %s, nor within %s of it",
+		at.Round(time.Second), (step*maxShift).Round(time.Second)))
+}
+
+// availabilityMap is the part of swarm.Availability this decision needs. Named
+// here rather than taken concretely so the rule can be tested without standing
+// up a swarm - the case that matters most is the one where there is no swarm
+// to stand up yet.
+type availabilityMap interface {
+	Known() bool
+	PieceLength() int64
+	OverFileRange(f swarm.FileInfo, off, length int64) int
+}
+
+// shiftCandidates lists where to try, nearest first and alternating sides, so
+// a frame moves the least it can and does not drift consistently one way.
+func shiftCandidates(at, step, duration time.Duration) []time.Duration {
+	out := []time.Duration{at}
+	if step <= 0 {
+		return out
 	}
-	return frame, keyframe.PTS, nil
+
+	for n := 1; n <= maxShift; n++ {
+		for _, candidate := range []time.Duration{at + time.Duration(n)*step, at - time.Duration(n)*step} {
+			if candidate > 0 && (duration <= 0 || candidate < duration) {
+				out = append(out, candidate)
+			}
+		}
+	}
+	return out
+}
+
+// reachStart is how much of a capture point's region must be held for it to be
+// worth trying, in pieces.
+//
+// Two, and deliberately not the profile's fetch window. The window is claim
+// geometry - how much to ask for at once so the decoder does not come back for
+// more - while this asks something else: does this part of the file exist in
+// the swarm at all. Measured on a 2.9 MiB fixture, judging by the 1 MiB window
+// meant every capture point overlapped a hole in the middle, because the
+// window was a third of the file; two pieces scale with the torrent's own
+// geometry instead of a policy constant, and are the smallest span that holds
+// the keyframe and survives a piece boundary.
+const reachStart = 2
+
+// reachable reports whether the swarm can serve the region a capture point
+// would start from.
+//
+// Until the swarm has said anything the honest answer is "unknown", and it is
+// given as yes. Measured, not guessed: judging on a map that was merely empty
+// skipped the first frame of a healthy run, because a peer is connected for a
+// while before its bitfield arrives and an empty map is indistinguishable from
+// a swarm that holds nothing.
+func reachable(avail availabilityMap, profile swarm.Profile,
+	file swarm.FileInfo, duration, at time.Duration) bool {
+
+	if !avail.Known() || duration <= 0 || file.Length <= 0 {
+		return true
+	}
+
+	span := avail.PieceLength() * reachStart
+	if span <= 0 {
+		span = profile.Window
+	}
+
+	offset := int64(float64(file.Length) * (float64(at) / float64(duration)))
+	return avail.OverFileRange(file, offset, span) > 0
 }
 
 // haltReason reports whether the run should stop and why.
@@ -429,6 +773,30 @@ func extensionFor(format frames.Format) string {
 //
 // Budgets and parallelism are deliberately excluded: they change how long a
 // run takes, not what a finished one contains.
+// budgetFor resolves the run's budget, defaulting it to the number of files
+// actually being worked on rather than everything the torrent holds: asking
+// for one episode out of twenty should get one episode's worth of traffic, not
+// a twentieth of the pack's.
+func budgetFor(cfg Config, selected int) Budget {
+	if cfg.Budget.MaxBytes == 0 && cfg.Budget.MaxTime == 0 {
+		return DefaultBudget(selected)
+	}
+	return cfg.Budget
+}
+
+// indicesOf reduces files to the numbers the torrent knows them by.
+func indicesOf(files []swarm.FileInfo) []int {
+	out := make([]int, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.Index)
+	}
+	return out
+}
+
+// The file selection is deliberately not part of the key. Which files a run
+// asked for does not change what a frame of any one of them looks like, and
+// keying on it would scatter the same file's frames across directories - and
+// stop a later run from reusing what an earlier, narrower one already fetched.
 func ParamsKey(cfg Config) string {
 	raw := fmt.Sprintf("n=%d;start=%.4f;end=%.4f;profile=%s;format=%s",
 		cfg.Plan.Count, cfg.Plan.Start, cfg.Plan.End, cfg.Profile.Name, cfg.Format)

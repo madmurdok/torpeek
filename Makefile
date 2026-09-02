@@ -21,6 +21,12 @@ check:
 	go vet ./...
 	go test ./...
 
+# Goes to a live public swarm, takes minutes and costs real traffic, which is
+# why it is not part of check. Writes docs/results/<version>-acceptance.md.
+.PHONY: acceptance
+acceptance:
+	go test -tags acceptance -timeout 60m -v ./acceptance/ $(ARGS)
+
 .PHONY: fmt
 fmt:
 	go fmt ./...
