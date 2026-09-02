@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,21 +52,57 @@ func testServer(t *testing.T, runner Runner) *httptest.Server {
 	return ts
 }
 
-// dial opens the event socket against a server whose UI root is at base.
+// dial opens the event socket against a server whose UI root is at base -
+// which may itself carry a query string (an access token, as srv.URL() now
+// can), preserved on the socket URL exactly the way app.js's own url()
+// helper preserves it for a real browser.
 func dial(t *testing.T, base string) *websocket.Conn {
 	t.Helper()
 
-	address := "ws" + strings.TrimPrefix(strings.TrimSuffix(base, "/"), "http") + "/events"
-	conn, resp, err := websocket.DefaultDialer.Dial(address, nil)
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatalf("parse base URL %q: %v", base, err)
+	}
+	if u.Scheme == "https" {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/events"
+
+	conn, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		status := 0
 		if resp != nil {
 			status = resp.StatusCode
 		}
-		t.Fatalf("dial %s: %v (status %d)", address, err, status)
+		t.Fatalf("dial %s: %v (status %d)", u.String(), err, status)
 	}
 	t.Cleanup(func() { conn.Close() })
 	return conn
+}
+
+// dialExpectingRejection is dial without the t.Fatalf on failure: it is used
+// by the tests that want to see the socket refused.
+func dialExpectingRejection(t *testing.T, base string) (*http.Response, error) {
+	t.Helper()
+
+	u, err := url.Parse(base)
+	if err != nil {
+		t.Fatalf("parse base URL %q: %v", base, err)
+	}
+	if u.Scheme == "https" {
+		u.Scheme = "wss"
+	} else {
+		u.Scheme = "ws"
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/events"
+
+	conn, resp, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	if err == nil {
+		conn.Close()
+	}
+	return resp, err
 }
 
 // next reads one event off the socket, failing rather than hanging.
@@ -616,6 +653,14 @@ func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
 // already proves the StripPrefix seam works; this proves -base-path (which
 // sets exactly this field) reaches it, including URL() reporting the
 // prefixed address a person is told to open.
+//
+// This is also, deliberately, the exact scenario needsToken exists for: a
+// loopback bind with a base path configured, standing in for the seedbox
+// behind nginx that TOR-30 targets (REQUIREMENTS.md section 4.1). So this
+// test also proves Start auto-generated a token here and enforces it - a
+// bind-address-only rule would have left this configuration open, which is
+// precisely the case TOR-30's decision writeup calls out as the one a naive
+// rule gets wrong.
 func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 	fake := &fakeRun{}
 
@@ -632,8 +677,12 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 	}
 	t.Cleanup(func() { srv.Close() })
 
+	if srv.cfg.Token == "" {
+		t.Fatal("a base path was configured but Start did not require a token")
+	}
+
 	root := "http://" + addr
-	if want := root + "/torpeek/"; srv.URL() != want {
+	if want := root + "/torpeek/?token=" + srv.cfg.Token; srv.URL() != want {
 		t.Fatalf("URL() = %q, want %q", srv.URL(), want)
 	}
 
@@ -652,6 +701,8 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 		t.Errorf("GET /torpeek redirects to %q, want /torpeek/", location)
 	}
 
+	// The shell itself is not gated (authGuard's doc comment says why), so
+	// it loads with no token at all.
 	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/app.css"} {
 		resp, err := http.Get(root + path)
 		if err != nil {
@@ -663,13 +714,27 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 		}
 	}
 
+	// But the API and the socket - what this base-path deployment exists to
+	// protect - refuse an unauthenticated request...
+	if resp := post(t, root, "/torpeek/runs", `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("POST /torpeek/runs with no token: status %d, want 401", resp.StatusCode)
+	}
+	if resp, err := dialExpectingRejection(t, root+"/torpeek/"); err == nil || resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Errorf("dial with no token: err=%v status=%d, want a 401 rejection", err, status)
+	}
+
+	// ...and accept one carrying the token srv.URL() itself printed.
 	conn := dial(t, srv.URL())
 	if got := next(t, conn); got["type"] != "run_state" {
 		t.Errorf("under the configured base path the socket said %v, want run_state", got)
 	}
 
-	if resp := post(t, root, "/torpeek/runs", `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusAccepted {
-		t.Errorf("POST /torpeek/runs: status %d, want 202", resp.StatusCode)
+	if resp := post(t, root, "/torpeek/runs?token="+srv.cfg.Token, `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusAccepted {
+		t.Errorf("POST /torpeek/runs?token=...: status %d, want 202", resp.StatusCode)
 	}
 }
 
