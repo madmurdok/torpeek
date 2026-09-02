@@ -116,7 +116,7 @@ func Open(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, erro
 
 	// Public torrent: restart with DHT, handing over the metadata already in
 	// hand so nothing is fetched twice.
-	mi := t.t.Metainfo()
+	mi := carriedOverMetainfo(t.t.Metainfo())
 	s.Close()
 
 	withDHT, err := newSession(cfg, true)
@@ -129,6 +129,30 @@ func Open(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, erro
 		return nil, nil, err
 	}
 	return withDHT, t, nil
+}
+
+// carriedOverMetainfo makes the metainfo anacrolix generates for a torrent
+// whose info has already arrived safe to hand straight back to AddTorrent.
+//
+// Torrent.Metainfo fills PieceLayers from Torrent.pieceLayers(), which always
+// allocates the map and then only records files carrying a BitTorrent v2
+// pieces root. A v1 torrent has none, so the map comes back non-nil and empty.
+// AddTorrent reads any non-nil map as "this torrent came with piece layers",
+// walks every multi-piece file and rejects each one with "no piece root set
+// for file" - which is why a plain v1 magnet produced a v2 complaint, once per
+// file. A .torrent read off disk never hits this: its bencode has no
+// "piece layers" key, so the field stays nil and the check is skipped.
+// Dropping an empty map is exactly what makes the round trip match that.
+//
+// A genuine v2 torrent is untouched: its files do carry roots, so any layers
+// actually held are kept and still validated, and a v2 torrent holding none is
+// no worse off - AddTorrent only warns for a missing entry, it is the empty
+// map that turns silence into an error.
+func carriedOverMetainfo(mi metainfo.MetaInfo) metainfo.MetaInfo {
+	if len(mi.PieceLayers) == 0 {
+		mi.PieceLayers = nil
+	}
+	return mi
 }
 
 // openBlind is the honest-but-imperfect path: DHT before the privacy check,
@@ -155,6 +179,18 @@ func (s *Session) UsesDHT() bool {
 	return s.dhtOn && len(s.cl.DhtServers()) > 0
 }
 
+// tuneClientForTest, when set, adjusts the anacrolix config just before a
+// client starts. It is nil in production and only ever set from a _test.go
+// file in this package.
+//
+// It exists because the one path worth testing here - Open's restart, which
+// only happens when DHT was asked for - cannot be reached with DHT off, and a
+// test must not reach the real DHT. Handing the second client a DHT server
+// with no starting nodes gives a DHT that is genuinely running (DhtServers is
+// non-empty, so UsesDHT is true) yet has nowhere to bootstrap to, which is how
+// anacrolix's own tests keep a DHT-enabled client offline.
+var tuneClientForTest func(*torrent.ClientConfig)
+
 func newSession(cfg Config, dht bool) (*Session, error) {
 	tc := torrent.NewDefaultClientConfig()
 	// The library logs read failures to stderr, including the ones we cause
@@ -179,6 +215,10 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// "nothing else is listening" (TOR-28's acceptance criterion): these
 	// probes bind their own ephemeral port each time, unpinned by design.
 	tc.NoDefaultPortForwarding = true
+
+	if tuneClientForTest != nil {
+		tuneClientForTest(tc)
+	}
 
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
