@@ -257,7 +257,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// Written even for a stopped run: what it did finish is still worth
 	// serving from disk next time, and a partial record is what resume will
 	// read to know where to pick up.
-	if err := saveRunRecord(writer.Layout(), torrent, videos, finished); err != nil {
+	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, finished); err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	}
 
@@ -544,17 +544,34 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 }
 
 // saveRunRecord writes what this run covered, so a later one can tell a whole
-// result from a partial one without opening a session to find out.
-func saveRunRecord(layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, finished []int) error {
+// result from a partial one without opening a session to find out - and, with
+// Source and Plan, so it can be named and repeated without a session open to
+// ask what it was.
+//
+// cfg.Source is recorded rather than anything swarm.Source parsed it into:
+// Source keeps only what it needs to answer its own questions (privacy,
+// trackers, infohash) and holds no exported form of the original string, so
+// cfg.Source is the one place that string still is - and it is exactly what
+// was typed, unlike a parsed representation.
+func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, finished []int) error {
 	record := cache.Run{
 		Version:   cache.Version,
 		Tool:      version.Version,
 		CreatedAt: time.Now().UTC(),
+		Source:    cfg.Source,
 		InfoHash:  torrent.InfoHash(),
 		Name:      torrent.Name(),
 		Private:   torrent.Private(),
-		Videos:    make([]cache.File, 0, len(videos)),
-		Complete:  finished,
+		Plan: cache.Plan{
+			Count:      cfg.Plan.Count,
+			Start:      cfg.Plan.Start,
+			End:        cfg.Plan.End,
+			Profile:    cfg.Profile.Name,
+			Format:     string(cfg.Format),
+			Sequential: cfg.Sequential,
+		},
+		Videos:   make([]cache.File, 0, len(videos)),
+		Complete: finished,
 	}
 	for _, v := range videos {
 		record.Videos = append(record.Videos, cache.File{

@@ -16,6 +16,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/manifest"
+	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
@@ -975,6 +976,25 @@ func TestRerunIsServedFromDiskWithoutTheSwarm(t *testing.T) {
 		if secondPaths[i] != paths[i] {
 			t.Errorf("cached run served %q where the first run wrote %q", secondPaths[i], paths[i])
 		}
+	}
+
+	// TOR-52: the record the first run left behind must carry the source it
+	// came from and its plan in readable form - not just what serving a
+	// rerun from disk needs, which is everything asserted above already.
+	layout := output.Layout{Root: first.OutputRoot, InfoHash: metadata.InfoHash, Params: ParamsKey(first)}
+	record, ok := cache.LoadRun(layout.RunDir())
+	if !ok {
+		t.Fatal("no run record for the first run")
+	}
+	if record.Source != torrentPath {
+		t.Errorf("record source = %q, want the path a person could rerun: %q", record.Source, torrentPath)
+	}
+	wantPlan := cache.Plan{
+		Count: first.Plan.Count, Start: first.Plan.Start, End: first.Plan.End,
+		Profile: first.Profile.Name, Format: string(first.Format), Sequential: first.Sequential,
+	}
+	if record.Plan != wantPlan {
+		t.Errorf("record plan = %+v, want %+v", record.Plan, wantPlan)
 	}
 }
 
