@@ -73,8 +73,16 @@ func (f Fixture) StartSeeder(t *testing.T) string {
 
 	// The torrent's name is the payload directory's own name, so its files
 	// live at DataDir/<name>/... - the seeder's DataDir is the parent.
+	return startSeeding(t, f.TorrentPath, filepath.Dir(f.Dir), true)
+}
+
+// startSeeding runs a seeder over dataDir. complete says whether to wait for
+// every byte to verify: a seeder with a deliberate hole never will.
+func startSeeding(t *testing.T, torrentPath, dataDir string, complete bool) string {
+	t.Helper()
+
 	cfg := torrent.NewDefaultClientConfig()
-	cfg.DataDir = filepath.Dir(f.Dir)
+	cfg.DataDir = dataDir
 	cfg.Seed = true
 	cfg.NoDHT = true
 	cfg.DisableTrackers = true
@@ -87,19 +95,43 @@ func (f Fixture) StartSeeder(t *testing.T) string {
 	}
 	t.Cleanup(func() { cl.Close() })
 
-	tor, err := cl.AddTorrentFromFile(f.TorrentPath)
+	tor, err := cl.AddTorrentFromFile(torrentPath)
 	if err != nil {
 		t.Fatalf("seeder add torrent: %v", err)
 	}
 	<-tor.GotInfo()
 	tor.VerifyData()
 
-	deadline := time.Now().Add(30 * time.Second)
-	for tor.BytesCompleted() < tor.Length() {
-		if time.Now().After(deadline) {
-			t.Fatalf("seeder verified only %d of %d bytes", tor.BytesCompleted(), tor.Length())
+	// A seeder that is still hashing announces its pieces as it goes, so a
+	// leecher asking early sees a map that is merely incomplete and reads it
+	// as a swarm full of holes. Both kinds of seeder must finish verifying
+	// before anyone is told about them.
+	deadline := time.Now().Add(60 * time.Second)
+	var last int64 = -1
+	stable := 0
+	for {
+		completed := tor.BytesCompleted()
+		if complete {
+			if completed >= tor.Length() {
+				break
+			}
+		} else {
+			if completed == last {
+				stable++
+			} else {
+				stable, last = 0, completed
+			}
+			// Held something, missing something, and unchanged for a while:
+			// hashing is done and the hole is real.
+			if stable >= 5 && completed > 0 && tor.BytesMissing() > 0 {
+				break
+			}
 		}
-		time.Sleep(50 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("seeder never settled: %d of %d bytes verified, %d missing",
+				completed, tor.Length(), tor.BytesMissing())
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	for _, a := range cl.ListenAddrs() {
@@ -109,6 +141,66 @@ func (f Fixture) StartSeeder(t *testing.T) string {
 	}
 	t.Fatal("seeder has no TCP listen address")
 	return ""
+}
+
+// StartSeederWithHole serves a copy of the fixture in which one stretch of the
+// payload is wrong, so the pieces covering it fail verification and the seeder
+// genuinely does not have them. from and to are fractions of the file.
+//
+// This is the only honest way to test behaviour against an incomplete swarm:
+// a seeder cannot be asked to withhold pieces it holds, but it will never
+// offer pieces whose hash does not match.
+func (f Fixture) StartSeederWithHole(t *testing.T, from, to float64) string {
+	t.Helper()
+
+	// The torrent's name is the directory's name, so the copy has to keep it.
+	parent := t.TempDir()
+	holed := filepath.Join(parent, filepath.Base(f.Dir))
+	if err := os.MkdirAll(holed, 0o700); err != nil {
+		t.Fatalf("create seeder directory: %v", err)
+	}
+
+	entries, err := os.ReadDir(f.Dir)
+	if err != nil {
+		t.Fatalf("read payload directory: %v", err)
+	}
+
+	var largest string
+	var largestSize int64
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			t.Fatalf("stat %s: %v", e.Name(), err)
+		}
+		if info.Size() > largestSize {
+			largest, largestSize = e.Name(), info.Size()
+		}
+	}
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(f.Dir, e.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", e.Name(), err)
+		}
+		if e.Name() == largest {
+			start := int(float64(len(content)) * from)
+			end := int(float64(len(content)) * to)
+			for i := start; i < end && i < len(content); i++ {
+				content[i] ^= 0xFF
+			}
+		}
+		if err := os.WriteFile(filepath.Join(holed, e.Name()), content, 0o600); err != nil {
+			t.Fatalf("write %s: %v", e.Name(), err)
+		}
+	}
+
+	return startSeeding(t, f.TorrentPath, parent, false)
 }
 
 // deterministicBytes fills a buffer with a cheap, repeatable pattern. Random

@@ -288,7 +288,7 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			deps.bus.Publish(*warning)
 		}
 
-		frame, actual, err := e.captureOne(ctx, deps, url, at)
+		shot, err := e.captureOne(ctx, cfg, deps, url, file, info.Duration, at, tolerance/4)
 		if err != nil {
 			skipped++
 			deps.bus.Publish(FrameSkipped{
@@ -308,7 +308,10 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		// a plausible-looking wrong answer on disk and report it as a success,
 		// which is exactly how a run once wrote the same opening frame twenty
 		// times over.
-		if !landedNear(at, actual, tolerance) {
+		// Compared against what was actually asked for, not the original
+		// point: a deliberate shift is not a failed seek, and confusing the
+		// two would throw away the frame the shift went to find.
+		if !landedNear(shot.asked, shot.actual, tolerance) {
 			skipped++
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
@@ -316,12 +319,13 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 				Requested: at,
 				Code:      CodeSeekFailed,
 				Reason: fmt.Sprintf("decoded at %s, %s away from the requested %s",
-					actual.Round(time.Second), (at - actual).Abs().Round(time.Second), at.Round(time.Second)),
+					shot.actual.Round(time.Second), (shot.asked - shot.actual).Abs().Round(time.Second),
+					shot.asked.Round(time.Second)),
 			})
 			continue
 		}
 
-		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, frame.Data, extensionFor(cfg.Format))
+		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, shot.frame.Data, extensionFor(cfg.Format))
 		if err != nil {
 			return produced, Fail(CodeStorage, err)
 		}
@@ -329,19 +333,17 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 
 		// Actual almost never equals Requested: decoding starts at the
 		// keyframe before the wanted moment, which is ordinary behaviour and
-		// not a shift. ShiftUnavailable means something else entirely - that
-		// the swarm could not serve the pieces there and another position was
-		// chosen instead - and it is set by the availability logic (TOR-13),
-		// not inferred from the timestamps differing.
+		// not a shift. Shift says only whether the capture point itself was
+		// moved, which is a decision, not a side effect of how keyframes fall.
 		deps.bus.Publish(FrameReady{
 			File:      file.Index,
 			Index:     i,
 			Requested: at,
-			Actual:    actual,
-			Shift:     ShiftNone,
+			Actual:    shot.actual,
+			Shift:     shot.shift,
 			Path:      path,
-			Width:     frame.Width,
-			Height:    frame.Height,
+			Width:     shot.frame.Width,
+			Height:    shot.frame.Height,
 		})
 
 		spent, elapsed := deps.tracker.Spent()
@@ -397,20 +399,124 @@ func landedNear(requested, actual, tolerance time.Duration) bool {
 	return requested-actual <= tolerance
 }
 
-// captureOne locates the keyframe for a timestamp and decodes it. The keyframe
-// lookup comes first and costs almost nothing, which is what lets a decision
-// about a point be made before spending traffic on its window.
-func (e *Engine) captureOne(ctx context.Context, deps fileDeps, url string, at time.Duration) (frames.Frame, time.Duration, error) {
-	keyframe, err := deps.prober.KeyframeAt(ctx, url, at)
-	if err != nil {
-		return frames.Frame{}, 0, err
+// capture is one frame and the story of where it came from.
+type capture struct {
+	frame frames.Frame
+	// asked is the timestamp finally requested, which is the capture point
+	// unless it had to be moved; actual is where the decoder landed.
+	asked  time.Duration
+	actual time.Duration
+	shift  ShiftReason
+}
+
+// maxShift is how far a capture point may be moved, as a multiple of step.
+// Two steps is a quarter of the way to the neighbouring point on either side:
+// far enough to escape a hole, near enough that the frame still represents the
+// moment it was planned for.
+const maxShift = 2
+
+// captureOne takes the frame for one capture point, moving it if the swarm
+// cannot serve the pieces there.
+//
+// Reachability is judged from an offset estimated by time, before anything is
+// read. Asking ffprobe where the keyframe is would be more accurate and would
+// defeat the purpose: that question is itself a read, and on a region no peer
+// holds it stalls until the deadline - which is exactly the wait the shift
+// exists to avoid.
+func (e *Engine) captureOne(ctx context.Context, cfg Config, deps fileDeps, url string,
+	file swarm.FileInfo, duration, at, step time.Duration) (capture, error) {
+
+	avail := deps.torrent.Availability()
+
+	for _, candidate := range shiftCandidates(at, step, duration) {
+		if !reachable(avail, cfg.Profile, file, duration, candidate) {
+			continue
+		}
+
+		keyframe, err := deps.prober.KeyframeAt(ctx, url, candidate)
+		if err != nil {
+			return capture{}, err
+		}
+		frame, err := deps.extractor.Frame(ctx, url, keyframe.PTS)
+		if err != nil {
+			return capture{}, err
+		}
+
+		shift := ShiftNone
+		if candidate != at {
+			shift = ShiftUnavailable
+		}
+		return capture{frame: frame, asked: candidate, actual: keyframe.PTS, shift: shift}, nil
 	}
 
-	frame, err := deps.extractor.Frame(ctx, url, keyframe.PTS)
-	if err != nil {
-		return frames.Frame{}, 0, err
+	return capture{}, Fail(CodeUnavailable, fmt.Errorf(
+		"no peer holds the pieces at %s, nor within %s of it",
+		at.Round(time.Second), (step*maxShift).Round(time.Second)))
+}
+
+// availabilityMap is the part of swarm.Availability this decision needs. Named
+// here rather than taken concretely so the rule can be tested without standing
+// up a swarm - the case that matters most is the one where there is no swarm
+// to stand up yet.
+type availabilityMap interface {
+	Known() bool
+	PieceLength() int64
+	OverFileRange(f swarm.FileInfo, off, length int64) int
+}
+
+// shiftCandidates lists where to try, nearest first and alternating sides, so
+// a frame moves the least it can and does not drift consistently one way.
+func shiftCandidates(at, step, duration time.Duration) []time.Duration {
+	out := []time.Duration{at}
+	if step <= 0 {
+		return out
 	}
-	return frame, keyframe.PTS, nil
+
+	for n := 1; n <= maxShift; n++ {
+		for _, candidate := range []time.Duration{at + time.Duration(n)*step, at - time.Duration(n)*step} {
+			if candidate > 0 && (duration <= 0 || candidate < duration) {
+				out = append(out, candidate)
+			}
+		}
+	}
+	return out
+}
+
+// reachStart is how much of a capture point's region must be held for it to be
+// worth trying, in pieces.
+//
+// Two, and deliberately not the profile's fetch window. The window is claim
+// geometry - how much to ask for at once so the decoder does not come back for
+// more - while this asks something else: does this part of the file exist in
+// the swarm at all. Measured on a 2.9 MiB fixture, judging by the 1 MiB window
+// meant every capture point overlapped a hole in the middle, because the
+// window was a third of the file; two pieces scale with the torrent's own
+// geometry instead of a policy constant, and are the smallest span that holds
+// the keyframe and survives a piece boundary.
+const reachStart = 2
+
+// reachable reports whether the swarm can serve the region a capture point
+// would start from.
+//
+// Until the swarm has said anything the honest answer is "unknown", and it is
+// given as yes. Measured, not guessed: judging on a map that was merely empty
+// skipped the first frame of a healthy run, because a peer is connected for a
+// while before its bitfield arrives and an empty map is indistinguishable from
+// a swarm that holds nothing.
+func reachable(avail availabilityMap, profile swarm.Profile,
+	file swarm.FileInfo, duration, at time.Duration) bool {
+
+	if !avail.Known() || duration <= 0 || file.Length <= 0 {
+		return true
+	}
+
+	span := avail.PieceLength() * reachStart
+	if span <= 0 {
+		span = profile.Window
+	}
+
+	offset := int64(float64(file.Length) * (float64(at) / float64(duration)))
+	return avail.OverFileRange(file, offset, span) > 0
 }
 
 // haltReason reports whether the run should stop and why.
