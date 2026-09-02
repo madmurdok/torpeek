@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/manifest"
@@ -922,5 +923,135 @@ func TestCacheMissesWhenAFrameIsGone(t *testing.T) {
 	}
 	if info.Size() == 0 {
 		t.Error("the frame came back empty")
+	}
+}
+
+// TestSecondRunFillsTheGapsRatherThanStartingOver is REQUIREMENTS.md section
+// 2.10: a run stopped by its budget keeps what it produced, and the next one
+// takes only the points that are missing.
+//
+// Reuse is proven by modification time. A frame that was rewritten would carry
+// a new one; the ones from the first run must be untouched.
+func TestSecondRunFillsTheGapsRatherThanStartingOver(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 60, "600k")
+
+	out := t.TempDir()
+	data := t.TempDir()
+
+	base := DefaultConfig(torrentPath, out, data)
+	base.Swarm.DHT = false
+	base.Swarm.MetadataTimeout = 10 * time.Second
+	base.Swarm.Peers = []string{seeder}
+	base.Profile = swarm.MinTraffic
+	base.Plan = frames.Plan{Count: 8, Start: 0.1, End: 0.9}
+	base.Parallelism = 1
+
+	first := base
+	first.Budget = Budget{MaxBytes: 64 << 20, MaxTime: 4 * time.Minute, WarnAt: 0.8}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	// Stopped by cancelling after a few frames rather than by a byte ceiling:
+	// where a budget lands depends on how the clip happened to compress, and a
+	// test that needs "some but not all" cannot be left to that. This is also
+	// the other half of section 2.10 - a cancelled run keeps its frames.
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+
+	events, err := NewEngine(tools).Run(runCtx, first)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	const stopAfter = 3
+	firstPaths := map[int]string{}
+	var firstDone *Done
+	for ev := range events {
+		switch e := ev.(type) {
+		case FrameReady:
+			firstPaths[e.Index] = e.Path
+			if len(firstPaths) == stopAfter {
+				stop()
+			}
+		case Done:
+			firstDone = &e
+		}
+	}
+	if firstDone == nil {
+		t.Fatal("first run produced no terminal event")
+	}
+	if len(firstPaths) == 0 || len(firstPaths) >= base.Plan.Count {
+		t.Fatalf("first run produced %d of %d frames; the test needs it stopped partway",
+			len(firstPaths), base.Plan.Count)
+	}
+	t.Logf("first run: %d of %d frames, %d bytes, reason %q",
+		len(firstPaths), base.Plan.Count, firstDone.DownloadedByte, firstDone.Reason)
+
+	stamps := map[int]time.Time{}
+	for index, path := range firstPaths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("frame %d is not on disk after a stopped run: %v", index, err)
+		}
+		stamps[index] = info.ModTime()
+	}
+
+	// Enough budget to finish, and a moment's gap so a rewrite would show.
+	second := base
+	second.Budget = Budget{MaxBytes: 64 << 20, MaxTime: 4 * time.Minute, WarnAt: 0.8}
+	time.Sleep(1100 * time.Millisecond)
+
+	events, err = NewEngine(tools).Run(ctx, second)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	secondPaths := map[int]string{}
+	var secondDone *Done
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case FrameReady:
+			secondPaths[e.Index] = e.Path
+		case Failed:
+			t.Errorf("second run failed: %s: %v", e.Code, e.Err)
+		case Done:
+			secondDone = &e
+		}
+	}
+
+	if secondDone == nil || secondDone.Reason != StopCompleted {
+		t.Fatalf("second run did not complete: %+v", secondDone)
+	}
+	if len(secondPaths) != base.Plan.Count {
+		t.Errorf("second run reported %d frames, want the full set of %d",
+			len(secondPaths), base.Plan.Count)
+	}
+
+	for index, when := range stamps {
+		info, err := os.Stat(secondPaths[index])
+		if err != nil {
+			t.Errorf("frame %d disappeared: %v", index, err)
+			continue
+		}
+		if !info.ModTime().Equal(when) {
+			t.Errorf("frame %d was written again (%s then %s); a second run should keep what it has",
+				index, when.Format(time.RFC3339Nano), info.ModTime().Format(time.RFC3339Nano))
+		}
+	}
+
+	// And the record now describes a whole file.
+	m, ok := cache.LoadManifest(filepath.Dir(filepath.Dir(secondPaths[0])))
+	if !ok {
+		t.Fatal("no manifest after the second run")
+	}
+	if len(m.Frames) != base.Plan.Count {
+		t.Errorf("manifest lists %d points, want %d", len(m.Frames), base.Plan.Count)
+	}
+	for _, f := range m.Frames {
+		if f.Shift == manifest.ShiftFailed {
+			t.Errorf("point %d is still unfilled: %s", f.Index, f.Error)
+		}
 	}
 }
