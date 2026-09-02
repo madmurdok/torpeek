@@ -16,13 +16,25 @@ import (
 	"github.com/madmurdok/torpeek/internal/wire"
 )
 
-// DefaultAddr is where the UI listens when nothing says otherwise.
-//
-// A fixed default rather than a free port: a managed host allocates a range
-// and forbids anything outside it (REQUIREMENTS.md section 4.1), so the port
-// has to be something a person can be told and a proxy can be pointed at.
-// There it must be overridden, which is what Config.Addr is for.
-const DefaultAddr = "127.0.0.1:8765"
+// DefaultHost and DefaultPort make up DefaultAddr - split out so a caller
+// overriding only one of them (the CLI's -web-host / -web-port) does not have
+// to parse the other back out of a string.
+const (
+	DefaultHost = "127.0.0.1"
+	DefaultPort = 8765
+
+	// DefaultAddr is where the UI listens when nothing says otherwise.
+	//
+	// A fixed default rather than a free port: a managed host allocates a
+	// range and forbids anything outside it (REQUIREMENTS.md section 4.1), so
+	// the port has to be something a person can be told and a proxy can be
+	// pointed at. There it must be overridden, which is what Config.Addr is
+	// for. The host stays loopback even there - a reverse proxy on the same
+	// machine is the documented deployment (section 3.3) - but it is still
+	// part of Config.Addr rather than hardcoded, for the rarer setup that
+	// needs something else.
+	DefaultAddr = "127.0.0.1:8765"
+)
 
 // Config configures the UI server.
 type Config struct {
