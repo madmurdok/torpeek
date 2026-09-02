@@ -12,6 +12,7 @@ package wire
 
 import (
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/probe"
 )
 
 // Event renders one event as the object clients exchange.
@@ -30,12 +31,19 @@ func Event(ev core.Event) map[string]any {
 			"selected": e.Selected,
 		}
 	case core.FileStarted:
+		// The summary panel (REQUIREMENTS.md section 3.3) needs more than the
+		// video's own dimensions: audio tracks, subtitles, bitrate. probe
+		// already inspected all of that before this event fired - the gap was
+		// only that this map used to throw most of it away.
 		return map[string]any{
 			"type": "file_started", "file": e.File, "path": e.Path,
 			"duration_ms": e.Media.Duration.Milliseconds(),
-			"width":       e.Media.Video.Width, "height": e.Media.Video.Height,
-			"codec": e.Media.Video.Codec, "audio": len(e.Media.Audio),
-			"subtitles": len(e.Media.Subtitles), "planned": len(e.Plan),
+			"format":      e.Media.FormatName, "size": e.Media.Size, "bitrate": e.Media.BitRate,
+			"width": e.Media.Video.Width, "height": e.Media.Video.Height,
+			"codec": e.Media.Video.Codec, "profile": e.Media.Video.Profile,
+			"fps": e.Media.Video.FPS, "video_bitrate": e.Media.Video.BitRate,
+			"audio": audioTracks(e.Media.Audio), "subtitles": subtitleTracks(e.Media.Subtitles),
+			"planned": len(e.Plan),
 		}
 	case core.FrameReady:
 		return map[string]any{
@@ -82,4 +90,30 @@ func Event(ev core.Event) map[string]any {
 	default:
 		return map[string]any{"type": "unknown"}
 	}
+}
+
+// audioTracks renders every audio track for the summary panel - the answer to
+// "is this the dub and the language I wanted" (probe.AudioStream's own doc).
+func audioTracks(tracks []probe.AudioStream) []map[string]any {
+	out := make([]map[string]any, len(tracks))
+	for i, t := range tracks {
+		out[i] = map[string]any{
+			"index": t.Index, "codec": t.Codec, "language": t.Language,
+			"title": t.Title, "channels": t.Channels, "bitrate": t.BitRate,
+			"default": t.Default,
+		}
+	}
+	return out
+}
+
+// subtitleTracks renders every subtitle track for the summary panel.
+func subtitleTracks(tracks []probe.SubtitleStream) []map[string]any {
+	out := make([]map[string]any, len(tracks))
+	for i, t := range tracks {
+		out[i] = map[string]any{
+			"index": t.Index, "codec": t.Codec, "language": t.Language,
+			"title": t.Title, "forced": t.Forced, "default": t.Default,
+		}
+	}
+	return out
 }

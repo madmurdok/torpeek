@@ -15,24 +15,47 @@
   <span id="status" class="status">connecting</span>
 </header>
 
-<form id="start" autocomplete="off">
-  <input id="source" name="source" type="text" spellcheck="false"
-         placeholder="magnet:?xt=urn:btih:… or a path to a .torrent file">
-  <select id="mode" name="mode">
-    <option value="min-time">min-time</option>
-    <option value="min-traffic">min-traffic</option>
-  </select>
-  <button id="go" type="submit">Take frames</button>
-  <button id="cancel" type="button" disabled>Cancel</button>
-</form>
+<section id="intake" class="intake">
+  <form id="start" autocomplete="off">
+    <div id="dropzone" class="dropzone">
+      <input id="source" name="source" type="text" spellcheck="false"
+             placeholder="Paste a magnet link…">
+      <label class="browse">
+        or <span class="link">choose a .torrent file</span>
+        <input id="file-input" type="file" accept=".torrent" hidden>
+      </label>
+    </div>
+    <div class="controls">
+      <select id="mode" name="mode">
+        <option value="min-time">fastest</option>
+        <option value="min-traffic">least traffic</option>
+      </select>
+      <button id="go" type="submit">Take frames</button>
+      <button id="cancel" type="button" disabled>Cancel</button>
+    </div>
+  </form>
+  <p class="hint">You can also drop a .torrent file anywhere on this page.</p>
+  <p id="error" class="error" hidden></p>
+</section>
 
-<p id="error" class="error" hidden></p>
-<p id="summary" class="summary"></p>
+<p id="torrent-summary" class="torrent-summary" hidden></p>
 
-<section id="frames" class="frames"></section>
+<section id="files" class="files"></section>
 
-<h2>Events</h2>
-<pre id="log" class="log"></pre>
+<details id="log-details" class="log-details">
+  <summary>Activity log</summary>
+  <pre id="log" class="log"></pre>
+</details>
+
+<div id="drop-overlay" class="drop-overlay" hidden>
+  <p>Drop the .torrent file to start</p>
+</div>
+
+<dialog id="lightbox" class="lightbox">
+  <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
+  <img id="lightbox-img" alt="">
+  <p id="lightbox-caption" class="lightbox-caption"></p>
+</dialog>
 
 <script src="app.js"></script>
 </body>

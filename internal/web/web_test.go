@@ -1,9 +1,11 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,6 +97,173 @@ func post(t *testing.T, base, path string, body string) *http.Response {
 	return resp
 }
 
+// uploadTorrent posts a multipart form the way a browser's FormData would
+// for a dropped .torrent, so the upload tests exercise the same encoding the
+// frontend sends.
+func uploadTorrent(t *testing.T, base string, content []byte, mode string) *http.Response {
+	t.Helper()
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("torrent", "release.torrent")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatalf("write form file: %v", err)
+	}
+	if mode != "" {
+		if err := mw.WriteField("mode", mode); err != nil {
+			t.Fatalf("write mode field: %v", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	resp, err := http.Post(strings.TrimSuffix(base, "/")+"/runs/upload", mw.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatalf("POST /runs/upload: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestUploadedTorrentStartsARun is the drag-and-drop path converging on the
+// same run machinery a pasted magnet uses: StartRun is called with a
+// filesystem path to the staged upload, and the run that follows looks like
+// any other to a connected client.
+func TestUploadedTorrentStartsARun(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	conn := dial(t, ts.URL)
+	next(t, conn) // idle run_state
+
+	resp := uploadTorrent(t, ts.URL, []byte("d8:announce...e"), "min-traffic")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/upload: status %d, want 202", resp.StatusCode)
+	}
+	if fake.starts != 1 {
+		t.Fatalf("the runner was called %d times, want 1", fake.starts)
+	}
+
+	active := next(t, conn)
+	if active["type"] != "run_state" || active["active"] != true {
+		t.Fatalf("after an upload, got %v, want an active run_state", active)
+	}
+	// The source shown to a person is a label, not the server's temp path -
+	// nobody typed that path and it means nothing to them.
+	if source, _ := active["source"].(string); strings.Contains(source, os.TempDir()) {
+		t.Errorf("run_state leaked the server temp path: %q", source)
+	}
+}
+
+// TestUploadStagesTheFileWherePassedToTheRunner proves the path the runner
+// receives is real and readable at the moment the run starts - the contract
+// swarm.ParseSource depends on - and that nothing on the request looks like
+// the raw multipart encoding leaking through.
+func TestUploadStagesTheFileWherePassedToTheRunner(t *testing.T) {
+	var gotSource string
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		gotSource = req.Source
+		data, err := os.ReadFile(req.Source)
+		if err != nil {
+			t.Errorf("runner could not read the staged upload: %v", err)
+		} else if string(data) != "torrent-bytes" {
+			t.Errorf("staged file holds %q, want the uploaded bytes", data)
+		}
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	uploadTorrent(t, ts.URL, []byte("torrent-bytes"), "")
+
+	if gotSource == "" {
+		t.Fatal("the runner was never called")
+	}
+	if filepath.Ext(gotSource) != ".torrent" {
+		t.Errorf("staged path %q does not look like a .torrent file", gotSource)
+	}
+}
+
+// TestUploadedFileOutlivesStartRun guards a real bug: swarm.Open re-reads a
+// file Source from disk (AddTorrentFromFile) from inside the run's own
+// goroutine, well after the runner call inside StartRun has already
+// returned - so a temp file removed as soon as StartRun returns is gone
+// before the run ever gets to read it. The fix keeps the file until the run
+// itself ends; this asserts that ordering directly rather than trusting a
+// synchronous-looking call chain.
+func TestUploadedFileOutlivesStartRun(t *testing.T) {
+	events := make(chan core.Event, 1)
+	started := make(chan string, 1)
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		started <- req.Source
+		return events, nil
+	}
+	ts := testServer(t, runner)
+
+	resp := uploadTorrent(t, ts.URL, []byte("torrent-bytes"), "")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/upload: status %d, want 202", resp.StatusCode)
+	}
+
+	path := <-started
+	// The file must still be there after StartRun/startRun has returned to
+	// the handler and the handler has responded - this is the exact window
+	// AddTorrentFromFile runs in for a real engine.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("staged upload was removed before the run could read it: %v", err)
+	}
+
+	close(events)
+	waitFor(t, func() bool {
+		_, err := os.Stat(path)
+		return errors.Is(err, os.ErrNotExist)
+	})
+}
+
+// TestUploadWithoutAFileIsRejected keeps a malformed drop from silently
+// starting a run.
+func TestUploadWithoutAFileIsRejected(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("mode", "min-time")
+	mw.Close()
+
+	resp, err := http.Post(ts.URL+"/runs/upload", mw.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatalf("POST /runs/upload: %v", err)
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /runs/upload with no file: status %d, want 400", resp.StatusCode)
+	}
+	if fake.starts != 0 {
+		t.Errorf("the runner was called %d times with no file, want 0", fake.starts)
+	}
+}
+
+// TestUploadRespectsOneRunAtATime is the same rule TestOneRunAtATime checks
+// for the magnet path, on the upload path.
+func TestUploadRespectsOneRunAtATime(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	if resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs: status %d, want 202", resp.StatusCode)
+	}
+
+	resp := uploadTorrent(t, ts.URL, []byte("bytes"), "")
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("POST /runs/upload while a run is active: status %d, want 409", resp.StatusCode)
+	}
+}
+
 // TestServesEmbeddedFrontend is the acceptance criterion in miniature: the
 // binary has to be able to show a UI with nothing beside it on disk.
 func TestServesEmbeddedFrontend(t *testing.T) {
@@ -104,7 +273,7 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 	for _, tc := range []struct{ path, contains string }{
 		{"/", "<title>torpeek</title>"},
 		{"/app.js", "WebSocket"},
-		{"/app.css", ".frames"},
+		{"/app.css", ".grid"},
 	} {
 		resp, err := http.Get(ts.URL + tc.path)
 		if err != nil {

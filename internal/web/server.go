@@ -42,13 +42,25 @@ func DefaultConfig() Config {
 
 // RunRequest is what the UI asks for when someone presses start.
 //
-// A .torrent dropped onto the page will need a second field or a second
-// endpoint carrying its bytes; the shape is a struct so that adding one does
-// not change any signature.
+// A dropped .torrent's bytes arrive at a separate endpoint, POST
+// /runs/upload (multipart/form-data), rather than as a field here: the JSON
+// path would need base64 for a binary payload, while multipart is what a
+// browser's FormData already produces from a dropped File with no encoding
+// step on either side. That handler (handleUploadTorrent) stages the upload
+// as a temp file and builds exactly this struct with the temp path as
+// Source - a .torrent path is already a valid Source (swarm.ParseSource
+// accepts one, same as a path typed on the command line) - then calls
+// StartRun. So a drag-and-drop and a pasted magnet converge on this one
+// method; there is only ever one way a run begins.
 type RunRequest struct {
 	Source string `json:"source"`
 	// Mode is the capture profile by name, empty meaning the server's default.
 	Mode string `json:"mode,omitempty"`
+	// Label overrides what run_state reports as the source, for a request
+	// whose Source is a server-side temp path nobody typed (an uploaded
+	// .torrent). Never set from JSON: it only exists on requests the server
+	// itself builds.
+	Label string `json:"-"`
 }
 
 // Runner starts a run and returns its event stream.
@@ -83,6 +95,13 @@ type runState struct {
 	source string
 	cancel context.CancelFunc
 	active bool
+	// cleanup runs once, after the run's event stream ends. It exists for
+	// handleUploadTorrent's staged temp file: swarm.Open re-reads a file
+	// Source from disk (AddTorrentFromFile) from inside the run's own
+	// goroutine, not during the synchronous ParseSource call StartRun already
+	// waited on - so the file has to outlive StartRun's return and can only
+	// be removed once the run that might still be reading it is over.
+	cleanup func()
 }
 
 // Start listens and begins serving. The returned server must be closed.
@@ -153,6 +172,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("POST /runs", s.handleStartRun)
+	mux.HandleFunc("POST /runs/upload", s.handleUploadTorrent)
 	mux.HandleFunc("POST /runs/cancel", s.handleCancelRun)
 	mux.HandleFunc("GET /files/{id}", s.handleFile)
 	mux.Handle("GET /", http.FileServerFS(assets))
@@ -186,20 +206,35 @@ func mountRoot(next http.Handler) http.Handler {
 // two tabs cannot quietly compete for the same output directory and traffic
 // budget. The caller cancels the current one first.
 func (s *Server) StartRun(req RunRequest) error {
+	return s.startRun(req, nil)
+}
+
+// startRun is StartRun plus an optional cleanup, run once the run this
+// request begins is over - win, lose, or never started. handleUploadTorrent
+// is the only caller that passes one, to remove its staged temp file only
+// once nothing can still be reading it.
+func (s *Server) startRun(req RunRequest, cleanup func()) error {
+	done := func(err error) error {
+		if cleanup != nil {
+			cleanup()
+		}
+		return err
+	}
+
 	req.Source = strings.TrimSpace(req.Source)
 	if req.Source == "" {
-		return errors.New("give a magnet link or a .torrent file")
+		return done(errors.New("give a magnet link or a .torrent file"))
 	}
 
 	s.mu.Lock()
 
 	if s.stopped {
 		s.mu.Unlock()
-		return errors.New("web: server is closed")
+		return done(errors.New("web: server is closed"))
 	}
 	if s.run != nil && s.run.active {
 		s.mu.Unlock()
-		return ErrRunInProgress
+		return done(ErrRunInProgress)
 	}
 
 	ctx, cancel := context.WithCancel(s.baseCtx)
@@ -207,10 +242,14 @@ func (s *Server) StartRun(req RunRequest) error {
 	if err != nil {
 		cancel()
 		s.mu.Unlock()
-		return err
+		return done(err)
 	}
 
-	state := &runState{source: req.Source, cancel: cancel, active: true}
+	display := req.Source
+	if req.Label != "" {
+		display = req.Label
+	}
+	state := &runState{source: display, cancel: cancel, active: true, cleanup: cleanup}
 	s.run = state
 	rec := s.stateRecordLocked(true)
 	s.mu.Unlock()
@@ -240,6 +279,10 @@ func (s *Server) CancelRun() error {
 func (s *Server) pump(state *runState, events <-chan core.Event) {
 	for ev := range events {
 		s.hub.publish(s.record(ev))
+	}
+
+	if state.cleanup != nil {
+		state.cleanup()
 	}
 
 	s.mu.Lock()

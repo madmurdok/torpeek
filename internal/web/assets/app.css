@@ -3,36 +3,140 @@
 body {
   margin: 0 auto;
   padding: 1.5rem 1rem 4rem;
-  max-width: 60rem;
+  max-width: 64rem;
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 header { display: flex; align-items: baseline; gap: .75rem; }
 h1 { font-size: 1.4rem; margin: 0; }
-h2 { font-size: 1rem; margin: 2rem 0 .5rem; }
+h2 { font-size: 1rem; margin: 0; }
+h3 { font-size: .8rem; margin: .6rem 0 .2rem; opacity: .7; text-transform: uppercase; letter-spacing: .04em; }
 
 .status { font-size: .8rem; opacity: .7; }
 .status[data-state="live"] { color: #1a7f37; opacity: 1; }
 .status[data-state="lost"] { color: #b35900; opacity: 1; }
 
-form { display: flex; gap: .5rem; margin: 1rem 0; flex-wrap: wrap; }
-#source { flex: 1 1 24rem; min-width: 16rem; padding: .45rem .6rem; font: inherit; }
-select, button { padding: .45rem .7rem; font: inherit; }
+/* Intake: magnet field, mode, buttons, and the drop target for a .torrent. */
+.intake { margin: 1rem 0 1.5rem; }
+
+form { display: flex; flex-direction: column; gap: .6rem; }
+
+.dropzone {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
+  border: 1px dashed #8888;
+  border-radius: .5rem;
+  padding: .6rem .75rem;
+}
+
+#source { flex: 1 1 22rem; min-width: 14rem; padding: .45rem .6rem; font: inherit; border: 1px solid #8886; border-radius: .35rem; }
+
+.browse { font-size: .85rem; opacity: .8; cursor: pointer; white-space: nowrap; }
+.browse .link { text-decoration: underline; }
+
+.controls { display: flex; gap: .5rem; flex-wrap: wrap; }
+select, button { padding: .45rem .7rem; font: inherit; border-radius: .35rem; }
 button:disabled { opacity: .5; }
 
+.hint { font-size: .78rem; opacity: .6; margin: .4rem 0 0; }
 .error { color: #b3261e; }
-.summary { opacity: .8; }
 
-.frames {
+.torrent-summary { opacity: .85; font-weight: 500; }
+
+/* One block per torrent file: its summary panel, its progress, its grid. */
+.files { display: flex; flex-direction: column; gap: 1.75rem; margin-top: 1rem; }
+
+.file { border-top: 1px solid #8884; padding-top: 1rem; }
+
+.file-title {
+  overflow-wrap: anywhere;
+}
+
+.specs {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  grid-template-columns: auto 1fr;
+  column-gap: .6rem;
+  row-gap: .1rem;
+  margin: .5rem 0;
+  font-size: .85rem;
+}
+.specs dt { opacity: .6; }
+.specs dd { margin: 0; }
+
+.tracks { display: flex; gap: 2rem; flex-wrap: wrap; }
+.track-group ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; }
+.track-group li { margin: .1rem 0; }
+
+.file-links { font-size: .8rem; display: flex; gap: 1rem; }
+.file-links a { color: inherit; }
+
+.file-progress { font-size: .8rem; opacity: .75; margin: .5rem 0; }
+
+/* The live frame grid: fills as frame_ready events arrive, click for full size. */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
   gap: .6rem;
 }
-.frames figure { margin: 0; }
-.frames img { width: 100%; display: block; background: #0002; }
-.frames figcaption { font-size: .75rem; opacity: .75; }
-.frames .shifted { color: #b35900; }
+.thumb { margin: 0; cursor: pointer; }
+.thumb img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #0002; border-radius: .25rem; }
+.thumb figcaption { font-size: .72rem; opacity: .75; }
+.thumb .shifted { color: #b35900; }
+.thumb:focus-visible img { outline: 2px solid #1a7f37; outline-offset: 2px; }
 
+/* Full-size view. */
+.lightbox {
+  border: none;
+  border-radius: .5rem;
+  padding: 1rem;
+  max-width: 92vw;
+  max-height: 92vh;
+  background: canvas;
+  color: canvastext;
+}
+.lightbox::backdrop { background: #000c; }
+.lightbox img { display: block; max-width: 88vw; max-height: 80vh; margin: 0 auto; }
+.lightbox-caption { text-align: center; font-size: .85rem; opacity: .8; margin: .5rem 0 0; }
+.lightbox-close {
+  position: absolute;
+  top: .4rem;
+  right: .5rem;
+  border: none;
+  background: none;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: .2rem .5rem;
+}
+
+/* Drag-and-drop feedback, shown while a file is dragged over the page. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1a7f3722;
+  border: .4rem dashed #1a7f37;
+  z-index: 10;
+  pointer-events: none;
+}
+/* A class selector otherwise beats the UA rule for [hidden] at equal
+   specificity, which would leave this shown at page load. */
+.drop-overlay[hidden] { display: none; }
+.drop-overlay p {
+  background: canvas;
+  color: canvastext;
+  padding: .75rem 1.25rem;
+  border-radius: .5rem;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
+
+.log-details { margin-top: 2rem; }
+.log-details summary { cursor: pointer; font-size: .85rem; opacity: .75; }
 .log {
   max-height: 22rem;
   overflow: auto;
@@ -40,4 +144,5 @@ button:disabled { opacity: .5; }
   background: #0000000d;
   font-size: .78rem;
   white-space: pre-wrap;
+  margin-top: .5rem;
 }

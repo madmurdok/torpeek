@@ -3,12 +3,20 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// maxTorrentUpload bounds a dropped .torrent, not the download that follows:
+// a real .torrent file is rarely more than a few hundred KB even for a large
+// multi-file release, so this is generous headroom against a mistaken drop,
+// not an expected size.
+const maxTorrentUpload = 32 << 20
 
 // Bounds on the event socket. A browser that stops reading must not pin a
 // run's events in memory forever, and a connection whose peer vanished
@@ -119,6 +127,77 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The result arrives as events, not as this response's body.
+	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+}
+
+// handleUploadTorrent begins a run for a .torrent dropped onto the page.
+//
+// The bytes cannot be a Source themselves - swarm.ParseSource reads a magnet
+// string or a filesystem path, not a byte stream - so this stages the upload
+// as a temp file and hands its path to the exact same StartRun a pasted
+// magnet goes through (see the RunRequest doc). That path has to survive
+// past this handler's return: swarm.Open re-reads a file Source from disk
+// (AddTorrentFromFile) from inside the run's own goroutine, well after
+// StartRun - and therefore this handler - has returned, so the temp file is
+// only removed once startRun's cleanup says the run that might still be
+// reading it is over.
+func (s *Server) handleUploadTorrent(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxTorrentUpload)
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "read the upload: "+err.Error())
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+
+	file, _, err := r.FormFile("torrent")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "no .torrent file in the upload: "+err.Error())
+		return
+	}
+	defer file.Close()
+
+	dir, err := os.MkdirTemp("", "torpeek-upload-*")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stage the upload: "+err.Error())
+		return
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+
+	// A fixed name rather than the browser-supplied filename: that value is
+	// attacker-controlled input and buys nothing here, since only this
+	// request ever reads the path back.
+	path := filepath.Join(dir, "upload.torrent")
+	dst, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		cleanup()
+		writeError(w, http.StatusInternalServerError, "stage the upload: "+err.Error())
+		return
+	}
+	_, copyErr := io.Copy(dst, file)
+	closeErr := dst.Close()
+	if copyErr != nil {
+		cleanup()
+		writeError(w, http.StatusInternalServerError, "stage the upload: "+copyErr.Error())
+		return
+	}
+	if closeErr != nil {
+		cleanup()
+		writeError(w, http.StatusInternalServerError, "stage the upload: "+closeErr.Error())
+		return
+	}
+
+	req := RunRequest{Source: path, Mode: r.FormValue("mode"), Label: "dropped .torrent"}
+	// startRun (via done()) runs cleanup itself on every path that does not
+	// end up starting a run; a run that does start defers cleanup to pump.
+	if err := s.startRun(req, cleanup); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrRunInProgress) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+
 	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
 }
 
