@@ -26,8 +26,13 @@ type MetadataReady struct {
 	Name     string
 	InfoHash string
 	Private  bool
-	// Videos are the files that will be processed, in torrent order.
+	// Videos are every video file the torrent holds, in torrent order.
 	Videos []swarm.FileInfo
+	// Selected are the torrent indices actually being worked on. It equals
+	// every entry of Videos unless the run named a subset; a client showing
+	// progress needs the number it is counting towards, not the number the
+	// torrent happens to contain.
+	Selected []int
 	// BlindDHT reports that DHT was used before the private flag could be
 	// checked - only possible for a magnet with no trackers. Surfaced rather
 	// than hidden, because on a private tracker it matters.

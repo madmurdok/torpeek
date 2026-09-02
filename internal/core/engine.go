@@ -35,6 +35,10 @@ type Config struct {
 	// Format is the image encoding for frames.
 	Format frames.Format
 
+	// Files narrows the run to some of the torrent's video files, by torrent
+	// index or by path pattern (see swarm.Select). Empty means all of them.
+	Files []string
+
 	Swarm  swarm.Config
 	Bridge bridge.Config
 }
@@ -110,11 +114,18 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	defer session.Close()
 
 	videos := torrent.Videos()
+
+	// Resolved before the event so it can say what is being worked on, but
+	// reported after it either way: a caller whose selection matched nothing
+	// still wants to see what the torrent held.
+	selected, selErr := swarm.Select(videos, cfg.Files)
+
 	bus.Publish(MetadataReady{
 		Name:     torrent.Name(),
 		InfoHash: torrent.InfoHash(),
 		Private:  torrent.Private(),
 		Videos:   videos,
+		Selected: indicesOf(selected),
 		BlindDHT: session.WentOnlineBlind(),
 	})
 
@@ -123,13 +134,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		bus.Publish(Failed{File: -1, Code: CodeNoVideo, Err: err})
 		return
 	}
+	if selErr != nil {
+		bus.Publish(Failed{File: -1, Code: CodeOf(selErr), Err: selErr})
+		return
+	}
 
 	// The budget covers the whole run, so every file shares one tracker.
-	budget := cfg.Budget
-	if budget.MaxBytes == 0 && budget.MaxTime == 0 {
-		budget = DefaultBudget(len(videos))
-	}
-	tracker := NewBudgetTracker(budget, torrent)
+	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent)
 
 	runCtx, cancel := tracker.Context(ctx)
 	defer cancel()
@@ -165,7 +176,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
-	for _, video := range videos {
+	for _, video := range selected {
 		if reason, halt := haltReason(runCtx, tracker); halt {
 			mu.Lock()
 			stopped = reason
@@ -429,6 +440,30 @@ func extensionFor(format frames.Format) string {
 //
 // Budgets and parallelism are deliberately excluded: they change how long a
 // run takes, not what a finished one contains.
+// budgetFor resolves the run's budget, defaulting it to the number of files
+// actually being worked on rather than everything the torrent holds: asking
+// for one episode out of twenty should get one episode's worth of traffic, not
+// a twentieth of the pack's.
+func budgetFor(cfg Config, selected int) Budget {
+	if cfg.Budget.MaxBytes == 0 && cfg.Budget.MaxTime == 0 {
+		return DefaultBudget(selected)
+	}
+	return cfg.Budget
+}
+
+// indicesOf reduces files to the numbers the torrent knows them by.
+func indicesOf(files []swarm.FileInfo) []int {
+	out := make([]int, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.Index)
+	}
+	return out
+}
+
+// The file selection is deliberately not part of the key. Which files a run
+// asked for does not change what a frame of any one of them looks like, and
+// keying on it would scatter the same file's frames across directories - and
+// stop a later run from reusing what an earlier, narrower one already fetched.
 func ParamsKey(cfg Config) string {
 	raw := fmt.Sprintf("n=%d;start=%.4f;end=%.4f;profile=%s;format=%s",
 		cfg.Plan.Count, cfg.Plan.Start, cfg.Plan.End, cfg.Profile.Name, cfg.Format)

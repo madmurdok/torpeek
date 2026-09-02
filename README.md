@@ -121,6 +121,8 @@ make fmt
 | `-format` | `jpeg` | `jpeg` or `png` |
 | `-max-bytes` | 150 MiB per file, capped at 2 GiB | traffic ceiling for the run |
 | `-max-time` | `10m` | time ceiling for the run |
+| `-file` | all of them | which video files to process: torrent index or path pattern, comma-separated |
+| `-list` | `false` | list the torrent's video files and exit, without taking frames |
 | `-parallel` | `4` | video files to work on at once |
 | `-torrent-port` | any free port | BitTorrent listen port, for a fixed port range |
 | `-bridge-port` | any free port | loopback port for the internal HTTP bridge |
@@ -131,6 +133,18 @@ make fmt
 
 Ctrl+C cancels the run rather than killing it: frames already written stay, and
 the summary still prints.
+
+A pack does not need a frame set from every episode to answer whether it is the
+right rip. `-list` shows what is inside without fetching any of it, and `-file`
+narrows the run — by the index `-list` prints, or by a pattern:
+
+```sh
+./bin/torpeek -list season-1.torrent
+./bin/torpeek -file S01E03 season-1.torrent      # or -file 11, or -file '*.mkv'
+```
+
+The traffic ceiling follows the selection, so one episode gets one episode's
+worth of budget rather than a share of the pack's.
 
 ### Output layout
 
