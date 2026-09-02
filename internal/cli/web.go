@@ -44,6 +44,12 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	}
 	cfg.BasePath = opts.BasePath
 	cfg.Token = opts.Token
+	// GET /runs lists what is already on disk (TOR-54) from the same root
+	// the engine writes to and reads cache hits from - base is the one
+	// shared core.Config this closure already reads OutputRoot from for
+	// every run, so the listing and a run agree on where results live
+	// without web deciding that itself.
+	cfg.OutputRoot = base.OutputRoot
 
 	server, err := web.Start(ctx, cfg, runner)
 	if err != nil {
