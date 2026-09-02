@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -30,13 +32,51 @@ const (
 	readLimit = 4 << 10
 )
 
-// upgrader keeps gorilla's default origin check, which requires the Origin
-// header to match the Host the request arrived on. Behind a reverse proxy
-// that sets Host correctly this still passes, and on a desktop it is what
-// keeps another site in the same browser from opening this socket.
+// upgrader's origin check is checkOrigin rather than gorilla's stock
+// same-origin comparison - see its doc comment for why X-Forwarded-Host has
+// to be part of it once nginx is in front (section 3.3).
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1 << 10,
 	WriteBufferSize: 8 << 10,
+	CheckOrigin:     checkOrigin,
+}
+
+// checkOrigin defends the socket the same way gorilla's default does -
+// reject a cross-site page in the same browser from opening it - but adds
+// one fallback: accept an Origin that matches X-Forwarded-Host instead of
+// r.Host.
+//
+// Behind a reverse proxy, r.Host is whatever Host header the proxy forwards,
+// and the boilerplate WebSocket-upgrade config people copy sets
+// X-Forwarded-Host without always remembering to also rewrite Host itself
+// (nginx's own default, absent an explicit proxy_set_header Host, sends the
+// upstream address). Without this fallback that already-common config would
+// 403 every browser tab, since the Origin a real browser sends is the public
+// host, never the upstream one.
+//
+// This does not weaken the check: X-Forwarded-Host is attacker-controlled
+// input whenever the server is reachable directly, but so is Origin, and a
+// raw client able to set one can set the other to match r.Host and pass the
+// stock check anyway. The header is trusted for exactly what it is - the
+// public name this request is asking for - never used to build a URL.
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+
+	// A chain of proxies appends to X-Forwarded-Host; only the first entry
+	// names what the client actually asked for.
+	forwarded, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
+	forwarded = strings.TrimSpace(forwarded)
+	return forwarded != "" && strings.EqualFold(u.Host, forwarded)
 }
 
 // handleEvents upgrades to a WebSocket, replays the run so far and then

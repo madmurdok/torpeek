@@ -610,6 +610,179 @@ func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
 	}
 }
 
+// TestConfiguredBasePathIsServedEndToEnd is TestWorksUnderABasePath's
+// counterpart at the level a person actually configures it: Config.BasePath
+// through a real Start(), not a hand-mounted mux. TestWorksUnderABasePath
+// already proves the StripPrefix seam works; this proves -base-path (which
+// sets exactly this field) reaches it, including URL() reporting the
+// prefixed address a person is told to open.
+func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
+	fake := &fakeRun{}
+
+	port := freeWebPort(t)
+	addr := net.JoinHostPort("127.0.0.1", port)
+
+	cfg := DefaultConfig()
+	cfg.Addr = addr
+	cfg.BasePath = "torpeek" // no leading slash: normalizeBasePath's job
+
+	srv, err := Start(context.Background(), cfg, fake.runner)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { srv.Close() })
+
+	root := "http://" + addr
+	if want := root + "/torpeek/"; srv.URL() != want {
+		t.Fatalf("URL() = %q, want %q", srv.URL(), want)
+	}
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Get(root + "/torpeek")
+	if err != nil {
+		t.Fatalf("GET /torpeek: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMovedPermanently {
+		t.Fatalf("GET /torpeek: status %d, want 301", resp.StatusCode)
+	}
+	if location := resp.Header.Get("Location"); location != "/torpeek/" {
+		t.Errorf("GET /torpeek redirects to %q, want /torpeek/", location)
+	}
+
+	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/app.css"} {
+		resp, err := http.Get(root + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: status %d, want 200", path, resp.StatusCode)
+		}
+	}
+
+	conn := dial(t, srv.URL())
+	if got := next(t, conn); got["type"] != "run_state" {
+		t.Errorf("under the configured base path the socket said %v, want run_state", got)
+	}
+
+	if resp := post(t, root, "/torpeek/runs", `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusAccepted {
+		t.Errorf("POST /torpeek/runs: status %d, want 202", resp.StatusCode)
+	}
+}
+
+// TestNormalizeBasePath covers the forms -base-path can arrive in: with or
+// without a leading/trailing slash, blank, whitespace, or nothing at all
+// (meaning the site root).
+func TestNormalizeBasePath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"/", ""},
+		{"torpeek", "/torpeek"},
+		{"/torpeek", "/torpeek"},
+		{"/torpeek/", "/torpeek"},
+		{"  /torpeek/  ", "/torpeek"},
+		{"/a/b/", "/a/b"},
+	}
+	for _, tc := range cases {
+		if got := normalizeBasePath(tc.in); got != tc.want {
+			t.Errorf("normalizeBasePath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestEventSocketAcceptsSameHostOrigin is the ordinary case, no proxy
+// involved: a page served by this origin opens the socket.
+func TestEventSocketAcceptsSameHostOrigin(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	address := "ws" + strings.TrimPrefix(ts.URL, "http") + "/events"
+	header := http.Header{"Origin": {ts.URL}}
+	conn, resp, err := websocket.DefaultDialer.Dial(address, header)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("dial with a matching Origin: %v (status %d)", err, status)
+	}
+	conn.Close()
+}
+
+// TestEventSocketRejectsForeignOrigin is the case checkOrigin exists to
+// stop: a hostile page open in the same browser trying to open this socket.
+func TestEventSocketRejectsForeignOrigin(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	address := "ws" + strings.TrimPrefix(ts.URL, "http") + "/events"
+	header := http.Header{"Origin": {"http://evil.example"}}
+	_, resp, err := websocket.DefaultDialer.Dial(address, header)
+	if err == nil {
+		t.Fatal("dial with a foreign Origin succeeded, want a rejection")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Errorf("status = %d, want 403", status)
+	}
+}
+
+// TestEventSocketAcceptsOriginMatchingForwardedHost is the reverse-proxy
+// case: r.Host is whatever the proxy forwards as Host (nginx's own default,
+// absent an explicit proxy_set_header Host, is the upstream address), while
+// the browser's Origin names the public host the proxy also sends along as
+// X-Forwarded-Host.
+func TestEventSocketAcceptsOriginMatchingForwardedHost(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	address := "ws" + strings.TrimPrefix(ts.URL, "http") + "/events"
+	header := http.Header{
+		"Origin":           {"https://user.host.example"},
+		"X-Forwarded-Host": {"user.host.example"},
+	}
+	conn, resp, err := websocket.DefaultDialer.Dial(address, header)
+	if err != nil {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Fatalf("dial with Origin matching X-Forwarded-Host: %v (status %d)", err, status)
+	}
+	conn.Close()
+}
+
+// TestEventSocketRejectsOriginNotMatchingForwardedHost keeps the fallback
+// from widening acceptance to "anything with a Forwarded-Host header" - it
+// only ever adds X-Forwarded-Host itself to the accepted set.
+func TestEventSocketRejectsOriginNotMatchingForwardedHost(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	address := "ws" + strings.TrimPrefix(ts.URL, "http") + "/events"
+	header := http.Header{
+		"Origin":           {"http://evil.example"},
+		"X-Forwarded-Host": {"user.host.example"},
+	}
+	_, resp, err := websocket.DefaultDialer.Dial(address, header)
+	if err == nil {
+		t.Fatal("dial with an Origin matching neither Host nor X-Forwarded-Host succeeded, want a rejection")
+	}
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		t.Errorf("status = %d, want 403", status)
+	}
+}
+
 func readAll(t *testing.T, resp *http.Response) string {
 	t.Helper()
 

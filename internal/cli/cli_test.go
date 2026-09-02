@@ -147,6 +147,39 @@ func TestWebAddr(t *testing.T) {
 	}
 }
 
+// TestBasePathAndHeadlessFlagsParse is the CLI half of TOR-29's plumbing:
+// -base-path and -headless must land unaltered in Options for serveWeb to
+// use. What they do once there is the web package's own tests
+// (TestConfiguredBasePathIsServedEndToEnd) and the headless behaviour proven
+// against the real binary in this task's manual verification.
+func TestBasePathAndHeadlessFlagsParse(t *testing.T) {
+	opts, err := parse([]string{"-web", "-base-path", "/torpeek", "-headless"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.BasePath != "/torpeek" {
+		t.Errorf("BasePath = %q, want /torpeek", opts.BasePath)
+	}
+	if !opts.Headless {
+		t.Error("Headless = false, want true")
+	}
+}
+
+// TestBasePathAndHeadlessDefaultOff: neither flag given must leave the site
+// root and a browser opened, the behaviour before this task existed.
+func TestBasePathAndHeadlessDefaultOff(t *testing.T) {
+	opts, err := parse([]string{"-web"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.BasePath != "" {
+		t.Errorf("BasePath = %q, want empty by default", opts.BasePath)
+	}
+	if opts.Headless {
+		t.Error("Headless = true, want false by default")
+	}
+}
+
 // sampleTorrent renders a clip, makes a torrent of it and starts a seeder.
 func sampleTorrent(t *testing.T) (torrentPath, seeder string) {
 	t.Helper()

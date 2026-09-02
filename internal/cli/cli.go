@@ -57,6 +57,8 @@ type Options struct {
 	BridgePort  int
 	WebHost     string
 	WebPort     int
+	BasePath    string
+	Headless    bool
 	Peers       []string
 	Upload      bool
 	DHT         bool
@@ -161,6 +163,8 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge (default: an OS-assigned port; required where a port range is allocated)")
 	fs.StringVar(&opts.WebHost, "web-host", "", "bind address for the web UI (default: "+web.DefaultHost+"; a reverse proxy on the same host is the documented way to expose it, section 3.3)")
 	fs.IntVar(&opts.WebPort, "web-port", 0, fmt.Sprintf("port for the web UI (default: %d)", web.DefaultPort))
+	fs.StringVar(&opts.BasePath, "base-path", "", "path the UI is mounted under behind a reverse proxy, e.g. /torpeek (default: the site root, section 3.3)")
+	fs.BoolVar(&opts.Headless, "headless", false, "do not try to open a browser; only serve (for a seedbox with no desktop, section 3.3)")
 	fs.BoolVar(&opts.Upload, "upload", true, "serve pieces back to the swarm while running")
 	fs.BoolVar(&opts.DHT, "dht", true, "use DHT and PEX (never for a private torrent)")
 	fs.BoolVar(&opts.Sequential, "sequential", false, "when a container has no usable index, degrade to sequential capture from the start instead of failing")

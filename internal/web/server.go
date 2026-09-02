@@ -43,6 +43,12 @@ type Config struct {
 	// somewhere else on a port out of its allocated range.
 	Addr string
 
+	// BasePath is where the UI is mounted, such as "/torpeek" for a seedbox
+	// behind nginx (REQUIREMENTS.md section 4.1). Empty mounts at the site
+	// root. Whatever is given is normalized (normalizeBasePath) before use,
+	// so "torpeek", "/torpeek" and "/torpeek/" all mean the same thing.
+	BasePath string
+
 	// ShutdownTimeout bounds how long Close waits for in-flight requests.
 	ShutdownTimeout time.Duration
 }
@@ -137,8 +143,8 @@ func Start(ctx context.Context, cfg Config, runner Runner) (*Server, error) {
 	}
 
 	s := newServer(ctx, cfg, runner)
-	s.url = "http://" + ln.Addr().String() + "/"
-	s.server = &http.Server{Handler: s.Handler()}
+	s.url = "http://" + ln.Addr().String() + s.cfg.BasePath + "/"
+	s.server = &http.Server{Handler: s.mountedHandler()}
 
 	go func() {
 		// http.ErrServerClosed is the normal shutdown path.
@@ -154,6 +160,7 @@ func newServer(ctx context.Context, cfg Config, runner Runner) *Server {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	cfg.BasePath = normalizeBasePath(cfg.BasePath)
 	s := &Server{
 		cfg:     cfg,
 		runner:  runner,
@@ -168,11 +175,13 @@ func newServer(ctx context.Context, cfg Config, runner Runner) *Server {
 // URL is where the UI can be reached.
 func (s *Server) URL() string { return s.url }
 
-// Handler is the whole UI as one http.Handler.
+// Handler is the whole UI as one http.Handler, unprefixed.
 //
 // Every route below is relative to wherever this handler is mounted, and
 // every URL it hands out is relative too, so mounting it under a base path is
-// an http.StripPrefix around this and nothing else (section 3.3).
+// an http.StripPrefix around this and nothing else (section 3.3). Start does
+// exactly that itself, driven by Config.BasePath (see mountedHandler); call
+// Handler directly only when embedding the server under a mux of your own.
 func (s *Server) Handler() http.Handler {
 	assets, err := fs.Sub(embedded, "assets")
 	if err != nil {
@@ -190,6 +199,49 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /", http.FileServerFS(assets))
 
 	return mountRoot(mux)
+}
+
+// mountedHandler is what Start actually serves: Handler with cfg.BasePath
+// applied. Handler itself stays unprefixed - a caller mounting the server
+// under a reverse proxy's own mux (or a test proving the seam, as
+// TestWorksUnderABasePath does) applies http.StripPrefix directly - so this
+// exists only to give -base-path an effect when torpeek serves itself.
+func (s *Server) mountedHandler() http.Handler {
+	return mountBasePath(s.cfg.BasePath, s.Handler())
+}
+
+// mountBasePath wraps handler so it answers under base instead of the site
+// root, the same way TestWorksUnderABasePath mounts it by hand: both the
+// bare prefix and its trailing-slash form point at one http.StripPrefix, so
+// a request landing on the prefix itself still reaches mountRoot's redirect
+// rather than a 404. base must already be normalized (normalizeBasePath);
+// "" mounts handler unchanged.
+func mountBasePath(base string, handler http.Handler) http.Handler {
+	if base == "" {
+		return handler
+	}
+
+	stripped := http.StripPrefix(base, handler)
+	mux := http.NewServeMux()
+	mux.Handle(base, stripped)
+	mux.Handle(base+"/", stripped)
+	return mux
+}
+
+// normalizeBasePath turns whatever -base-path was given into the form the
+// rest of the package expects: a single leading slash and no trailing one.
+// "" and "/" both mean "no base path" - there is nothing for StripPrefix to
+// strip either way - so both collapse to "", which mountBasePath treats as
+// "mount at the root".
+func normalizeBasePath(base string) string {
+	base = strings.TrimSpace(base)
+	if base == "" || base == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(base, "/") {
+		base = "/" + base
+	}
+	return strings.TrimRight(base, "/")
 }
 
 // mountRoot handles being addressed by the mount point itself.
