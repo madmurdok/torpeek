@@ -230,3 +230,82 @@ func TestBudgetStopExitsPartial(t *testing.T) {
 		t.Errorf("stderr = %q, want it to say results were kept", stderr.String())
 	}
 }
+
+// TestListShowsFilesWithoutTakingFrames: choosing which file to look at must
+// not cost what looking at it costs.
+func TestListShowsFilesWithoutTakingFrames(t *testing.T) {
+	torrentPath, seeder := sampleTorrent(t)
+
+	out := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	code := Run(ctx, []string{
+		"-list", "-out", out, "-data", t.TempDir(), "-dht=false", "-peer", seeder, torrentPath,
+	}, &stdout, &stderr)
+
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr.String())
+	}
+	text := stdout.String()
+	t.Logf("stdout:\n%s", text)
+	if !strings.Contains(text, "movie.mkv") {
+		t.Errorf("listing does not name the file: %q", text)
+	}
+	if !strings.Contains(text, "-file") {
+		t.Errorf("listing does not say how to use what it printed: %q", text)
+	}
+
+	var frames int
+	_ = filepath.Walk(out, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			frames++
+		}
+		return nil
+	})
+	if frames != 0 {
+		t.Errorf("listing wrote %d files into the output directory", frames)
+	}
+}
+
+// TestListInJSONIsOneObject, not an event stream: it answers a question rather
+// than reporting a run.
+func TestListInJSONIsOneObject(t *testing.T) {
+	torrentPath, seeder := sampleTorrent(t)
+
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	code := Run(ctx, []string{
+		"-list", "-json", "-out", t.TempDir(), "-data", t.TempDir(),
+		"-dht=false", "-peer", seeder, torrentPath,
+	}, &stdout, &stderr)
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d (stderr: %s)", code, ExitOK, stderr.String())
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want one object", len(lines))
+	}
+
+	var got struct {
+		Type   string `json:"type"`
+		Videos []struct {
+			Index int    `json:"index"`
+			Path  string `json:"path"`
+			Bytes int64  `json:"bytes"`
+		} `json:"videos"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, lines[0])
+	}
+	if got.Type != "contents" {
+		t.Errorf("type = %q, want %q", got.Type, "contents")
+	}
+	if len(got.Videos) != 1 || got.Videos[0].Bytes <= 0 {
+		t.Errorf("videos = %+v, want the one file with a real size", got.Videos)
+	}
+}

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,9 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer) int {
 		case core.MetadataReady:
 			fmt.Fprintf(stdout, "%s\n", e.Name)
 			fmt.Fprintf(stdout, "  %d video file(s)", len(e.Videos))
+			if len(e.Selected) != len(e.Videos) {
+				fmt.Fprintf(stdout, ", %d selected", len(e.Selected))
+			}
 			if e.Private {
 				fmt.Fprint(stdout, ", private torrent (DHT and PEX off)")
 			}
@@ -139,6 +143,7 @@ func wire(ev core.Event) any {
 		return map[string]any{
 			"type": "metadata_ready", "name": e.Name, "infohash": e.InfoHash,
 			"private": e.Private, "videos": len(e.Videos), "blind_dht": e.BlindDHT,
+			"selected": e.Selected,
 		}
 	case core.FileStarted:
 		return map[string]any{
@@ -219,4 +224,42 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// listFiles prints what a torrent holds and returns without taking a frame.
+func listFiles(ctx context.Context, cfg core.Config, asJSON bool, stdout, stderr io.Writer) int {
+	contents, err := (&core.Engine{}).List(ctx, cfg)
+	if err != nil {
+		fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		return ExitFailed
+	}
+
+	if asJSON {
+		videos := make([]map[string]any, 0, len(contents.Videos))
+		for _, f := range contents.Videos {
+			videos = append(videos, map[string]any{
+				"index": f.Index, "path": f.Path, "bytes": f.Length,
+			})
+		}
+		if err := json.NewEncoder(stdout).Encode(map[string]any{
+			"type": "contents", "name": contents.Name, "infohash": contents.InfoHash,
+			"private": contents.Private, "videos": videos, "downloaded": contents.Downloaded,
+		}); err != nil {
+			fmt.Fprintf(stderr, "torpeek: writing contents: %v\n", err)
+			return ExitFailed
+		}
+		return ExitOK
+	}
+
+	fmt.Fprintf(stdout, "%s\n", contents.Name)
+	if len(contents.Videos) == 0 {
+		fmt.Fprintln(stderr, "  no video files")
+		return ExitFailed
+	}
+	for _, f := range contents.Videos {
+		fmt.Fprintf(stdout, "  %3d  %9s  %s\n", f.Index, humanBytes(f.Length), f.Path)
+	}
+	fmt.Fprintf(stdout, "\nname one with -file, by index or by pattern; %s fetched to find out\n",
+		humanBytes(contents.Downloaded))
+	return ExitOK
 }

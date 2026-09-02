@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,5 +366,145 @@ func TestSeekToleranceNeverGoesBelowAKeyframeInterval(t *testing.T) {
 	}
 	if got := seekTolerance([]time.Duration{sec(175.3), sec(341.4)}); got != sec(166.1) {
 		t.Errorf("tolerance = %s, want the spacing between the points", got)
+	}
+}
+
+// TestRunProcessesOnlyTheSelectedFile is the point of the selection: testing
+// or previewing one file of a pack must not cost a run over all of them.
+func TestRunProcessesOnlyTheSelectedFile(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 3, 20, "200k")
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Files = []string{"episode-2"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var (
+		metadata *MetadataReady
+		started  []string
+		byFile   = map[int]int{}
+		done     *Done
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case MetadataReady:
+			metadata = &e
+		case FileStarted:
+			started = append(started, e.Path)
+		case FrameReady:
+			byFile[e.File]++
+		case Failed:
+			t.Errorf("unexpected failure: %s: %v", e.Code, e.Err)
+		case Done:
+			done = &e
+		}
+	}
+
+	if metadata == nil || done == nil {
+		t.Fatal("run produced no metadata or no terminal event")
+	}
+	if len(metadata.Videos) != 3 {
+		t.Errorf("metadata reports %d video files, want all 3 the torrent holds", len(metadata.Videos))
+	}
+	if len(metadata.Selected) != 1 {
+		t.Errorf("metadata reports %d selected, want 1", len(metadata.Selected))
+	}
+	if len(started) != 1 {
+		t.Fatalf("started %d files (%v), want only the selected one", len(started), started)
+	}
+	if !strings.Contains(started[0], "episode-2") {
+		t.Errorf("started %q, want episode-2", started[0])
+	}
+	if len(byFile) != 1 || byFile[metadata.Selected[0]] != cfg.Plan.Count {
+		t.Errorf("frames by file = %v, want %d frames for file %v only",
+			byFile, cfg.Plan.Count, metadata.Selected)
+	}
+	if done.Files != 1 {
+		t.Errorf("Done reports %d files, want 1", done.Files)
+	}
+}
+
+// TestRunRefusesASelectionThatMatchesNothing: the caller has to be able to
+// tell "you asked for a file that is not here" from "there was nothing worth
+// taking", which look the same from outside.
+func TestRunRefusesASelectionThatMatchesNothing(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 2, 15, "200k")
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Files = []string{"episode-9"}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var (
+		sawMetadata bool
+		failure     *Failed
+		frames      int
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case MetadataReady:
+			sawMetadata = true
+			if len(e.Videos) != 2 {
+				t.Errorf("metadata reports %d videos, want the 2 the torrent holds", len(e.Videos))
+			}
+		case FrameReady:
+			frames++
+		case Failed:
+			failure = &e
+		}
+	}
+
+	if !sawMetadata {
+		t.Error("no metadata event - a caller whose selection missed still needs to see what was there")
+	}
+	if frames != 0 {
+		t.Errorf("%d frames were taken despite the selection matching nothing", frames)
+	}
+	if failure == nil {
+		t.Fatal("run did not fail on a selection matching nothing")
+	}
+	if failure.Code != CodeNoFileMatch {
+		t.Errorf("failure code = %q, want %q", failure.Code, CodeNoFileMatch)
+	}
+	if !strings.Contains(failure.Err.Error(), "episode-1.mkv") {
+		t.Errorf("failure %q does not say what could have been named instead", failure.Err)
+	}
+}
+
+// TestBudgetScalesWithTheSelection, not with what the torrent happens to hold.
+func TestBudgetScalesWithTheSelection(t *testing.T) {
+	cfg := Config{} // no explicit budget, so the default applies
+
+	one := budgetFor(cfg, 1)
+	twenty := budgetFor(cfg, 20)
+
+	if one.MaxBytes != DefaultBudget(1).MaxBytes {
+		t.Errorf("one selected file gets %d bytes, want one file's worth (%d)",
+			one.MaxBytes, DefaultBudget(1).MaxBytes)
+	}
+	if twenty.MaxBytes <= one.MaxBytes {
+		t.Errorf("twenty files get %d bytes, not more than one file's %d",
+			twenty.MaxBytes, one.MaxBytes)
+	}
+
+	explicit := Config{Budget: Budget{MaxBytes: 7 << 20}}
+	if got := budgetFor(explicit, 20); got.MaxBytes != 7<<20 {
+		t.Errorf("an explicit ceiling became %d; it must be left alone", got.MaxBytes)
 	}
 }
