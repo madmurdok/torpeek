@@ -3,6 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -202,6 +203,106 @@ func TestBridgeRequestTimesOut(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("request did not return - the bridge can be hung by a slow fetch")
 	}
+}
+
+// TestBridgeRecordsAStalledRead is the bridge's half of TOR-45: a read that
+// ran out of time has to be visible as such, because nothing downstream can
+// tell it from a defective file. The client sees headers, then a body that
+// stops early - which is exactly what a truncated container looks like.
+func TestBridgeRecordsAStalledRead(t *testing.T) {
+	content := &memoryContent{data: make([]byte, 4096), delay: time.Hour}
+	b := startTestBridge(t, content, 300*time.Millisecond)
+
+	url, _, err := b.Publish(content, 0)
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	if n, last := b.Stalls(url); n != 0 || last != nil {
+		t.Fatalf("Stalls before any request = (%d, %v), want (0, nil)", n, last)
+	}
+
+	// Not the get helper: the whole point is that the response is unfinished,
+	// so reading it fails with an unexpected EOF - which is precisely what
+	// ffprobe sees and mistakes for a defective file.
+	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req.Header.Set("Range", "bytes=100-1099")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	read, readErr := io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	t.Logf("client saw Content-Length %d, read %d bytes, then: %v", resp.ContentLength, read, readErr)
+
+	n, last := b.Stalls(url)
+	if n != 1 {
+		t.Fatalf("Stalls after a timed-out read = %d, want 1", n)
+	}
+	if !errors.Is(last, ErrStalled) {
+		t.Fatalf("recorded error %v does not match ErrStalled", last)
+	}
+
+	var stall *StallError
+	if !errors.As(last, &stall) {
+		t.Fatalf("recorded error %v is not a *StallError", last)
+	}
+	if stall.Off != 100 || stall.Length != 1000 || stall.Delivered != 0 {
+		t.Errorf("stall = %+v, want the 1000 bytes asked for at offset 100, none delivered", stall)
+	}
+	if stall.Elapsed < 300*time.Millisecond {
+		t.Errorf("stall elapsed %s, want at least the 300ms timeout", stall.Elapsed)
+	}
+	t.Logf("recorded: %v", last)
+}
+
+// TestBridgeDoesNotCountANormalReadAsAStall is the control for the test above.
+// Without it, "a stall was recorded" would prove nothing: a counter that
+// increments on every request would pass the test above and mislabel every
+// healthy run.
+//
+// The second case is the one that matters. ffmpeg asks for "this offset to the
+// end of the file" and hangs up after a few hundred kilobytes, leaving the
+// response unfinished on purpose. That is the single most common request shape
+// in a run, and calling it a stall would put read_stalled on every file.
+func TestBridgeDoesNotCountANormalReadAsAStall(t *testing.T) {
+	// Larger than any socket buffer, so the copy is still going when the
+	// client walks away.
+	content := &memoryContent{data: make([]byte, 8<<20)}
+	b := startTestBridge(t, content, 30*time.Second)
+
+	url, _, err := b.Publish(content, 0)
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+
+	t.Run("a served range", func(t *testing.T) {
+		get(t, url, "bytes=0-4095")
+		if n, last := b.Stalls(url); n != 0 {
+			t.Errorf("Stalls after a healthy read = (%d, %v), want 0", n, last)
+		}
+	})
+
+	t.Run("a client that hangs up mid-body", func(t *testing.T) {
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if _, err := io.ReadFull(resp.Body, make([]byte, 4096)); err != nil {
+			t.Fatalf("read the first 4 KiB: %v", err)
+		}
+		resp.Body.Close()
+
+		// The handler notices on its next write, not instantly; give it room
+		// to record a stall if it were going to.
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if n, last := b.Stalls(url); n != 0 {
+				t.Fatalf("a client hanging up was recorded as a stall: (%d, %v)", n, last)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 }
 
 func get(t *testing.T, url, rangeHeader string) ([]byte, *http.Response) {

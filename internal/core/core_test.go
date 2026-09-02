@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/madmurdok/torpeek/internal/bridge"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/probe"
 	"github.com/madmurdok/torpeek/internal/swarm"
@@ -183,6 +184,16 @@ func TestCodeOfClassifiesPipelineErrors(t *testing.T) {
 		{name: "no metadata", err: fmt.Errorf("open: %w", swarm.ErrNoMetadata), want: CodeNoMetadata},
 		{name: "privacy", err: swarm.ErrPrivacyUnresolvable, want: CodePrivacyUnresolvable},
 		{name: "no index", err: fmt.Errorf("inspect: %w", probe.ErrNoIndex), want: CodeUnprobeable},
+		{name: "stalled read", err: &bridge.StallError{Off: 1 << 20, Length: 4 << 20}, want: CodeReadStalled},
+		// The pair that TOR-45 is about: ffprobe's verdict on a file it never
+		// finished reading, carried alongside the reason it could not. The
+		// stall is the honest half, so it is the one that names the code.
+		{
+			name: "stall under a container verdict",
+			err: fmt.Errorf("%w; ffprobe then reported: %v",
+				&bridge.StallError{Off: 1 << 20, Length: 4 << 20}, probe.ErrNoIndex),
+			want: CodeReadStalled,
+		},
 		{name: "tool missing", err: &ffmpeg.NotFoundError{Tool: "ffmpeg"}, want: CodeToolMissing},
 		{name: "tool failed", err: &ffmpeg.ExitError{Tool: "ffmpeg", Code: 1}, want: CodeDecodeFailed},
 		{name: "unknown", err: errors.New("something new"), want: CodeInternal},
