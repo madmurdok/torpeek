@@ -55,8 +55,16 @@ func testServer(t *testing.T, runner Runner) *httptest.Server {
 // to read the registry, or to close it while the test watches.
 func newTestServer(t *testing.T, runner Runner) (*Server, *httptest.Server) {
 	t.Helper()
+	return newTestServerWithConfig(t, DefaultConfig(), runner)
+}
 
-	srv := newServer(context.Background(), DefaultConfig(), runner)
+// newTestServerWithConfig is newTestServer for a test that needs a
+// non-default Config - OutputRoot, most often, for the GET /runs tests that
+// need a server pointed at a specific directory.
+func newTestServerWithConfig(t *testing.T, cfg Config, runner Runner) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), cfg, runner)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -143,6 +151,17 @@ func post(t *testing.T, base, path string, body string) *http.Response {
 	resp, err := http.Post(strings.TrimSuffix(base, "/")+path, "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST %s: %v", path, err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func get(t *testing.T, base, path string) *http.Response {
+	t.Helper()
+
+	resp, err := http.Get(strings.TrimSuffix(base, "/") + path)
+	if err != nil {
+		t.Fatalf("GET %s: %v", path, err)
 	}
 	t.Cleanup(func() { resp.Body.Close() })
 	return resp

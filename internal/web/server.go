@@ -66,6 +66,16 @@ type Config struct {
 	// unit that restarts on its own with nobody watching the log for the new
 	// value (REQUIREMENTS.md section 3.3, section 4.1).
 	Token string
+
+	// OutputRoot is where GET /runs looks for runs this process did not
+	// start - output.Layout's root, the same directory a run's own cache hit
+	// (core.serveFromCache) reads. This package never writes there and never
+	// decides a run's parameters from what it finds - it only lists what
+	// cache.LoadRun can read back, per run.json (see listRuns). Empty means
+	// nothing on disk is listed, only the registry: a caller building the
+	// server directly (most tests) has no output directory to speak of, and
+	// leaving it empty rather than requiring one keeps that working.
+	OutputRoot string
 }
 
 // DefaultConfig serves the desktop case: loopback, fixed port.
@@ -250,6 +260,7 @@ func (s *Server) Handler() http.Handler {
 	// authGuard's doc comment for why gating it too would be self-defeating.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /events", s.authGuard(s.handleEvents))
+	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))

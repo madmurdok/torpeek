@@ -63,6 +63,21 @@ func TestUnauthenticatedSocketIsRejectedWithATokenSet(t *testing.T) {
 	}
 }
 
+// TestGETRunsRequiresAuth is GET /runs' share of TOR-30's rule: authGuard
+// wraps every route that serves the API, this one included - the listing is
+// as much a way to see what the owner is doing as the event stream is.
+func TestGETRunsRequiresAuth(t *testing.T) {
+	fake := &fakeRun{}
+	ts := tokenServer(t, fake.runner, "s3cret")
+
+	if resp := get(t, ts.URL, "/runs"); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("GET /runs with no token: status %d, want 401", resp.StatusCode)
+	}
+	if resp := get(t, ts.URL, "/runs?token=s3cret"); resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /runs?token=s3cret: status %d, want 200", resp.StatusCode)
+	}
+}
+
 // TestCorrectTokenReachesTheAPIAndTheSocket proves the token that is
 // accepted is not merely "some non-empty value": it has to be the
 // configured one, on both surfaces.

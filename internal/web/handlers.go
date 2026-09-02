@@ -280,6 +280,12 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleListRuns answers the panel with the live queue plus everything
+// already on disk - see Server.listRuns for how the two are merged.
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"runs": s.listRuns()})
+}
+
 // handleFile serves one file the run announced: a frame, a contact sheet or a
 // manifest. Nothing else on disk is reachable.
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
