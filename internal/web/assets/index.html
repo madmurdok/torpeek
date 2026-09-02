@@ -10,44 +10,48 @@
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header>
-  <h1>torpeek</h1>
-  <span id="status" class="status">connecting</span>
-</header>
-
-<section id="intake" class="intake">
-  <form id="start" autocomplete="off">
-    <div id="dropzone" class="dropzone">
-      <input id="source" name="source" type="text" spellcheck="false"
-             placeholder="Paste a magnet link…">
-      <label class="browse">
-        or <span class="link">choose a .torrent file</span>
-        <input id="file-input" type="file" accept=".torrent" hidden>
-      </label>
-    </div>
-    <div class="controls">
-      <select id="mode" name="mode">
-        <option value="min-time">fastest</option>
-        <option value="min-traffic">least traffic</option>
-      </select>
-      <button id="go" type="submit">Take frames</button>
-    </div>
-  </form>
-  <p class="hint">You can also drop a .torrent file anywhere on this page. Adding another torrent while one is
-    already running just queues it - no need to wait.</p>
-  <p id="error" class="error" hidden></p>
-</section>
-
 <div class="workspace">
-  <aside class="runs-panel">
+  <aside id="runs-panel" class="runs-panel">
+    <header class="panel-header">
+      <h1>torpeek</h1>
+      <span id="status" class="status">connecting</span>
+    </header>
     <h2 class="runs-panel-title">Torrents</h2>
     <ul id="run-list" class="run-list"></ul>
-    <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link above to start.</p>
+    <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
   </aside>
 
-  <section id="detail" class="detail">
-    <p id="detail-empty" class="detail-empty">Select a torrent on the left to see its files and frames.</p>
-  </section>
+  <div id="resizer" class="resizer" role="separator" aria-orientation="vertical"
+       aria-label="Resize the torrent panel" tabindex="0"></div>
+
+  <div class="main">
+    <section id="intake" class="intake">
+      <form id="start" autocomplete="off">
+        <div id="dropzone" class="dropzone">
+          <input id="source" name="source" type="text" spellcheck="false"
+                 placeholder="Paste a magnet link…">
+          <label class="browse">
+            or <span class="link">choose a .torrent file</span>
+            <input id="file-input" type="file" accept=".torrent" hidden>
+          </label>
+        </div>
+        <div class="controls">
+          <select id="mode" name="mode">
+            <option value="min-time">fastest</option>
+            <option value="min-traffic">least traffic</option>
+          </select>
+          <button id="go" type="submit">Take frames</button>
+        </div>
+      </form>
+      <p class="hint">You can also drop a .torrent file anywhere on this page. Adding another torrent while one is
+        already running just queues it - no need to wait.</p>
+      <p id="error" class="error" hidden></p>
+    </section>
+
+    <section id="detail" class="detail">
+      <p id="detail-empty" class="detail-empty">Select a torrent on the left to see its files and frames.</p>
+    </section>
+  </div>
 </div>
 
 <details id="log-details" class="log-details">
