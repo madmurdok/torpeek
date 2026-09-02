@@ -508,3 +508,177 @@ func TestBudgetScalesWithTheSelection(t *testing.T) {
 		t.Errorf("an explicit ceiling became %d; it must be left alone", got.MaxBytes)
 	}
 }
+
+// fakeAvailability stands in for the swarm so the shifting rules can be tested
+// without one - including the case where there is no swarm yet.
+type fakeAvailability struct {
+	// known says whether the swarm has told us anything yet.
+	known bool
+	// holes are byte ranges within the file that nobody holds.
+	holes [][2]int64
+	// pieceLength sets how wide a region reachability is judged over.
+	pieceLength int64
+}
+
+func (f fakeAvailability) Known() bool { return f.known }
+
+func (f fakeAvailability) PieceLength() int64 { return f.pieceLength }
+
+func (f fakeAvailability) OverFileRange(_ swarm.FileInfo, off, length int64) int {
+	for _, h := range f.holes {
+		if off < h[1] && h[0] < off+length {
+			return 0
+		}
+	}
+	return 3
+}
+
+func TestShiftCandidatesTryNearestFirstAndBothSides(t *testing.T) {
+	at := 100 * time.Second
+	got := shiftCandidates(at, 10*time.Second, 300*time.Second)
+
+	want := []time.Duration{
+		100 * time.Second,
+		110 * time.Second, 90 * time.Second,
+		120 * time.Second, 80 * time.Second,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("candidate %d = %s, want %s (%v)", i, got[i], want[i], got)
+		}
+	}
+
+	// Nothing outside the file, and nothing at all without a step.
+	near := shiftCandidates(5*time.Second, 10*time.Second, 30*time.Second)
+	for _, c := range near {
+		if c <= 0 || c >= 30*time.Second {
+			t.Errorf("candidate %s falls outside the file", c)
+		}
+	}
+	if got := shiftCandidates(at, 0, 300*time.Second); len(got) != 1 || got[0] != at {
+		t.Errorf("with no step the only candidate should be the point itself, got %v", got)
+	}
+}
+
+// TestReachableWithNoPeersSaysYes is the trap this rule exists around: a map
+// read before any peer has sent a bitfield reports every piece missing, and
+// believing it would skip every frame of a perfectly healthy run.
+func TestReachableSaysYesUntilTheSwarmHasSpoken(t *testing.T) {
+	file := swarm.FileInfo{Index: 0, Path: "movie.mkv", Length: 100 << 20}
+	nobody := fakeAvailability{known: false, pieceLength: 1 << 20, holes: [][2]int64{{0, 100 << 20}}}
+
+	if !reachable(nobody, swarm.MinTraffic, file, time.Hour, 30*time.Minute) {
+		t.Error("a point was called unreachable before the swarm had said anything")
+	}
+}
+
+func TestReachableFollowsTheHoles(t *testing.T) {
+	const length = 100 << 20
+	file := swarm.FileInfo{Index: 0, Path: "movie.mkv", Length: length}
+	duration := time.Hour
+
+	// Nobody holds the second quarter of the file.
+	avail := fakeAvailability{known: true, pieceLength: 1 << 20, holes: [][2]int64{{length / 4, length / 2}}}
+
+	if reachable(avail, swarm.MinTraffic, file, duration, 20*time.Minute) {
+		t.Error("a point inside the hole was called reachable")
+	}
+	if !reachable(avail, swarm.MinTraffic, file, duration, 45*time.Minute) {
+		t.Error("a point in a served region was called unreachable")
+	}
+
+	// A file of unknown length or duration cannot be judged, so it is not.
+	if !reachable(avail, swarm.MinTraffic, swarm.FileInfo{}, duration, time.Minute) {
+		t.Error("a file with no length should not be judged")
+	}
+	if !reachable(avail, swarm.MinTraffic, file, 0, time.Minute) {
+		t.Error("a file with no duration should not be judged")
+	}
+}
+
+// TestRunShiftsPastAnUnavailableRegion is the acceptance criterion, against a
+// swarm that genuinely cannot serve part of the file: the seeder's copy is
+// wrong there, so those pieces fail its own verification and it never offers
+// them. The frame set must still be complete, and the moved point must say so.
+func TestRunShiftsPastAnUnavailableRegion(t *testing.T) {
+	tools := locateTools(t)
+
+	dir := t.TempDir()
+	renderCtx, renderCancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer renderCancel()
+	if _, err := tools.Run(renderCtx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=60",
+		"-c:v", "libx264", "-g", "50", "-pix_fmt", "yuv420p", "-b:v", "1500k",
+		filepath.Join(dir, "movie.mkv"),
+	); err != nil {
+		t.Fatalf("render clip: %v", err)
+	}
+
+	fixture := torrenttest.BuildDir(t, dir, 256<<10)
+	// Nobody holds the middle of the file. A point planned there has to move.
+	seeder := fixture.StartSeederWithHole(t, 0.42, 0.58)
+
+	cfg := runConfig(t, fixture.TorrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Plan = frames.Plan{Count: 3, Start: 0.1, End: 0.9}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var (
+		ready   []FrameReady
+		skipped []FrameSkipped
+		done    *Done
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case FrameReady:
+			ready = append(ready, e)
+		case FrameSkipped:
+			skipped = append(skipped, e)
+		case Failed:
+			t.Errorf("unexpected failure: %s: %v", e.Code, e.Err)
+		case Done:
+			done = &e
+		}
+	}
+
+	for _, s := range skipped {
+		t.Logf("skipped frame %d at %s: %s: %s", s.Index, s.Requested, s.Code, s.Reason)
+	}
+	if len(ready) != cfg.Plan.Count {
+		t.Fatalf("produced %d frames, want the full set of %d despite the hole",
+			len(ready), cfg.Plan.Count)
+	}
+	if done == nil || done.Reason != StopCompleted {
+		t.Errorf("run did not complete: %+v", done)
+	}
+
+	var shifted int
+	for _, f := range ready {
+		if _, err := os.Stat(f.Path); err != nil {
+			t.Errorf("frame %d is not on disk: %v", f.Index, err)
+		}
+		if f.Shift == ShiftUnavailable {
+			shifted++
+			if f.Actual == f.Requested {
+				t.Errorf("frame %d is marked shifted but came from the requested %s",
+					f.Index, f.Requested)
+			}
+			t.Logf("frame %d asked for %s, taken at %s, marked %q",
+				f.Index, f.Requested.Round(time.Second), f.Actual.Round(time.Second), f.Shift)
+		}
+	}
+	if shifted == 0 {
+		t.Error("no frame was marked shifted, so the hole was never noticed")
+	}
+}

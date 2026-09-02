@@ -103,6 +103,44 @@ func (a Availability) OverRange(start, end int64) int {
 	return least
 }
 
+// OverFileRange is OverRange for an offset inside one file, which is how
+// every caller above the swarm thinks: ffprobe reports positions within the
+// file it was handed, while pieces are numbered across the whole torrent.
+func (a Availability) OverFileRange(f FileInfo, off, length int64) int {
+	if off < 0 {
+		off = 0
+	}
+	if off > f.Length {
+		return 0
+	}
+	if off+length > f.Length {
+		length = f.Length - off
+	}
+	return a.OverRange(f.Offset+off, f.Offset+off+length)
+}
+
+// PieceLength is the torrent's piece size, which is the unit anything about
+// availability is really measured in.
+func (a Availability) PieceLength() int64 { return a.pieceLength }
+
+// Known reports whether the sample carries information at all.
+//
+// A map read before any peer has sent its bitfield says every piece is
+// missing, which is ignorance rather than a fact about the swarm - and a
+// connected peer is not the same as a peer that has said what it holds, so
+// counting connections is not enough to tell the two apart.
+func (a Availability) Known() bool {
+	if a.peers == 0 {
+		return false
+	}
+	for _, n := range a.counts {
+		if n > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Unavailable counts the pieces no connected peer holds. On a healthy swarm it
 // is zero; anything else is what makes capture points need shifting.
 func (a Availability) Unavailable() int {
