@@ -38,6 +38,15 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return engine.Run(ctx, cfg)
 	}
 
+	// Reopening a finished run replays it from disk (TOR-55) through the same
+	// engine the runner above uses, so a cache hit and a live run agree about
+	// what a run looks like without web deciding that itself - it only ever
+	// asks for base.OutputRoot, the one output directory this whole closure
+	// already agrees with GET /runs about (see cfg.OutputRoot below).
+	replayer := func(infoHash, params string) <-chan core.Event {
+		return engine.Replay(base.OutputRoot, infoHash, params)
+	}
+
 	cfg := web.DefaultConfig()
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
@@ -51,7 +60,7 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// without web deciding that itself.
 	cfg.OutputRoot = base.OutputRoot
 
-	server, err := web.Start(ctx, cfg, runner)
+	server, err := web.Start(ctx, cfg, runner, replayer)
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitFailed

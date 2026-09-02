@@ -173,7 +173,7 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 // startStatus maps the two ways a start can be turned away. Neither is "a run
 // is already going": that answer no longer exists.
 func startStatus(err error) int {
-	if errors.Is(err, errClosed) {
+	if errors.Is(err, errClosed) || errors.Is(err, errReplayUnavailable) {
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusBadRequest
@@ -241,6 +241,36 @@ func (s *Server) handleUploadTorrent(w http.ResponseWriter, r *http.Request) {
 	// server that closes under it. A run that reaches the slot defers cleanup
 	// to pump, after its event stream ends.
 	info, err := s.startRun(req, cleanup)
+	if err != nil {
+		writeError(w, startStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// reopenRequest addresses a run already on disk. It carries no id on
+// purpose: infohash and params are exactly what a GET /runs disk-only row
+// gives a panel for a run this process may never have minted an id for (a
+// previous process's run, or one this process itself trimmed from memory -
+// see keepFinishedRuns).
+type reopenRequest struct {
+	InfoHash string `json:"infohash"`
+	Params   string `json:"params"`
+}
+
+// handleReopenRun replays a finished run from disk under a fresh registry
+// entry - see Server.ReopenRun for why it never waits for the queue slot,
+// and for why the response already carries the run's real outcome rather
+// than "queued" or "running".
+func (s *Server) handleReopenRun(w http.ResponseWriter, r *http.Request) {
+	var req reopenRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.ReopenRun(req.InfoHash, req.Params)
 	if err != nil {
 		writeError(w, startStatus(err), err.Error())
 		return

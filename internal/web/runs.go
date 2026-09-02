@@ -9,9 +9,9 @@ import (
 
 // RunState is where a run is in its life.
 //
-// queued and running are the two live states; done, failed and cancelled are
-// final and never change again. A client can rely on that: a run it has seen
-// end will not come back.
+// queued, running and replaying are the live states; done, failed and
+// cancelled are final and never change again. A client can rely on that: a
+// run it has seen end will not come back.
 type RunState string
 
 const (
@@ -21,6 +21,16 @@ const (
 	RunQueued RunState = "queued"
 	// RunRunning means the run owns the single slot.
 	RunRunning RunState = "running"
+	// RunReplaying means the run is being read back from disk rather than
+	// downloaded - a cache hit's own state, distinct from both of the above.
+	// It never queues (ReopenRun never touches s.waiting) because it never
+	// competes for the network or the traffic budget the queue exists to
+	// protect, and calling it "running" would say a run holds the swarm slot
+	// it never asked for and never took. Brief in practice - replaying is a
+	// handful of local file reads, done well before the state ends up
+	// RunDone or RunFailed - but the honest answer if anything is asked
+	// while it lasts.
+	RunReplaying RunState = "replaying"
 	// RunDone means the run's event stream ended normally.
 	RunDone RunState = "done"
 	// RunFailed means the run could not be started, or ended on a run-scoped

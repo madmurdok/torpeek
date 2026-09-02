@@ -16,7 +16,7 @@ func tokenServer(t *testing.T, runner Runner, token string) *httptest.Server {
 
 	cfg := DefaultConfig()
 	cfg.Token = token
-	srv := newServer(context.Background(), cfg, runner)
+	srv := newServer(context.Background(), cfg, runner, nil)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -150,7 +150,7 @@ func TestStartLeavesLoopbackUnprotectedByDefault(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = net.JoinHostPort("127.0.0.1", port)
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestStartHonoursAPinnedToken(t *testing.T) {
 	cfg.Addr = net.JoinHostPort("127.0.0.1", port)
 	cfg.Token = "pinned-value"
 
-	srv, err := Start(context.Background(), cfg, fake.runner)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
