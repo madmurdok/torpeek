@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -302,7 +303,34 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	tolerance := seekTolerance(points)
 	records := make([]manifest.Frame, 0, len(points))
 
+	// What an earlier run already produced for this file. A stopped run keeps
+	// its frames, so finishing the job means taking the points it never got
+	// to - not paying for the ones it did.
+	prior, _ := cache.LoadManifest(deps.writer.Layout().FileDir(file.Index, file.Path))
+	done := reusableFrames(prior, points)
+
 	for i, at := range points {
+		if earlier, ok := done[i]; ok {
+			produced++
+			records = append(records, earlier)
+
+			actual := time.Duration(0)
+			if earlier.ActualMS != nil {
+				actual = time.Duration(*earlier.ActualMS) * time.Millisecond
+			}
+			deps.bus.Publish(FrameReady{
+				File:      file.Index,
+				Index:     i,
+				Requested: at,
+				Actual:    actual,
+				Shift:     ShiftReason(earlier.Shift),
+				Path:      earlier.Path,
+				Width:     earlier.Width,
+				Height:    earlier.Height,
+			})
+			continue
+		}
+
 		if _, halt := haltReason(ctx, deps.tracker); halt {
 			// Stopping between capture points, never mid-write: the frame in
 			// flight is finished and kept.
@@ -447,6 +475,40 @@ func saveRunRecord(layout output.Layout, torrent *swarm.Torrent, videos []swarm.
 		record.Complete = []int{}
 	}
 	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// reusableFrames picks out the capture points an earlier run already took,
+// keyed by their position in the plan.
+//
+// A point is only reused when its recorded request matches the one planned
+// now. The parameters that decide where points fall are part of the result's
+// key, so they cannot have changed - but an index is a weak thing to trust a
+// frame to, and comparing the timestamp costs nothing.
+//
+// Points that failed last time are deliberately not reused: a gap is what a
+// second run exists to fill.
+func reusableFrames(prior manifest.Manifest, points []time.Duration) map[int]manifest.Frame {
+	if len(prior.Frames) == 0 {
+		return nil
+	}
+
+	out := make(map[int]manifest.Frame, len(prior.Frames))
+	for _, f := range prior.Frames {
+		if f.Index < 0 || f.Index >= len(points) {
+			continue
+		}
+		if f.Shift == manifest.ShiftFailed || f.ActualMS == nil || f.Path == "" {
+			continue
+		}
+		if f.RequestedMS != points[f.Index].Milliseconds() {
+			continue
+		}
+		if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
+			continue
+		}
+		out[f.Index] = f
+	}
+	return out
 }
 
 // availabilityBuckets is how finely the swarm map is recorded. Enough for a UI
