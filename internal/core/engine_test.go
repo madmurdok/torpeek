@@ -738,6 +738,118 @@ func TestRunShiftsPastAnUnavailableRegion(t *testing.T) {
 	}
 }
 
+// TestRunStepsPastABlankFrame is the acceptance criterion for TOR-12: a
+// capture point that lands on a black frame must not be written as-is. The
+// clip's opening four seconds are pure black, its remainder ordinary
+// testsrc content, and the plan's one capture point sits at 1.5s - deep
+// inside the black lead-in, with a keyframe every second so the point does
+// not simply land past the black region by luck.
+func TestRunStepsPastABlankFrame(t *testing.T) {
+	tools := locateTools(t)
+
+	dir := t.TempDir()
+	renderCtx, renderCancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer renderCancel()
+	if _, err := tools.Run(renderCtx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "color=black:s=640x360:d=4:r=25",
+		"-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=26",
+		"-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[out]", "-map", "[out]",
+		"-c:v", "libx264", "-g", "25", "-pix_fmt", "yuv420p", "-b:v", "1500k",
+		filepath.Join(dir, "movie.mkv"),
+	); err != nil {
+		t.Fatalf("render clip: %v", err)
+	}
+
+	fixture := torrenttest.BuildDir(t, dir, 256<<10)
+	seeder := fixture.StartSeeder(t)
+
+	cfg := runConfig(t, fixture.TorrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	// One point, deliberately placed at 1.5s - the middle of the window
+	// Points() picks for Count 1 is (Start+End)/2 of the duration, so this
+	// window centres on 1.5s out of a 30s file.
+	cfg.Plan = frames.Plan{Count: 1, Start: 0.045, End: 0.055}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var (
+		ready   []FrameReady
+		skipped []FrameSkipped
+		done    *Done
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case FrameReady:
+			ready = append(ready, e)
+		case FrameSkipped:
+			skipped = append(skipped, e)
+		case Failed:
+			t.Errorf("unexpected failure: %s: %v", e.Code, e.Err)
+		case Done:
+			done = &e
+		}
+	}
+
+	for _, s := range skipped {
+		t.Logf("skipped frame %d at %s: %s: %s", s.Index, s.Requested, s.Code, s.Reason)
+	}
+	if len(ready) != 1 {
+		t.Fatalf("produced %d frames, want the single planned point despite the black lead-in", len(ready))
+	}
+	if done == nil || done.Reason != StopCompleted {
+		t.Errorf("run did not complete: %+v", done)
+	}
+
+	frame := ready[0]
+	if frame.Shift != ShiftBlank {
+		t.Errorf("frame was not marked %q, got %q", ShiftBlank, frame.Shift)
+	}
+	if frame.Actual == frame.Requested {
+		t.Errorf("frame is marked stepped but came from the requested %s", frame.Requested)
+	}
+	t.Logf("frame asked for %s, taken at %s, marked %q",
+		frame.Requested.Round(time.Millisecond), frame.Actual.Round(time.Millisecond), frame.Shift)
+
+	data, err := os.ReadFile(frame.Path)
+	if err != nil {
+		t.Fatalf("frame is not on disk: %v", err)
+	}
+	blank, err := frames.IsBlank(data)
+	if err != nil {
+		t.Fatalf("the written frame does not even decode: %v", err)
+	}
+	if blank {
+		t.Error("the written frame is still blank - stepping did not escape the black region")
+	}
+
+	// The other half of the criterion: the shift has to survive into the
+	// record, not just the event stream.
+	raw, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Dir(frame.Path)), manifest.Name))
+	if err != nil {
+		t.Fatalf("no manifest next to the frame: %v", err)
+	}
+	var m manifest.Manifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("manifest is not readable: %v", err)
+	}
+	if len(m.Frames) != 1 {
+		t.Fatalf("manifest lists %d capture points, want 1", len(m.Frames))
+	}
+	if m.Frames[0].Shift != manifest.ShiftBlank {
+		t.Errorf("manifest marks the frame %q, want %q", m.Frames[0].Shift, manifest.ShiftBlank)
+	}
+	if m.Frames[0].ActualMS == nil || *m.Frames[0].ActualMS == m.Frames[0].RequestedMS {
+		t.Error("manifest records no timestamp different from the request, though the frame was stepped")
+	}
+}
+
 // TestRerunIsServedFromDiskWithoutTheSwarm is acceptance criterion 3: the same
 // torrent and the same parameters twice must cost nothing the second time.
 //
