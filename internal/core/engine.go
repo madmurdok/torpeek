@@ -33,6 +33,13 @@ type Config struct {
 	Profile swarm.Profile
 	Budget  Budget
 
+	// Sequential opts into degrading to sequential reading from the start
+	// when a container states no duration to plan capture points across
+	// (REQUIREMENTS.md 2.7). Off by default: a container with no index gets
+	// a typed error naming why instead, since spending traffic on a guess is
+	// a decision the caller makes, never one taken silently.
+	Sequential bool
+
 	// Parallelism is how many video files are worked on at once. On a shared
 	// seedbox this belongs at 1-2 rather than the desktop default (section 4.1).
 	Parallelism int
@@ -283,13 +290,41 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	defer withdraw()
 
 	info, err := deps.prober.Inspect(ctx, url)
+	var points []time.Duration
+	sequential := false
 	if err != nil {
-		return 0, false, err
-	}
+		// A container with no duration is the one case the sequential
+		// fallback exists for (REQUIREMENTS.md 2.7); anything else - no
+		// video stream at all, or the file not opening as media - stays a
+		// hard failure regardless of the flag, since there is no frame to
+		// read sequentially either way.
+		var niErr *probe.NoIndexError
+		if !cfg.Sequential || !errors.As(err, &niErr) || niErr.Reason != probe.ReasonNoDuration {
+			return 0, false, err
+		}
 
-	points, err := cfg.Plan.Points(info.Duration)
-	if err != nil {
-		return 0, false, err
+		keyframes, seqErr := deps.prober.SequentialKeyframes(ctx, url, cfg.Plan.Count)
+		if seqErr != nil {
+			// The fallback found nothing to work with either; the original
+			// error is still the honest one to report.
+			return 0, false, err
+		}
+
+		points = make([]time.Duration, len(keyframes))
+		for i, kf := range keyframes {
+			points[i] = kf.PTS
+		}
+		// Duration becomes the last point actually found, so everything
+		// downstream - shift candidates, the manifest's file duration, the
+		// availability ratio - sees a file that ends where the sequential
+		// read stopped rather than a nonexistent length.
+		info.Duration = points[len(points)-1]
+		sequential = true
+	} else {
+		points, err = cfg.Plan.Points(info.Duration)
+		if err != nil {
+			return 0, false, err
+		}
 	}
 
 	deps.bus.Publish(FileStarted{
@@ -444,7 +479,7 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		})
 	}
 
-	if err := e.writeManifest(deps, file, info, records); err != nil {
+	if err := e.writeManifest(deps, file, info, records, sequential); err != nil {
 		return produced, false, Fail(CodeStorage, err)
 	}
 
@@ -529,7 +564,7 @@ const availabilityBuckets = 64
 // The cost it carries is the run's, not the file's: the budget is shared
 // across files, and a per-file share of it would be a number nothing enforces.
 func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
-	info probe.MediaInfo, records []manifest.Frame) error {
+	info probe.MediaInfo, records []manifest.Frame, sequential bool) error {
 
 	spent, elapsed := deps.tracker.Spent()
 	limitBytes, limitTime := deps.tracker.Limits()
@@ -578,6 +613,7 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 			LimitBytes:      limitBytes,
 			LimitMS:         limitTime.Milliseconds(),
 			LimitHit:        limitHit,
+			Sequential:      sequential,
 		},
 	}
 
@@ -871,8 +907,8 @@ func indicesOf(files []swarm.FileInfo) []int {
 // keying on it would scatter the same file's frames across directories - and
 // stop a later run from reusing what an earlier, narrower one already fetched.
 func ParamsKey(cfg Config) string {
-	raw := fmt.Sprintf("n=%d;start=%.4f;end=%.4f;profile=%s;format=%s",
-		cfg.Plan.Count, cfg.Plan.Start, cfg.Plan.End, cfg.Profile.Name, cfg.Format)
+	raw := fmt.Sprintf("n=%d;start=%.4f;end=%.4f;profile=%s;format=%s;sequential=%v",
+		cfg.Plan.Count, cfg.Plan.Start, cfg.Plan.End, cfg.Profile.Name, cfg.Format, cfg.Sequential)
 
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:8])
