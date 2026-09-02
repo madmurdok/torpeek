@@ -109,42 +109,63 @@ button:disabled { opacity: .5; }
 
 .torrent-summary { opacity: .85; font-weight: 500; }
 
-.run-list { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; }
+/* The torrent list: a sortable table (TOR-62) rather than a stack of cards,
+   so a library of any size costs one line per torrent instead of three. The
+   wrap is what scrolls - the table itself just grows - and the header row
+   stays put (position: sticky) so the sort controls are never scrolled away. */
+.run-table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .run-list-empty { font-size: .82rem; opacity: .6; margin: 0; }
 
-.run-row {
-  display: flex;
-  align-items: stretch;
-  gap: .25rem;
-  border: 1px solid #8884;
-  border-radius: .5rem;
-  background: #8881 0;
-}
-.run-row.selected { border-color: #1a7f37; background: #1a7f3714; }
+.run-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+.run-table th, .run-table td { padding: .4rem .3rem; text-align: left; vertical-align: middle; }
 
+.run-table thead th {
+  position: sticky;
+  top: 0;
+  background: canvas;
+  font-size: .68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  opacity: .65;
+  white-space: nowrap;
+  border-bottom: 1px solid #8884;
+  cursor: pointer;
+  user-select: none;
+}
+.run-table thead th.run-actions-header { cursor: default; }
+.run-table thead th:focus-visible { outline: 2px solid #1a7f37; outline-offset: -2px; }
+.run-table thead th[aria-sort]::after { display: inline-block; width: .9em; text-align: center; }
+.run-table thead th[aria-sort="ascending"]::after { content: "▲"; }
+.run-table thead th[aria-sort="descending"]::after { content: "▼"; }
+
+.run-row { border-bottom: 1px solid #8882; }
+.run-row:hover { background: #8881; }
+.run-row.selected { background: #1a7f3714; box-shadow: inset 3px 0 0 #1a7f37; }
+
+.run-cell-name { min-width: 0; }
 .run-row-main {
-  flex: 1 1 auto;
+  display: block;
+  width: 100%;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: .15rem;
   text-align: left;
   background: none;
   border: none;
-  padding: .5rem .6rem;
+  padding: 0;
+  margin: 0;
   font: inherit;
+  color: inherit;
   cursor: pointer;
-  border-radius: .5rem;
 }
-.run-row-main:hover { background: #8882; }
 
 .run-name { font-weight: 500; overflow-wrap: anywhere; }
-.run-meta { font-size: .75rem; opacity: .7; overflow-wrap: anywhere; }
+.run-meta { display: block; font-size: .7rem; opacity: .65; overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
 
+.run-cell-when { white-space: nowrap; opacity: .75; font-size: .78rem; }
+.run-cell-status { white-space: nowrap; }
+
+.run-cell-actions { width: 1.6rem; text-align: right; }
 .run-cancel {
-  align-self: center;
-  margin-right: .4rem;
   border: none;
   background: none;
   opacity: .55;
