@@ -389,6 +389,14 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			continue
 		}
 
+		// Blank rejection happens here, after the seek is confirmed real and
+		// before anything reaches disk - the only point where a wasted decode
+		// is free to retry. It is judged against the picture, not the swarm,
+		// so it runs after decoding rather than alongside the availability
+		// shift above: that one moves before any traffic is spent, this one
+		// can only be judged once a frame exists to look at.
+		shot = e.rejectBlank(ctx, deps, url, tolerance/4, shot)
+
 		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, shot.frame.Data, extensionFor(cfg.Format))
 		if err != nil {
 			return produced, false, Fail(CodeStorage, err)
@@ -641,6 +649,71 @@ type capture struct {
 // far enough to escape a hole, near enough that the frame still represents the
 // moment it was planned for.
 const maxShift = 2
+
+// maxBlankSteps is how many neighbouring keyframes a blank frame may be
+// stepped past before it is kept as it is. Unlike a shift, each attempt here
+// costs a real decode - it is judged after the frame is already in hand - so
+// it is bounded the same way and for the same reason: escape a hole in the
+// picture without hunting forever.
+const maxBlankSteps = 2
+
+// rejectBlank detects a black or near-monotone frame (REQUIREMENTS.md 2.3)
+// and steps forward through neighbouring keyframes to escape it, up to
+// maxBlankSteps attempts. When every attempt is still blank, the last frame
+// reached is kept rather than the point being failed - ARCHITECTURE.md's
+// Stepping state is explicit about this: "attempts exhausted, take it as
+// is." The marker only ever says ShiftBlank when a step actually happened;
+// a frame that was never blank, or that failed every retry, leaves shot's
+// own shift untouched.
+//
+// Stepping only moves forward. KeyframeAt seeks backwards to the keyframe at
+// or before its argument, so a request strictly after the timestamp already
+// held is how the next keyframe is reached - there is no "next keyframe"
+// query. When a request lands on the same pts already held, nothing moved,
+// and the next attempt tries a larger step instead of repeating the same
+// request; a genuine probe or decode failure stops retrying rather than
+// spending the remaining attempts on requests unlikely to do better.
+func (e *Engine) rejectBlank(ctx context.Context, deps fileDeps, url string, step time.Duration, shot capture) capture {
+	blank, err := frames.IsBlank(shot.frame.Data)
+	if err != nil || !blank {
+		return shot
+	}
+	if step <= 0 {
+		step = minSeekTolerance / 4
+	}
+
+	best := shot
+	advance := step
+	for attempt := 1; attempt <= maxBlankSteps; attempt++ {
+		candidate := best.actual + advance
+
+		keyframe, err := deps.prober.KeyframeAt(ctx, url, candidate)
+		if err != nil {
+			break
+		}
+		if keyframe.PTS <= best.actual {
+			// Did not reach a new keyframe; try further out next time,
+			// without spending a decode on a frame already held.
+			advance *= 2
+			continue
+		}
+		advance = step
+
+		frame, err := deps.extractor.Frame(ctx, url, keyframe.PTS)
+		if err != nil {
+			break
+		}
+
+		best = capture{frame: frame, asked: shot.asked, actual: keyframe.PTS, shift: ShiftBlank}
+
+		blank, err = frames.IsBlank(frame.Data)
+		if err != nil || !blank {
+			break
+		}
+	}
+
+	return best
+}
 
 // captureOne takes the frame for one capture point, moving it if the swarm
 // cannot serve the pieces there.
