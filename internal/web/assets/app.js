@@ -33,6 +33,7 @@ const el = {
   resizer: document.getElementById("resizer"),
   runList: document.getElementById("run-list"),
   runListEmpty: document.getElementById("run-list-empty"),
+  sortHeaders: document.querySelectorAll("#run-table thead [data-sort]"),
   detail: document.getElementById("detail"),
   detailEmpty: document.getElementById("detail-empty"),
   log: document.getElementById("log"),
@@ -49,7 +50,10 @@ const el = {
 // torrent must not erase the first, and a finished one must stay clickable
 // for as long as the page remembers it. state.selected is the one entry
 // shown on the right.
-const state = { runs: new Map(), selected: null };
+// sort is the table's current order: key names the column (a <th data-sort>
+// value), dir is "asc" or "desc". The default - date, newest first - is what
+// the panel already showed before it became a table (TOR-62).
+const state = { runs: new Map(), selected: null, sort: { key: "when", dir: "desc" } };
 
 function url(path) {
   const u = new URL(path, document.baseURI);
@@ -147,6 +151,83 @@ function metaLabel(entry) {
   return "";
 }
 
+function whenLabel(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " +
+    d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+// ---------------------------------------------------------------------------
+// Table sorting. All client-side, over what state.runs already holds - GET
+// /runs is small enough that a server-side sort parameter would only add a
+// second place order is decided (TOR-62).
+
+function sortValue(entry, key) {
+  switch (key) {
+    case "name": return (entry.name || entry.source || shortId(entry.id)).toLowerCase();
+    case "status": return badgeLabel(entry).toLowerCase();
+    case "when":
+    default: return entry.when || 0;
+  }
+}
+
+function compareEntries(a, b) {
+  const { key, dir } = state.sort;
+  const va = sortValue(a, key);
+  const vb = sortValue(b, key);
+  let cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
+  if (dir === "desc") cmp = -cmp;
+  return cmp;
+}
+
+// reorderRuns moves every row's existing element into sorted order without
+// rebuilding anything - appendChild on a node already in the table just
+// relocates it, so a row that has not moved costs a no-op reflow, never a
+// rebuild. Called whenever a row is added or anything a sort key reads
+// (name, status, when) changes, so the table always reflects the active
+// sort - including under the default "when" sort, where a status change
+// never touches when, so re-running this never moves that row.
+function reorderRuns() {
+  const rows = Array.from(state.runs.values()).sort(compareEntries);
+  for (const entry of rows) el.runList.append(entry.rowEl);
+}
+
+function updateSortIndicators() {
+  for (const th of el.sortHeaders) {
+    if (th.dataset.sort === state.sort.key) {
+      th.setAttribute("aria-sort", state.sort.dir === "asc" ? "ascending" : "descending");
+    } else {
+      th.setAttribute("aria-sort", "none");
+    }
+  }
+}
+
+// setSort is what clicking (or activating with the keyboard) a column header
+// does: the same column reverses direction, a different one is sorted
+// ascending - except "when", which starts descending (newest first), the
+// same default the table opens with, since that is the more useful way to
+// first look at dates.
+function setSort(key) {
+  if (state.sort.key === key) {
+    state.sort.dir = state.sort.dir === "asc" ? "desc" : "asc";
+  } else {
+    state.sort.key = key;
+    state.sort.dir = key === "when" ? "desc" : "asc";
+  }
+  updateSortIndicators();
+  reorderRuns();
+}
+
+for (const th of el.sortHeaders) {
+  th.addEventListener("click", () => setSort(th.dataset.sort));
+  th.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    setSort(th.dataset.sort);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Run entries: one per torrent, live or on disk. Each owns its own row in the
 // left panel and its own container on the right, built once and updated in
@@ -154,28 +235,41 @@ function metaLabel(entry) {
 // shows and hides what is already there.
 
 function newRunEntry(id) {
-  const row = document.createElement("li");
+  const row = document.createElement("tr");
   row.className = "run-row";
 
+  const nameCell = document.createElement("td");
+  nameCell.className = "run-cell-name";
   const main = document.createElement("button");
   main.type = "button";
   main.className = "run-row-main";
-  const badge = document.createElement("span");
-  badge.className = "run-badge";
   const name = document.createElement("span");
   name.className = "run-name";
+  main.append(name);
+  nameCell.append(main);
+
+  const whenCell = document.createElement("td");
+  whenCell.className = "run-cell-when";
+
+  const statusCell = document.createElement("td");
+  statusCell.className = "run-cell-status";
+  const badge = document.createElement("span");
+  badge.className = "run-badge";
   const meta = document.createElement("span");
   meta.className = "run-meta";
-  main.append(badge, name, meta);
+  statusCell.append(badge, meta);
 
+  const actionsCell = document.createElement("td");
+  actionsCell.className = "run-cell-actions";
   const cancel = document.createElement("button");
   cancel.type = "button";
   cancel.className = "run-cancel";
   cancel.title = "Cancel";
   cancel.textContent = "✕";
   cancel.hidden = true;
+  actionsCell.append(cancel);
 
-  row.append(main, cancel);
+  row.append(nameCell, whenCell, statusCell, actionsCell);
   el.runList.append(row);
   el.runListEmpty.hidden = true;
 
@@ -197,12 +291,19 @@ function newRunEntry(id) {
     id, disk: false, infohash: "", params: "",
     state: "", source: "", name: "", error: "", progress: "",
     files: 0, complete: 0,
+    // when is this row's sort key for the default (date, newest-first) sort.
+    // Set once, here, at creation - never touched again by a status update -
+    // which is what keeps a live run from jumping position as events arrive.
+    // loadRuns() overwrites it once with the authoritative value GET /runs
+    // reports, for a row it already knows about at page load.
+    when: Date.now(),
     reopening: false,
     fileEntries: new Map(),
     // Set once this run's first file block is built, so every file after it
     // defaults to collapsed - only the first one earns the auto-expand.
     autoExpanded: false,
-    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowCancel: cancel,
+    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta,
+    rowWhen: whenCell, rowCancel: cancel,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
     detailTitle: detailEl.querySelector(".run-detail-title"),
@@ -212,7 +313,13 @@ function newRunEntry(id) {
     filesEl: detailEl.querySelector(".files"),
   };
 
-  main.addEventListener("click", () => selectOrReopen(entry));
+  // One listener on the row, not the name button alone: a click anywhere in
+  // the row selects it (a table row is a natural click target), and a
+  // keyboard activation of the name button still reaches it too, since a
+  // button's click event bubbles the same way a mouse click does. The cancel
+  // button stops its own click from bubbling here, so a cancel never also
+  // selects the row it sits in.
+  row.addEventListener("click", () => selectOrReopen(entry));
   cancel.addEventListener("click", (event) => {
     event.stopPropagation();
     cancelRun(entry.id);
@@ -253,7 +360,10 @@ function syncEntry(entry) {
   entry.rowBadge.dataset.state = entry.disk ? "disk" : entry.state;
   entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
   entry.rowMeta.textContent = metaLabel(entry);
+  entry.rowWhen.textContent = whenLabel(entry.when);
+  entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
   entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
+  reorderRuns();
 
   entry.detailBadge.textContent = badgeLabel(entry);
   entry.detailBadge.dataset.state = entry.disk ? "disk" : entry.state;
@@ -753,6 +863,14 @@ async function loadRuns() {
     entry.complete = row.complete || 0;
     if (!disk) entry.state = row.state || entry.state;
     entry.error = row.error || entry.error;
+    // row.when is GET /runs's own answer for this row - the newest lifecycle
+    // timestamp for a live entry, run.json's created_at for a disk one - and
+    // it is the one moment this page overwrites entry.when after creation:
+    // this is the initial listing, not a live status update, so setting it
+    // here does not conflict with the rule that a status change must never
+    // move a row under the default sort.
+    const when = row.when ? Date.parse(row.when) : NaN;
+    if (!Number.isNaN(when)) entry.when = when;
     syncEntry(entry);
   }
 }
@@ -946,5 +1064,6 @@ window.addEventListener("resize", () => {
   applyPanelWidth(clampPanelWidth(panelWidth));
 });
 
+updateSortIndicators();
 loadRuns();
 connect();
