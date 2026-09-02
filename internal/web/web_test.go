@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -12,7 +13,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,13 +47,22 @@ func (f *fakeRun) runner(ctx context.Context, req RunRequest) (<-chan core.Event
 func testServer(t *testing.T, runner Runner) *httptest.Server {
 	t.Helper()
 
+	_, ts := newTestServer(t, runner)
+	return ts
+}
+
+// newTestServer is testServer for a test that also needs the server itself -
+// to read the registry, or to close it while the test watches.
+func newTestServer(t *testing.T, runner Runner) (*Server, *httptest.Server) {
+	t.Helper()
+
 	srv := newServer(context.Background(), DefaultConfig(), runner)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
 		srv.Close()
 	})
-	return ts
+	return srv, ts
 }
 
 // dial opens the event socket against a server whose UI root is at base -
@@ -186,9 +199,14 @@ func TestUploadedTorrentStartsARun(t *testing.T) {
 		t.Fatalf("the runner was called %d times, want 1", fake.starts)
 	}
 
+	// Accepted first, started second: every run is queued before it takes the
+	// slot, even when the slot was free all along.
+	if queued := next(t, conn); queued["type"] != "run_state" || queued["state"] != "queued" {
+		t.Fatalf("after an upload, got %v, want a queued run_state", queued)
+	}
 	active := next(t, conn)
-	if active["type"] != "run_state" || active["active"] != true {
-		t.Fatalf("after an upload, got %v, want an active run_state", active)
+	if active["type"] != "run_state" || active["active"] != true || active["state"] != "running" {
+		t.Fatalf("after an upload, got %v, want a running run_state", active)
 	}
 	// The source shown to a person is a label, not the server's temp path -
 	// nobody typed that path and it means nothing to them.
@@ -286,9 +304,10 @@ func TestUploadWithoutAFileIsRejected(t *testing.T) {
 	}
 }
 
-// TestUploadRespectsOneRunAtATime is the same rule TestOneRunAtATime checks
-// for the magnet path, on the upload path.
-func TestUploadRespectsOneRunAtATime(t *testing.T) {
+// TestUploadWhileARunIsGoingIsQueued is the same rule TestASecondRunWaitsForTheSlot
+// checks for the magnet path, on the upload path: a drop onto a busy server is
+// accepted and waits, rather than being refused.
+func TestUploadWhileARunIsGoingIsQueued(t *testing.T) {
 	fake := &fakeRun{}
 	ts := testServer(t, fake.runner)
 
@@ -297,8 +316,14 @@ func TestUploadRespectsOneRunAtATime(t *testing.T) {
 	}
 
 	resp := uploadTorrent(t, ts.URL, []byte("bytes"), "")
-	if resp.StatusCode != http.StatusConflict {
-		t.Errorf("POST /runs/upload while a run is active: status %d, want 409", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/upload while a run is going: status %d, want 202", resp.StatusCode)
+	}
+	if got := decodeBody(t, resp)["state"]; got != "queued" {
+		t.Errorf("the dropped .torrent was reported as %v, want queued", got)
+	}
+	if fake.starts != 1 {
+		t.Errorf("the runner was called %d times, want 1 - the second run has not started", fake.starts)
 	}
 }
 
@@ -356,6 +381,9 @@ func TestStreamsEventsToConnectedClient(t *testing.T) {
 		t.Fatalf("POST /runs: status %d, want 202", resp.StatusCode)
 	}
 
+	if got := next(t, conn); got["type"] != "run_state" || got["state"] != "queued" {
+		t.Fatalf("after starting, got %v, want a queued run_state", got)
+	}
 	if got := next(t, conn); got["type"] != "run_state" || got["active"] != true {
 		t.Fatalf("after starting, got %v, want an active run_state", got)
 	}
@@ -399,7 +427,9 @@ func TestReplaysTheRunToALateClient(t *testing.T) {
 	waitFor(t, func() bool { return len(fake.events) == 0 })
 
 	conn := dial(t, ts.URL)
-	for _, want := range []string{"run_state", "metadata_ready", "file_started"} {
+	// The connection marker, then the run: accepted, started, and what it has
+	// said so far.
+	for _, want := range []string{"run_state", "run_state", "run_state", "metadata_ready", "file_started"} {
 		if got := next(t, conn); got["type"] != want {
 			t.Fatalf("replayed %v, want a %s", got, want)
 		}
@@ -424,8 +454,10 @@ func TestHeartbeatsCollapseInTheReplay(t *testing.T) {
 	waitFor(t, func() bool { return len(fake.events) == 0 })
 
 	conn := dial(t, ts.URL)
-	if got := next(t, conn); got["type"] != "run_state" {
-		t.Fatalf("first replayed message is %v, want run_state", got)
+	for i := 0; i < 3; i++ {
+		if got := next(t, conn); got["type"] != "run_state" {
+			t.Fatalf("replayed message %d is %v, want run_state", i, got)
+		}
 	}
 
 	progress := next(t, conn)
@@ -454,6 +486,7 @@ func TestServesAFileTheRunAnnounced(t *testing.T) {
 	conn := dial(t, ts.URL)
 	next(t, conn) // idle run_state
 	post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc"}`)
+	next(t, conn) // queued run_state
 	next(t, conn) // active run_state
 
 	fake.events <- core.FrameReady{File: 0, Index: 0, Path: frame, Width: 640, Height: 360}
@@ -495,29 +528,34 @@ func TestServesAFileTheRunAnnounced(t *testing.T) {
 	}
 }
 
-// TestOneRunAtATime keeps two tabs from competing for the same output
-// directory and the same traffic budget.
-func TestOneRunAtATime(t *testing.T) {
-	fake := &fakeRun{}
+// TestASecondRunWaitsForTheSlot keeps two tabs from competing for the same
+// output directory and the same traffic budget - the rule that has always
+// held here - while no longer turning the second tab away. One run at a time
+// is now kept by the queue rather than by a 409.
+func TestASecondRunWaitsForTheSlot(t *testing.T) {
+	fake := newFakeRuns()
 	ts := testServer(t, fake.runner)
 
-	if resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("first POST /runs: status %d, want 202", resp.StatusCode)
-	}
-	resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:def"}`)
-	if resp.StatusCode != http.StatusConflict {
-		t.Fatalf("second POST /runs: status %d, want 409", resp.StatusCode)
-	}
-	if fake.starts != 1 {
-		t.Errorf("the runner was called %d times, want 1", fake.starts)
+	first := startRun(t, ts.URL, "magnet:?xt=urn:btih:abc")
+	if first.state != "running" {
+		t.Fatalf("the first run is %q, want running - the slot was free", first.state)
 	}
 
-	// Once the run ends, the next one is allowed.
-	close(fake.events)
-	waitFor(t, func() bool {
-		again := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:def"}`)
-		return again.StatusCode == http.StatusAccepted
-	})
+	second := startRun(t, ts.URL, "magnet:?xt=urn:btih:def")
+	if second.state != "queued" {
+		t.Fatalf("the second run is %q, want queued", second.state)
+	}
+	if second.id == first.id {
+		t.Fatalf("both runs were given the same id %q", first.id)
+	}
+	if got := fake.count(); got != 1 {
+		t.Errorf("the runner was called %d times, want 1 - only one run may hold the slot", got)
+	}
+
+	// The queued run starts on its own, when the first one's stream ends -
+	// nobody has to ask again.
+	fake.finish(t, "magnet:?xt=urn:btih:abc")
+	waitFor(t, func() bool { return fake.count() == 2 })
 }
 
 // TestCancelStopsTheRun is what the UI's cancel button has to reach: the run's
@@ -560,17 +598,46 @@ func TestStartRunRejectsABlankSource(t *testing.T) {
 	}
 }
 
+// TestRunnerFailureIsReported: a run that cannot be started is now a run that
+// failed, not a request that was refused. It has to be: a queued run reaches
+// the runner minutes after the request that asked for it was answered, so the
+// failure can only reach a client one way, and that way has to be the same
+// for every run.
 func TestRunnerFailureIsReported(t *testing.T) {
 	fake := &fakeRun{err: errors.New("no such torrent file")}
 	ts := testServer(t, fake.runner)
 
+	conn := dial(t, ts.URL)
+	next(t, conn) // the connection marker
+
 	resp := post(t, ts.URL, "/runs", `{"source":"/nope.torrent"}`)
-	body := readAll(t, resp)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("POST /runs: status %d, want 400", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs: status %d, want 202", resp.StatusCode)
 	}
-	if !strings.Contains(body, "no such torrent file") {
-		t.Errorf("response %q does not name the failure", body)
+	body := decodeBody(t, resp)
+	id, _ := body["id"].(string)
+	if id == "" {
+		t.Fatalf("POST /runs answered %v, with no run id", body)
+	}
+	if body["state"] != "failed" {
+		t.Errorf("POST /runs answered %v, want a failed state", body)
+	}
+
+	if got := next(t, conn); got["state"] != "queued" || got["run"] != id {
+		t.Fatalf("first message is %v, want the queued state of run %s", got, id)
+	}
+
+	failure := next(t, conn)
+	if failure["type"] != "failed" || failure["run"] != id {
+		t.Fatalf("got %v, want a failed event for run %s", failure, id)
+	}
+	if msg, _ := failure["error"].(string); !strings.Contains(msg, "no such torrent file") {
+		t.Errorf("the failed event %v does not name the failure", failure)
+	}
+
+	final := next(t, conn)
+	if final["type"] != "run_state" || final["state"] != "failed" || final["run"] != id {
+		t.Errorf("got %v, want run %s to end as failed", final, id)
 	}
 }
 
@@ -946,4 +1013,496 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition never held")
+}
+
+// fakeRuns is fakeRun for a server that holds more than one: it hands out a
+// fresh event channel per run, keyed by the source that asked for it, so a
+// test can drive two runs at once. fakeRun keeps one channel, which a second
+// start silently overwrites.
+//
+// Each run's channel closes on its own when the run's context is cancelled,
+// the way a real engine's does - so a cancelled run ends here too, rather
+// than leaving pump waiting on a channel nobody will ever close.
+type fakeRuns struct {
+	mu     sync.Mutex
+	runs   map[string]*fakeStream
+	starts []string
+}
+
+type fakeStream struct {
+	events chan core.Event
+	ctx    context.Context
+	once   sync.Once
+}
+
+func newFakeRuns() *fakeRuns {
+	return &fakeRuns{runs: make(map[string]*fakeStream)}
+}
+
+func (f *fakeRuns) runner(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+	stream := &fakeStream{events: make(chan core.Event, 32), ctx: ctx}
+
+	f.mu.Lock()
+	f.runs[req.Source] = stream
+	f.starts = append(f.starts, req.Source)
+	f.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		stream.once.Do(func() { close(stream.events) })
+	}()
+	return stream.events, nil
+}
+
+// count is how many runs have reached the runner, which is the only proof
+// that a queued run has not quietly started.
+func (f *fakeRuns) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.starts)
+}
+
+func (f *fakeRuns) started(source string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.runs[source]
+	return ok
+}
+
+func (f *fakeRuns) stream(t *testing.T, source string) *fakeStream {
+	t.Helper()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	stream, ok := f.runs[source]
+	if !ok {
+		t.Fatalf("no run has been started for %q", source)
+	}
+	return stream
+}
+
+func (f *fakeRuns) send(t *testing.T, source string, events ...core.Event) {
+	t.Helper()
+
+	stream := f.stream(t, source)
+	for _, ev := range events {
+		stream.events <- ev
+	}
+}
+
+// finish ends a run's stream the way a completed engine run does.
+func (f *fakeRuns) finish(t *testing.T, source string) {
+	t.Helper()
+
+	stream := f.stream(t, source)
+	stream.once.Do(func() { close(stream.events) })
+}
+
+func (f *fakeRuns) context(t *testing.T, source string) context.Context {
+	t.Helper()
+	return f.stream(t, source).ctx
+}
+
+// startedRun is what POST /runs answers: an id, and whether the run took the
+// slot or is waiting for it.
+type startedRun struct{ id, state string }
+
+func startRun(t *testing.T, base, source string) startedRun {
+	t.Helper()
+
+	resp := post(t, base, "/runs", `{"source":`+strconv.Quote(source)+`}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs for %s: status %d, want 202", source, resp.StatusCode)
+	}
+	body := decodeBody(t, resp)
+	id, _ := body["id"].(string)
+	state, _ := body["state"].(string)
+	if id == "" {
+		t.Fatalf("POST /runs answered %v, which names no run", body)
+	}
+	return startedRun{id: id, state: state}
+}
+
+func decodeBody(t *testing.T, resp *http.Response) map[string]any {
+	t.Helper()
+
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode the response body: %v", err)
+	}
+	return body
+}
+
+// runInfo finds one run in the registry snapshot.
+func runInfo(t *testing.T, srv *Server, id string) RunInfo {
+	t.Helper()
+
+	for _, info := range srv.snapshot() {
+		if info.ID == id {
+			return info
+		}
+	}
+	t.Fatalf("run %s is not in the registry", id)
+	return RunInfo{}
+}
+
+// TestTwoRunsBackToBackDoNotContaminateEachOther is TOR-53's acceptance
+// criterion: both runs complete, the second was queued rather than refused,
+// and neither one's events nor its replay history end up in the other.
+//
+// The replay is where a shared history shows itself. Two runs both start at
+// file 0, so with one progressAt keyed by file index alone, the second run's
+// heartbeat overwrites the first run's in place - the first run's replay
+// loses its progress and gains one belonging to a run it never was.
+func TestTwoRunsBackToBackDoNotContaminateEachOther(t *testing.T) {
+	const (
+		sourceA = "magnet:?xt=urn:btih:aaa"
+		sourceB = "magnet:?xt=urn:btih:bbb"
+	)
+
+	fake := newFakeRuns()
+	srv, ts := newTestServer(t, fake.runner)
+
+	live := dial(t, ts.URL)
+	if got := next(t, live); got["type"] != "run_state" {
+		t.Fatalf("first message is %v, want the connection marker", got)
+	}
+
+	first := startRun(t, ts.URL, sourceA)
+	if first.state != "running" {
+		t.Fatalf("the first run is %q, want running", first.state)
+	}
+	second := startRun(t, ts.URL, sourceB)
+	if second.state != "queued" {
+		t.Fatalf("the second run is %q, want queued - it must wait, not be refused", second.state)
+	}
+
+	fake.send(t, sourceA,
+		core.MetadataReady{Name: "First", InfoHash: "aaa", Selected: []int{0}},
+		core.Progress{File: 0, FramesDone: 1, FramesTotal: 2},
+		core.Progress{File: 0, FramesDone: 2, FramesTotal: 2},
+		core.Done{Reason: core.StopCompleted, Files: 1, Frames: 2},
+	)
+	fake.finish(t, sourceA)
+
+	// The queued run takes the slot by itself once the first is over.
+	waitFor(t, func() bool { return fake.started(sourceB) })
+
+	fake.send(t, sourceB,
+		core.MetadataReady{Name: "Second", InfoHash: "bbb", Selected: []int{0}},
+		core.Progress{File: 0, FramesDone: 9, FramesTotal: 9},
+		core.Done{Reason: core.StopCompleted, Files: 1, Frames: 9},
+	)
+	fake.finish(t, sourceB)
+
+	waitFor(t, func() bool {
+		return runInfo(t, srv, first.id).State == RunDone &&
+			runInfo(t, srv, second.id).State == RunDone
+	})
+	if got := runInfo(t, srv, first.id).InfoHash; got != "aaa" {
+		t.Errorf("the first run recorded infohash %q, want aaa", got)
+	}
+	if got := runInfo(t, srv, second.id).InfoHash; got != "bbb" {
+		t.Errorf("the second run recorded infohash %q, want bbb", got)
+	}
+
+	// What the live socket saw: every message after the marker names the run
+	// it belongs to, and each run's own sequence is exactly what it emitted.
+	byRun := map[string][]string{}
+	for i := 0; i < 13; i++ {
+		ev := next(t, live)
+		id, _ := ev["run"].(string)
+		if id != first.id && id != second.id {
+			t.Fatalf("live message %v belongs to no run of this test", ev)
+		}
+		kind, _ := ev["type"].(string)
+		if kind == "run_state" {
+			kind = "run_state:" + ev["state"].(string)
+		}
+		byRun[id] = append(byRun[id], kind)
+	}
+	wantFirst := []string{
+		"run_state:queued", "run_state:running", "metadata_ready",
+		"progress", "progress", "done", "run_state:done",
+	}
+	wantSecond := []string{
+		"run_state:queued", "run_state:running", "metadata_ready",
+		"progress", "done", "run_state:done",
+	}
+	if got := byRun[first.id]; !slices.Equal(got, wantFirst) {
+		t.Errorf("the first run's live stream was %v, want %v", got, wantFirst)
+	}
+	if got := byRun[second.id]; !slices.Equal(got, wantSecond) {
+		t.Errorf("the second run's live stream was %v, want %v", got, wantSecond)
+	}
+
+	// And what a page opening now replays: the same two runs, each whole,
+	// each still its own - with its heartbeats collapsed to the last one of
+	// that run, not of whichever run ticked last.
+	replay := dial(t, ts.URL)
+	if got := next(t, replay); got["type"] != "run_state" {
+		t.Fatalf("replay opens with %v, want the connection marker", got)
+	}
+	for _, want := range []struct {
+		run    startedRun
+		name   string
+		frames float64
+	}{
+		{first, "First", 2},
+		{second, "Second", 9},
+	} {
+		for _, kind := range []string{"run_state", "run_state", "metadata_ready", "progress", "done", "run_state"} {
+			ev := next(t, replay)
+			if ev["type"] != kind {
+				t.Fatalf("replaying run %s: got %v, want a %s", want.run.id, ev, kind)
+			}
+			if ev["run"] != want.run.id {
+				t.Fatalf("replaying run %s: %v belongs to another run", want.run.id, ev)
+			}
+			switch kind {
+			case "metadata_ready":
+				if ev["name"] != want.name {
+					t.Errorf("run %s replayed the metadata of %v, want %q", want.run.id, ev["name"], want.name)
+				}
+			case "progress":
+				if ev["frames_done"] != want.frames {
+					t.Errorf("run %s replayed a heartbeat at %v frames, want %v - a heartbeat of another run",
+						want.run.id, ev["frames_done"], want.frames)
+				}
+			}
+		}
+	}
+}
+
+// TestCancellingAQueuedRunLeavesTheRunningOneAlone: a queued run has no
+// context to cancel, so stopping it is taking it out of the queue - and doing
+// that must not touch the run holding the slot, nor the runs behind it.
+func TestCancellingAQueuedRunLeavesTheRunningOneAlone(t *testing.T) {
+	const (
+		sourceA = "magnet:?xt=urn:btih:aaa"
+		sourceB = "magnet:?xt=urn:btih:bbb"
+		sourceC = "magnet:?xt=urn:btih:ccc"
+	)
+
+	fake := newFakeRuns()
+	srv, ts := newTestServer(t, fake.runner)
+
+	running := startRun(t, ts.URL, sourceA)
+	queued := startRun(t, ts.URL, sourceB)
+	behind := startRun(t, ts.URL, sourceC)
+
+	resp := post(t, ts.URL, "/runs/cancel", `{"id":"`+queued.id+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/cancel for a queued run: status %d, want 202", resp.StatusCode)
+	}
+	if got := decodeBody(t, resp)["state"]; got != "cancelled" {
+		t.Errorf("the cancelled run is reported as %v, want cancelled", got)
+	}
+
+	if got := runInfo(t, srv, queued.id).State; got != RunCancelled {
+		t.Errorf("the queued run is %q, want cancelled", got)
+	}
+	if got := runInfo(t, srv, running.id).State; got != RunRunning {
+		t.Errorf("the running run is %q, want running - cancelling a queued run must not touch it", got)
+	}
+	if got := runInfo(t, srv, behind.id).State; got != RunQueued {
+		t.Errorf("the run behind it is %q, want queued", got)
+	}
+
+	select {
+	case <-fake.context(t, sourceA).Done():
+		t.Fatal("cancelling a queued run cancelled the running one")
+	default:
+	}
+	if got := fake.count(); got != 1 {
+		t.Errorf("the runner was called %d times, want 1", got)
+	}
+
+	// When the slot frees up it goes to the run behind, never to the
+	// cancelled one.
+	fake.finish(t, sourceA)
+	waitFor(t, func() bool { return fake.started(sourceC) })
+	if fake.started(sourceB) {
+		t.Error("the cancelled run was started anyway")
+	}
+}
+
+func TestCancellingAnUnknownRunIsNotFound(t *testing.T) {
+	fake := newFakeRuns()
+	ts := testServer(t, fake.runner)
+
+	if resp := post(t, ts.URL, "/runs/cancel", `{"id":"nosuchrun"}`); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("POST /runs/cancel for an unknown run: status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestCancellingAFinishedRunIsAConflict(t *testing.T) {
+	const source = "magnet:?xt=urn:btih:aaa"
+
+	fake := newFakeRuns()
+	srv, ts := newTestServer(t, fake.runner)
+
+	run := startRun(t, ts.URL, source)
+	fake.finish(t, source)
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).State == RunDone })
+
+	if resp := post(t, ts.URL, "/runs/cancel", `{"id":"`+run.id+`"}`); resp.StatusCode != http.StatusConflict {
+		t.Errorf("POST /runs/cancel for a finished run: status %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestFinishedRunsFallOutOfMemory: a finished run outlives its own completion
+// - the panel shows runs that are over - but not forever. This process runs
+// for hours, and every finished run holds its whole replay.
+func TestFinishedRunsFallOutOfMemory(t *testing.T) {
+	fake := newFakeRuns()
+	srv, ts := newTestServer(t, fake.runner)
+
+	var ids []string
+	for i := 0; i < keepFinishedRuns+3; i++ {
+		source := fmt.Sprintf("magnet:?xt=urn:btih:%02d", i)
+		run := startRun(t, ts.URL, source)
+		ids = append(ids, run.id)
+		waitFor(t, func() bool { return fake.started(source) })
+		fake.finish(t, source)
+		waitFor(t, func() bool {
+			for _, info := range srv.snapshot() {
+				if info.ID == run.id {
+					return info.State == RunDone
+				}
+			}
+			return false
+		})
+	}
+
+	held := srv.snapshot()
+	if len(held) != keepFinishedRuns {
+		t.Fatalf("the registry holds %d finished runs, want %d", len(held), keepFinishedRuns)
+	}
+	if held[0].ID != ids[3] {
+		t.Errorf("the oldest run held is %s, want %s - the oldest three should have gone", held[0].ID, ids[3])
+	}
+
+	// A dropped run's history goes with it: it is not replayed to a page
+	// connecting now.
+	conn := dial(t, ts.URL)
+	if got := next(t, conn); got["type"] != "run_state" {
+		t.Fatalf("replay opens with %v, want the connection marker", got)
+	}
+	// Three records per run held: accepted, started, finished.
+	seen := map[string]bool{}
+	for i := 0; i < keepFinishedRuns*3; i++ {
+		if id, ok := next(t, conn)["run"].(string); ok {
+			seen[id] = true
+		}
+	}
+	if len(seen) != keepFinishedRuns {
+		t.Errorf("the replay covers %d runs, want %d", len(seen), keepFinishedRuns)
+	}
+	for _, gone := range ids[:3] {
+		if seen[gone] {
+			t.Errorf("run %s was trimmed from the registry but is still replayed", gone)
+		}
+	}
+}
+
+// TestTrimNeverDropsALiveRun is the other half of the rule, at the level it
+// is decided: a run still queued or running stays, however old it is, because
+// dropping it would forget the one thing that can still be cancelled.
+func TestTrimNeverDropsALiveRun(t *testing.T) {
+	fake := &fakeRun{}
+	srv, _ := newTestServer(t, fake.runner)
+
+	live := &runEntry{id: "live", state: RunRunning, source: "the oldest run"}
+	srv.runs[live.id] = live
+	srv.order = append(srv.order, live.id)
+
+	var newest string
+	for i := 0; i < keepFinishedRuns+5; i++ {
+		entry := &runEntry{id: fmt.Sprintf("done-%02d", i), state: RunDone}
+		srv.runs[entry.id] = entry
+		srv.order = append(srv.order, entry.id)
+		newest = entry.id
+	}
+
+	srv.trim()
+
+	held := srv.snapshot()
+	if len(held) != keepFinishedRuns+1 {
+		t.Fatalf("trim left %d runs, want %d finished plus the live one", len(held), keepFinishedRuns)
+	}
+	if held[0].ID != live.id {
+		t.Errorf("the oldest run held is %s, want the live one", held[0].ID)
+	}
+	if held[len(held)-1].ID != newest {
+		t.Errorf("trim dropped the newest finished run %s", newest)
+	}
+}
+
+// TestClosingCancelsTheQueueAndItsStagedUploads: a queued run will never
+// start once the server stops, so nothing would ever run the cleanup that
+// removes the .torrent staged for it - the file would outlive the process
+// that made it.
+func TestClosingCancelsTheQueueAndItsStagedUploads(t *testing.T) {
+	const source = "magnet:?xt=urn:btih:aaa"
+
+	fake := newFakeRuns()
+	srv, ts := newTestServer(t, fake.runner)
+
+	running := startRun(t, ts.URL, source)
+
+	before := stagedUploads(t)
+	resp := uploadTorrent(t, ts.URL, []byte("torrent-bytes"), "")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/upload: status %d, want 202", resp.StatusCode)
+	}
+	queued := decodeBody(t, resp)
+	if queued["state"] != "queued" {
+		t.Fatalf("the dropped .torrent is %v, want queued", queued["state"])
+	}
+
+	staged := ""
+	for dir := range stagedUploads(t) {
+		if !before[dir] {
+			staged = dir
+		}
+	}
+	if staged == "" {
+		t.Fatal("the upload staged nothing on disk")
+	}
+
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	if _, err := os.Stat(staged); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("closing the server left the queued run's staged upload behind: %v", err)
+	}
+	if got := runInfo(t, srv, queued["id"].(string)).State; got != RunCancelled {
+		t.Errorf("the queued run is %q after Close, want cancelled", got)
+	}
+	select {
+	case <-fake.context(t, source).Done():
+	case <-time.After(5 * time.Second):
+		t.Error("closing the server did not cancel the run holding the slot")
+	}
+	if got := runInfo(t, srv, running.id).ID; got != running.id {
+		t.Errorf("the running run vanished from the registry: %q", got)
+	}
+}
+
+// stagedUploads lists the temp directories handleUploadTorrent makes, so a
+// test can name the one its own upload created.
+func stagedUploads(t *testing.T) map[string]bool {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "torpeek-upload-*"))
+	if err != nil {
+		t.Fatalf("list staged uploads: %v", err)
+	}
+	out := make(map[string]bool, len(matches))
+	for _, dir := range matches {
+		out[dir] = true
+	}
+	return out
 }

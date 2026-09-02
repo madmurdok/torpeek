@@ -22,7 +22,27 @@ import (
 // add keys of its own to the returned map - the web server attaches URLs for
 // the files an event names - which is an addition to this vocabulary rather
 // than a second one.
-func Event(ev core.Event) map[string]any {
+//
+// run says which run the event belongs to, under the "run" key. Nothing else
+// in the vocabulary can answer that: "file" is a torrent-file index that
+// restarts at 0 every run, "index" is a frame index, and "infohash" names a
+// torrent rather than a run - two runs of the same magnet share it. A server
+// holding several runs at once (internal/web) needs the key on every event or
+// a client cannot tell whose frame it just received.
+//
+// An empty run omits the key rather than writing "run":"". A stream that only
+// ever describes one run - the CLI's NDJSON, which is a single run's output
+// by construction - has nothing to disambiguate, and a blank identifier there
+// would read as a run whose id happens to be empty.
+func Event(run string, ev core.Event) map[string]any {
+	m := event(ev)
+	if run != "" {
+		m["run"] = run
+	}
+	return m
+}
+
+func event(ev core.Event) map[string]any {
 	switch e := ev.(type) {
 	case core.MetadataReady:
 		return map[string]any{
