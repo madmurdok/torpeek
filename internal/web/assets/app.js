@@ -29,6 +29,8 @@ const el = {
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
   dropOverlay: document.getElementById("drop-overlay"),
+  runsPanel: document.getElementById("runs-panel"),
+  resizer: document.getElementById("resizer"),
   runList: document.getElementById("run-list"),
   runListEmpty: document.getElementById("run-list-empty"),
   detail: document.getElementById("detail"),
@@ -776,6 +778,105 @@ document.addEventListener("drop", async (event) => {
   el.dropOverlay.hidden = true;
   const file = event.dataTransfer.files[0];
   if (file) await uploadTorrent(file);
+});
+
+// ---------------------------------------------------------------------------
+// The panel divider: dragging it resizes the left panel, and the width it is
+// left at survives a reload - a long torrent name that got cut off is what
+// the drag is for, so losing the width on every visit would defeat it.
+// localStorage is read through a try/catch on purpose: it throws in a
+// private window or with site data blocked, and a page that cannot remember
+// the width must still render at the default from app.css rather than break.
+const PANEL_WIDTH_KEY = "torpeek.panelWidth";
+const PANEL_MIN_WIDTH = 160;
+const PANEL_MAX_WIDTH = 640;
+const PANEL_RIGHT_MARGIN = 240; // the right column keeps at least this much room
+
+function clampPanelWidth(px) {
+  const roomMax = Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_RIGHT_MARGIN);
+  const max = Math.min(PANEL_MAX_WIDTH, roomMax);
+  return Math.min(max, Math.max(PANEL_MIN_WIDTH, px));
+}
+
+function loadPanelWidth() {
+  try {
+    const raw = localStorage.getItem(PANEL_WIDTH_KEY);
+    const width = raw ? parseFloat(raw) : NaN;
+    return Number.isFinite(width) ? width : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function savePanelWidth(px) {
+  try {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(px));
+  } catch (err) {
+    // Best-effort only - the default width still works.
+  }
+}
+
+function applyPanelWidth(px) {
+  document.documentElement.style.setProperty("--panel-width", px + "px");
+}
+
+// panelWidth stays null until either a stored width was found or the divider
+// has been dragged once - only then is there anything to reclamp on resize
+// or to persist.
+let panelWidth = loadPanelWidth();
+if (panelWidth != null) {
+  panelWidth = clampPanelWidth(panelWidth);
+  applyPanelWidth(panelWidth);
+}
+
+let dragStartX = 0;
+let dragStartWidth = 0;
+
+el.resizer.addEventListener("pointerdown", (event) => {
+  if (event.button !== undefined && event.button !== 0) return;
+  dragStartX = event.clientX;
+  dragStartWidth = el.runsPanel.getBoundingClientRect().width;
+  el.resizer.classList.add("dragging");
+  el.resizer.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+el.resizer.addEventListener("pointermove", (event) => {
+  if (!el.resizer.classList.contains("dragging")) return;
+  panelWidth = clampPanelWidth(dragStartWidth + (event.clientX - dragStartX));
+  applyPanelWidth(panelWidth);
+});
+
+function endPanelDrag(event) {
+  if (!el.resizer.classList.contains("dragging")) return;
+  el.resizer.classList.remove("dragging");
+  try {
+    el.resizer.releasePointerCapture(event.pointerId);
+  } catch (err) {
+    // Already released (e.g. on pointercancel) - nothing more to do.
+  }
+  savePanelWidth(panelWidth);
+}
+
+el.resizer.addEventListener("pointerup", endPanelDrag);
+el.resizer.addEventListener("pointercancel", endPanelDrag);
+
+// Arrow keys on the focused divider give keyboard users the same control.
+el.resizer.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const current = el.runsPanel.getBoundingClientRect().width;
+  panelWidth = clampPanelWidth(current + (event.key === "ArrowLeft" ? -16 : 16));
+  applyPanelWidth(panelWidth);
+  savePanelWidth(panelWidth);
+});
+
+// A width chosen at one viewport size can stop fitting after the window is
+// resized; only reclamp a width that was actually set, never impose one on
+// a page that is still using the CSS default.
+window.addEventListener("resize", () => {
+  if (panelWidth == null) return;
+  applyPanelWidth(clampPanelWidth(panelWidth));
 });
 
 loadRuns();

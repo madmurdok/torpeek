@@ -1,13 +1,10 @@
-:root { color-scheme: light dark; }
+:root { color-scheme: light dark; --panel-width: 17rem; }
 
 body {
-  margin: 0 auto;
-  padding: 1.5rem 1rem 4rem;
-  max-width: 76rem;
+  margin: 0;
   font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-header { display: flex; align-items: baseline; gap: .75rem; }
 h1 { font-size: 1.4rem; margin: 0; }
 h2 { font-size: 1rem; margin: 0; }
 h3 { font-size: .8rem; margin: .6rem 0 .2rem; opacity: .7; text-transform: uppercase; letter-spacing: .04em; }
@@ -16,48 +13,103 @@ h3 { font-size: .8rem; margin: .6rem 0 .2rem; opacity: .7; text-transform: upper
 .status[data-state="live"] { color: #1a7f37; opacity: 1; }
 .status[data-state="lost"] { color: #b35900; opacity: 1; }
 
-/* Intake: magnet field, mode, buttons, and the drop target for a .torrent. */
-.intake { margin: 1rem 0 1.5rem; }
+/* The whole page: a full-height left panel (the torpeek title, then every
+   torrent) and a draggable divider next to a right column that starts with
+   the one-line intake and holds the selected torrent's detail below it.
+   Narrow viewports stack the two instead of squeezing the panel to nothing. */
+.workspace {
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+  max-width: 76rem;
+  margin: 0 auto;
+}
 
-form { display: flex; flex-direction: column; gap: .6rem; }
+@media (max-width: 52rem) {
+  .workspace { flex-direction: column; min-height: 0; }
+}
+
+.panel-header { display: flex; align-items: baseline; gap: .75rem; }
+
+.runs-panel {
+  flex: 0 0 var(--panel-width, 17rem);
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 1.25rem 1rem;
+  border-right: 1px solid #8884;
+  display: flex;
+  flex-direction: column;
+}
+.runs-panel-title { font-size: .8rem; opacity: .6; text-transform: uppercase; letter-spacing: .04em; margin: 1.1rem 0 .5rem; }
+
+@media (max-width: 52rem) {
+  .runs-panel { flex: 0 0 auto; border-right: none; border-bottom: 1px solid #8884; }
+}
+
+/* The draggable divider. Only present above the stacking breakpoint - there
+   is no second column to widen once the panel sits above the detail pane. */
+.resizer {
+  flex: 0 0 6px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.resizer:hover, .resizer:focus-visible, .resizer.dragging { background: #1a7f3733; }
+.resizer:focus-visible { outline: none; }
+
+@media (max-width: 52rem) {
+  .resizer { display: none; }
+}
+
+.main {
+  flex: 1 1 0;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 1.25rem 1.5rem 4rem;
+}
+
+@media (max-width: 52rem) {
+  .main { padding: 1.25rem 1rem 4rem; }
+}
+
+/* Intake: magnet field, mode select and Take frames on one line - a magnet
+   is pasted, never read, so the field does not need to be wide - plus the
+   drop target for a .torrent file. */
+.intake { margin: 0 0 1.5rem; }
+
+form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
+
+@media (max-width: 52rem) {
+  form { flex-wrap: wrap; }
+}
 
 .dropzone {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: .75rem;
   flex-wrap: wrap;
   border: 1px dashed #8888;
   border-radius: .5rem;
-  padding: .6rem .75rem;
+  padding: .45rem .75rem;
 }
 
-#source { flex: 1 1 22rem; min-width: 14rem; padding: .45rem .6rem; font: inherit; border: 1px solid #8886; border-radius: .35rem; }
+#source { flex: 1 1 14rem; min-width: 8rem; padding: .45rem .6rem; font: inherit; border: 1px solid #8886; border-radius: .35rem; }
 
 .browse { font-size: .85rem; opacity: .8; cursor: pointer; white-space: nowrap; }
 .browse .link { text-decoration: underline; }
 
-.controls { display: flex; gap: .5rem; flex-wrap: wrap; }
+.controls { flex: 0 0 auto; display: flex; gap: .5rem; flex-wrap: nowrap; }
 select, button { padding: .45rem .7rem; font: inherit; border-radius: .35rem; }
 button:disabled { opacity: .5; }
 
-.hint { font-size: .78rem; opacity: .6; margin: .4rem 0 0; }
+.hint { font-size: .78rem; opacity: .6; margin: .6rem 0 0; }
 .error { color: #b3261e; }
 
 .torrent-summary { opacity: .85; font-weight: 500; }
 
-/* The two-column workspace: every torrent on the left, the selected one's
-   files and frames on the right. Stacks on a narrow viewport instead of
-   squeezing the panel down to nothing. */
-.workspace { display: flex; gap: 1.5rem; align-items: flex-start; margin-top: .5rem; }
-
-@media (max-width: 52rem) {
-  .workspace { flex-direction: column; }
-}
-
-.runs-panel { flex: 0 0 17rem; min-width: 0; }
-.runs-panel-title { font-size: .8rem; opacity: .6; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 .5rem; }
-
-.run-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .4rem; }
+.run-list { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; overflow-y: auto; display: flex; flex-direction: column; gap: .4rem; }
 .run-list-empty { font-size: .82rem; opacity: .6; margin: 0; }
 
 .run-row {
@@ -122,7 +174,7 @@ button:disabled { opacity: .5; }
 .run-badge[data-state="cancelled"] { background: #8884; opacity: .8; }
 .run-badge[data-state="disk"] { background: #8883; }
 
-.detail { flex: 1 1 0; min-width: 0; }
+.detail { min-width: 0; }
 .detail-empty { opacity: .6; margin-top: .5rem; }
 
 .run-detail-header { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
@@ -220,7 +272,10 @@ button:disabled { opacity: .5; }
   font-weight: 500;
 }
 
-.log-details { margin-top: 2rem; }
+/* body no longer carries page padding - the workspace above provides its
+   own - so this recreates it for what comes after: the same horizontal
+   gutter and max-width, still centered. */
+.log-details { max-width: 76rem; margin: 2rem auto 4rem; padding: 0 1rem; box-sizing: border-box; }
 .log-details summary { cursor: pointer; font-size: .85rem; opacity: .75; }
 .log {
   max-height: 22rem;
