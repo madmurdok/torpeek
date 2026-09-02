@@ -214,11 +214,16 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	tor := newTorrent(t)
 	// Directly known peers are added before waiting: without a tracker or DHT
 	// they are the only way metadata arrives at all.
+	//
+	// Deliberately not through a *Torrent. That type's whole premise is that
+	// the metadata is known - it caches the file list and the piece geometry
+	// at construction - and here it is exactly what has not arrived yet. A
+	// magnet reaches this line with a nil Info, and building one crashed the
+	// run before it started (TOR-48). Introducing a peer needs none of that.
 	if len(s.cfg.Peers) > 0 {
-		tor.AddPeers(s.cfg.Peers...)
+		addPeers(t, s.cfg.Peers...)
 	}
 
 	select {

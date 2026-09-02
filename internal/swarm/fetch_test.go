@@ -174,3 +174,51 @@ func TestProfileWindowGeometry(t *testing.T) {
 		t.Error("min-traffic claimed nothing, which cannot satisfy any read")
 	}
 }
+
+// TestMagnetReachesMetadataWithoutCrashing is the regression test for TOR-48.
+//
+// A magnet arrives at Session.add with no metadata at all, and the code there
+// built a *Torrent - a type whose premise is that the metadata IS known -
+// purely to introduce the peers that metadata would arrive from. Reading the
+// file list off a nil Info panicked, so a magnet crashed the process before it
+// downloaded a byte. Every earlier test used a .torrent, which hands the info
+// over at add time and can never reach that state.
+//
+// The peer is supplied through the config rather than after Open returns,
+// because that is the path with the defect: peers added before the wait are
+// the only way metadata arrives when there is no tracker and no DHT.
+func TestMagnetReachesMetadataWithoutCrashing(t *testing.T) {
+	fixture := torrenttest.Build(t, "movie.mkv", testPayloadSize, testPieceLength)
+	seederAddr := fixture.StartSeeder(t)
+
+	src, err := ParseSource(fixture.Magnet(t))
+	if err != nil {
+		t.Fatalf("parse magnet: %v", err)
+	}
+	if !src.IsMagnet() {
+		t.Fatal("the fixture's magnet did not parse as a magnet")
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false // the dead tracker in the URI is never reached either
+	cfg.MetadataTimeout = 30 * time.Second
+	cfg.Peers = []string{seederAddr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	session, tor, err := Open(ctx, cfg, src)
+	if err != nil {
+		t.Fatalf("open from a magnet: %v", err)
+	}
+	defer session.Close()
+
+	files := tor.Files()
+	if len(files) != 1 {
+		t.Fatalf("magnet run sees %d files, want 1", len(files))
+	}
+	if files[0].Length != testPayloadSize {
+		t.Errorf("file is %d bytes, want %d - the metadata that arrived is not the fixture's",
+			files[0].Length, testPayloadSize)
+	}
+}
