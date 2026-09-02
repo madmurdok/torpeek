@@ -74,6 +74,9 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stdout, ", %d skipped", e.Skipped)
 			}
 			fmt.Fprintln(stdout)
+			if e.SheetPath != "" {
+				fmt.Fprintf(stdout, "  sheet: %s\n", e.SheetPath)
+			}
 
 		case core.Failed:
 			if e.File < 0 {
@@ -179,6 +182,7 @@ func wire(ev core.Event) any {
 		return map[string]any{
 			"type": "file_done", "file": e.File, "path": e.Path,
 			"frames": e.Frames, "skipped": e.Skipped,
+			"manifest_path": e.ManifestPath, "sheet_path": e.SheetPath,
 		}
 	case core.Done:
 		return map[string]any{

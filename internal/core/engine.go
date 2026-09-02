@@ -18,6 +18,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/sheet"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/version"
 )
@@ -444,15 +445,26 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		})
 	}
 
-	if err := e.writeManifest(deps, file, info, records); err != nil {
+	manifestPath, err := e.writeManifest(deps, file, info, records)
+	if err != nil {
+		return produced, false, Fail(CodeStorage, err)
+	}
+
+	// The sheet is assembled last, from whatever frames landed on disk during
+	// the loop above - never accumulated as they arrived - so a run stopped
+	// partway still gets a sheet from what it actually has (section 2.11).
+	sheetPath, err := e.writeSheet(deps, file, info, points, records)
+	if err != nil {
 		return produced, false, Fail(CodeStorage, err)
 	}
 
 	deps.bus.Publish(FileDone{
-		File:    file.Index,
-		Path:    file.Path,
-		Frames:  produced,
-		Skipped: skipped,
+		File:         file.Index,
+		Path:         file.Path,
+		Frames:       produced,
+		Skipped:      skipped,
+		ManifestPath: manifestPath,
+		SheetPath:    sheetPath,
 	})
 
 	// Complete means every point planned for this file produced a frame. A
@@ -529,7 +541,7 @@ const availabilityBuckets = 64
 // The cost it carries is the run's, not the file's: the budget is shared
 // across files, and a per-file share of it would be a number nothing enforces.
 func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
-	info probe.MediaInfo, records []manifest.Frame) error {
+	info probe.MediaInfo, records []manifest.Frame) (string, error) {
 
 	spent, elapsed := deps.tracker.Spent()
 	limitBytes, limitTime := deps.tracker.Limits()
@@ -596,12 +608,27 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encode manifest: %w", err)
+		return "", fmt.Errorf("encode manifest: %w", err)
 	}
 	data = append(data, '\n')
 
-	_, err = deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
-	return err
+	return deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
+}
+
+// writeSheet composes the contact sheet from whatever frames this file's
+// records point to and writes it beside the manifest. It reads tiles from
+// disk rather than from anything held in memory as frames arrived, per
+// section 2.11 - and tolerates records shorter than points (a run stopped
+// between capture points) and individual records with no frame (an
+// unavailable or rejected point), per section 2.3.
+func (e *Engine) writeSheet(deps fileDeps, file swarm.FileInfo,
+	info probe.MediaInfo, points []time.Duration, records []manifest.Frame) (string, error) {
+
+	data, err := sheet.Build(points, records, info.Video.Width, info.Video.Height)
+	if err != nil {
+		return "", fmt.Errorf("compose sheet: %w", err)
+	}
+	return deps.writer.WriteFile(file.Index, file.Path, output.SheetName, data)
 }
 
 // minSeekTolerance is the smallest gap worth calling a miss. Keyframes are
