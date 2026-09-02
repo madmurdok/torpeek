@@ -143,7 +143,13 @@ button:disabled { opacity: .5; }
 .run-row:hover { background: #8881; }
 .run-row.selected { background: #1a7f3714; box-shadow: inset 3px 0 0 #1a7f37; }
 
-.run-cell-name { min-width: 0; }
+/* A name is cut off, not shredded. `max-width: 0` with `width: 100%` is what
+   makes a table cell shrinkable enough for an ellipsis to happen at all - a
+   td is sized by its content otherwise, and the name would either push the
+   other columns out or wrap one character at a time. The date and status
+   columns keep their intrinsic width, so this cell takes whatever is left,
+   which is exactly what widening the panel gives it more of. */
+.run-cell-name { min-width: 0; max-width: 0; width: 100%; }
 .run-row-main {
   display: block;
   width: 100%;
@@ -158,7 +164,13 @@ button:disabled { opacity: .5; }
   cursor: pointer;
 }
 
-.run-name { font-weight: 500; overflow-wrap: anywhere; }
+.run-name {
+  display: block;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .run-meta { display: block; font-size: .7rem; opacity: .65; overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
 
 .run-cell-when { white-space: nowrap; opacity: .75; font-size: .78rem; }
