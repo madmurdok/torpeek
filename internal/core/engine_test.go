@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -733,5 +734,193 @@ func TestRunShiftsPastAnUnavailableRegion(t *testing.T) {
 	}
 	if m.Tool == "" || m.Version != manifest.Version {
 		t.Errorf("manifest does not identify itself: version=%d tool=%q", m.Version, m.Tool)
+	}
+}
+
+// TestRerunIsServedFromDiskWithoutTheSwarm is acceptance criterion 3: the same
+// torrent and the same parameters twice must cost nothing the second time.
+//
+// The seeder is stopped before the second run, so a cache that quietly went to
+// the network would not merely be slow - it would fail outright. That is the
+// point: "issued no requests" is asserted by removing the only thing that
+// could have answered them.
+func TestRerunIsServedFromDiskWithoutTheSwarm(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 2, 20, "200k")
+
+	out := t.TempDir()
+	data := t.TempDir()
+
+	first := DefaultConfig(torrentPath, out, data)
+	first.Swarm.DHT = false
+	first.Swarm.MetadataTimeout = 10 * time.Second
+	first.Swarm.Peers = []string{seeder}
+	first.Profile = swarm.MinTraffic
+	first.Plan = frames.Plan{Count: 3, Start: 0.1, End: 0.9}
+	first.Budget = Budget{MaxBytes: 64 << 20, MaxTime: 4 * time.Minute, WarnAt: 0.8}
+	first.Parallelism = 2
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, first)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	var (
+		firstFrames int
+		firstDone   *Done
+		paths       []string
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case FrameReady:
+			firstFrames++
+			paths = append(paths, e.Path)
+		case Failed:
+			t.Fatalf("first run failed: %s: %v", e.Code, e.Err)
+		case Done:
+			firstDone = &e
+		}
+	}
+	if firstDone == nil || firstFrames != 6 {
+		t.Fatalf("first run produced %d frames: %+v", firstFrames, firstDone)
+	}
+	if firstDone.DownloadedByte == 0 {
+		t.Fatal("the first run downloaded nothing, so the second proves nothing")
+	}
+
+	// The second run is left with nobody to ask: no peers, no DHT, no
+	// trackers, and a fresh piece directory so it cannot quietly re-read what
+	// the first one fetched. Its ceiling is seconds, so a cache miss fails
+	// loudly instead of grinding.
+	if err := os.RemoveAll(data); err != nil {
+		t.Fatalf("remove piece directory: %v", err)
+	}
+
+	second := first
+	second.Swarm.DataDir = t.TempDir()
+	second.Swarm.Peers = nil
+	second.Swarm.MetadataTimeout = 3 * time.Second
+	second.Budget = Budget{MaxBytes: 8 << 20, MaxTime: 8 * time.Second, WarnAt: 0.8}
+
+	rerunCtx, rerunCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer rerunCancel()
+
+	events, err = NewEngine(tools).Run(rerunCtx, second)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	var (
+		secondFrames int
+		secondPaths  []string
+		secondDone   *Done
+		metadata     *MetadataReady
+		started      int
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case MetadataReady:
+			metadata = &e
+		case FileStarted:
+			started++
+		case FrameReady:
+			secondFrames++
+			secondPaths = append(secondPaths, e.Path)
+		case Failed:
+			t.Errorf("second run failed: %s: %v", e.Code, e.Err)
+		case Done:
+			secondDone = &e
+		}
+	}
+
+	if secondDone == nil {
+		t.Fatal("second run produced no terminal event")
+	}
+	if secondDone.DownloadedByte != 0 {
+		t.Errorf("second run downloaded %d bytes; an identical rerun must not go to the swarm",
+			secondDone.DownloadedByte)
+	}
+	if secondDone.Reason != StopCompleted {
+		t.Errorf("second run ended as %q, want a completed run", secondDone.Reason)
+	}
+	if secondFrames != firstFrames {
+		t.Errorf("second run reported %d frames, first reported %d", secondFrames, firstFrames)
+	}
+	if started != 2 || metadata == nil || len(metadata.Videos) != 2 {
+		t.Errorf("a cached run should look like a live one: %d files started, metadata %+v",
+			started, metadata)
+	}
+	// Compared as sets: a live run works on files in parallel, so its events
+	// interleave, while a replay is file by file. The order is not the promise
+	// - the frames are.
+	sort.Strings(paths)
+	sort.Strings(secondPaths)
+	for i := range secondPaths {
+		if secondPaths[i] != paths[i] {
+			t.Errorf("cached run served %q where the first run wrote %q", secondPaths[i], paths[i])
+		}
+	}
+}
+
+// TestCacheMissesWhenAFrameIsGone: a manifest is a promise about files on
+// disk, and a promise about a deleted file has to be treated as no promise.
+func TestCacheMissesWhenAFrameIsGone(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 20, "200k")
+
+	out := t.TempDir()
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.OutputRoot = out
+	cfg.Swarm.Peers = []string{seeder}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+
+	var written []string
+	for _, ev := range collect(t, events) {
+		if f, ok := ev.(FrameReady); ok {
+			written = append(written, f.Path)
+		}
+	}
+	if len(written) == 0 {
+		t.Fatal("first run produced no frames")
+	}
+
+	if err := os.Remove(written[0]); err != nil {
+		t.Fatalf("remove a frame: %v", err)
+	}
+
+	events, err = NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	var done *Done
+	for _, ev := range collect(t, events) {
+		if d, ok := ev.(Done); ok {
+			done = &d
+		}
+	}
+	if done == nil {
+		t.Fatal("second run produced no terminal event")
+	}
+
+	// Downloaded bytes cannot tell the two apart here - the piece directory is
+	// still warm, so a live rerun fetches nothing either. What settles it is
+	// the file: a cache hit would have served the manifest and left the gap.
+	info, err := os.Stat(written[0])
+	if err != nil {
+		t.Fatalf("the deleted frame was not produced again: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("the frame came back empty")
 	}
 }

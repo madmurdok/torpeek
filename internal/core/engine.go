@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/manifest"
@@ -109,6 +110,13 @@ func (e *Engine) Run(ctx context.Context, cfg Config) (<-chan Event, error) {
 func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus) {
 	started := time.Now()
 
+	// Before anything else, and before any session exists: an identical rerun
+	// is required to make no network request at all, and the only way to be
+	// certain of that is not to connect.
+	if e.serveFromCache(cfg, src, bus, started) {
+		return
+	}
+
 	session, torrent, err := swarm.Open(ctx, cfg.Swarm, src)
 	if err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeOf(err), Err: err})
@@ -174,6 +182,9 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		made    int
 		done    int
 		stopped StopReason = StopCompleted
+		// finished are the files whose frame set came out whole, which is what
+		// a later run may be served from disk.
+		finished []int
 	)
 
 	sem := make(chan struct{}, cfg.Parallelism)
@@ -194,7 +205,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			produced, err := e.processFile(runCtx, cfg, fileDeps{
+			produced, complete, err := e.processFile(runCtx, cfg, fileDeps{
 				torrent:   torrent,
 				bridge:    srv,
 				prober:    prober,
@@ -209,6 +220,9 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 			made += produced
 			if err == nil {
 				done++
+				if complete {
+					finished = append(finished, file.Index)
+				}
 				return
 			}
 			if reason, halt := haltReason(runCtx, tracker); halt {
@@ -229,6 +243,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		mu.Lock()
 		stopped = reason
 		mu.Unlock()
+	}
+
+	// Written even for a stopped run: what it did finish is still worth
+	// serving from disk next time, and a partial record is what resume will
+	// read to know where to pick up.
+	if err := saveRunRecord(writer.Layout(), torrent, videos, finished); err != nil {
+		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	}
 
 	spent, _ := tracker.Spent()
@@ -253,21 +274,21 @@ type fileDeps struct {
 	bus       *Bus
 }
 
-func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, file swarm.FileInfo) (int, error) {
+func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, file swarm.FileInfo) (produced int, complete bool, err error) {
 	url, withdraw, err := deps.bridge.Publish(bridge.FromTorrent(deps.torrent, cfg.Profile), file.Index)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer withdraw()
 
 	info, err := deps.prober.Inspect(ctx, url)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	points, err := cfg.Plan.Points(info.Duration)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 
 	deps.bus.Publish(FileStarted{
@@ -277,7 +298,6 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		Plan:  points,
 	})
 
-	produced := 0
 	skipped := 0
 	tolerance := seekTolerance(points)
 	records := make([]manifest.Frame, 0, len(points))
@@ -343,7 +363,7 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 
 		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, shot.frame.Data, extensionFor(cfg.Format))
 		if err != nil {
-			return produced, Fail(CodeStorage, err)
+			return produced, false, Fail(CodeStorage, err)
 		}
 		produced++
 
@@ -389,7 +409,7 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	}
 
 	if err := e.writeManifest(deps, file, info, records); err != nil {
-		return produced, Fail(CodeStorage, err)
+		return produced, false, Fail(CodeStorage, err)
 	}
 
 	deps.bus.Publish(FileDone{
@@ -399,7 +419,34 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		Skipped: skipped,
 	})
 
-	return produced, nil
+	// Complete means every point planned for this file produced a frame. A
+	// file with a gap is not a cacheable result: a later run should try the
+	// missing points again rather than be served the gap as an answer.
+	return produced, produced == len(points), nil
+}
+
+// saveRunRecord writes what this run covered, so a later one can tell a whole
+// result from a partial one without opening a session to find out.
+func saveRunRecord(layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, finished []int) error {
+	record := cache.Run{
+		Version:   cache.Version,
+		Tool:      version.Version,
+		CreatedAt: time.Now().UTC(),
+		InfoHash:  torrent.InfoHash(),
+		Name:      torrent.Name(),
+		Private:   torrent.Private(),
+		Videos:    make([]cache.File, 0, len(videos)),
+		Complete:  finished,
+	}
+	for _, v := range videos {
+		record.Videos = append(record.Videos, cache.File{
+			Index: v.Index, Path: v.Path, Bytes: v.Length, Offset: v.Offset,
+		})
+	}
+	if record.Complete == nil {
+		record.Complete = []int{}
+	}
+	return cache.SaveRun(layout.RunDir(), record)
 }
 
 // availabilityBuckets is how finely the swarm map is recorded. Enough for a UI
