@@ -31,16 +31,24 @@
         <option value="min-traffic">least traffic</option>
       </select>
       <button id="go" type="submit">Take frames</button>
-      <button id="cancel" type="button" disabled>Cancel</button>
     </div>
   </form>
-  <p class="hint">You can also drop a .torrent file anywhere on this page.</p>
+  <p class="hint">You can also drop a .torrent file anywhere on this page. Adding another torrent while one is
+    already running just queues it - no need to wait.</p>
   <p id="error" class="error" hidden></p>
 </section>
 
-<p id="torrent-summary" class="torrent-summary" hidden></p>
+<div class="workspace">
+  <aside class="runs-panel">
+    <h2 class="runs-panel-title">Torrents</h2>
+    <ul id="run-list" class="run-list"></ul>
+    <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link above to start.</p>
+  </aside>
 
-<section id="files" class="files"></section>
+  <section id="detail" class="detail">
+    <p id="detail-empty" class="detail-empty">Select a torrent on the left to see its files and frames.</p>
+  </section>
+</div>
 
 <details id="log-details" class="log-details">
   <summary>Activity log</summary>
