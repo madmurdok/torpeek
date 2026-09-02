@@ -24,6 +24,37 @@ import (
 	"time"
 )
 
+// ErrStalled means a request ran out of its own time before the bytes it had
+// promised were delivered.
+//
+// It exists because of what the client sees instead: headers with a
+// Content-Length, then a body that stops early. To ffprobe that is
+// indistinguishable from a truncated file - it reports no packets, no streams,
+// no index - and a file accused of having no index is sent down the degraded
+// path or skipped as unprobeable. The bridge is the only layer that knows the
+// read never finished, so it says so here rather than leaving the container to
+// take the blame (TOR-45).
+var ErrStalled = errors.New("read through the bridge timed out")
+
+// StallError names which read ran out of time and how much of it arrived.
+type StallError struct {
+	// Off and Length are the byte range the client asked for.
+	Off, Length int64
+	// Delivered is how much of it reached the client before time ran out.
+	Delivered int64
+	// Timeout is the deadline that expired; Elapsed is how long the request
+	// actually took, which is the same figure seen from the outside.
+	Timeout time.Duration
+	Elapsed time.Duration
+}
+
+func (e *StallError) Error() string {
+	return fmt.Sprintf("%s: %d of %d bytes at offset %d after %s (timeout %s)",
+		ErrStalled, e.Delivered, e.Length, e.Off, e.Elapsed.Round(time.Millisecond), e.Timeout)
+}
+
+func (e *StallError) Unwrap() error { return ErrStalled }
+
 // Content is what the bridge can publish: a sized, seekable resource fetched
 // on demand. Defined here rather than taken from the swarm package so the
 // server can be tested without a torrent client.
@@ -64,12 +95,32 @@ type Bridge struct {
 	baseURL  string
 
 	mu        sync.RWMutex
-	published map[string]publication
+	published map[string]*publication
 }
 
 type publication struct {
 	content Content
 	file    int
+
+	// mu guards the stall record, which is written by whichever request
+	// goroutine ran out of time and read by the run that published the file.
+	mu     sync.Mutex
+	stalls int
+	last   error
+}
+
+// noteStall records a read that did not finish in time.
+func (p *publication) noteStall(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stalls++
+	p.last = err
+}
+
+func (p *publication) stallRecord() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.stalls, p.last
 }
 
 // Start begins listening. The returned bridge must be closed.
@@ -90,7 +141,7 @@ func Start(cfg Config) (*Bridge, error) {
 		cfg:       cfg,
 		listener:  ln,
 		baseURL:   "http://" + ln.Addr().String(),
-		published: make(map[string]publication),
+		published: make(map[string]*publication),
 	}
 	b.server = &http.Server{Handler: http.HandlerFunc(b.serve)}
 
@@ -120,7 +171,7 @@ func (b *Bridge) Publish(c Content, file int) (string, func(), error) {
 	token := hex.EncodeToString(raw[:])
 
 	b.mu.Lock()
-	b.published[token] = publication{content: c, file: file}
+	b.published[token] = &publication{content: c, file: file}
 	b.mu.Unlock()
 
 	// The trailing name is decoration for ffmpeg's format guessing; the token
@@ -132,6 +183,29 @@ func (b *Bridge) Publish(c Content, file int) (string, func(), error) {
 		delete(b.published, token)
 		b.mu.Unlock()
 	}, nil
+}
+
+// Stalls reports the reads of a publication that ran out of time: how many
+// there have been, and the most recent one's error.
+//
+// The count is what makes this usable: a caller takes it before an operation
+// and compares afterwards, so a stall from an earlier capture point can never
+// be blamed for a later, unrelated failure. An unknown or withdrawn URL simply
+// has no stalls.
+func (b *Bridge) Stalls(url string) (count int, last error) {
+	rest, ok := strings.CutPrefix(url, b.baseURL+"/")
+	if !ok {
+		return 0, nil
+	}
+	token, _, _ := strings.Cut(rest, "/")
+
+	b.mu.RLock()
+	pub, ok := b.published[token]
+	b.mu.RUnlock()
+	if !ok {
+		return 0, nil
+	}
+	return pub.stallRecord()
 }
 
 // Close stops the server.
@@ -203,13 +277,39 @@ func (b *Bridge) serve(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), b.cfg.RequestTimeout)
 	defer cancel()
 
+	// The only deadline on this context is the one set right above: r.Context()
+	// is cancelled when the client goes away, never on a timer. So
+	// DeadlineExceeded below means precisely "this request ran out of its own
+	// time", and a client that read what it wanted and hung up - which is
+	// ffmpeg's normal behaviour on an open-ended range - reads as Canceled and
+	// is not a stall.
+	started := time.Now()
+
 	body, err := pub.content.Fetch(ctx, pub.file, span.Start, span.Length)
 	if err != nil {
 		// Headers are already written, so the only honest signal left is to
 		// cut the body short; the client sees a truncated response.
+		b.noteStall(ctx, pub, span, 0, started)
 		return
 	}
 	defer body.Close()
 
-	_, _ = io.Copy(w, body)
+	sent, _ := io.Copy(w, body)
+	b.noteStall(ctx, pub, span, sent, started)
+}
+
+// noteStall records the request as stalled if it ran out of time with bytes
+// still owed. Called on both exits from serve, since a read can die before the
+// first byte or halfway through the body and the client cannot tell them apart.
+func (b *Bridge) noteStall(ctx context.Context, pub *publication, span byteRange, sent int64, started time.Time) {
+	if sent >= span.Length || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return
+	}
+	pub.noteStall(&StallError{
+		Off:       span.Start,
+		Length:    span.Length,
+		Delivered: sent,
+		Timeout:   b.cfg.RequestTimeout,
+		Elapsed:   time.Since(started),
+	})
 }

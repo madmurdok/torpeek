@@ -42,9 +42,50 @@ func Build(t *testing.T, name string, size, pieceLength int64) Fixture {
 		t.Fatalf("write payload: %v", err)
 	}
 
+	return Fixture{
+		Dir:         dir,
+		TorrentPath: writeTorrent(t, dir, pieceLength, false),
+		Payload:     payload,
+		FileName:    name,
+	}
+}
+
+// BuildPrivate is Build with the BEP 27 private flag set.
+//
+// It exists for the one case a .torrent fixture cannot reproduce: a magnet
+// whose torrent turns out private only once the metadata has arrived. That is
+// the branch of Session.Open that decides not to restart with DHT, and the
+// guarantee it protects is worth a test that actually walks it.
+func BuildPrivate(t *testing.T, name string, size, pieceLength int64) Fixture {
+	t.Helper()
+
+	dir := t.TempDir()
+	payload := deterministicBytes(size)
+
+	if err := os.WriteFile(filepath.Join(dir, name), payload, 0o600); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	return Fixture{
+		Dir:         dir,
+		TorrentPath: writeTorrent(t, dir, pieceLength, true),
+		Payload:     payload,
+		FileName:    name,
+	}
+}
+
+// writeTorrent builds the info for a directory already on disk and writes the
+// .torrent describing it, returning the path. No announce URL, so nothing in a
+// test can reach a tracker.
+func writeTorrent(t *testing.T, dir string, pieceLength int64, private bool) string {
+	t.Helper()
+
 	info := metainfo.Info{PieceLength: pieceLength}
 	if err := info.BuildFromFilePath(dir); err != nil {
 		t.Fatalf("build info: %v", err)
+	}
+	if private {
+		info.Private = &private
 	}
 	infoBytes, err := bencode.Marshal(info)
 	if err != nil {
@@ -61,8 +102,7 @@ func Build(t *testing.T, name string, size, pieceLength int64) Fixture {
 	if err := mi.Write(f); err != nil {
 		t.Fatalf("write torrent file: %v", err)
 	}
-
-	return Fixture{Dir: dir, TorrentPath: torrentPath, Payload: payload, FileName: name}
+	return torrentPath
 }
 
 // StartSeeder serves the fixture on loopback and returns its host:port. The
@@ -223,27 +263,12 @@ func BuildFromBytes(t *testing.T, name string, payload []byte, pieceLength int64
 		t.Fatalf("write payload: %v", err)
 	}
 
-	info := metainfo.Info{PieceLength: pieceLength}
-	if err := info.BuildFromFilePath(dir); err != nil {
-		t.Fatalf("build info: %v", err)
+	return Fixture{
+		Dir:         dir,
+		TorrentPath: writeTorrent(t, dir, pieceLength, false),
+		Payload:     payload,
+		FileName:    name,
 	}
-	infoBytes, err := bencode.Marshal(info)
-	if err != nil {
-		t.Fatalf("marshal info: %v", err)
-	}
-
-	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
-	torrentPath := filepath.Join(t.TempDir(), "fixture.torrent")
-	f, err := os.Create(torrentPath)
-	if err != nil {
-		t.Fatalf("create torrent file: %v", err)
-	}
-	defer f.Close()
-	if err := mi.Write(f); err != nil {
-		t.Fatalf("write torrent file: %v", err)
-	}
-
-	return Fixture{Dir: dir, TorrentPath: torrentPath, Payload: payload, FileName: name}
 }
 
 // BuildDir makes a torrent over a directory the caller has already filled,
@@ -251,25 +276,25 @@ func BuildFromBytes(t *testing.T, name string, payload []byte, pieceLength int64
 func BuildDir(t *testing.T, dir string, pieceLength int64) Fixture {
 	t.Helper()
 
-	info := metainfo.Info{PieceLength: pieceLength}
-	if err := info.BuildFromFilePath(dir); err != nil {
-		t.Fatalf("build info: %v", err)
-	}
-	infoBytes, err := bencode.Marshal(info)
-	if err != nil {
-		t.Fatalf("marshal info: %v", err)
-	}
+	return Fixture{Dir: dir, TorrentPath: writeTorrent(t, dir, pieceLength, false)}
+}
 
-	mi := metainfo.MetaInfo{InfoBytes: infoBytes}
-	torrentPath := filepath.Join(t.TempDir(), "fixture.torrent")
-	f, err := os.Create(torrentPath)
-	if err != nil {
-		t.Fatalf("create torrent file: %v", err)
-	}
-	defer f.Close()
-	if err := mi.Write(f); err != nil {
-		t.Fatalf("write torrent file: %v", err)
-	}
+// Magnet is the fixture as a magnet URI: an infohash and nothing else that
+// matters, so a session opened from it reaches add() with no metadata yet.
+//
+// That is the state a .torrent fixture can never reproduce - it hands over the
+// info bytes at add time - and it is the state a magnet always starts in. The
+// tracker in the URI is a dead loopback address included only to satisfy the
+// privacy routing, which refuses a trackerless magnet unless DHT is allowed;
+// nothing in a test should reach a tracker, and nothing here does. Metadata
+// arrives over BEP 9 from whatever peer the caller supplies.
+func (f Fixture) Magnet(t *testing.T) string {
+	t.Helper()
 
-	return Fixture{Dir: dir, TorrentPath: torrentPath}
+	mi, err := metainfo.LoadFromFile(f.TorrentPath)
+	if err != nil {
+		t.Fatalf("load fixture torrent: %v", err)
+	}
+	return "magnet:?xt=urn:btih:" + mi.HashInfoBytes().HexString() +
+		"&tr=http://127.0.0.1:1/announce"
 }

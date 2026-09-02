@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/dht/v2"
+	"github.com/anacrolix/torrent"
+
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
@@ -173,4 +176,194 @@ func TestProfileWindowGeometry(t *testing.T) {
 	if frugal.Len() < 1 {
 		t.Error("min-traffic claimed nothing, which cannot satisfy any read")
 	}
+}
+
+// TestMagnetReachesMetadataWithoutCrashing is the regression test for TOR-48.
+//
+// A magnet arrives at Session.add with no metadata at all, and the code there
+// built a *Torrent - a type whose premise is that the metadata IS known -
+// purely to introduce the peers that metadata would arrive from. Reading the
+// file list off a nil Info panicked, so a magnet crashed the process before it
+// downloaded a byte. Every earlier test used a .torrent, which hands the info
+// over at add time and can never reach that state.
+//
+// The peer is supplied through the config rather than after Open returns,
+// because that is the path with the defect: peers added before the wait are
+// the only way metadata arrives when there is no tracker and no DHT.
+func TestMagnetReachesMetadataWithoutCrashing(t *testing.T) {
+	fixture := torrenttest.Build(t, "movie.mkv", testPayloadSize, testPieceLength)
+	seederAddr := fixture.StartSeeder(t)
+
+	src, err := ParseSource(fixture.Magnet(t))
+	if err != nil {
+		t.Fatalf("parse magnet: %v", err)
+	}
+	if !src.IsMagnet() {
+		t.Fatal("the fixture's magnet did not parse as a magnet")
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false // the dead tracker in the URI is never reached either
+	cfg.MetadataTimeout = 30 * time.Second
+	cfg.Peers = []string{seederAddr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	session, tor, err := Open(ctx, cfg, src)
+	if err != nil {
+		t.Fatalf("open from a magnet: %v", err)
+	}
+	defer session.Close()
+
+	files := tor.Files()
+	if len(files) != 1 {
+		t.Fatalf("magnet run sees %d files, want 1", len(files))
+	}
+	if files[0].Length != testPayloadSize {
+		t.Errorf("file is %d bytes, want %d - the metadata that arrived is not the fixture's",
+			files[0].Length, testPayloadSize)
+	}
+}
+
+// TestPublicMagnetSurvivesTheDHTRestart is the regression test for TOR-49.
+//
+// A magnet carrying a tracker is fetched with DHT off so a private torrent can
+// never reach the DHT; once the metadata says the torrent is public, Open
+// tears the client down and restarts it with DHT on, handing over the metainfo
+// already in hand rather than fetching it twice. That hand-over was broken:
+// anacrolix's Torrent.Metainfo always allocates the PieceLayers map, a v1
+// torrent fills none of it, and AddTorrent reads a non-nil map as "this
+// torrent has piece layers" and rejects every multi-piece file with
+// "no piece root set for file". The result was that a plain public magnet -
+// the default path of the whole program - failed on the restart.
+//
+// Nothing before this test could catch it. Every other test either uses a
+// .torrent, whose privacy is known before the first client starts so there is
+// no restart, or a magnet with DHT off, which skips the restart too. Reaching
+// the restart needs DHT asked for, so the client here is given a DHT server
+// with no starting nodes: running, and with nowhere to bootstrap to.
+func TestPublicMagnetSurvivesTheDHTRestart(t *testing.T) {
+	withOfflineDHT(t)
+
+	fixture := torrenttest.Build(t, "movie.mkv", testPayloadSize, testPieceLength)
+	seederAddr := fixture.StartSeeder(t)
+
+	src, err := ParseSource(fixture.Magnet(t))
+	if err != nil {
+		t.Fatalf("parse magnet: %v", err)
+	}
+
+	// The route this test exists for: probe the tracker with DHT off, then
+	// restart with DHT because the torrent turned out public.
+	route := routeFor(Config{DHT: true}, src)
+	if !route.probeTrackersFirst || route.dht {
+		t.Fatalf("route = %+v, want the first client without DHT and a restart after the privacy check", route)
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = true // required to reach the restart at all
+	cfg.MetadataTimeout = 30 * time.Second
+	cfg.Peers = []string{seederAddr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	session, tor, err := Open(ctx, cfg, src)
+	if err != nil {
+		t.Fatalf("open a public magnet with DHT on: %v", err)
+	}
+	defer session.Close()
+
+	if !session.DHTEnabled() {
+		t.Error("the restarted session has DHT off; the restart is the only reason it exists")
+	}
+	if session.WentOnlineBlind() {
+		t.Error("session went online blind, but the magnet carried a tracker to probe first")
+	}
+	if tor.Private() {
+		t.Fatal("the fixture reports itself private, so this run never took the restart")
+	}
+	if got := len(tor.Files()); got != 1 {
+		t.Fatalf("restarted session sees %d files, want 1", got)
+	}
+
+	// Constructed is not the same as usable: the torrent carried over to the
+	// second client has to be able to fetch.
+	const (
+		readOffset = 4 << 20
+		readLength = 64 << 10
+	)
+	got, err := tor.ReadRange(ctx, 0, readOffset, readLength, MinTraffic)
+	if err != nil {
+		t.Fatalf("read from the restarted session: %v", err)
+	}
+	if !bytes.Equal(got, fixture.Payload[readOffset:readOffset+readLength]) {
+		t.Fatalf("read %d bytes that do not match the payload", len(got))
+	}
+}
+
+// TestPrivateMagnetNeverRestartsOntoDHT is the other half of TOR-49, and the
+// guarantee that must not bend: acceptance criterion 5.
+//
+// The .torrent case is covered elsewhere and is the easy one - the flag is
+// known before any client starts. This is the hard one: the flag is unknown at
+// add time and only arrives with the metadata, so the whole privacy decision
+// rests on Open reading it and declining to restart. DHT is asked for here,
+// and must still be refused.
+func TestPrivateMagnetNeverRestartsOntoDHT(t *testing.T) {
+	withOfflineDHT(t)
+
+	fixture := torrenttest.BuildPrivate(t, "movie.mkv", testPayloadSize, testPieceLength)
+	seederAddr := fixture.StartSeeder(t)
+
+	src, err := ParseSource(fixture.Magnet(t))
+	if err != nil {
+		t.Fatalf("parse magnet: %v", err)
+	}
+	if _, known := src.Privacy(); known {
+		t.Fatal("the magnet already knows the private flag, so this is not the path under test")
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = true // asked for, and must still be refused
+	cfg.MetadataTimeout = 30 * time.Second
+	cfg.Peers = []string{seederAddr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	session, tor, err := Open(ctx, cfg, src)
+	if err != nil {
+		t.Fatalf("open a private magnet: %v", err)
+	}
+	defer session.Close()
+
+	if !tor.Private() {
+		t.Fatal("the fixture is not private, so nothing here was tested")
+	}
+	if session.DHTEnabled() {
+		t.Error("session enabled DHT for a private torrent")
+	}
+	if session.UsesDHT() {
+		t.Error("a DHT server is running for a private torrent")
+	}
+	if session.WentOnlineBlind() {
+		t.Error("session went online blind for a magnet that carried a tracker")
+	}
+}
+
+// withOfflineDHT lets a test ask for DHT without reaching the real one: the
+// client gets a DHT server with an empty starting-node list, so it runs, is
+// visible to UsesDHT, and has nowhere to bootstrap to. This is how anacrolix
+// keeps its own DHT-enabled client tests offline.
+func withOfflineDHT(t *testing.T) {
+	t.Helper()
+
+	tuneClientForTest = func(tc *torrent.ClientConfig) {
+		tc.DhtStartingNodes = func(string) dht.StartingNodesGetter {
+			return func() ([]dht.Addr, error) { return nil, nil }
+		}
+	}
+	t.Cleanup(func() { tuneClientForTest = nil })
 }

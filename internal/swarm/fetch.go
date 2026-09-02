@@ -263,6 +263,16 @@ func (t *Torrent) ReadRange(ctx context.Context, file int, off, length int64, p 
 // AddPeers introduces peers by address, for cases where no tracker or DHT will
 // hand them over.
 func (t *Torrent) AddPeers(addrs ...string) int {
+	return addPeers(t.t, addrs...)
+}
+
+// addPeers is the same thing before there is a *Torrent to hang it off.
+//
+// Introducing a peer needs nothing from the metadata, which is why this is
+// reachable while the info is still nil - the case where peers matter most,
+// since on a magnet with no tracker and no DHT they are the only route the
+// metadata itself can arrive by.
+func addPeers(t *torrent.Torrent, addrs ...string) int {
 	peers := make([]torrent.PeerInfo, 0, len(addrs))
 	for _, a := range addrs {
 		peers = append(peers, torrent.PeerInfo{
@@ -271,7 +281,7 @@ func (t *Torrent) AddPeers(addrs ...string) int {
 			Trusted: true,
 		})
 	}
-	return t.t.AddPeers(peers)
+	return t.AddPeers(peers)
 }
 
 // stringAddr adapts a host:port string to the client's peer address interface.

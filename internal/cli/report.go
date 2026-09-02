@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/wire"
 )
 
 // reportText writes progress a person reads. Frames are announced as they land
@@ -130,77 +131,13 @@ func reportJSON(events <-chan core.Event, stdout, stderr io.Writer) int {
 			}
 		}
 
-		if err := enc.Encode(wire(ev)); err != nil {
+		if err := enc.Encode(wire.Event(ev)); err != nil {
 			fmt.Fprintf(stderr, "torpeek: writing events: %v\n", err)
 			return ExitFailed
 		}
 	}
 
 	return code
-}
-
-// wire is the JSON shape of an event.
-func wire(ev core.Event) any {
-	switch e := ev.(type) {
-	case core.MetadataReady:
-		return map[string]any{
-			"type": "metadata_ready", "name": e.Name, "infohash": e.InfoHash,
-			"private": e.Private, "videos": len(e.Videos), "blind_dht": e.BlindDHT,
-			"selected": e.Selected,
-		}
-	case core.FileStarted:
-		return map[string]any{
-			"type": "file_started", "file": e.File, "path": e.Path,
-			"duration_ms": e.Media.Duration.Milliseconds(),
-			"width":       e.Media.Video.Width, "height": e.Media.Video.Height,
-			"codec": e.Media.Video.Codec, "audio": len(e.Media.Audio),
-			"subtitles": len(e.Media.Subtitles), "planned": len(e.Plan),
-		}
-	case core.FrameReady:
-		return map[string]any{
-			"type": "frame_ready", "file": e.File, "index": e.Index,
-			"requested_ms": e.Requested.Milliseconds(), "actual_ms": e.Actual.Milliseconds(),
-			"shift": string(e.Shift), "path": e.Path, "width": e.Width, "height": e.Height,
-		}
-	case core.FrameSkipped:
-		return map[string]any{
-			"type": "frame_skipped", "file": e.File, "index": e.Index,
-			"requested_ms": e.Requested.Milliseconds(), "code": string(e.Code), "reason": e.Reason,
-		}
-	case core.Progress:
-		return map[string]any{
-			"type": "progress", "file": e.File, "frames_done": e.FramesDone,
-			"frames_total": e.FramesTotal, "downloaded": e.DownloadedByte,
-			"elapsed_ms": e.Elapsed.Milliseconds(), "peers": e.Peers, "seeds": e.Seeds,
-		}
-	case core.BudgetWarning:
-		return map[string]any{
-			"type": "budget_warning", "spent": e.SpentBytes, "limit": e.LimitBytes,
-			"elapsed_ms": e.Elapsed.Milliseconds(), "limit_ms": e.LimitTime.Milliseconds(),
-		}
-	case core.FileDone:
-		return map[string]any{
-			"type": "file_done", "file": e.File, "path": e.Path,
-			"frames": e.Frames, "skipped": e.Skipped,
-			"manifest_path": e.ManifestPath, "sheet_path": e.SheetPath,
-		}
-	case core.Done:
-		return map[string]any{
-			"type": "done", "reason": string(e.Reason), "files": e.Files,
-			"frames": e.Frames, "downloaded": e.DownloadedByte,
-			"elapsed_ms": e.Elapsed.Milliseconds(),
-		}
-	case core.Failed:
-		msg := ""
-		if e.Err != nil {
-			msg = e.Err.Error()
-		}
-		return map[string]any{
-			"type": "failed", "file": e.File, "code": string(e.Code), "error": msg,
-		}
-	default:
-		return map[string]any{"type": "unknown"}
-	}
 }
 
 func describeTrack(language, title, codec string) string {

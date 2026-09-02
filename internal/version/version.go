@@ -3,4 +3,4 @@
 package version
 
 // Version is the release this binary claims to be.
-const Version = "0.3.0"
+const Version = "0.4.0"

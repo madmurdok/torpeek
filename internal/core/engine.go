@@ -271,6 +271,24 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	})
 }
 
+// stallSince reports the bridge read that ran out of time since the count
+// taken before an operation, or nil if none did.
+//
+// It is the answer to a question the prober cannot answer for itself. The
+// timeout belongs to the bridge's own per-request context, not to the run
+// context ffprobe was launched under, and ffprobe is a subprocess besides: it
+// sees a truncated body, decides the file holds no streams or no keyframe with
+// a position, and exits successfully. Every context the Go side is holding at
+// that moment is still alive, so there is nothing there to check - the only
+// layer that knows the read never finished is the one that gave up on it.
+func stallSince(b *bridge.Bridge, url string, before int) error {
+	n, last := b.Stalls(url)
+	if n <= before || last == nil {
+		return nil
+	}
+	return last
+}
+
 // fileDeps groups what processing one file needs, so the signature does not
 // grow a parameter per collaborator.
 type fileDeps struct {
@@ -290,10 +308,18 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 	}
 	defer withdraw()
 
+	stalls, _ := deps.bridge.Stalls(url)
 	info, err := deps.prober.Inspect(ctx, url)
 	var points []time.Duration
 	sequential := false
 	if err != nil {
+		// Asked before anything is read into the container's character: a
+		// read that never finished makes ffprobe describe a file it only
+		// partly saw, and every verdict below would be about that.
+		if stall := stallSince(deps.bridge, url, stalls); stall != nil {
+			return 0, false, fmt.Errorf("inspect: %w; ffprobe then reported: %v", stall, err)
+		}
+
 		// A container with no duration is the one case the sequential
 		// fallback exists for (REQUIREMENTS.md 2.7); anything else - no
 		// video stream at all, or the file not opening as media - stays a
@@ -376,8 +402,17 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			deps.bus.Publish(*warning)
 		}
 
+		stalls, _ := deps.bridge.Stalls(url)
 		shot, err := e.captureOne(ctx, cfg, deps, url, file, info.Duration, at, tolerance/4)
 		if err != nil {
+			// Same reasoning as at the inspect above, and this is where it was
+			// actually caught: a keyframe query whose read timed out comes
+			// back as "no keyframe with a byte position", which is a statement
+			// about the container that nothing here is entitled to make.
+			if stall := stallSince(deps.bridge, url, stalls); stall != nil {
+				err = fmt.Errorf("capture point at %s: %w; ffprobe then reported: %v",
+					at.Round(time.Second), stall, err)
+			}
 			skipped++
 			records = append(records, manifest.Frame{
 				Index:       i,
