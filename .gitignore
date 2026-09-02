@@ -10,3 +10,6 @@
 /cache/
 
 .DS_Store
+
+# Isolated agent worktrees: a second checkout of this tree, created inside it
+/.claude/
