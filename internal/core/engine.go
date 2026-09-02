@@ -739,7 +739,7 @@ func reachable(avail availabilityMap, profile swarm.Profile,
 
 	span := avail.PieceLength() * reachStart
 	if span <= 0 {
-		span = profile.Window
+		span = profile.WindowSize(0)
 	}
 
 	offset := int64(float64(file.Length) * (float64(at) / float64(duration)))
