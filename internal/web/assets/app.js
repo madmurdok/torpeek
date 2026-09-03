@@ -1105,7 +1105,13 @@ async function deleteFrame(fentry, frame) {
   target.searchParams.set("params", frame.params);
 
   try {
-    const detail = (await del(target)).file;
+    const answer = await del(target);
+    const detail = answer.file;
+    // The delete happened even when something derived from it did not - a
+    // contact sheet that could not be rebuilt, today. Saying so beside the
+    // grid is the honest report; refusing to re-render would leave a frame
+    // on screen that is no longer on disk (TOR-78).
+    if (answer.warning) showError(answer.warning);
     fentry.frames = new Map();
     for (const f of (detail && detail.frames) || []) {
       fentry.frames.set(f.time_ms, detailFrame(f));
