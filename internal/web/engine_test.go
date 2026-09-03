@@ -62,7 +62,7 @@ func TestServesAFrameFromARealRun(t *testing.T) {
 		return engine.Run(ctx, run)
 	}
 
-	srv := newServer(ctx, DefaultConfig(), runner, nil, nil)
+	srv := newServer(ctx, DefaultConfig(), runner, nil, nil, nil)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()

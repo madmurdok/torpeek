@@ -216,6 +216,7 @@ button:disabled { opacity: .5; }
 .run-badge[data-state="queued"] { background: #b3590022; color: #b35900; }
 .run-badge[data-state="done"] { background: #1a7f3722; color: #1a7f37; }
 .run-badge[data-state="failed"] { background: #b3261e22; color: #b3261e; }
+.run-badge[data-state="needs-action"] { background: #b3590022; color: #b35900; font-weight: 600; }
 .run-badge[data-state="cancelled"] { background: #8884; opacity: .8; }
 .run-badge[data-state="disk"] { background: #8883; }
 
@@ -226,6 +227,34 @@ button:disabled { opacity: .5; }
 .run-detail-title { overflow-wrap: anywhere; }
 .run-detail-cancel { margin-left: auto; }
 .run-detail-error { color: #b3261e; }
+
+/* The picker a multi-file torrent parks on (TOR-67): nothing has been
+   downloaded beyond the metadata, and nothing will be until someone ticks a
+   box here. It sits between the torrent's summary line and its (still
+   empty) file list. */
+.picker { margin-top: .8rem; border: 1px solid #b3590055; border-radius: .4rem; padding: .6rem .7rem; }
+
+.picker-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .5rem; }
+.picker-title { font-weight: 500; margin-right: auto; }
+
+.picker-list { list-style: none; margin: 0; padding: 0; max-height: 18rem; overflow-y: auto; }
+
+.picker-file {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  padding: .2rem .25rem;
+  border-radius: .3rem;
+  cursor: pointer;
+}
+.picker-file:hover { background: #8882; }
+.picker-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.picker-size { flex: 0 0 auto; font-size: .8rem; opacity: .65; }
+
+.picker-foot { display: flex; align-items: center; gap: .6rem; margin: .6rem 0 0; }
+/* The cost of pressing the button, shown before it is spent: frames are per
+   file, so this is the number that surprises people (TOR-50). */
+.picker-cost { font-size: .82rem; opacity: .75; }
 
 /* One block per torrent file: its summary panel, its progress, its grid -
    collapsed to a single clickable row by default (TOR-63), except the first

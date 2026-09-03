@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -176,6 +177,27 @@ type Replayer func(infoHash, params string) <-chan core.Event
 // operations with nothing worth cancelling.
 type Deleter func(infoHash, params string, fileIndex, frameIndex int) error
 
+// Lister reports what a torrent holds - its name, its infohash and its video
+// files - without capturing anything from it.
+//
+// It is injected for the same reason Runner is: this package does not build
+// a run configuration, and a listing has to start from the very same one a
+// run does, or the two would disagree about the pinned port, the DHT switch
+// and the known peers while looking at the same torrent (cli/web.go's
+// serveWeb builds both from one base config). It takes only a source,
+// because nothing else about a request can change what a torrent contains.
+//
+// Unlike Replayer and Deleter it takes a context, and that difference is the
+// point: those are a handful of local file reads, while this is a wait on
+// the swarm for metadata bounded only by swarm.Config.MetadataTimeout. It is
+// the one injected call worth cancelling - cancelling a torrent that is
+// still fetching its file list cancels exactly this.
+//
+// Nil is allowed and means no parking at all: every run goes straight to the
+// runner, which is what this server did before TOR-67 and what every test
+// that is not about the picker still does.
+type Lister func(ctx context.Context, source string) (core.Contents, error)
+
 // ErrNoSuchRun is returned when a request names a run this server does not
 // hold - never did, or held and has since forgotten (see keepFinishedRuns).
 var ErrNoSuchRun = errors.New("no such run")
@@ -226,6 +248,7 @@ type Server struct {
 	runner   Runner
 	replayer Replayer
 	deleter  Deleter
+	lister   Lister
 	baseCtx  context.Context
 
 	server *http.Server
@@ -254,12 +277,13 @@ type Server struct {
 // It does not open a browser: on a seedbox there is nothing to open, and a
 // test must never depend on one. The caller decides, with OpenBrowser.
 //
-// replayer and deleter may both be nil - the routes that need them then
-// answer 503 rather than the server refusing to start, the same tolerance
-// Config.OutputRoot's own doc describes for a caller with no disk-backed run
-// to speak of. The real entry point (cli/web.go) always supplies both,
-// paired with runner.
-func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer, deleter Deleter) (*Server, error) {
+// replayer, deleter and lister may all be nil - the routes that need the
+// first two then answer 503 rather than the server refusing to start, the
+// same tolerance Config.OutputRoot's own doc describes for a caller with no
+// disk-backed run to speak of, and a nil lister simply means no torrent ever
+// parks for a file selection (see Lister). The real entry point (cli/web.go)
+// always supplies all three, paired with runner.
+func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer, deleter Deleter, lister Lister) (*Server, error) {
 	if cfg.Addr == "" {
 		cfg.Addr = DefaultAddr
 	}
@@ -287,7 +311,7 @@ func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer, de
 		return nil, fmt.Errorf("web listen on %s: %w", cfg.Addr, err)
 	}
 
-	s := newServer(ctx, cfg, runner, replayer, deleter)
+	s := newServer(ctx, cfg, runner, replayer, deleter, lister)
 	s.url = "http://" + ln.Addr().String() + s.cfg.BasePath + "/"
 	if s.cfg.Token != "" {
 		// The token is base64.RawURLEncoding output: a fixed alphabet with
@@ -307,7 +331,7 @@ func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer, de
 
 // newServer builds a server without listening, which is what a test wants
 // when it drives the handler through httptest.
-func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer, deleter Deleter) *Server {
+func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer, deleter Deleter, lister Lister) *Server {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -317,6 +341,7 @@ func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer
 		runner:   runner,
 		replayer: replayer,
 		deleter:  deleter,
+		lister:   lister,
 		baseCtx:  ctx,
 		files:    newFileSet(),
 		hub:      newHub(connectRecord()),
@@ -354,6 +379,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
+	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
 	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.Handle("GET /", http.FileServerFS(assets))
@@ -514,6 +540,12 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 // It loops because a run can fail before it produces any events at all - a
 // source that does not parse - and that must not leave the slot empty with
 // runs still waiting behind it.
+//
+// A run that still has to be told which files to capture takes the slot for
+// its metadata pass first (needsListingLocked, listThenRun). That pass costs
+// the same pinned BitTorrent port a run costs, which is why it happens here
+// rather than beside the queue: RunReplaying's exemption does not transfer -
+// a replay reads local files, a listing opens a swarm session.
 func (s *Server) dispatch() {
 	for {
 		s.mu.Lock()
@@ -525,37 +557,196 @@ func (s *Server) dispatch() {
 		s.waiting = s.waiting[1:]
 
 		ctx, cancel := context.WithCancel(s.baseCtx)
-		events, err := s.runner(ctx, entry.req)
-		if err != nil {
-			cancel()
-			entry.state, entry.err, entry.endedAt = RunFailed, err, time.Now()
-			failure := s.record(entry, core.Failed{File: -1, Code: core.CodeOf(err), Err: err})
-			state := s.runStateRecordLocked(entry, false)
+
+		if s.needsListingLocked(entry) {
+			// The slot is taken before a single byte is asked for, and the
+			// state is "running" because that is what this is: the run's own
+			// first phase, on the run's own cancellable context, holding the
+			// one thing a second run could not share.
+			entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
+			s.running = entry
+			rec := s.runStateRecordLocked(entry, false)
 			s.mu.Unlock()
 
-			// The client learns why on the run's own stream: this is the one
-			// place a start can fail after the request that asked for it has
-			// already been answered.
-			s.hub.publish(entry.id, failure)
-			s.hub.publish(entry.id, state)
-			// Nothing ever read this run's source, so nothing can still be
-			// reading it.
-			if entry.cleanup != nil {
-				entry.cleanup()
-			}
-			s.trim()
-			continue
+			s.hub.publish(entry.id, rec)
+			// Its own goroutine: this waits on the swarm for metadata, up to
+			// swarm.Config.MetadataTimeout, and dispatch is called from the
+			// goroutine that is answering an HTTP request.
+			go s.listThenRun(ctx, cancel, entry)
+			return
 		}
 
-		entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
-		s.running = entry
-		rec := s.runStateRecordLocked(entry, false)
+		if s.beginRun(ctx, cancel, entry) {
+			return
+		}
+		// The runner refused this one before it produced any events; the slot
+		// is still free, so the next waiter gets its turn immediately.
+	}
+}
+
+// needsListingLocked reports whether this entry has to be told what the
+// torrent holds before anything can be captured from it.
+//
+// A request that already names files has been decided - by the picker, or by
+// Regenerate, which asks for the one file a person is already looking at -
+// so paying for a metadata pass to offer a choice nobody is waiting to make
+// would only delay it. An entry that has already listed once (a parked
+// torrent coming back through the queue with its selection) never lists
+// again. And a server built without a Lister keeps the behaviour it had
+// before TOR-67: straight into the run.
+//
+// The caller must hold s.mu.
+func (s *Server) needsListingLocked(entry *runEntry) bool {
+	return s.lister != nil && !entry.listed && len(entry.req.Files) == 0
+}
+
+// beginRun hands one entry to the runner and puts its events on the wire. It
+// reports whether the run actually began: false means the runner refused it,
+// the entry is already recorded as failed on its own stream, and the slot is
+// free for whoever is next.
+//
+// It is shared by the two places a run can start - dispatch, for a request
+// that needed no listing, and listThenRun, for one whose metadata pass found
+// a single video file. The second must not release the slot between the two
+// phases, or a torrent queued behind it could jump in front of a request
+// that has already paid for its metadata; that is why taking the slot is
+// this function's own step rather than something dispatch did beforehand.
+//
+// The caller must hold s.mu, and beginRun releases it before it returns: the
+// hub is never written to under the registry lock, and neither is cleanup
+// called under it.
+func (s *Server) beginRun(ctx context.Context, cancel context.CancelFunc, entry *runEntry) bool {
+	events, err := s.runner(ctx, entry.req)
+	if err != nil {
+		cancel()
+		entry.state, entry.err, entry.endedAt = RunFailed, err, time.Now()
+		failure := s.record(entry, core.Failed{File: -1, Code: core.CodeOf(err), Err: err})
+		state := s.runStateRecordLocked(entry, false)
+		s.releaseSlotLocked(entry)
 		s.mu.Unlock()
 
-		s.hub.publish(entry.id, rec)
-		go s.pump(entry, events)
+		// The client learns why on the run's own stream: this is the one
+		// place a start can fail after the request that asked for it has
+		// already been answered.
+		s.hub.publish(entry.id, failure)
+		s.hub.publish(entry.id, state)
+		// Nothing ever read this run's source, so nothing can still be
+		// reading it.
+		if entry.cleanup != nil {
+			entry.cleanup()
+		}
+		s.trim()
+		return false
+	}
+
+	entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
+	s.running = entry
+	rec := s.runStateRecordLocked(entry, false)
+	s.mu.Unlock()
+
+	s.hub.publish(entry.id, rec)
+	go s.pump(entry, events)
+	return true
+}
+
+// listThenRun is a run's first phase: find out what the torrent holds, then
+// either capture it or stop and ask.
+//
+// It runs inside the slot, because a listing opens a full swarm session on
+// the same pinned port a run uses, and it deliberately does not go through
+// pump - pump reads a stream that ends as a run that finished, which is the
+// one thing a metadata pass must not be mistaken for.
+//
+// Three ways out, and only one of them keeps the slot:
+//   - the listing failed, or a cancel or a Close overtook it: the entry ends
+//     here, the slot goes back;
+//   - more than one video file: the file list goes out as a needs_action
+//     record, the entry parks in RunNeedsAction, and the slot goes back so
+//     the next torrent runs while this one waits for a person;
+//   - one video file, or none: the run starts immediately, still holding the
+//     slot, because there is nothing to ask about.
+func (s *Server) listThenRun(ctx context.Context, cancel context.CancelFunc, entry *runEntry) {
+	contents, err := s.lister(ctx, entry.req.Source)
+
+	s.mu.Lock()
+	entry.listed = true
+	if err == nil {
+		entry.contents = &contents
+		// The same tie metadata_ready makes for a live run: the infohash is
+		// what joins this entry to the record its run will leave on disk.
+		entry.infoHash = contents.InfoHash
+	}
+
+	// Which of the three happens, and the state the entry moves to, are
+	// decided in one locked step. CancelRun reads that state to choose what
+	// cancelling this entry means, so a decision taken here and written a
+	// moment later would let a cancel land in the gap and be lost - a run
+	// answered as "cancelling" that then parks itself and waits for a person
+	// who has already walked away.
+	switch {
+	case entry.cancelled || s.stopped:
+		// A cancel, or a Close, that landed while the metadata was still in
+		// flight. Usually it is what ended the listing (the error above is
+		// its own context being cancelled), but it can also arrive just
+		// after a listing that succeeded - which is exactly why this is
+		// checked before the outcome and not after.
+		entry.state, entry.endedAt = RunCancelled, time.Now()
+	case err != nil:
+		// The listing is the run's first phase, so a listing that fails is a
+		// run that failed, reported on the run's own stream exactly the way
+		// beginRun reports a runner that refused to start.
+		entry.state, entry.err, entry.endedAt = RunFailed, err, time.Now()
+	case len(contents.Videos) > 1:
+		// Nothing more happens until a person picks (RunNeedsAction).
+		entry.state = RunNeedsAction
+	default:
+		// One video file - or none, which is the engine's own failure to
+		// report rather than a choice worth offering - so there is nothing
+		// to ask about and the run starts here, still holding the slot.
+		if !s.beginRun(ctx, cancel, entry) {
+			s.dispatch()
+		}
 		return
 	}
+
+	// Everything that reaches here is done with the slot. A parked entry
+	// holds no context either: its listing is over, and the wait that
+	// follows can last hours, so the context is released rather than left
+	// hanging off s.baseCtx for the life of the process.
+	entry.cancel = nil
+	s.releaseSlotLocked(entry)
+	var failure, notice record
+	switch entry.state {
+	case RunFailed:
+		failure = s.record(entry, core.Failed{File: -1, Code: core.CodeOf(err), Err: err})
+	case RunNeedsAction:
+		notice = s.needsActionRecordLocked(entry)
+	}
+	state := s.runStateRecordLocked(entry, false)
+	parked := entry.state == RunNeedsAction
+	s.mu.Unlock()
+
+	cancel()
+
+	if failure.data != nil {
+		s.hub.publish(entry.id, failure)
+	}
+	if notice.data != nil {
+		s.hub.publish(entry.id, notice)
+	}
+	s.hub.publish(entry.id, state)
+
+	// A parked entry keeps its source: the run it is waiting for has not
+	// happened yet, and an uploaded .torrent staged for it is exactly what
+	// the run will be started from once someone ticks a box. Its cleanup
+	// happens when the run ends, or when the cancel does (CancelRun, Close).
+	if !parked {
+		if entry.cleanup != nil {
+			entry.cleanup()
+		}
+		s.trim()
+	}
+	s.dispatch()
 }
 
 // ReopenRun replays a finished run from disk under a fresh registry entry, so
@@ -673,7 +864,9 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 //
 // A queued run has no context to cancel - it never got one - so cancelling it
 // is taking it out of the queue, which is why this cannot be left to the run
-// itself to notice.
+// itself to notice. A torrent parked for a file selection is the same case
+// for a different reason: it had a context and gave it back when it released
+// the slot, and nothing is watching it that could notice anything.
 func (s *Server) CancelRun(id string) (RunInfo, error) {
 	s.mu.Lock()
 
@@ -718,10 +911,173 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		s.trim()
 		return info, nil
 
+	case RunNeedsAction:
+		// A parked torrent is cancelled the way a queued one is, and for the
+		// same reason: there is nothing running to ask to stop. It is a
+		// registry edit - mark it, tell the page, let trim have it - plus
+		// the cleanup of a staged upload the run it was waiting for will now
+		// never read.
+		//
+		// entry.cancel must not be called: listThenRun set it to nil when it
+		// gave the slot back, which is the honest record of what a parked
+		// entry holds (RunNeedsAction). ReopenRun avoids the same nil the
+		// other way, by handing its entry a no-op cancel, and that is right
+		// there because it shares pump with live runs and pump calls
+		// entry.cancel unconditionally at the end of every stream. Nothing
+		// runs for a parked entry at all, so there is no shared path to
+		// satisfy here and a placeholder closure would only claim there is
+		// something to cancel.
+		//
+		// It is never in s.waiting either, so dropWaitingLocked would be a
+		// no-op walk; leaving it out says so, instead of implying it might
+		// be in the queue.
+		entry.cancelled = true
+		entry.state, entry.endedAt = RunCancelled, time.Now()
+		rec := s.runStateRecordLocked(entry, false)
+		info := entry.info()
+		s.mu.Unlock()
+
+		if entry.cleanup != nil {
+			entry.cleanup()
+		}
+		s.hub.publish(entry.id, rec)
+		s.trim()
+		return info, nil
+
 	default:
 		info := entry.info()
 		s.mu.Unlock()
 		return info, fmt.Errorf("run %s is already %s", entry.id, info.State)
+	}
+}
+
+// DecideRun answers the question a parked torrent asked: these are the files
+// to capture. The entry goes back into the queue - the same entry, so one
+// torrent stays one row and one history, needs-action to queued to running -
+// and returns to the runner with the selection in its request.
+//
+// Only an entry in RunNeedsAction can be decided. Anything else is either a
+// run this server does not hold (ErrNoSuchRun, a 404) or one that is not
+// waiting to be told anything (a 409, matching how CancelRun answers a run
+// that has already ended).
+//
+// files is checked against the video files the listing actually found rather
+// than passed through to the run. Otherwise a page left open across two
+// different torrents would send an index this one does not have, and
+// swarm.Select's ErrNoFileMatch would surface minutes later as a failed run
+// instead of immediately as a 400 about the request that was wrong. An empty
+// selection is refused for a different reason: it means "every file" to
+// cfg.Files, and a person looking at a picker who wants everything can tick
+// everything - reading a blank answer as "all of it" is how a torrent gets
+// captured six times over (TOR-50).
+//
+// count carries the intake's frames-per-file when the page sends one, so the
+// number chosen while looking at the picker is the number the run uses. Zero
+// leaves whatever the request already had, which is the server's own -n.
+func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if len(files) == 0 {
+		return RunInfo{}, fmt.Errorf("%w: pick at least one file to capture", errBadRequest)
+	}
+	if count < 0 {
+		return RunInfo{}, fmt.Errorf("%w: frames per file cannot be negative, got %d", errBadRequest, count)
+	}
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if entry.state != RunNeedsAction || entry.contents == nil {
+		info := entry.info()
+		s.mu.Unlock()
+		return info, fmt.Errorf("run %s is not waiting for a file selection, it is %s", entry.id, info.State)
+	}
+
+	chosen := make([]string, 0, len(files))
+	for _, spec := range files {
+		spec = strings.TrimSpace(spec)
+		if !entry.holdsFile(spec) {
+			s.mu.Unlock()
+			return RunInfo{}, fmt.Errorf("%w: %q is not a video file of this torrent", errBadRequest, spec)
+		}
+		chosen = append(chosen, spec)
+	}
+
+	entry.req.Files = chosen
+	if count > 0 {
+		entry.req.Count = count
+	}
+	entry.state = RunQueued
+	s.waiting = append(s.waiting, entry)
+	rec := s.runStateRecordLocked(entry, false)
+	s.mu.Unlock()
+
+	s.hub.publish(entry.id, rec)
+	// The same call StartRun makes, in the caller's own goroutine and for the
+	// same reason: by the time this returns, this torrent has either started
+	// or is behind one that has - so the state answered here is the truth
+	// rather than a guess, exactly as it is for a fresh run.
+	s.dispatch()
+
+	s.mu.Lock()
+	info := entry.info()
+	s.mu.Unlock()
+	return info, nil
+}
+
+// holdsFile reports whether spec names one of the video files this entry's
+// listing found.
+//
+// Only a torrent index, never the path patterns swarm.Select also accepts. A
+// picker sends back the indices it was handed in the needs_action record, so
+// anything else arriving here is a page guessing rather than a person
+// choosing - and a pattern would have to be matched twice, loosely here and
+// for real in swarm.Select, which is how the two would come to disagree
+// about what was picked.
+//
+// The caller must hold the server's lock: contents is written under it.
+func (e *runEntry) holdsFile(spec string) bool {
+	index, err := strconv.Atoi(spec)
+	if err != nil {
+		return false
+	}
+	for _, video := range e.contents.Videos {
+		if video.Index == index {
+			return true
+		}
+	}
+	return false
+}
+
+// releaseSlotLocked gives the single slot back, if this entry is what holds
+// it.
+//
+// The one place s.running is ever cleared. Three paths reach it - a run
+// whose event stream ended (pump), a run the runner refused before it
+// produced a stream (beginRun), and a torrent parked for someone to choose
+// files (listThenRun) - and a second assignment written by hand in any of
+// them would be free to drift from the others.
+//
+// The guard is not a formality. pump also runs for a replay, which never
+// took the slot at all (ReopenRun), and clearing it there would take the
+// slot away from whoever legitimately holds it; the same guard makes
+// beginRun's failure path safe whether or not its caller had already taken
+// the slot for a listing.
+//
+// The caller must hold s.mu.
+func (s *Server) releaseSlotLocked(entry *runEntry) {
+	if s.running == entry {
+		s.running = nil
 	}
 }
 
@@ -796,9 +1152,7 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 		outcome = RunCancelled
 	}
 	entry.state, entry.err, entry.endedAt = outcome, failure, time.Now()
-	if s.running == entry {
-		s.running = nil
-	}
+	s.releaseSlotLocked(entry)
 	rec := s.runStateRecordLocked(entry, false)
 	s.mu.Unlock()
 
@@ -890,7 +1244,9 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 // asks "is this one going", kept because it is what run_state has always
 // meant - true for running and replaying alike, since both mean more events
 // are still coming for this run, and false the moment either reaches a final
-// state. reset marks the message that opens a run's history: a page clears
+// state. False for needs-action too, and that is not a special case: nothing
+// more is coming for a parked torrent until a person acts, which is exactly
+// what active has always meant. reset marks the message that opens a run's history: a page clears
 // what it shows for that run when it sees one. It is what tells a
 // reconnecting page that what follows is the whole run, rather than more of
 // what it already has.
@@ -909,6 +1265,33 @@ func (s *Server) runStateRecordLocked(entry *runEntry, reset bool) record {
 		m["error"] = entry.err.Error()
 	}
 	return record{data: encode(m)}
+}
+
+// needsActionRecordLocked is the file list a parked torrent is waiting on.
+//
+// Like run_state it is not a core event - the core has no opinion about a
+// server that stops and asks a person something - so it is built here rather
+// than in the event vocabulary, and carries the same "run" key everything
+// else on a run's stream carries.
+//
+// Deliberately not a metadata_ready. That event means a capture has begun
+// and its "selected" list says what is already being worked on; sending it
+// here would tell the page traffic is being spent when the whole point of
+// this record is that none is. A type of its own also lands in the run's own
+// backlog, so a page opened or reconnected an hour later replays it and
+// rebuilds the picker without asking the server for anything.
+//
+// The per-file shape is wire.VideoFiles, the same one metadata_ready uses,
+// so the page has exactly one notion of what a video file is.
+//
+// The caller must hold s.mu: every field read here is written under it.
+func (s *Server) needsActionRecordLocked(entry *runEntry) record {
+	contents := entry.contents
+	return record{data: encode(map[string]any{
+		"type": "needs_action", "run": entry.id,
+		"name": contents.Name, "infohash": contents.InfoHash,
+		"private": contents.Private, "videos": wire.VideoFiles(contents.Videos),
+	})}
 }
 
 // connectRecord is the first thing any client is sent: an idle run_state
@@ -942,6 +1325,12 @@ func encode(m map[string]any) []byte {
 // an uploaded .torrent staged for a run that never happens would outlive the
 // process that staged it. Marking them cancelled also means a Close during a
 // queue leaves no run stuck in "queued" for whatever reads the registry next.
+//
+// A torrent parked for a file selection needs the same treatment for the
+// same reasons, and cannot be reached the same way: it is neither in the
+// queue nor in the slot - that is what parking means - so it has to be found
+// in the registry itself. Left alone it would sit in "needs-action" on a
+// stopped server, waiting for a decision no route is left to accept.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	if s.stopped {
@@ -950,10 +1339,18 @@ func (s *Server) Close() error {
 	}
 	s.stopped = true
 	running := s.running
-	waiting := s.waiting
-	s.waiting = nil
 	ended := time.Now()
-	for _, entry := range waiting {
+
+	// Everything that was going to start and now never will: the queue, plus
+	// every torrent parked for a decision.
+	stranded := s.waiting
+	s.waiting = nil
+	for _, id := range s.order {
+		if entry := s.runs[id]; entry.state == RunNeedsAction {
+			stranded = append(stranded, entry)
+		}
+	}
+	for _, entry := range stranded {
 		entry.cancelled = true
 		entry.state, entry.endedAt = RunCancelled, ended
 	}
@@ -962,7 +1359,7 @@ func (s *Server) Close() error {
 	if running != nil {
 		running.cancel()
 	}
-	for _, entry := range waiting {
+	for _, entry := range stranded {
 		if entry.cleanup != nil {
 			entry.cleanup()
 		}

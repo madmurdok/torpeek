@@ -139,11 +139,16 @@ function langLabel(code) {
   return code && code !== "und" ? code : "unknown language";
 }
 
-// A run can still be cancelled while it is queued or running; every other
-// state is final (runs.go's RunState.final), and "replaying" is a cache hit
-// already well underway by the time this page can react to it.
+// A run can still be cancelled while it is queued, running, or parked
+// waiting for a file selection; every other state is final (runs.go's
+// RunState.final), and "replaying" is a cache hit already well underway by
+// the time this page can react to it.
+//
+// needs-action belongs here precisely because nothing will ever end it on
+// its own: a torrent waiting for someone to tick boxes waits forever, so
+// cancelling is the only way out other than deciding.
 function cancellable(state) {
-  return state === "queued" || state === "running";
+  return state === "queued" || state === "running" || state === "needs-action";
 }
 
 function badgeLabel(entry) {
@@ -152,6 +157,7 @@ function badgeLabel(entry) {
     case "queued": return "queued";
     case "running": return "running";
     case "replaying": return "reopening…";
+    case "needs-action": return "choose files";
     case "done": return "done";
     case "failed": return "failed";
     case "cancelled": return "cancelled";
@@ -299,6 +305,21 @@ function newRunEntry(id) {
     "</header>" +
     '<p class="run-detail-error" hidden></p>' +
     '<p class="torrent-summary" hidden></p>' +
+    // The picker sits between the torrent's own summary line and its files:
+    // the one gap in this pane, and both of its neighbours are already
+    // scoped to this entry, so a second torrent's picker cannot land in it.
+    '<section class="picker" hidden>' +
+      '<p class="picker-head">' +
+        '<span class="picker-title"></span>' +
+        '<button type="button" class="picker-all">Select all</button>' +
+        '<button type="button" class="picker-none">Select none</button>' +
+      '</p>' +
+      '<ul class="picker-list"></ul>' +
+      '<p class="picker-foot">' +
+        '<button type="button" class="picker-go">Take frames</button>' +
+        '<span class="picker-cost"></span>' +
+      '</p>' +
+    '</section>' +
     '<section class="files"></section>';
   el.detail.append(detailEl);
 
@@ -314,6 +335,12 @@ function newRunEntry(id) {
     when: Date.now(),
     reopening: false,
     fileEntries: new Map(),
+    // videos is the file list a needs_action record brought, and picked the
+    // indices ticked in it. Both are empty for every torrent that never
+    // parked - a single-file one, or any run started with a selection
+    // already in it (Regenerate).
+    videos: [],
+    picked: new Set(),
     // Set once this run's first file block is built, so every file after it
     // defaults to collapsed - only the first one earns the auto-expand.
     autoExpanded: false,
@@ -325,6 +352,13 @@ function newRunEntry(id) {
     detailCancel: detailEl.querySelector(".run-detail-cancel"),
     detailError: detailEl.querySelector(".run-detail-error"),
     torrentSummary: detailEl.querySelector(".torrent-summary"),
+    pickerEl: detailEl.querySelector(".picker"),
+    pickerTitle: detailEl.querySelector(".picker-title"),
+    pickerList: detailEl.querySelector(".picker-list"),
+    pickerAll: detailEl.querySelector(".picker-all"),
+    pickerNone: detailEl.querySelector(".picker-none"),
+    pickerGo: detailEl.querySelector(".picker-go"),
+    pickerCost: detailEl.querySelector(".picker-cost"),
     filesEl: detailEl.querySelector(".files"),
   };
 
@@ -340,6 +374,10 @@ function newRunEntry(id) {
     cancelRun(entry.id);
   });
   entry.detailCancel.addEventListener("click", () => cancelRun(entry.id));
+
+  entry.pickerAll.addEventListener("click", () => setAllPicked(entry, true));
+  entry.pickerNone.addEventListener("click", () => setAllPicked(entry, false));
+  entry.pickerGo.addEventListener("click", () => decide(entry));
 
   return entry;
 }
@@ -367,6 +405,14 @@ function resetRunContent(entry) {
   entry.torrentSummary.hidden = true;
   entry.torrentSummary.textContent = "";
   entry.error = "";
+  // The picker goes with everything else this run has shown. It comes back
+  // from the replayed needs_action that follows in the same history, so a
+  // reconnecting page rebuilds it rather than keeping a stale copy of a list
+  // the server may since have moved past.
+  entry.videos = [];
+  entry.picked.clear();
+  entry.pickerList.replaceChildren();
+  entry.pickerEl.hidden = true;
 }
 
 function syncEntry(entry) {
@@ -390,6 +436,11 @@ function syncEntry(entry) {
   entry.detailCancel.hidden = entry.disk || !cancellable(entry.state);
   entry.detailError.hidden = !entry.error;
   entry.detailError.textContent = entry.error || "";
+  // One rule for whether the picker is on screen, and it is the run's own
+  // state: the needs_action record arrives just before the run_state that
+  // announces the parking, and the run_state that ends the parking (queued,
+  // or cancelled) is what takes it away again.
+  entry.pickerEl.hidden = !(entry.state === "needs-action" && entry.videos.length > 0);
 }
 
 function selectRun(id) {
@@ -492,6 +543,113 @@ async function cancelRun(id) {
     await post("runs/cancel", { id });
   } catch (err) {
     showError(String(err.message || err));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The picker: what a multi-file torrent shows instead of starting (TOR-67).
+// The server has fetched the metadata, given the queue slot back and parked
+// the torrent; nothing at all happens until someone says which files to
+// capture, so this is the whole of the run's UI while it waits.
+
+function basename(path) {
+  const parts = String(path || "").split("/");
+  return parts[parts.length - 1] || path || "";
+}
+
+// renderPicker builds the tick list from a needs_action record.
+//
+// Nothing is ticked to begin with, and "Take frames" stays disabled until
+// something is. A torrent reaches this screen precisely because it holds
+// several video files, and pre-ticking them all would put the most expensive
+// possible run one careless click away - the count is per file, so six
+// variants at 20 frames is 120 captures (TOR-50). Select all is right there
+// for the person who does mean all of it.
+function renderPicker(entry, ev) {
+  entry.videos = ev.videos || [];
+  entry.picked = new Set();
+  entry.pickerTitle.textContent =
+    entry.videos.length + " video file(s) — pick what to capture";
+
+  entry.pickerList.replaceChildren(...entry.videos.map((video) => {
+    const item = document.createElement("li");
+    const label = document.createElement("label");
+    label.className = "picker-file";
+
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = String(video.index);
+    box.addEventListener("change", () => {
+      if (box.checked) entry.picked.add(video.index);
+      else entry.picked.delete(video.index);
+      updatePickerCost(entry);
+    });
+
+    const name = document.createElement("span");
+    name.className = "picker-name";
+    name.textContent = basename(video.path);
+    name.title = video.path;
+
+    const size = document.createElement("span");
+    size.className = "picker-size";
+    size.textContent = bytesLabel(video.length);
+
+    label.append(box, name, size);
+    item.append(label);
+    return item;
+  }));
+
+  updatePickerCost(entry);
+}
+
+function setAllPicked(entry, picked) {
+  entry.picked = new Set(picked ? entry.videos.map((video) => video.index) : []);
+  for (const box of entry.pickerList.querySelectorAll("input[type=checkbox]")) {
+    box.checked = picked;
+  }
+  updatePickerCost(entry);
+}
+
+// updatePickerCost shows what pressing the button would cost, before it is
+// spent rather than after.
+//
+// This is the one place in the whole program where that number can be shown
+// in advance: -n is frames PER video file (TOR-50), so a bundle of quality
+// variants multiplies it, and every other screen only ever reports the
+// traffic once it is gone. It follows both inputs live - the ticks here and
+// the count on the intake line, which a person may well adjust while looking
+// at this list.
+function updatePickerCost(entry) {
+  const files = entry.picked.size;
+  const n = countValue();
+  entry.pickerGo.disabled = files === 0;
+  if (files === 0) {
+    entry.pickerCost.textContent = "nothing picked yet";
+    return;
+  }
+  entry.pickerCost.textContent = n
+    ? files + " file(s) × " + n + " = " + files * n + " frames"
+    : files + " file(s)";
+}
+
+// decide sends the selection and lets the torrent out of its parked state.
+//
+// The answer is only an acknowledgement: what actually moves this row from
+// "choose files" to "queued" (and takes the picker off the screen) is the
+// run_state that arrives on the socket, the same way every other change to a
+// run reaches this page.
+async function decide(entry) {
+  showError("");
+  const files = [...entry.picked].sort((a, b) => a - b).map(String);
+  if (files.length === 0) return;
+
+  entry.pickerGo.disabled = true;
+  try {
+    await post("runs/decide", { id: entry.id, files, count: countValue() });
+    logFor(entry, "capturing " + files.length + " of " + entry.videos.length + " file(s)");
+  } catch (err) {
+    showError(String(err.message || err));
+    entry.pickerGo.disabled = false;
   }
 }
 
@@ -993,6 +1151,21 @@ function apply(ev) {
       logFor(entry, "metadata: " + ev.name + " (" + ev.infohash + ")");
       break;
 
+    case "needs_action":
+      // Not a core event and deliberately not a metadata_ready: no run is
+      // running. The torrent's name and file list arrive here, and the
+      // run_state that follows this record is what actually shows the
+      // picker (syncEntry).
+      entry.name = ev.name;
+      if (ev.infohash) entry.infohash = ev.infohash;
+      entry.torrentSummary.hidden = false;
+      entry.torrentSummary.textContent =
+        ev.name + " — " + (ev.videos || []).length + " video file(s), none captured yet";
+      renderPicker(entry, ev);
+      syncEntry(entry);
+      logFor(entry, "waiting for a file selection: " + (ev.videos || []).length + " video file(s)");
+      break;
+
     case "file_started":
       onFileStarted(entry, ev);
       break;
@@ -1217,6 +1390,14 @@ el.form.addEventListener("submit", async (event) => {
     showError(String(err.message || err));
   } finally {
     el.go.disabled = false;
+  }
+});
+
+// The cost line beside "Take frames" reads the intake's count, so a picker
+// on screen has to follow it while it is being typed in.
+el.count.addEventListener("input", () => {
+  for (const entry of state.runs.values()) {
+    if (!entry.pickerEl.hidden) updatePickerCost(entry);
   }
 });
 

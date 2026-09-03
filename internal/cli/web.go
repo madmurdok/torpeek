@@ -49,6 +49,24 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return core.DeleteFrame(base.OutputRoot, infoHash, params, fileIndex, frameIndex)
 	}
 
+	// Listing a torrent's files before any of them is captured (TOR-67) is
+	// injected for the same reason again, and starts from the same base: the
+	// metadata pass and the run that follows it must share one cfg.Swarm -
+	// the same pinned port, the same DHT switch, the same known peers - or
+	// they would reach the same torrent by two different routes, and the
+	// second would be the first to find out. Only the source varies, which
+	// is why this takes one rather than a whole web.RunRequest: no other
+	// field of a request can change what a torrent contains.
+	//
+	// It takes a context because it is a wait on the swarm, not a file read
+	// (see web.Lister), and core.List is what bounds it: metadata only, the
+	// session closed and its pieces discarded before it returns.
+	lister := func(ctx context.Context, source string) (core.Contents, error) {
+		cfg := base
+		cfg.Source = source
+		return engine.List(ctx, cfg)
+	}
+
 	cfg := web.DefaultConfig()
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
@@ -67,7 +85,7 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// page and a run agree without web deciding anything.
 	cfg.DefaultCount = base.Plan.Count
 
-	server, err := web.Start(ctx, cfg, runner, replayer, deleter)
+	server, err := web.Start(ctx, cfg, runner, replayer, deleter, lister)
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitFailed

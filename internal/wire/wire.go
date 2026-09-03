@@ -48,7 +48,7 @@ func event(ev core.Event) map[string]any {
 	case core.MetadataReady:
 		return map[string]any{
 			"type": "metadata_ready", "name": e.Name, "infohash": e.InfoHash,
-			"private": e.Private, "videos": videoFiles(e.Videos), "blind_dht": e.BlindDHT,
+			"private": e.Private, "videos": VideoFiles(e.Videos), "blind_dht": e.BlindDHT,
 			"selected": e.Selected,
 		}
 	case core.FileStarted:
@@ -113,14 +113,21 @@ func event(ev core.Event) map[string]any {
 	}
 }
 
-// videoFiles renders every video file the torrent holds, so a picker can be
+// VideoFiles renders every video file the torrent holds, so a picker can be
 // built from the same event that used to only report a count.
 //
 // index, path and length are all of swarm.FileInfo the run knows at this
 // point - Offset is an internal detail no client needs, and anything else
 // (duration, resolution) only exists after probing, which costs traffic a
 // picker should not have to spend before someone has even chosen a file.
-func videoFiles(files []swarm.FileInfo) []map[string]any {
+//
+// Exported because metadata_ready is no longer the only message that carries
+// this list: a torrent parked for someone to choose files (needs_action,
+// TOR-67) sends the very same one, and that record is the web server's own
+// rather than a core event, so it is built outside this package. Two hand-
+// written shapes for one list would drift exactly the way this package
+// exists to prevent - and the page would then need two ways to read a file.
+func VideoFiles(files []swarm.FileInfo) []map[string]any {
 	out := make([]map[string]any, len(files))
 	for i, f := range files {
 		out[i] = map[string]any{"index": f.Index, "path": f.Path, "length": f.Length}

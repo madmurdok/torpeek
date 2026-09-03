@@ -77,11 +77,29 @@ func newTestServerWithReplayer(t *testing.T, cfg Config, runner Runner, replayer
 }
 
 // newTestServerWith is the full form, for the tests that delete a frame
-// (TOR-70) and so need all three injected closures.
+// (TOR-70) and so need all three injected closures. Its lister is nil, which
+// is the no-parking path every test that is not about the picker takes -
+// see newTestServerWithLister for the ones that are.
 func newTestServerWith(t *testing.T, cfg Config, runner Runner, replayer Replayer, deleter Deleter) (*Server, *httptest.Server) {
 	t.Helper()
 
-	srv := newServer(context.Background(), cfg, runner, replayer, deleter)
+	srv := newServer(context.Background(), cfg, runner, replayer, deleter, nil)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Close()
+	})
+	return srv, ts
+}
+
+// newTestServerWithLister is newTestServer plus a Lister, for the tests that
+// park a torrent waiting for a file selection (TOR-67). Every other helper
+// here passes a nil lister, which is the no-parking path - so these are the
+// only tests in which a run has a metadata pass at all.
+func newTestServerWithLister(t *testing.T, runner Runner, lister Lister) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), DefaultConfig(), runner, nil, nil, lister)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -698,7 +716,7 @@ func TestRunnerFailureIsReported(t *testing.T) {
 // reference, no absolute socket URL (REQUIREMENTS.md section 3.3).
 func TestWorksUnderABasePath(t *testing.T) {
 	fake := &fakeRun{}
-	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil, nil)
+	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil, nil, nil)
 	t.Cleanup(func() { srv.Close() })
 
 	mounted := http.NewServeMux()
@@ -789,7 +807,7 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 	cfg.Addr = addr
 	cfg.BasePath = "torpeek" // no leading slash: normalizeBasePath's job
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -994,7 +1012,7 @@ func TestStartHonoursThePinnedAddr(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1027,7 +1045,7 @@ func TestStartFailsLoudlyWhenAddrIsTaken(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil, nil)
 	if err == nil {
 		srv.Close()
 		t.Fatalf("Start on the already-occupied %s succeeded, want an error", addr)
@@ -1083,7 +1101,11 @@ type fakeRuns struct {
 type fakeStream struct {
 	events chan core.Event
 	ctx    context.Context
-	once   sync.Once
+	// req is the request the runner was actually handed, so a test can check
+	// what reached the engine rather than what it asked for - the file
+	// selection a picker decided on (TOR-67) only exists here.
+	req  RunRequest
+	once sync.Once
 }
 
 func newFakeRuns() *fakeRuns {
@@ -1091,7 +1113,7 @@ func newFakeRuns() *fakeRuns {
 }
 
 func (f *fakeRuns) runner(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
-	stream := &fakeStream{events: make(chan core.Event, 32), ctx: ctx}
+	stream := &fakeStream{events: make(chan core.Event, 32), ctx: ctx, req: req}
 
 	f.mu.Lock()
 	f.runs[req.Source] = stream
