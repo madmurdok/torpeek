@@ -45,6 +45,14 @@ type RunSummary struct {
 	// only the record a run leaves on disk does.
 	Files    int `json:"files"`
 	Complete int `json:"complete"`
+	// Selected is how many files were ever asked for in this directory
+	// (cache.Run.SelectedCount) - Partial's denominator, deliberately not
+	// Files. A torrent with six files where three were chosen and all three
+	// finished has Complete == Selected < Files: that is Done, and comparing
+	// against Files instead would call it Partial for no reason a person
+	// asked for. Zero alongside a zero Files means the same thing zero Files
+	// already means: no disk record merged in yet.
+	Selected int `json:"selected"`
 
 	Err string `json:"error,omitempty"`
 
@@ -53,12 +61,23 @@ type RunSummary struct {
 	When time.Time `json:"when"`
 }
 
+// Partial reports whether this row's selection is short of complete - a
+// selected file with no frames, not merely a torrent with unselected files
+// left over. Judged from counts alone, on purpose (TOR-72): cache.Run does
+// not record how a run ended, so there is no run state to ask instead, and a
+// disk-only row has no state to invent one for. Zero Selected reads as not
+// partial for the same reason it reads as not done: a row with no merged
+// disk record yet has nothing here to call either one.
+func (r RunSummary) Partial() bool {
+	return r.Selected > 0 && r.Complete < r.Selected
+}
+
 // diskRun is one run.json found under OutputRoot, read with cache.LoadRun -
 // the same parser a live run's own cache hit uses, so a listing and a cache
 // hit never disagree about what counts as a usable record.
 type diskRun struct {
 	InfoHash, Params, Name, Source string
-	Files, Complete                int
+	Files, Complete, Selected      int
 	CreatedAt                      time.Time
 }
 
@@ -101,7 +120,7 @@ func (s *Server) listRuns() []RunSummary {
 			if idxs := byHash[info.InfoHash]; len(idxs) == 1 {
 				d := disk[idxs[0]]
 				row.Name, row.Params = d.Name, d.Params
-				row.Files, row.Complete = d.Files, d.Complete
+				row.Files, row.Complete, row.Selected = d.Files, d.Complete, d.Selected
 				if row.Source == "" {
 					row.Source = d.Source
 				}
@@ -117,7 +136,7 @@ func (s *Server) listRuns() []RunSummary {
 		}
 		out = append(out, RunSummary{
 			Source: d.Source, Name: d.Name, InfoHash: d.InfoHash, Params: d.Params,
-			Files: d.Files, Complete: d.Complete, When: d.CreatedAt,
+			Files: d.Files, Complete: d.Complete, Selected: d.Selected, When: d.CreatedAt,
 		})
 	}
 
@@ -184,6 +203,7 @@ func walkRuns(root string) []diskRun {
 				InfoHash: run.InfoHash, Params: paramDir.Name(),
 				Name: run.Name, Source: run.Source,
 				Files: len(run.Videos), Complete: len(run.Complete),
+				Selected:  run.SelectedCount(),
 				CreatedAt: run.CreatedAt,
 			})
 		}
