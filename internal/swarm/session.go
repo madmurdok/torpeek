@@ -91,12 +91,19 @@ type Session struct {
 	// left its piece-completion database open for the life of the process,
 	// and a client that failed to start leaked one outright.
 	//
-	// What that does NOT explain, though it was the reason for looking: the
-	// "couldn't open piece completion db: timeout" warning of TOR-59. Closing
-	// this changes no observable behaviour in any test here - the local
-	// fixtures never produce that warning with or without it - so the leak is
-	// fixed on the strength of the ownership argument above, and the warning
-	// remains unexplained. TOR-59 keeps that half.
+	// This is also the whole of TOR-59's "couldn't open piece completion db:
+	// timeout". That db is bbolt, held under an exclusive flock with a
+	// one-second timeout, and a leaked storage held it for the life of the
+	// process - so the second client of a public-magnet restart, and the
+	// second run over one data dir, timed out on the lock and silently fell
+	// back to in-memory bookkeeping. completion_test.go pins both shapes, and
+	// they separate the arms cleanly: with this Close removed every run warns
+	// and the db stays held; with it, none of 126 runs did, 120 of them at
+	// load averages between 84 and 265. It looked unexplained only because
+	// bbolt is the default piece completion solely when cgo is off - the
+	// shipped build - while a bare `go test` has cgo on and gets sqlite,
+	// which shares the file and never warns. Build with CGO_ENABLED=0 (make
+	// check) to see any of it.
 	store   storage.ClientImplCloser
 	dhtOn   bool
 	blindly bool // DHT was used before the private flag could be checked
