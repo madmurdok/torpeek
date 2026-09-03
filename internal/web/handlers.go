@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/madmurdok/torpeek/internal/core"
 )
 
 // maxTorrentUpload bounds a dropped .torrent, not the download that follows:
@@ -359,6 +361,58 @@ func (s *Server) handleFileDetail(w http.ResponseWriter, r *http.Request) {
 	// {"runs": ...}), so a field can be added beside it later without the
 	// body changing shape.
 	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
+}
+
+// handleDeleteFrame removes one frame and answers with the file's refreshed
+// detail - the same body GET /runs/{infohash}/files/{index} returns,
+// recomputed after the delete, so the page re-renders from disk truth rather
+// than from its own idea of what just happened (TOR-70).
+//
+// The result set is a query parameter rather than a field in the body: a
+// DELETE with a body is legal but awkward on both sides (fetch allows one,
+// caches and proxies vary in what they do with it), and the set is part of
+// the address here, not a payload - infohash, file index, frame index and
+// params together name exactly one frame on disk.
+//
+// The three path segments answer 404 when they are malformed, matching what
+// the GET on the same path already does for an infohash that is not hex: a
+// path that cannot name a resource names nothing. params is a request
+// parameter rather than part of the path, so a malformed one is a 400 about
+// the request.
+func (s *Server) handleDeleteFrame(w http.ResponseWriter, r *http.Request) {
+	index, indexErr := strconv.Atoi(r.PathValue("index"))
+	frame, frameErr := strconv.Atoi(r.PathValue("frame"))
+	if indexErr != nil || frameErr != nil {
+		writeError(w, http.StatusNotFound, "no such frame")
+		return
+	}
+
+	detail, err := s.DeleteFrame(r.PathValue("infohash"),
+		strings.TrimSpace(r.URL.Query().Get("params")), index, frame)
+	if err != nil {
+		writeError(w, deleteStatus(err), err.Error())
+		return
+	}
+
+	// Wrapped under the same "file" key the GET answers with, so a page can
+	// read either response the same way.
+	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
+}
+
+// deleteStatus maps a delete's three failures: nothing there to remove, a
+// request that does not name a frame, and a server with no way to remove one.
+// Anything else is a write that failed, which is the server's problem.
+func deleteStatus(err error) int {
+	switch {
+	case errors.Is(err, core.ErrNoSuchFrame):
+		return http.StatusNotFound
+	case errors.Is(err, errBadRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, errDeleteUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // handleDefaults reports what a run does when the request does not say -

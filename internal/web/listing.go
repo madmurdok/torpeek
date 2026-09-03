@@ -240,11 +240,19 @@ type FrameRef struct {
 	// this server named, and a sibling set's frames were never named by any
 	// event in this process - that is precisely why this request exists.
 	URL string `json:"url"`
-	// Params says which set the frame came from. Nothing in the UI shows it;
-	// it is here so a person reading the response can tell two coinciding
-	// timecodes apart, and so a future per-frame action (TOR-70) has the
-	// directory it would act on.
+	// Params says which set the frame came from, and Index is its own number
+	// in that set's manifest. Nothing in the UI shows either; together they
+	// are the address a DELETE needs (with the infohash and file index
+	// already in its path), which is why the page keeps them on every frame
+	// it draws a cross on. They also let a person reading the response tell
+	// two coinciding timecodes apart.
+	//
+	// Index is the manifest's own number and never a position in Frames:
+	// deleting a frame leaves a hole in the sequence on purpose, since
+	// core's reuse of an earlier run's frames keys on exactly this number
+	// (core.DeleteFrame explains why renumbering would be destructive).
 	Params string `json:"params"`
+	Index  int    `json:"index"`
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
 }
@@ -255,8 +263,10 @@ type FrameRef struct {
 // deliberately more forgiving than cache.Usable, which refuses a whole
 // manifest if a single frame is missing: this list only decides what to SHOW,
 // never whether a run is servable, and cache.Usable stays the sole judge of
-// the latter (weakening it is TOR-70's job, not this one's). A person who
-// deleted one frame should still see the other nineteen.
+// the latter. A person who deleted one frame should still see the other
+// nineteen. TOR-70 did not weaken cache.Usable in the end and did not need
+// to: core.DeleteFrame removes the record along with the file, and a
+// manifest that no longer mentions a frame has nothing left to fail on.
 //
 // Reports ok=false when the torrent has no set holding this file at all -
 // an unknown infohash, an index no set lists, or a file whose frames are all
@@ -311,7 +321,7 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 			}
 			detail.Frames = append(detail.Frames, FrameRef{
 				TimeMS: at, Shift: string(f.Shift), URL: s.files.publish(f.Path),
-				Params: params, Width: f.Width, Height: f.Height,
+				Params: params, Index: f.Index, Width: f.Width, Height: f.Height,
 			})
 			set.Frames++
 		}
@@ -355,13 +365,24 @@ func videoPath(run cache.Run, index int) (string, bool) {
 	return "", false
 }
 
-// validInfoHash gates the one place a request's own string reaches the
-// filesystem. Everywhere else this package serves only paths the event
+// validInfoHash gates one of the two places a request's own string reaches
+// the filesystem. Everywhere else this package serves only paths the event
 // stream named, for exactly this reason (see files.go); here the infohash
 // addresses a directory, so it has to be provably a hex digest and nothing
 // else - "../.." must never become a path.
-func validInfoHash(s string) bool {
-	if len(s) != 40 {
+func validInfoHash(s string) bool { return hexOfLength(s, 40) }
+
+// validParams gates the other one: the result set a DELETE names
+// (Server.DeleteFrame), which addresses a directory the same way. A
+// core.ParamsKey is the first eight bytes of a sha256 in hex, so sixteen
+// characters exactly - anything else was not written by a run.
+func validParams(s string) bool { return hexOfLength(s, 16) }
+
+// hexOfLength reports whether s is exactly n lower-case hex digits. Lower
+// case only: that is how the directories are named, and accepting the other
+// case would mean two spellings of one run on a case-sensitive filesystem.
+func hexOfLength(s string, n int) bool {
+	if len(s) != n {
 		return false
 	}
 	for _, c := range s {

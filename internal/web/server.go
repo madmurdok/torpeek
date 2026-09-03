@@ -69,12 +69,18 @@ type Config struct {
 
 	// OutputRoot is where GET /runs looks for runs this process did not
 	// start - output.Layout's root, the same directory a run's own cache hit
-	// (core.serveFromCache) reads. This package never writes there and never
-	// decides a run's parameters from what it finds - it only lists what
-	// cache.LoadRun can read back, per run.json (see listRuns). Empty means
-	// nothing on disk is listed, only the registry: a caller building the
-	// server directly (most tests) has no output directory to speak of, and
-	// leaving it empty rather than requiring one keeps that working.
+	// (core.serveFromCache) reads. This package writes nothing there itself
+	// and never decides a run's parameters from what it finds - it only
+	// lists what cache.LoadRun can read back, per run.json (see listRuns).
+	// Deleting one frame (TOR-70) is the single change that starts here, and
+	// even that is core's to make: this package validates the address and
+	// calls the Deleter it was handed, exactly as it calls a Runner rather
+	// than building a run configuration itself.
+	//
+	// Empty means nothing on disk is listed, only the registry: a caller
+	// building the server directly (most tests) has no output directory to
+	// speak of, and leaving it empty rather than requiring one keeps that
+	// working. A delete needs one and refuses without it.
 	OutputRoot string
 
 	// DefaultCount is how many frames per video file a run takes when the
@@ -155,6 +161,21 @@ type Runner func(ctx context.Context, req RunRequest) (<-chan core.Event, error)
 // rather than by what a fresh run would be asked to do.
 type Replayer func(infoHash, params string) <-chan core.Event
 
+// Deleter removes one frame of one result set from disk - the record in the
+// file's manifest and the frame file both - and reports whether it could.
+//
+// It is injected for the same reason Runner and Replayer are: this package
+// does not decide what a run is and does not write under the output root.
+// core.DeleteFrame is the one real implementation, and everything that makes
+// a delete safe (the manifest written before the file is unlinked, survivors
+// never renumbered, a file whose last frame is gone taken out of run.json's
+// Complete) lives there with the cache rules it has to keep. Here there is
+// only an address to validate.
+//
+// It takes no context: like a replay, this is a handful of local file
+// operations with nothing worth cancelling.
+type Deleter func(infoHash, params string, fileIndex, frameIndex int) error
+
 // ErrNoSuchRun is returned when a request names a run this server does not
 // hold - never did, or held and has since forgotten (see keepFinishedRuns).
 var ErrNoSuchRun = errors.New("no such run")
@@ -166,6 +187,16 @@ var errClosed = errors.New("web: server is closed")
 // with no Replayer - a test driving newServer directly, most often, since the
 // real entry point (cli/web.go) always supplies one alongside its Runner.
 var errReplayUnavailable = errors.New("web: reopening a run from disk is not available")
+
+// errBadRequest marks a request this server can read but not act on - a
+// malformed result set name, today - so a handler can answer 400 without
+// matching on message text.
+var errBadRequest = errors.New("web: malformed request")
+
+// errDeleteUnavailable is DELETE's counterpart to errReplayUnavailable: a
+// server built with no Deleter, or with no output root to delete from,
+// refuses rather than pretending it removed something.
+var errDeleteUnavailable = errors.New("web: deleting a frame is not available")
 
 // keepFinishedRuns bounds how many finished runs stay in memory.
 //
@@ -194,6 +225,7 @@ type Server struct {
 	cfg      Config
 	runner   Runner
 	replayer Replayer
+	deleter  Deleter
 	baseCtx  context.Context
 
 	server *http.Server
@@ -222,11 +254,12 @@ type Server struct {
 // It does not open a browser: on a seedbox there is nothing to open, and a
 // test must never depend on one. The caller decides, with OpenBrowser.
 //
-// replayer may be nil - ReopenRun then answers errReplayUnavailable rather
-// than refusing to start, the same tolerance Config.OutputRoot's own doc
-// describes for a caller with no disk-backed run to speak of. The real
-// entry point (cli/web.go) always supplies one, paired with runner.
-func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer) (*Server, error) {
+// replayer and deleter may both be nil - the routes that need them then
+// answer 503 rather than the server refusing to start, the same tolerance
+// Config.OutputRoot's own doc describes for a caller with no disk-backed run
+// to speak of. The real entry point (cli/web.go) always supplies both,
+// paired with runner.
+func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer, deleter Deleter) (*Server, error) {
 	if cfg.Addr == "" {
 		cfg.Addr = DefaultAddr
 	}
@@ -254,7 +287,7 @@ func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer) (*
 		return nil, fmt.Errorf("web listen on %s: %w", cfg.Addr, err)
 	}
 
-	s := newServer(ctx, cfg, runner, replayer)
+	s := newServer(ctx, cfg, runner, replayer, deleter)
 	s.url = "http://" + ln.Addr().String() + s.cfg.BasePath + "/"
 	if s.cfg.Token != "" {
 		// The token is base64.RawURLEncoding output: a fixed alphabet with
@@ -274,7 +307,7 @@ func Start(ctx context.Context, cfg Config, runner Runner, replayer Replayer) (*
 
 // newServer builds a server without listening, which is what a test wants
 // when it drives the handler through httptest.
-func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer) *Server {
+func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer, deleter Deleter) *Server {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -283,6 +316,7 @@ func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer
 		cfg:      cfg,
 		runner:   runner,
 		replayer: replayer,
+		deleter:  deleter,
 		baseCtx:  ctx,
 		files:    newFileSet(),
 		hub:      newHub(connectRecord()),
@@ -320,6 +354,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
+	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.Handle("GET /", http.FileServerFS(assets))
 
@@ -584,6 +619,49 @@ func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
 	info := entry.info()
 	s.mu.Unlock()
 	return info, nil
+}
+
+// DeleteFrame removes one frame of one result set and answers with what that
+// file has left, gathered from disk exactly as GET
+// /runs/{infohash}/files/{index} gathers it - so a page re-renders from what
+// is actually there rather than from its own guess at what a delete did.
+//
+// Both strings reach the filesystem, so both are checked to be what they
+// claim: an infohash is a 40-character hex digest and a params key is
+// core.ParamsKey's 16. Everywhere else this package serves only paths its own
+// event stream named (see files.go), which is why this is one of the two
+// places a guard is needed at all - the other being fileDetail, whose
+// validInfoHash this shares. (ReopenRun, which also takes a params from a
+// request, only trims it: it addresses a directory to read, not one to
+// remove from, and tightening it is not this change's to make.)
+//
+// A file whose frames are now all gone answers an empty detail rather than
+// the 404 fileDetail reports for it: the delete did happen, and "there is
+// nothing left" is the answer to the request that emptied it.
+func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int) (FileDetail, error) {
+	if s.deleter == nil || s.cfg.OutputRoot == "" {
+		return FileDetail{}, errDeleteUnavailable
+	}
+	if !validInfoHash(infoHash) || fileIndex < 0 || frameIndex < 0 {
+		return FileDetail{}, fmt.Errorf("%w: no frame %d of file %d under %s",
+			core.ErrNoSuchFrame, frameIndex, fileIndex, infoHash)
+	}
+	if !validParams(params) {
+		return FileDetail{}, fmt.Errorf("%w: %q is not a result set", errBadRequest, params)
+	}
+
+	if err := s.deleter(infoHash, params, fileIndex, frameIndex); err != nil {
+		return FileDetail{}, err
+	}
+
+	detail, ok := s.fileDetail(infoHash, fileIndex)
+	if !ok {
+		// Explicitly empty rather than left nil: the page replaces its grid
+		// with this list, and a JSON null would read as "no answer" where
+		// what is meant is "no frames".
+		return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}, nil
+	}
+	return detail, nil
 }
 
 // CancelRun stops one run: the one in the slot, or one still waiting for it.

@@ -612,6 +612,13 @@ function fileBlock(entry, index) {
     detailLoaded: false,
     width: 0,
     height: 0,
+    // index and entry are how a frame addresses an action on itself: a
+    // delete names the torrent (entry.infohash), the file, the result set
+    // and the frame's own number in that set's manifest. Everything else on
+    // this page is driven by events arriving with a run already in hand;
+    // this is the one thing a click on a thumbnail has to look up.
+    index,
+    entry,
   };
   entry.fileEntries.set(index, fentry);
 
@@ -737,7 +744,11 @@ function addFrame(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
   const at = ev.actual_ms;
 
-  fentry.frames.set(at, { url: url(ev.url), timeMs: at, shift: ev.shift || "" });
+  // No params: a frame straight off the event stream has no result set to
+  // address until its manifest exists, so it carries no cross yet. The
+  // file_done that follows re-reads every frame from disk moments later
+  // (loadFileDetail) and replaces this one with an addressable version.
+  fentry.frames.set(at, { url: url(ev.url), timeMs: at, shift: ev.shift || "", params: "", index: ev.index });
   renderFrames(fentry);
   updateFileSummary(fentry);
 
@@ -752,10 +763,10 @@ function addFrame(entry, ev) {
 // disk arrives all at once and interleaves with what is already shown.
 function renderFrames(fentry) {
   const ordered = [...fentry.frames.values()].sort((a, b) => a.timeMs - b.timeMs);
-  fentry.grid.replaceChildren(...ordered.map(frameFigure));
+  fentry.grid.replaceChildren(...ordered.map((frame) => frameFigure(frame, fentry)));
 }
 
-function frameFigure(frame) {
+function frameFigure(frame, fentry) {
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
   figure.className = "thumb";
@@ -777,9 +788,33 @@ function frameFigure(frame) {
 
   figure.append(img, caption);
 
+  // The cross, only for a frame that names the result set it lives in: that
+  // is the other half of its address on disk, and without it there is
+  // nothing a delete could be aimed at (see addFrame). It sits inside the
+  // figure, which is itself clickable, so the click must not also open the
+  // lightbox over the frame it just removed.
+  if (fentry && frame.params) {
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "thumb-delete";
+    remove.textContent = "×";
+    const what = "Delete the frame at " + timecode(frame.timeMs);
+    remove.title = what;
+    remove.setAttribute("aria-label", what);
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteFrame(fentry, frame);
+    });
+    figure.append(remove);
+  }
+
   const open = () => openLightbox(img.src, caption.textContent);
   figure.addEventListener("click", open);
   figure.addEventListener("keydown", (event) => {
+    // Only the figure's own keys open it. Enter on the delete button inside
+    // fires that button's click and then keeps bubbling to here, which would
+    // open a lightbox on a frame that is on its way out.
+    if (event.target !== figure) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       open();
@@ -787,6 +822,53 @@ function frameFigure(frame) {
   });
 
   return figure;
+}
+
+// deleteFrame removes one frame from disk - its manifest record and its file
+// both, which is what keeps the rest of the run openable (core.DeleteFrame).
+//
+// There is no confirmation step: the ticket asks for a cross, the panel's own
+// Regenerate is the way back, and a dialog on every thumbnail would make
+// clearing a handful of bad frames worse than the frames are. What the server
+// answers with is the file's remaining frames, read back off disk, so the
+// grid is replaced from that rather than by removing a tile here and hoping
+// the two agree. A failure changes nothing on screen.
+//
+// Replaced, not merged: a frame the grid still shows for a file whose
+// manifest is gone has to go too. The one thing that costs is a regeneration
+// in flight for this same file - its live frames are not on disk yet, so they
+// drop out of the grid until its own file_done puts them back moments later.
+async function deleteFrame(fentry, frame) {
+  showError("");
+  if (!fentry.entry.infohash || !frame.params) return;
+
+  const path = ["runs", fentry.entry.infohash, "files", fentry.index, "frames", frame.index].join("/");
+  const target = url(path);
+  target.searchParams.set("params", frame.params);
+
+  try {
+    const detail = (await del(target)).file;
+    fentry.frames = new Map();
+    for (const f of (detail && detail.frames) || []) {
+      fentry.frames.set(f.time_ms, detailFrame(f));
+    }
+    renderFrames(fentry);
+    updateFileSummary(fentry);
+    logFor(fentry.entry, "deleted the frame at " + seconds(frame.timeMs) + " of file " + fentry.index);
+  } catch (err) {
+    showError(String(err.message || err));
+  }
+}
+
+// detailFrame is one frame of a file-detail response in the shape the grid
+// keeps them in. Both readers of that response - the merge on opening a file
+// and the replacement after a delete - go through here, so a frame is never
+// half-addressable in one of them and whole in the other.
+function detailFrame(f) {
+  return {
+    url: url(f.url), timeMs: f.time_ms, shift: f.shift || "",
+    params: f.params || "", index: f.index,
+  };
 }
 
 // loadFileDetail asks the server for every frame this torrent has on disk
@@ -821,9 +903,7 @@ async function loadFileDetail(entry, fentry, index) {
     if (!detail || !detail.frames) return;
 
     for (const frame of detail.frames) {
-      fentry.frames.set(frame.time_ms, {
-        url: url(frame.url), timeMs: frame.time_ms, shift: frame.shift || "",
-      });
+      fentry.frames.set(frame.time_ms, detailFrame(frame));
     }
     fentry.detailLoaded = true;
     renderFrames(fentry);
@@ -992,6 +1072,20 @@ async function post(path, body) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+// del is post's counterpart for the one request that removes something.
+//
+// It takes a whole URL rather than a path, because unlike every POST here the
+// delete carries a query parameter (the result set) and url() is what already
+// knows how to build one with the access token on it - so the caller sets its
+// parameter on that object instead of hand-encoding a string. There is no
+// body: the address is the request.
+async function del(target) {
+  const response = await fetch(target, { method: "DELETE" });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;

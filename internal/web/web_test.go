@@ -69,11 +69,19 @@ func newTestServerWithConfig(t *testing.T, cfg Config, runner Runner) (*Server, 
 }
 
 // newTestServerWithReplayer is newTestServerWithConfig plus a Replayer, for
-// the tests that reopen a run from disk (TOR-55).
+// the tests that reopen a run from disk (TOR-55). Its deleter is nil, which
+// is what TestDeleteFrameWithoutADeleterIsUnavailable relies on.
 func newTestServerWithReplayer(t *testing.T, cfg Config, runner Runner, replayer Replayer) (*Server, *httptest.Server) {
 	t.Helper()
+	return newTestServerWith(t, cfg, runner, replayer, nil)
+}
 
-	srv := newServer(context.Background(), cfg, runner, replayer)
+// newTestServerWith is the full form, for the tests that delete a frame
+// (TOR-70) and so need all three injected closures.
+func newTestServerWith(t *testing.T, cfg Config, runner Runner, replayer Replayer, deleter Deleter) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), cfg, runner, replayer, deleter)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -690,7 +698,7 @@ func TestRunnerFailureIsReported(t *testing.T) {
 // reference, no absolute socket URL (REQUIREMENTS.md section 3.3).
 func TestWorksUnderABasePath(t *testing.T) {
 	fake := &fakeRun{}
-	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil)
+	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil, nil)
 	t.Cleanup(func() { srv.Close() })
 
 	mounted := http.NewServeMux()
@@ -781,7 +789,7 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 	cfg.Addr = addr
 	cfg.BasePath = "torpeek" // no leading slash: normalizeBasePath's job
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -986,7 +994,7 @@ func TestStartHonoursThePinnedAddr(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1019,7 +1027,7 @@ func TestStartFailsLoudlyWhenAddrIsTaken(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil)
 	if err == nil {
 		srv.Close()
 		t.Fatalf("Start on the already-occupied %s succeeded, want an error", addr)

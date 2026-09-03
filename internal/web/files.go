@@ -13,6 +13,14 @@ import (
 // back onto that layout - a second, drifting notion of where results are, and
 // a path-traversal question to get wrong - the server only ever serves a path
 // the event stream itself named. Anything not announced does not exist here.
+//
+// Two requests do have to name a directory themselves, because they address a
+// result set nothing announced: GET /runs/{infohash}/files/{index} (a sibling
+// set's frames were never on any event stream) and its DELETE (TOR-70). Both
+// go through validInfoHash and, for the delete, validParams before a string
+// from a request becomes part of a path - and the delete itself is core's:
+// this package still writes nothing under the output root, it asks
+// core.DeleteFrame to.
 type fileSet struct {
 	mu     sync.RWMutex
 	byID   map[string]string
