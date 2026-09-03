@@ -30,10 +30,16 @@ type Run struct {
 	Tool      string    `json:"tool"`
 	CreatedAt time.Time `json:"created_at"`
 
-	// Source is the magnet URI or .torrent path this run was given - the
-	// string a person could paste back in to run it again. Absent from a
-	// record written before this field existed, in which case it reads back
-	// as "": a run found on disk that cannot say what it was asked for.
+	// Source is the string a person could paste back in to run this again: the
+	// magnet URI exactly as typed, or - for a .torrent - the copy the run kept
+	// in its own directory (output.Layout.TorrentPath) rather than wherever
+	// the file was read from. The distinction is not cosmetic: a .torrent
+	// dropped onto the web UI is staged in a temp directory that is deleted as
+	// the run ends, so recording that path put a name for a file that provably
+	// no longer existed in the one field promising to be pasteable
+	// (core.recordedSource). Absent from a record written before this field
+	// existed, in which case it reads back as "": a run found on disk that
+	// cannot say what it was asked for.
 	Source string `json:"source"`
 
 	InfoHash string `json:"infohash"`

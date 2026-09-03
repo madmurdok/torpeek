@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,6 +85,24 @@ type Config struct {
 	// speak of, and leaving it empty rather than requiring one keeps that
 	// working. A delete needs one and refuses without it.
 	OutputRoot string
+
+	// WatchDir is a directory a torrent client on this host watches for new
+	// .torrent files. When it is set, the UI offers a button that copies a
+	// run's saved .torrent into it; when it is empty the button is absent
+	// altogether rather than shown and failing, and the one route that would
+	// use it answers 503 (SendToWatchDir).
+	//
+	// It exists because downloading and queueing are two different things on
+	// the deployment this tool targets (REQUIREMENTS.md section 4.1): the UI
+	// runs on the seedbox and the browser runs on a laptop, so the download
+	// link puts the .torrent on the laptop. A watch directory is the one way
+	// to say "start this where I just checked it" that needs no credentials
+	// and no client API - every client on a managed host already has one.
+	//
+	// This is the only directory outside the output root this package ever
+	// writes to, and it never comes from a request: it is a flag, and a
+	// request can only name which already-announced .torrent to copy into it.
+	WatchDir string
 
 	// DefaultCount is how many frames per video file a run takes when the
 	// request does not say - the -n flag, which runConfig starts from. The
@@ -219,6 +239,20 @@ var errBadRequest = errors.New("web: malformed request")
 // server built with no Deleter, or with no output root to delete from,
 // refuses rather than pretending it removed something.
 var errDeleteUnavailable = errors.New("web: deleting a frame is not available")
+
+// errWatchUnavailable is what SendToWatchDir returns on a server started
+// without -watch-dir. The page does not show the button at all in that case
+// (GET /defaults reports whether it should), so reaching this is a client
+// asking for something it was told is not there - answered as 503, the same
+// way the other "this server was not built for that" refusals are.
+var errWatchUnavailable = errors.New("web: no watch directory is configured")
+
+// errNoSuchTorrent is what SendToWatchDir returns when the id it was given is
+// not one this server minted for a run's .torrent - an id it never published,
+// or one that names some other artefact (a frame, a sheet, a manifest). Both
+// collapse into one 404 on purpose: the request named nothing this route can
+// act on, and which of the two it was is a detail for the message.
+var errNoSuchTorrent = errors.New("web: no such saved torrent")
 
 // keepFinishedRuns bounds how many finished runs stay in memory.
 //
@@ -382,6 +416,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
 	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
+	mux.HandleFunc("POST /files/{id}/watch", s.authGuard(s.handleWatchTorrent))
 	mux.Handle("GET /", http.FileServerFS(assets))
 
 	return mountRoot(mux)
@@ -855,6 +890,86 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 	return detail, nil
 }
 
+// SendToWatchDir copies one run's saved .torrent into the watch directory, so
+// a torrent client already running on this host picks it up, and answers with
+// where it put it.
+//
+// This is deliberately a second feature rather than the download link's
+// server-side half. A download hands the file to the BROWSER, which on the
+// deployment this tool targets is a laptop somewhere else; a watch directory
+// hands it to a client on the machine the UI is running on. Both are useful
+// and they are not substitutes, which is why the page offers both when it can
+// and only the download when it cannot.
+//
+// It is addressed by the same files/{id} handle the download uses rather than
+// by infohash and params, and that is the whole reason no new guard appears
+// here: an id is not a path, it is a key into the registry of paths this
+// server's own event stream published (fileSet), so nothing a request carries
+// can name a file that was never announced. The extension check on top of that
+// is not path safety - it is scope: every frame and sheet of every run is
+// published under the same registry, and "send this to my torrent client"
+// must mean a torrent, not whatever handle a page had lying around.
+//
+// The copy is written to a temporary file in the watch directory and renamed
+// into place. A watch directory is, by definition, being watched: a client
+// that sees the file appear opens it immediately, and a partially written one
+// is a corrupt torrent it will refuse - permanently, for the clients that
+// remember having rejected it. The temporary name starts with a dot and does
+// not end in .torrent, so it does not match what a client is looking for even
+// during the moment it exists.
+func (s *Server) SendToWatchDir(id string) (string, error) {
+	if s.cfg.WatchDir == "" {
+		return "", errWatchUnavailable
+	}
+
+	path, ok := s.files.lookup(id)
+	if !ok || !isTorrentPath(path) {
+		return "", fmt.Errorf("%w: %q does not name a run's .torrent", errNoSuchTorrent, id)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read the saved torrent: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(s.cfg.WatchDir, ".torpeek-*.part")
+	if err != nil {
+		return "", fmt.Errorf("write into the watch directory: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return "", fmt.Errorf("write into the watch directory: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return "", fmt.Errorf("write into the watch directory: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		os.Remove(tmpName)
+		return "", fmt.Errorf("write into the watch directory: %w", err)
+	}
+
+	dest := filepath.Join(s.cfg.WatchDir, filepath.Base(path))
+	if err := os.Rename(tmpName, dest); err != nil {
+		os.Remove(tmpName)
+		return "", fmt.Errorf("place the torrent in the watch directory: %w", err)
+	}
+	return dest, nil
+}
+
+// isTorrentPath reports whether a published path is a run's own .torrent
+// rather than one of the frames, sheets and manifests published beside it.
+//
+// The extension is the whole test, and it is enough because these paths are
+// not user input: every one of them was written by output.Writer, which is
+// the only thing that ever names a file .torrent under the output root
+// (output.Layout.TorrentPath).
+func isTorrentPath(path string) bool {
+	return strings.EqualFold(filepath.Ext(path), ".torrent")
+}
+
 // CancelRun stops one run: the one in the slot, or one still waiting for it.
 // Frames already written stay on disk, which is the whole point of cancelling
 // rather than killing (section 2.10).
@@ -1224,6 +1339,17 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 		}
 		if e.ManifestPath != "" {
 			m["manifest_url"] = s.files.publish(e.ManifestPath)
+		}
+	case core.Done:
+		// The run's own .torrent, published the same way every other artefact
+		// is: the page can only ask for a path this server's event stream
+		// named (files.go), and announcing it here is also what makes the
+		// link appear exactly when the file is really on disk - a run that
+		// could not write one, or a cached run captured before torpeek kept
+		// one, announces no path and so gets no link, with nothing having to
+		// guess. It is why this needed no new route and no new path guard.
+		if e.TorrentPath != "" {
+			m["torrent_url"] = s.files.publish(e.TorrentPath)
 		}
 	}
 

@@ -90,6 +90,14 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer) int {
 		case core.Done:
 			fmt.Fprintf(stdout, "\n%d frames from %d file(s) in %s, %s downloaded\n",
 				e.Frames, e.Files, e.Elapsed.Round(time.Second), humanBytes(e.DownloadedByte))
+			if e.TorrentPath != "" {
+				// Worth a line of its own: it is the one output of a run that
+				// is useful somewhere other than torpeek - hand it to a client
+				// and the torrent that was just previewed starts downloading.
+				// The caveat belongs here too, where the path is, rather than
+				// only in a doc comment nobody reading a terminal will open.
+				fmt.Fprintf(stdout, "torrent: %s (info dictionary as received, so the infohash matches; the creation date, comment and created-by are generated)\n", e.TorrentPath)
+			}
 			switch e.Reason {
 			case core.StopBudget:
 				fmt.Fprintln(stderr, "stopped at a limit; what was produced is kept")

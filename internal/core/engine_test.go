@@ -986,8 +986,21 @@ func TestRerunIsServedFromDiskWithoutTheSwarm(t *testing.T) {
 	if !ok {
 		t.Fatal("no run record for the first run")
 	}
-	if record.Source != torrentPath {
-		t.Errorf("record source = %q, want the path a person could rerun: %q", record.Source, torrentPath)
+	// TOR-73 changed what "the path a person could rerun" means for a
+	// .torrent source, and the change is the point rather than a detail: it
+	// is now the copy the run kept in its own directory, not the path the
+	// file was read from. The web UI stages a dropped .torrent in a temp
+	// directory it deletes as the run ends, so the path this used to expect
+	// was one that provably no longer existed by the time anybody read the
+	// record. The saved copy has the same infohash and lives as long as the
+	// record naming it, which is what makes the field true rather than
+	// usually-true.
+	if want := layout.TorrentPath(); record.Source != want {
+		t.Errorf("record source = %q, want the copy this run kept: %q", record.Source, want)
+	}
+	if _, err := os.Stat(record.Source); err != nil {
+		t.Errorf("record source %q is not on disk: %v - the whole point of the field is that it can be pasted back",
+			record.Source, err)
 	}
 	wantPlan := cache.Plan{
 		Count: first.Plan.Count, Start: first.Plan.Start, End: first.Plan.End,

@@ -111,6 +111,19 @@ type Done struct {
 	Frames         int
 	DownloadedByte int64
 	Elapsed        time.Duration
+
+	// TorrentPath is where the run kept its own .torrent, so a client can
+	// offer it without knowing anything about the output layout - the same
+	// service FileDone's ManifestPath and SheetPath do for one video file.
+	// It rides on Done rather than beside them because there is one per RUN,
+	// not one per file, and Done is the only run-scoped event a finished run
+	// is guaranteed to end on.
+	//
+	// Empty means this run has none to offer: a run whose write failed (the
+	// failure is reported on its own stream, it does not end the run), or a
+	// cached run recorded before torpeek kept one at all. A client must treat
+	// the empty case as "no link", never as "the file is at the usual place".
+	TorrentPath string
 }
 
 // Failed is the last event of a run that could not continue. Per-file
