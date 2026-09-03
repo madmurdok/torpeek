@@ -13,6 +13,7 @@ package wire
 import (
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // Event renders one event as the object clients exchange.
@@ -47,7 +48,7 @@ func event(ev core.Event) map[string]any {
 	case core.MetadataReady:
 		return map[string]any{
 			"type": "metadata_ready", "name": e.Name, "infohash": e.InfoHash,
-			"private": e.Private, "videos": len(e.Videos), "blind_dht": e.BlindDHT,
+			"private": e.Private, "videos": videoFiles(e.Videos), "blind_dht": e.BlindDHT,
 			"selected": e.Selected,
 		}
 	case core.FileStarted:
@@ -110,6 +111,21 @@ func event(ev core.Event) map[string]any {
 	default:
 		return map[string]any{"type": "unknown"}
 	}
+}
+
+// videoFiles renders every video file the torrent holds, so a picker can be
+// built from the same event that used to only report a count.
+//
+// index, path and length are all of swarm.FileInfo the run knows at this
+// point - Offset is an internal detail no client needs, and anything else
+// (duration, resolution) only exists after probing, which costs traffic a
+// picker should not have to spend before someone has even chosen a file.
+func videoFiles(files []swarm.FileInfo) []map[string]any {
+	out := make([]map[string]any, len(files))
+	for i, f := range files {
+		out[i] = map[string]any{"index": f.Index, "path": f.Path, "length": f.Length}
+	}
+	return out
 }
 
 // audioTracks renders every audio track for the summary panel - the answer to

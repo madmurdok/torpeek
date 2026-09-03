@@ -177,6 +177,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	}
 
 	// The budget covers the whole run, so every file shares one tracker.
+	//
+	// budgetFor reads len(selected) right here, before the budget's clock
+	// starts (tracker.Context below). Whoever adds another way to narrow a
+	// run - the web UI (TOR-66/67/68) included - has to apply that
+	// selection earlier, into cfg.Files before swarm.Select runs above;
+	// narrowing the file list after this point would leave the budget sized
+	// for files no longer being fetched.
 	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent)
 
 	runCtx, cancel := tracker.Context(ctx)

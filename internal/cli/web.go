@@ -24,17 +24,10 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	engine := core.NewEngine(tools)
 
 	runner := func(ctx context.Context, req web.RunRequest) (<-chan core.Event, error) {
-		cfg := base
-		cfg.Source = req.Source
-
-		if req.Mode != "" {
-			profile, err := swarm.ProfileByName(req.Mode)
-			if err != nil {
-				return nil, err
-			}
-			cfg.Profile = profile
+		cfg, err := runConfig(base, req)
+		if err != nil {
+			return nil, err
 		}
-
 		return engine.Run(ctx, cfg)
 	}
 
@@ -103,6 +96,37 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	<-ctx.Done()
 	fmt.Fprintln(stdout, "torpeek: stopping")
 	return ExitOK
+}
+
+// runConfig turns one web request into the config its run executes with.
+// Extracted out of serveWeb's runner closure so the mapping - profile
+// lookup, file selection - can be tested without a running server or a real
+// torrent.
+//
+// req.Files, when the browser sent a selection, replaces base's own -file
+// flag rather than being merged with it: a person who ticked boxes in the
+// UI is choosing the whole selection, not adding to whatever the process
+// happened to be started with. An empty selection leaves base.Files alone,
+// which is what keeps -file working exactly as before for the source the
+// command line itself starts (opts.Source below) and for any request that
+// simply does not offer a picker.
+func runConfig(base core.Config, req web.RunRequest) (core.Config, error) {
+	cfg := base
+	cfg.Source = req.Source
+
+	if req.Mode != "" {
+		profile, err := swarm.ProfileByName(req.Mode)
+		if err != nil {
+			return core.Config{}, err
+		}
+		cfg.Profile = profile
+	}
+
+	if len(req.Files) > 0 {
+		cfg.Files = req.Files
+	}
+
+	return cfg, nil
 }
 
 // webAddr turns -web-host/-web-port into a listen address, leaving the
