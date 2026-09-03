@@ -331,6 +331,36 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": s.listRuns()})
 }
 
+// handleFileDetail answers one video file's frames across every result set
+// that torrent has on disk (TOR-69).
+//
+// This is the per-run detail request walkRuns' own comment set aside as
+// future work: the listing stays one run.json per directory, and the
+// frame-by-frame reads happen here, for one file, only when a person opens
+// it. It is also the only way a page can reach a sibling set at all - the
+// event stream carries no params name, and a replay is addressed by one
+// directory, so frames of the OTHER set were never announced to this page.
+//
+// Reads disk and nothing else, which is what keeps a cache hit free of the
+// network however it is opened.
+func (s *Server) handleFileDetail(w http.ResponseWriter, r *http.Request) {
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no such file")
+		return
+	}
+
+	detail, ok := s.fileDetail(r.PathValue("infohash"), index)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such file")
+		return
+	}
+	// Wrapped under a key like every other response here (GET /runs answers
+	// {"runs": ...}), so a field can be added beside it later without the
+	// body changing shape.
+	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
+}
+
 // handleDefaults reports what a run does when the request does not say -
 // today just the frame count.
 //

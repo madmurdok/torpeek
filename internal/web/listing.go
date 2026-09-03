@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
+	"github.com/madmurdok/torpeek/internal/output"
 )
 
 // RunSummary is one row of GET /runs: enough for a panel to show a run and
@@ -188,4 +189,185 @@ func walkRuns(root string) []diskRun {
 		}
 	}
 	return out
+}
+
+// FileDetail is what GET /runs/{infohash}/files/{index} answers: one video
+// file's frames, gathered from every result set that torrent has on disk.
+//
+// Sets exist because core.ParamsKey hashes the frame count, so a
+// regeneration at a different count writes a sibling params directory
+// rather than growing the first one (TOR-68). What the person asked for,
+// though, is more frames of that file - so the frames arrive here as one
+// list ordered by time, with the sets they came from named separately for
+// anyone who wants to know rather than woven into the frames.
+type FileDetail struct {
+	Index int    `json:"index"`
+	Path  string `json:"path"`
+	// Sets is every params directory that holds frames for this file, newest
+	// plan first is deliberately NOT promised: they are listed in the order
+	// the directory walk found them, since nothing about a set makes one of
+	// them the current one.
+	Sets []FrameSet `json:"sets"`
+	// Frames is the union, ordered by timecode. Two sets always share the
+	// window's edges - frames.Plan pins the first and last point to the
+	// window - so a timecode carrying more than one frame on disk appears
+	// once here. Which one survives is decided by params order, so the same
+	// disk always answers the same way.
+	Frames []FrameRef `json:"frames"`
+}
+
+// FrameSet names one result set holding frames for the file.
+type FrameSet struct {
+	Params string `json:"params"`
+	// Count is the plan's frame count from run.json - what was asked for,
+	// which is not always what came out; Frames is what this set actually
+	// has on disk and can serve.
+	Count  int `json:"count"`
+	Frames int `json:"frames"`
+}
+
+// FrameRef is one frame a page can show: when it is from, why it moved if it
+// did, and where to get it.
+type FrameRef struct {
+	// TimeMS is where the frame actually came from (manifest ActualMS),
+	// falling back to where it was asked for when the manifest records no
+	// actual - which is also the sort key and the identity used to collapse
+	// the sets' shared edges.
+	TimeMS int64  `json:"time_ms"`
+	Shift  string `json:"shift,omitempty"`
+	// URL is a files/{id} handle minted here, the same way an event's frame
+	// URL is (see fileSet.publish): the page can only ever ask for a path
+	// this server named, and a sibling set's frames were never named by any
+	// event in this process - that is precisely why this request exists.
+	URL string `json:"url"`
+	// Params says which set the frame came from. Nothing in the UI shows it;
+	// it is here so a person reading the response can tell two coinciding
+	// timecodes apart, and so a future per-frame action (TOR-70) has the
+	// directory it would act on.
+	Params string `json:"params"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+}
+
+// fileDetail gathers one file's frames across every set of one torrent.
+//
+// A frame is listed when its own file is still on disk and non-empty. That is
+// deliberately more forgiving than cache.Usable, which refuses a whole
+// manifest if a single frame is missing: this list only decides what to SHOW,
+// never whether a run is servable, and cache.Usable stays the sole judge of
+// the latter (weakening it is TOR-70's job, not this one's). A person who
+// deleted one frame should still see the other nineteen.
+//
+// Reports ok=false when the torrent has no set holding this file at all -
+// an unknown infohash, an index no set lists, or a file whose frames are all
+// gone - which the handler answers as a 404 rather than an empty list: there
+// is no such file to show, which is a different thing from a file with
+// nothing left in it.
+func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
+	if s.cfg.OutputRoot == "" || !validInfoHash(infoHash) || index < 0 {
+		return FileDetail{}, false
+	}
+
+	paramDirs, err := os.ReadDir(filepath.Join(s.cfg.OutputRoot, infoHash))
+	if err != nil {
+		return FileDetail{}, false
+	}
+
+	detail := FileDetail{Index: index}
+	for _, paramDir := range paramDirs {
+		if !paramDir.IsDir() {
+			continue
+		}
+		params := paramDir.Name()
+		layout := output.Layout{Root: s.cfg.OutputRoot, InfoHash: infoHash, Params: params}
+
+		run, ok := cache.LoadRun(layout.RunDir())
+		if !ok {
+			continue
+		}
+		// The file's own path is what output.FileSlug turns into the
+		// directory name, so the record is what says where to look rather
+		// than this package re-deriving a layout of its own.
+		path, ok := videoPath(run, index)
+		if !ok {
+			continue
+		}
+		m, ok := cache.LoadManifest(layout.FileDir(index, path))
+		if !ok {
+			continue
+		}
+
+		set := FrameSet{Params: params, Count: run.Plan.Count}
+		for _, f := range m.Frames {
+			if f.Path == "" {
+				continue
+			}
+			if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
+				continue
+			}
+			at := f.RequestedMS
+			if f.ActualMS != nil {
+				at = *f.ActualMS
+			}
+			detail.Frames = append(detail.Frames, FrameRef{
+				TimeMS: at, Shift: string(f.Shift), URL: s.files.publish(f.Path),
+				Params: params, Width: f.Width, Height: f.Height,
+			})
+			set.Frames++
+		}
+		if set.Frames == 0 {
+			continue
+		}
+		detail.Path = path
+		detail.Sets = append(detail.Sets, set)
+	}
+
+	if len(detail.Frames) == 0 {
+		return FileDetail{}, false
+	}
+
+	sort.SliceStable(detail.Frames, func(i, j int) bool {
+		if detail.Frames[i].TimeMS != detail.Frames[j].TimeMS {
+			return detail.Frames[i].TimeMS < detail.Frames[j].TimeMS
+		}
+		return detail.Frames[i].Params < detail.Frames[j].Params
+	})
+
+	merged := detail.Frames[:0:0]
+	for _, f := range detail.Frames {
+		if len(merged) > 0 && merged[len(merged)-1].TimeMS == f.TimeMS {
+			continue
+		}
+		merged = append(merged, f)
+	}
+	detail.Frames = merged
+
+	return detail, true
+}
+
+// videoPath finds one video file's path in a run record.
+func videoPath(run cache.Run, index int) (string, bool) {
+	for _, v := range run.Videos {
+		if v.Index == index {
+			return v.Path, true
+		}
+	}
+	return "", false
+}
+
+// validInfoHash gates the one place a request's own string reaches the
+// filesystem. Everywhere else this package serves only paths the event
+// stream named, for exactly this reason (see files.go); here the infohash
+// addresses a directory, so it has to be provably a hex digest and nothing
+// else - "../.." must never become a path.
+func validInfoHash(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }

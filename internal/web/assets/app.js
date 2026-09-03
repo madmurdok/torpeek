@@ -93,6 +93,20 @@ function seconds(ms) {
   return (ms / 1000).toFixed(1) + "s";
 }
 
+// timecode is where a frame came from, as a person reads a video position:
+// mm:ss, growing an hours field only when the film is that long. It is what
+// a frame's caption says now - the frame INDEX cannot label a merged grid,
+// since every result set numbers its own frames from zero, so two different
+// moments would both read "#3" (TOR-69).
+function timecode(ms) {
+  if (!ms && ms !== 0) return "";
+  const total = Math.round(ms / 1000);
+  const s = String(total % 60).padStart(2, "0");
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h > 0 ? h + ":" + String(m).padStart(2, "0") + ":" + s : String(m).padStart(2, "0") + ":" + s;
+}
+
 function bitrateLabel(bps) {
   if (!bps) return "";
   if (bps >= 1e6) return (bps / 1e6).toFixed(1) + " Mbps";
@@ -587,7 +601,15 @@ function fileBlock(entry, index) {
     progress: article.querySelector(".file-progress"),
     grid: article.querySelector(".grid"),
     expanded: false,
-    frameCount: 0,
+    // frames is this file's grid, keyed by timecode in milliseconds. The key
+    // is what merges the result sets: frames.Plan pins the first and last
+    // point to the window, so every regeneration lands on the first set's
+    // edges exactly, and one moment must be one thumbnail however many sets
+    // hold it (TOR-69). It is also why the grid is rendered from state
+    // rather than appended to: a set fetched after the fact arrives in no
+    // particular order relative to what is already there.
+    frames: new Map(),
+    detailLoaded: false,
     width: 0,
     height: 0,
   };
@@ -596,7 +618,15 @@ function fileBlock(entry, index) {
   fentry.regenCount.value = el.count.value;
   fentry.regenGo.addEventListener("click", () => regenerate(entry, index, fentry));
 
-  fentry.toggle.addEventListener("click", () => setFileExpanded(fentry, !fentry.expanded));
+  fentry.toggle.addEventListener("click", () => {
+    const expanded = !fentry.expanded;
+    setFileExpanded(fentry, expanded);
+    // Opening a file is when it is worth reading the other result sets off
+    // disk - not on every run_state, and not for a file nobody looked at.
+    // Once is enough: a set only gains frames by a run finishing, which
+    // asks again itself (onFileDone).
+    if (expanded && !fentry.detailLoaded) loadFileDetail(entry, fentry, index);
+  });
   setFileExpanded(fentry, !entry.autoExpanded);
   entry.autoExpanded = true;
   updateFileSummary(fentry);
@@ -669,7 +699,8 @@ function setFileExpanded(fentry, expanded) {
 function updateFileSummary(fentry) {
   const parts = [];
   if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
-  parts.push(fentry.frameCount === 1 ? "1 frame" : fentry.frameCount + " frames");
+  const count = fentry.frames.size;
+  parts.push(count === 1 ? "1 frame" : count + " frames");
   fentry.summary.textContent = parts.join(" · ");
 }
 
@@ -699,32 +730,52 @@ function onFileStarted(entry, ev) {
       ", " + ev.width + "x" + ev.height + " " + ev.codec + ", " + ev.planned + " points");
 }
 
+// addFrame records one frame the event stream just announced and re-renders
+// the file's grid. It records rather than appends: two result sets of the
+// same file share timecodes, and the grid is one list ordered by time.
 function addFrame(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
-  fentry.frameCount++;
+  const at = ev.actual_ms;
+
+  fentry.frames.set(at, { url: url(ev.url), timeMs: at, shift: ev.shift || "" });
+  renderFrames(fentry);
   updateFileSummary(fentry);
 
+  logFor(entry, "frame " + ev.index + " at " + seconds(at) + (ev.shift ? " (" + ev.shift + ")" : ""));
+}
+
+// renderFrames rebuilds the grid from fentry.frames, earliest first.
+//
+// Rebuilding the whole grid rather than inserting into it keeps one rule -
+// the DOM is the map, ordered by time - instead of two: a live run appends
+// in plan order and would look sorted either way, while a set fetched from
+// disk arrives all at once and interleaves with what is already shown.
+function renderFrames(fentry) {
+  const ordered = [...fentry.frames.values()].sort((a, b) => a.timeMs - b.timeMs);
+  fentry.grid.replaceChildren(...ordered.map(frameFigure));
+}
+
+function frameFigure(frame) {
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
   figure.className = "thumb";
 
   const img = document.createElement("img");
-  img.src = url(ev.url);
-  img.alt = "frame " + ev.index;
+  img.src = frame.url;
+  img.alt = "frame at " + timecode(frame.timeMs);
   img.loading = "lazy";
 
   const caption = document.createElement("figcaption");
-  caption.textContent = "#" + ev.index + "  " + seconds(ev.actual_ms);
-  if (ev.shift) {
+  caption.textContent = timecode(frame.timeMs);
+  if (frame.shift) {
     caption.append(" ");
     const note = document.createElement("span");
     note.className = "shifted";
-    note.textContent = ev.shift;
+    note.textContent = frame.shift;
     caption.append(note);
   }
 
   figure.append(img, caption);
-  fentry.grid.append(figure);
 
   const open = () => openLightbox(img.src, caption.textContent);
   figure.addEventListener("click", open);
@@ -735,7 +786,51 @@ function addFrame(entry, ev) {
     }
   });
 
-  logFor(entry, "frame " + ev.index + " at " + seconds(ev.actual_ms) + (ev.shift ? " (" + ev.shift + ")" : ""));
+  return figure;
+}
+
+// loadFileDetail asks the server for every frame this torrent has on disk
+// for one file, across every result set, and merges them into the grid.
+//
+// This is the only way the other sets can be reached at all: a frame URL is
+// a handle the server minted for a path its own event stream named, and a
+// sibling set was never announced to this page - a replay is addressed by
+// one params directory and no event carries a params name. So the frames of
+// a regeneration are not "somewhere in the event history"; they have to be
+// asked for.
+//
+// A 404 is the normal answer while a run is still going: the manifest this
+// reads is written when a file finishes, so there is nothing on disk to
+// merge yet, and the live grid is already correct. Anything else is logged
+// and changes nothing.
+async function loadFileDetail(entry, fentry, index) {
+  if (!entry.infohash) return;
+
+  try {
+    // Assembled from segments rather than written as one string: a path
+    // segment spelled inline would read as a site-root path and trip
+    // TestTheFrontendUsesNoAbsolutePaths, which guards against exactly the
+    // absolute paths that break under a base path. url() then resolves the
+    // relative path against document.baseURI.
+    const path = ["runs", entry.infohash, "files", index].join("/");
+    const response = await fetch(url(path));
+    if (response.status === 404) return;
+    if (!response.ok) throw new Error(response.statusText);
+
+    const detail = (await response.json()).file;
+    if (!detail || !detail.frames) return;
+
+    for (const frame of detail.frames) {
+      fentry.frames.set(frame.time_ms, {
+        url: url(frame.url), timeMs: frame.time_ms, shift: frame.shift || "",
+      });
+    }
+    fentry.detailLoaded = true;
+    renderFrames(fentry);
+    updateFileSummary(fentry);
+  } catch (err) {
+    logFor(entry, "could not read file " + index + "'s frames: " + (err.message || err));
+  }
 }
 
 function openLightbox(src, caption) {
@@ -764,6 +859,11 @@ function onFileDone(entry, ev) {
   }
 
   logFor(entry, "file " + ev.file + " done: " + ev.frames + " frames, " + ev.skipped + " skipped");
+
+  // The manifest exists from now on, so this is the first moment the other
+  // result sets of this file can be read off disk - and the moment this
+  // run's own frames become part of what a later open would find.
+  loadFileDetail(entry, fentry, ev.file);
 }
 
 function link(href, text) {
