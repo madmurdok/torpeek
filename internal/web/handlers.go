@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -235,7 +236,21 @@ func (s *Server) handleUploadTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := RunRequest{Source: path, Mode: r.FormValue("mode"), Label: "dropped .torrent"}
+	// The count comes off the same intake line a pasted magnet uses, so a
+	// dropped .torrent has to read it here: this handler builds its
+	// RunRequest by hand and would otherwise silently ignore the number the
+	// person just typed. An unparseable or absent field is no count at all,
+	// which is exactly what the server's default means - a drop is not the
+	// place to argue about a form value.
+	count, err := strconv.Atoi(strings.TrimSpace(r.FormValue("count")))
+	if err != nil {
+		count = 0
+	}
+
+	req := RunRequest{
+		Source: path, Mode: r.FormValue("mode"), Count: count,
+		Label: "dropped .torrent",
+	}
 	// startRun runs cleanup itself on every path that does not end up owning
 	// the file: a request it refuses, a run cancelled while it waits, a
 	// server that closes under it. A run that reaches the slot defers cleanup
@@ -314,6 +329,19 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 // already on disk - see Server.listRuns for how the two are merged.
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": s.listRuns()})
+}
+
+// handleDefaults reports what a run does when the request does not say -
+// today just the frame count.
+//
+// It exists so the page can show the number actually in force rather than a
+// copy of it written into the HTML: the assets are static and served
+// straight out of the embed, with no templating step to substitute one in,
+// so without this the field would read 20 on a server started as -n 6. The
+// server does not decide the value; it repeats what the one shared
+// core.Config already says (Config.DefaultCount).
+func (s *Server) handleDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"count": s.cfg.DefaultCount})
 }
 
 // handleFile serves one file the run announced: a frame, a contact sheet or a

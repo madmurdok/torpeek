@@ -101,6 +101,18 @@ form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
 .browse .link { text-decoration: underline; }
 
 .controls { flex: 0 0 auto; display: flex; gap: .5rem; flex-wrap: nowrap; }
+/* input is deliberately absent from the rule below: #source has its own,
+   and a number field wants the same border and radius as a select without
+   the select's width. 4.5rem holds four digits and keeps the intake one
+   line. */
+input[type="number"] {
+  width: 4.5rem;
+  padding: .45rem .6rem;
+  font: inherit;
+  border: 1px solid #8886;
+  border-radius: .35rem;
+}
+
 select, button { padding: .45rem .7rem; font: inherit; border-radius: .35rem; }
 button:disabled { opacity: .5; }
 
@@ -281,6 +293,10 @@ button:disabled { opacity: .5; }
 .file-links a { color: inherit; }
 
 .file-progress { font-size: .8rem; opacity: .75; margin: .5rem 0; }
+
+.file-regen { display: flex; align-items: center; gap: .5rem; margin: .5rem 0 0; }
+.file-regen-label { display: flex; align-items: center; gap: .4rem; font-size: .8rem; opacity: .75; }
+.file-regen-count { width: 4rem; }
 
 /* The live frame grid: fills as frame_ready events arrive, click for full size. */
 .grid {

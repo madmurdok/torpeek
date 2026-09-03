@@ -52,6 +52,11 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// every run, so the listing and a run agree on where results live
 	// without web deciding that itself.
 	cfg.OutputRoot = base.OutputRoot
+	// GET /defaults reports this so the intake field can show the number a
+	// run would actually use. Same reason as OutputRoot above: base is the
+	// one core.Config this closure already builds every run from, so the
+	// page and a run agree without web deciding anything.
+	cfg.DefaultCount = base.Plan.Count
 
 	server, err := web.Start(ctx, cfg, runner, replayer)
 	if err != nil {
@@ -124,6 +129,14 @@ func runConfig(base core.Config, req web.RunRequest) (core.Config, error) {
 
 	if len(req.Files) > 0 {
 		cfg.Files = req.Files
+	}
+
+	// Zero means the request said nothing, so -n stands. Only the lower
+	// bound frames.Plan.Validate already enforces applies beyond that -
+	// there is no cap here, and n is per video file, so a torrent of six
+	// quality variants costs six times this number (TOR-50).
+	if req.Count > 0 {
+		cfg.Plan.Count = req.Count
 	}
 
 	return cfg, nil

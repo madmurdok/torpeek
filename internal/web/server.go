@@ -76,6 +76,17 @@ type Config struct {
 	// server directly (most tests) has no output directory to speak of, and
 	// leaving it empty rather than requiring one keeps that working.
 	OutputRoot string
+
+	// DefaultCount is how many frames per video file a run takes when the
+	// request does not say - the -n flag, which runConfig starts from. The
+	// server does not decide it and does not use it: GET /defaults only
+	// reports it, so the page can show the number that is actually in force
+	// instead of a copy of the default written into the HTML, which would
+	// quietly disagree with a server started as -n 6. Zero means "not
+	// stated" (a caller building the server directly, most tests), and the
+	// page then leaves its field empty - which sends no count at all, and
+	// so still gets the server's default.
+	DefaultCount int
 }
 
 // DefaultConfig serves the desktop case: loopback, fixed port.
@@ -105,6 +116,17 @@ type RunRequest struct {
 	// means every video file, the same as leaving -file off on the command
 	// line.
 	Files []string `json:"files,omitempty"`
+	// Count is how many frames per video file the run should take. Zero
+	// means the server's own default - the -n flag runConfig starts from -
+	// which is why it is an int and not a pointer: a page that has not
+	// chosen a number sends nothing, and "nothing" and "the default" have
+	// to be the same request. Negative is refused outright (startRun), so
+	// the only value that reaches frames.Plan.Validate from here is one
+	// somebody typed.
+	//
+	// Beware what the number means: it is frames PER video file, and a
+	// torrent bundling six quality variants multiplies it (TOR-50).
+	Count int `json:"count,omitempty"`
 	// Label overrides what run_state reports as the source, for a request
 	// whose Source is a server-side temp path nobody typed (an uploaded
 	// .torrent). Never set from JSON: it only exists on requests the server
@@ -291,6 +313,7 @@ func (s *Server) Handler() http.Handler {
 	// authGuard's doc comment for why gating it too would be self-defeating.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /events", s.authGuard(s.handleEvents))
+	mux.HandleFunc("GET /defaults", s.authGuard(s.handleDefaults))
 	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
@@ -401,6 +424,16 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	req.Source = strings.TrimSpace(req.Source)
 	if req.Source == "" {
 		return refuse(errors.New("give a magnet link or a .torrent file"))
+	}
+
+	// Refused here rather than left to frames.Plan.Validate inside the
+	// engine: that failure would arrive minutes later as a failed run on a
+	// 202-accepted request, where a number the client can see is wrong
+	// before anything is queued is a 400 about the request itself. Zero is
+	// not a rejection - it is how a page says "whatever the server was
+	// started with".
+	if req.Count < 0 {
+		return refuse(fmt.Errorf("frames per file cannot be negative, got %d", req.Count))
 	}
 
 	display := req.Source
