@@ -1519,6 +1519,10 @@ func TestTrimNeverDropsALiveRun(t *testing.T) {
 func TestClosingCancelsTheQueueAndItsStagedUploads(t *testing.T) {
 	const source = "magnet:?xt=urn:btih:aaa"
 
+	// Before the server exists, so every upload it stages lands where only
+	// this test can see it (TOR-51).
+	privateTempDir(t)
+
 	fake := newFakeRuns()
 	srv, ts := newTestServer(t, fake.runner)
 
@@ -1562,6 +1566,17 @@ func TestClosingCancelsTheQueueAndItsStagedUploads(t *testing.T) {
 	if got := runInfo(t, srv, running.id).ID; got != running.id {
 		t.Errorf("the running run vanished from the registry: %q", got)
 	}
+}
+
+// privateTempDir points os.MkdirTemp at a directory belonging to this test
+// alone, so a stagedUploads glob can only ever see uploads this test staged.
+// Same reason as internal/cli's copy of it: globbing the machine's shared
+// temp directory reads another checkout's concurrent suite as this test's
+// own leftovers (TOR-51).
+func privateTempDir(t *testing.T) {
+	t.Helper()
+
+	t.Setenv("TMPDIR", t.TempDir())
 }
 
 // stagedUploads lists the temp directories handleUploadTorrent makes, so a

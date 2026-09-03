@@ -436,6 +436,12 @@ func TestListInJSONIsOneObject(t *testing.T) {
 func TestPieceDirectoryIsDiscardedWhenWeMadeIt(t *testing.T) {
 	torrentPath, seeder := sampleTorrent(t)
 
+	// Before the first run, and before anything is globbed: what this test
+	// asserts is that a run removes the directory IT made, and the only way
+	// to know which one that is, is for nothing else to be able to put one
+	// where the test is looking.
+	privateTempDir(t)
+
 	before := scratchDirs(t)
 
 	out := t.TempDir()
@@ -475,6 +481,25 @@ func TestPieceDirectoryIsDiscardedWhenWeMadeIt(t *testing.T) {
 }
 
 // scratchDirs lists the piece directories torpeek would have made.
+// privateTempDir points os.MkdirTemp at a directory belonging to this test
+// alone, so a scratchDirs glob can only ever see piece directories this
+// test's own runs made.
+//
+// The alternative - globbing the machine's shared temp directory - reads
+// whatever else is on the machine at that moment as something the run left
+// behind. That is not hypothetical: a second checkout running its own suite
+// at the same time trips it, which is now a normal way to work here (three
+// agents ran this repo in parallel while 0.7.0 was built). os.TempDir
+// answers $TMPDIR on unix and Windows' own variables elsewhere, so setting
+// it is all that is needed; t.Setenv restores it and refuses to run under
+// t.Parallel, which is the guard against one test's temp dir leaking into
+// another's.
+func privateTempDir(t *testing.T) {
+	t.Helper()
+
+	t.Setenv("TMPDIR", t.TempDir())
+}
+
 func scratchDirs(t *testing.T) map[string]bool {
 	t.Helper()
 
