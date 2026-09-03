@@ -40,6 +40,15 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return engine.Replay(base.OutputRoot, infoHash, params)
 	}
 
+	// Deleting one frame (TOR-70) is injected the same way and for the same
+	// reason: core owns everything under base.OutputRoot - it is the only
+	// package that writes there - and the rules a delete has to keep are the
+	// cache's, not a UI's. web validates the address and calls this; what a
+	// safe delete is stays in core.DeleteFrame.
+	deleter := func(infoHash, params string, fileIndex, frameIndex int) error {
+		return core.DeleteFrame(base.OutputRoot, infoHash, params, fileIndex, frameIndex)
+	}
+
 	cfg := web.DefaultConfig()
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
@@ -58,7 +67,7 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// page and a run agree without web deciding anything.
 	cfg.DefaultCount = base.Plan.Count
 
-	server, err := web.Start(ctx, cfg, runner, replayer)
+	server, err := web.Start(ctx, cfg, runner, replayer, deleter)
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitFailed
