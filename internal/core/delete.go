@@ -252,6 +252,20 @@ func withoutIndex(indices []int, drop int) []int {
 // within reports whether path sits inside dir, which is how a manifest record
 // is checked to be describing a frame of its own run before it is unlinked.
 //
+// It compares the two as spelled, without resolving symlinks, and that is
+// deliberate now rather than merely unexamined (TOR-77). Since a manifest
+// records a frame relative to itself (TOR-60), the path reaching here was
+// built by joining onto the very directory the caller named, so the two
+// sides cannot disagree about spelling however the caller spelled it - a
+// delete through /tmp of a run recorded under /private/tmp works, and
+// TestDeleteFrameThroughARootSpelledAnotherWay holds that.
+//
+// What is left for this to refuse is a record that names a file somewhere
+// else entirely - an older manifest whose absolute path could not be
+// re-anchored inside the run it belongs to. That is precisely the record
+// that must not be unlinked, so resolving symlinks here would only make it
+// easier to act on.
+//
 // What reaches it changed with TOR-60, and the contract is worth stating
 // exactly. A frame path now arrives from cache.LoadManifest already resolved
 // against the file directory this very call derived from root/infoHash/params

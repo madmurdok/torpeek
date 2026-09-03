@@ -485,3 +485,62 @@ func TestDeleteFrameRefusesARecordPointingOutsideItsRun(t *testing.T) {
 			frameIndices(after))
 	}
 }
+
+// TestDeleteFrameThroughARootSpelledAnotherWay is TOR-77, which TOR-60
+// settled: the guard inside DeleteFrame compares a frame's path against the
+// run directory it was addressed through, and it used to compare two
+// independent spellings of one place. On macOS that alone refused a
+// legitimate delete - /tmp is a symlink to /private/tmp, so a server started
+// with one could not delete a frame of a run recorded through the other, and
+// the error blamed the record for pointing outside its own run.
+//
+// Now that a manifest records a frame relative to itself (TOR-60), the path
+// reaching the guard was built by joining onto the very directory the caller
+// named, so the two sides cannot disagree whatever the caller called it.
+// This test holds that: it writes the run through one spelling of a root and
+// deletes through the other. Without the relative form it fails, which is
+// what makes it a regression test rather than a restatement.
+func TestDeleteFrameThroughARootSpelledAnotherWay(t *testing.T) {
+	real := t.TempDir()
+
+	// A second spelling of the same directory, which is what /tmp is to
+	// /private/tmp on this platform.
+	linked := filepath.Join(t.TempDir(), "results")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Skipf("this platform will not make a symlink: %v", err)
+	}
+
+	const (
+		infoHash = "00112233445566778899aabbccddeeff00112233"
+		params   = "00112233445566ff"
+		path     = "movie.mkv"
+	)
+	run := cache.Run{
+		Version: cache.Version, Tool: "test", CreatedAt: time.Now(),
+		InfoHash: infoHash, Name: "movie",
+		Plan:     cache.Plan{Count: 3, Start: 0.05, End: 0.95, Profile: "min-traffic", Format: "jpeg"},
+		Videos:   []cache.File{{Index: 0, Path: path, Bytes: 1 << 20}},
+		Selected: []int{0}, Complete: []int{0},
+	}
+	buildCachedRun(t, real, infoHash, params, run, map[int]manifest.Manifest{
+		0: fileManifest(0, path, 3),
+	})
+
+	// Written through the real path, deleted through the symlink.
+	if err := DeleteFrame(linked, infoHash, params, 0, 1); err != nil {
+		t.Fatalf("delete through the other spelling of the same root: %v", err)
+	}
+
+	m, ok := cache.LoadManifest(output.Layout{Root: real, InfoHash: infoHash, Params: params}.FileDir(0, path))
+	if !ok {
+		t.Fatal("the manifest is unreadable after the delete")
+	}
+	if len(m.Frames) != 2 {
+		t.Fatalf("the manifest holds %d records, want 2", len(m.Frames))
+	}
+	for _, f := range m.Frames {
+		if f.Index == 1 {
+			t.Error("frame 1 is still recorded; the delete was refused or silently skipped")
+		}
+	}
+}
