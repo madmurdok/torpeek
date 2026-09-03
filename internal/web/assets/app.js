@@ -358,7 +358,11 @@ function syncEntry(entry) {
   entry.rowEl.dataset.state = entry.disk ? "disk" : entry.state;
   entry.rowBadge.textContent = badgeLabel(entry);
   entry.rowBadge.dataset.state = entry.disk ? "disk" : entry.state;
+  // The cell truncates, so the whole name has to be reachable some other way
+  // than by widening the panel - a tooltip costs nothing and answers "which
+  // Sintel is this" without moving the divider.
   entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
+  entry.rowName.title = entry.rowName.textContent;
   entry.rowMeta.textContent = metaLabel(entry);
   entry.rowWhen.textContent = whenLabel(entry.when);
   entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
