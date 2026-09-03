@@ -226,10 +226,32 @@ func TestClearRemovesOneNamedSet(t *testing.T) {
 	kept := makeSet(t, root, "aaaa000000000000000000000000000000000a", "1111111111111111", now, 100)
 	gone := makeSet(t, root, "bbbb000000000000000000000000000000000b", "2222222222222222", now, 100)
 
-	if err := Clear(root, "bbbb000000000000000000000000000000000b", "2222222222222222"); err != nil {
+	removed, err := Clear(root, "bbbb000000000000000000000000000000000b", "2222222222222222")
+	if err != nil {
 		t.Fatalf("clear: %v", err)
 	}
+	if !removed {
+		t.Error("clear reported nothing removed for a set that was there")
+	}
 	mustNotExist(t, gone)
+	mustExist(t, kept)
+}
+
+// TestClearSaysWhenThereWasNothingToRemove: os.RemoveAll answers nil for a
+// path that never existed, so without this the CLI printed "removed" for a
+// set nobody had - a small untruth of the same kind as a sheet that keeps
+// depicting a deleted frame.
+func TestClearSaysWhenThereWasNothingToRemove(t *testing.T) {
+	root := t.TempDir()
+	kept := makeSet(t, root, "aaaa000000000000000000000000000000000a", "1111111111111111", time.Now().UTC(), 100)
+
+	removed, err := Clear(root, "aaaa000000000000000000000000000000000a", "ffffffffffffffff")
+	if err != nil {
+		t.Fatalf("clear a set that is not there: %v", err)
+	}
+	if removed {
+		t.Error("clear claims it removed a set that never existed")
+	}
 	mustExist(t, kept)
 }
 

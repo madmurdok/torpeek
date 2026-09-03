@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -199,8 +200,24 @@ func Evict(root string, ceiling int64, protect string) (EvictResult, error) {
 
 // Clear removes one named set outright, regardless of size or age -
 // REQUIREMENTS.md 2.9's manual half: a person decided, not the ceiling.
-func Clear(root, infoHash, params string) error {
-	return os.RemoveAll(filepath.Join(root, infoHash, params))
+func Clear(root, infoHash, params string) (bool, error) {
+	dir := filepath.Join(root, infoHash, params)
+
+	// Statted first, because os.RemoveAll cannot tell "removed it" from
+	// "there was nothing there" - it reports nil either way. A caller that
+	// printed "removed" on that nil would be claiming to have deleted a set
+	// that never existed, which is a small lie of exactly the kind this
+	// release went looking for.
+	if _, err := os.Stat(dir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ClearAll removes every result set Scan finds under root, the other half of
