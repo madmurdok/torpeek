@@ -50,9 +50,18 @@ type Run struct {
 	// run worked on. Without it a rerun could not tell "all files" from "the
 	// files that happened to be asked for last time" while staying offline.
 	Videos []File `json:"videos"`
-	// Complete lists the file indices whose frame set came out whole. A file
-	// with a failed capture point is deliberately absent: a rerun should try
-	// it again rather than serve a gap as a result.
+	// Selected lists every file index any run recorded in this directory has
+	// ever asked for - not only this run's own selection. Without it, a file
+	// index absent from Complete is ambiguous: never picked, or picked and
+	// failed. Cross-referenced with Complete, it tells the two apart. Absent
+	// from a record written before this field existed, in which case it
+	// reads back as nil: a pre-existing record cannot say what was asked for,
+	// only what came out whole.
+	Selected []int `json:"selected"`
+	// Complete lists the file indices whose frame set came out whole, across
+	// every run this directory has ever recorded - not only this run's own.
+	// A file with a failed capture point is deliberately absent: a rerun
+	// should try it again rather than serve a gap as a result.
 	Complete []int `json:"complete"`
 }
 

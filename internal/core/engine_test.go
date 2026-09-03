@@ -1190,6 +1190,156 @@ func TestSecondRunFillsTheGapsRatherThanStartingOver(t *testing.T) {
 	}
 }
 
+// TestSecondRunOverADisjointSelectionKeepsTheFirstRunsCompleteFiles is the
+// acceptance criterion for TOR-65: saveRunRecord must merge Complete (and
+// Selected) with what is already on disk rather than replace it. ParamsKey
+// deliberately excludes the file selection, so two runs with different
+// selections write to the very same directory. Without the merge, a run
+// rebuilds Complete from only the files it itself finished, so a later run
+// over different files would make the earlier run's completed files -
+// whose frames are still on disk - silently drop out of the record.
+//
+// The two selections here are disjoint on purpose. A narrower selection that
+// is already a *subset* of what an earlier, fully-completed run recorded
+// would be served straight from cache (loadCacheHit finds every requested
+// file already in Complete) and would never reach saveRunRecord at all - a
+// test built that way would pass whether or not the merge exists, proving
+// nothing. Disjoint selections guarantee the second run is a cache miss and
+// actually goes live, so the run whose record we are checking is the one
+// that exercises the merge.
+func TestSecondRunOverADisjointSelectionKeepsTheFirstRunsCompleteFiles(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 6, 8, "150k")
+
+	cfg := DefaultConfig(torrentPath, t.TempDir(), t.TempDir())
+	cfg.Swarm.DHT = false
+	cfg.Swarm.MetadataTimeout = 10 * time.Second
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Profile = swarm.MinTraffic
+	cfg.Plan = frames.Plan{Count: 2, Start: 0.1, End: 0.9}
+	cfg.Budget = Budget{MaxBytes: 64 << 20, MaxTime: 4 * time.Minute, WarnAt: 0.8}
+	cfg.Parallelism = 3
+	cfg.Bridge = bridge.DefaultConfig()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	// First run: half the torrent's files.
+	first := cfg
+	first.Files = []string{"episode-1", "episode-2", "episode-3"}
+
+	events, err := NewEngine(tools).Run(ctx, first)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	var (
+		firstMeta *MetadataReady
+		firstDone *Done
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case MetadataReady:
+			firstMeta = &e
+		case Failed:
+			t.Fatalf("first run failed: %s: %v", e.Code, e.Err)
+		case Done:
+			firstDone = &e
+		}
+	}
+	if firstMeta == nil || firstDone == nil || firstDone.Files != 3 {
+		t.Fatalf("first run did not complete its 3 selected files: metadata=%+v done=%+v", firstMeta, firstDone)
+	}
+	firstIndices := append([]int(nil), firstMeta.Selected...)
+
+	// Second run: the other half - same parameters, so the same directory
+	// per ParamsKey (file selection is deliberately excluded from that key;
+	// see ParamsKey's own doc comment) - but a completely different
+	// selection, chosen by name so it cannot overlap the first.
+	second := cfg
+	second.Files = []string{"episode-4", "episode-5", "episode-6"}
+
+	events, err = NewEngine(tools).Run(ctx, second)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	var (
+		secondMeta *MetadataReady
+		secondDone *Done
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case MetadataReady:
+			secondMeta = &e
+		case Failed:
+			t.Fatalf("second run failed: %s: %v", e.Code, e.Err)
+		case Done:
+			secondDone = &e
+		}
+	}
+	if secondMeta == nil || secondDone == nil || secondDone.Files != 3 {
+		t.Fatalf("second run did not complete its 3 selected files: metadata=%+v done=%+v", secondMeta, secondDone)
+	}
+	secondIndices := append([]int(nil), secondMeta.Selected...)
+
+	// Confirm the two selections really are disjoint, and that the second
+	// run really did go live rather than being served from cache - otherwise
+	// this test would prove nothing about the merge either way.
+	firstSet := map[int]bool{}
+	for _, i := range firstIndices {
+		firstSet[i] = true
+	}
+	for _, i := range secondIndices {
+		if firstSet[i] {
+			t.Fatalf("selections overlap at file %d; the test needs disjoint selections to force the second run live", i)
+		}
+	}
+	if secondDone.DownloadedByte == 0 {
+		t.Fatal("second run downloaded nothing - it must have been served from cache, so it never reached saveRunRecord")
+	}
+
+	layout := output.Layout{Root: cfg.OutputRoot, InfoHash: secondMeta.InfoHash, Params: ParamsKey(cfg)}
+	record, ok := cache.LoadRun(layout.RunDir())
+	if !ok {
+		t.Fatal("no run record after the second run")
+	}
+
+	want := map[int]bool{}
+	for _, i := range firstIndices {
+		want[i] = true
+	}
+	for _, i := range secondIndices {
+		want[i] = true
+	}
+
+	got := map[int]bool{}
+	for _, c := range record.Complete {
+		got[c] = true
+	}
+	for i := range want {
+		if !got[i] {
+			t.Errorf("file %d, completed by an earlier run, is missing from record.Complete = %v", i, record.Complete)
+		}
+	}
+	if len(record.Complete) != len(want) {
+		t.Errorf("record.Complete = %v, want exactly the union %v", record.Complete, want)
+	}
+
+	// The record's Selected must likewise carry every file any run here ever
+	// asked for, not only the most recent run's own selection.
+	gotSelected := map[int]bool{}
+	for _, s := range record.Selected {
+		gotSelected[s] = true
+	}
+	for i := range want {
+		if !gotSelected[i] {
+			t.Errorf("file %d is missing from record.Selected = %v", i, record.Selected)
+		}
+	}
+	if len(record.Selected) != len(want) {
+		t.Errorf("record.Selected = %v, want exactly the union %v", record.Selected, want)
+	}
+}
+
 // TestRunDiscardsItsOwnPiecesButKeepsResults is the acceptance criterion for
 // TOR-56: a run's raw pieces are staging data (REQUIREMENTS.md 2.9), and by
 // the time the run has reported Done, its own <DataDir>/<infohash>/ subtree
