@@ -29,8 +29,11 @@ const el = {
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
   dropOverlay: document.getElementById("drop-overlay"),
+  runsPanel: document.getElementById("runs-panel"),
+  resizer: document.getElementById("resizer"),
   runList: document.getElementById("run-list"),
   runListEmpty: document.getElementById("run-list-empty"),
+  sortHeaders: document.querySelectorAll("#run-table thead [data-sort]"),
   detail: document.getElementById("detail"),
   detailEmpty: document.getElementById("detail-empty"),
   log: document.getElementById("log"),
@@ -47,7 +50,10 @@ const el = {
 // torrent must not erase the first, and a finished one must stay clickable
 // for as long as the page remembers it. state.selected is the one entry
 // shown on the right.
-const state = { runs: new Map(), selected: null };
+// sort is the table's current order: key names the column (a <th data-sort>
+// value), dir is "asc" or "desc". The default - date, newest first - is what
+// the panel already showed before it became a table (TOR-62).
+const state = { runs: new Map(), selected: null, sort: { key: "when", dir: "desc" } };
 
 function url(path) {
   const u = new URL(path, document.baseURI);
@@ -145,6 +151,83 @@ function metaLabel(entry) {
   return "";
 }
 
+function whenLabel(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " +
+    d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+}
+
+// ---------------------------------------------------------------------------
+// Table sorting. All client-side, over what state.runs already holds - GET
+// /runs is small enough that a server-side sort parameter would only add a
+// second place order is decided (TOR-62).
+
+function sortValue(entry, key) {
+  switch (key) {
+    case "name": return (entry.name || entry.source || shortId(entry.id)).toLowerCase();
+    case "status": return badgeLabel(entry).toLowerCase();
+    case "when":
+    default: return entry.when || 0;
+  }
+}
+
+function compareEntries(a, b) {
+  const { key, dir } = state.sort;
+  const va = sortValue(a, key);
+  const vb = sortValue(b, key);
+  let cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
+  if (dir === "desc") cmp = -cmp;
+  return cmp;
+}
+
+// reorderRuns moves every row's existing element into sorted order without
+// rebuilding anything - appendChild on a node already in the table just
+// relocates it, so a row that has not moved costs a no-op reflow, never a
+// rebuild. Called whenever a row is added or anything a sort key reads
+// (name, status, when) changes, so the table always reflects the active
+// sort - including under the default "when" sort, where a status change
+// never touches when, so re-running this never moves that row.
+function reorderRuns() {
+  const rows = Array.from(state.runs.values()).sort(compareEntries);
+  for (const entry of rows) el.runList.append(entry.rowEl);
+}
+
+function updateSortIndicators() {
+  for (const th of el.sortHeaders) {
+    if (th.dataset.sort === state.sort.key) {
+      th.setAttribute("aria-sort", state.sort.dir === "asc" ? "ascending" : "descending");
+    } else {
+      th.setAttribute("aria-sort", "none");
+    }
+  }
+}
+
+// setSort is what clicking (or activating with the keyboard) a column header
+// does: the same column reverses direction, a different one is sorted
+// ascending - except "when", which starts descending (newest first), the
+// same default the table opens with, since that is the more useful way to
+// first look at dates.
+function setSort(key) {
+  if (state.sort.key === key) {
+    state.sort.dir = state.sort.dir === "asc" ? "desc" : "asc";
+  } else {
+    state.sort.key = key;
+    state.sort.dir = key === "when" ? "desc" : "asc";
+  }
+  updateSortIndicators();
+  reorderRuns();
+}
+
+for (const th of el.sortHeaders) {
+  th.addEventListener("click", () => setSort(th.dataset.sort));
+  th.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    setSort(th.dataset.sort);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Run entries: one per torrent, live or on disk. Each owns its own row in the
 // left panel and its own container on the right, built once and updated in
@@ -152,28 +235,41 @@ function metaLabel(entry) {
 // shows and hides what is already there.
 
 function newRunEntry(id) {
-  const row = document.createElement("li");
+  const row = document.createElement("tr");
   row.className = "run-row";
 
+  const nameCell = document.createElement("td");
+  nameCell.className = "run-cell-name";
   const main = document.createElement("button");
   main.type = "button";
   main.className = "run-row-main";
-  const badge = document.createElement("span");
-  badge.className = "run-badge";
   const name = document.createElement("span");
   name.className = "run-name";
+  main.append(name);
+  nameCell.append(main);
+
+  const whenCell = document.createElement("td");
+  whenCell.className = "run-cell-when";
+
+  const statusCell = document.createElement("td");
+  statusCell.className = "run-cell-status";
+  const badge = document.createElement("span");
+  badge.className = "run-badge";
   const meta = document.createElement("span");
   meta.className = "run-meta";
-  main.append(badge, name, meta);
+  statusCell.append(badge, meta);
 
+  const actionsCell = document.createElement("td");
+  actionsCell.className = "run-cell-actions";
   const cancel = document.createElement("button");
   cancel.type = "button";
   cancel.className = "run-cancel";
   cancel.title = "Cancel";
   cancel.textContent = "✕";
   cancel.hidden = true;
+  actionsCell.append(cancel);
 
-  row.append(main, cancel);
+  row.append(nameCell, whenCell, statusCell, actionsCell);
   el.runList.append(row);
   el.runListEmpty.hidden = true;
 
@@ -195,9 +291,19 @@ function newRunEntry(id) {
     id, disk: false, infohash: "", params: "",
     state: "", source: "", name: "", error: "", progress: "",
     files: 0, complete: 0,
+    // when is this row's sort key for the default (date, newest-first) sort.
+    // Set once, here, at creation - never touched again by a status update -
+    // which is what keeps a live run from jumping position as events arrive.
+    // loadRuns() overwrites it once with the authoritative value GET /runs
+    // reports, for a row it already knows about at page load.
+    when: Date.now(),
     reopening: false,
     fileEntries: new Map(),
-    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowCancel: cancel,
+    // Set once this run's first file block is built, so every file after it
+    // defaults to collapsed - only the first one earns the auto-expand.
+    autoExpanded: false,
+    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta,
+    rowWhen: whenCell, rowCancel: cancel,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
     detailTitle: detailEl.querySelector(".run-detail-title"),
@@ -207,7 +313,13 @@ function newRunEntry(id) {
     filesEl: detailEl.querySelector(".files"),
   };
 
-  main.addEventListener("click", () => selectOrReopen(entry));
+  // One listener on the row, not the name button alone: a click anywhere in
+  // the row selects it (a table row is a natural click target), and a
+  // keyboard activation of the name button still reaches it too, since a
+  // button's click event bubbles the same way a mouse click does. The cancel
+  // button stops its own click from bubbling here, so a cancel never also
+  // selects the row it sits in.
+  row.addEventListener("click", () => selectOrReopen(entry));
   cancel.addEventListener("click", (event) => {
     event.stopPropagation();
     cancelRun(entry.id);
@@ -236,6 +348,7 @@ function ensureRun(id) {
 function resetRunContent(entry) {
   entry.filesEl.replaceChildren();
   entry.fileEntries.clear();
+  entry.autoExpanded = false;
   entry.torrentSummary.hidden = true;
   entry.torrentSummary.textContent = "";
   entry.error = "";
@@ -245,9 +358,16 @@ function syncEntry(entry) {
   entry.rowEl.dataset.state = entry.disk ? "disk" : entry.state;
   entry.rowBadge.textContent = badgeLabel(entry);
   entry.rowBadge.dataset.state = entry.disk ? "disk" : entry.state;
+  // The cell truncates, so the whole name has to be reachable some other way
+  // than by widening the panel - a tooltip costs nothing and answers "which
+  // Sintel is this" without moving the divider.
   entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
+  entry.rowName.title = entry.rowName.textContent;
   entry.rowMeta.textContent = metaLabel(entry);
+  entry.rowWhen.textContent = whenLabel(entry.when);
+  entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
   entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
+  reorderRuns();
 
   entry.detailBadge.textContent = badgeLabel(entry);
   entry.detailBadge.dataset.state = entry.disk ? "disk" : entry.state;
@@ -406,6 +526,22 @@ function trackGroup(label, tracks, formatter) {
 // its own frame grid, since a multi-file torrent should not mix their frames
 // or their tracks in one place - and one torrent's files must never mix with
 // another's now that the page can hold several at once.
+//
+// Everything below the title - specs, tracks, links, progress, the frame
+// grid - is built and filled in exactly as before, whether or not the file
+// is expanded; only file-body's `hidden` attribute decides what is on
+// screen. A frame_ready for a collapsed file still appends its figure to
+// .grid (addFrame never checks expanded state), so expanding it later shows
+// everything that arrived while it was closed - nothing is built lazily,
+// there is nothing to replay.
+//
+// Only the first file built for a run is auto-expanded (entry.autoExpanded
+// latches on the first call and never resets except on a full
+// resetRunContent). Every file after that starts collapsed, and a file's
+// expanded state changes from then on only in response to its own toggle
+// button - never from a later file_started/frame_ready/progress event - so
+// a person's click can neither be collapsed out from under them nor have
+// the expansion stolen back to file zero.
 function fileBlock(entry, index) {
   let fentry = entry.fileEntries.get(index);
   if (fentry) return fentry;
@@ -413,34 +549,79 @@ function fileBlock(entry, index) {
   const article = document.createElement("article");
   article.className = "file";
   article.innerHTML =
-    '<header class="file-header">' +
-      '<h2 class="file-title"></h2>' +
+    '<h2 class="file-title">' +
+      '<button type="button" class="file-toggle" aria-expanded="false">' +
+        '<span class="file-toggle-icon" aria-hidden="true"></span>' +
+        '<span class="file-name"></span>' +
+        '<span class="file-summary"></span>' +
+      "</button>" +
+    "</h2>" +
+    '<div class="file-body">' +
       '<dl class="specs"></dl>' +
       '<div class="tracks"></div>' +
       '<p class="file-links" hidden></p>' +
-    "</header>" +
-    '<p class="file-progress" hidden></p>' +
-    '<div class="grid"></div>';
+      '<p class="file-progress" hidden></p>' +
+      '<div class="grid"></div>' +
+    "</div>";
   entry.filesEl.append(article);
 
   fentry = {
     article,
-    title: article.querySelector(".file-title"),
+    toggle: article.querySelector(".file-toggle"),
+    name: article.querySelector(".file-name"),
+    summary: article.querySelector(".file-summary"),
+    body: article.querySelector(".file-body"),
     specs: article.querySelector(".specs"),
     tracks: article.querySelector(".tracks"),
     links: article.querySelector(".file-links"),
     progress: article.querySelector(".file-progress"),
     grid: article.querySelector(".grid"),
+    expanded: false,
+    frameCount: 0,
+    width: 0,
+    height: 0,
   };
   entry.fileEntries.set(index, fentry);
+
+  fentry.toggle.addEventListener("click", () => setFileExpanded(fentry, !fentry.expanded));
+  setFileExpanded(fentry, !entry.autoExpanded);
+  entry.autoExpanded = true;
+  updateFileSummary(fentry);
+
   return fentry;
+}
+
+function setFileExpanded(fentry, expanded) {
+  fentry.expanded = expanded;
+  fentry.article.dataset.expanded = String(expanded);
+  fentry.toggle.setAttribute("aria-expanded", String(expanded));
+  fentry.body.hidden = !expanded;
+  // The collapsed-only summary line and the specs panel say the same thing
+  // two different ways; showing both at once would just repeat resolution.
+  fentry.summary.hidden = expanded;
+}
+
+// updateFileSummary keeps a collapsed row worth choosing by without opening
+// it: the file name is always visible on the toggle itself, and this adds
+// whatever of resolution and frame count are already known - both update
+// live (resolution the moment file_started arrives, the frame count on
+// every frame_ready) whether or not the file happens to be expanded right
+// now.
+function updateFileSummary(fentry) {
+  const parts = [];
+  if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
+  parts.push(fentry.frameCount === 1 ? "1 frame" : fentry.frameCount + " frames");
+  fentry.summary.textContent = parts.join(" · ");
 }
 
 // The summary panel: audio tracks, subtitles, bitrate, resolution, filled the
 // moment the file's media is known - before a single frame exists.
 function onFileStarted(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
-  fentry.title.textContent = ev.path;
+  fentry.name.textContent = ev.path;
+  fentry.width = ev.width;
+  fentry.height = ev.height;
+  updateFileSummary(fentry);
 
   fentry.specs.replaceChildren();
   addSpec(fentry.specs, "Resolution", ev.width && ev.height ? ev.width + "×" + ev.height : "");
@@ -461,6 +642,8 @@ function onFileStarted(entry, ev) {
 
 function addFrame(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
+  fentry.frameCount++;
+  updateFileSummary(fentry);
 
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
@@ -684,6 +867,14 @@ async function loadRuns() {
     entry.complete = row.complete || 0;
     if (!disk) entry.state = row.state || entry.state;
     entry.error = row.error || entry.error;
+    // row.when is GET /runs's own answer for this row - the newest lifecycle
+    // timestamp for a live entry, run.json's created_at for a disk one - and
+    // it is the one moment this page overwrites entry.when after creation:
+    // this is the initial listing, not a live status update, so setting it
+    // here does not conflict with the rule that a status change must never
+    // move a row under the default sort.
+    const when = row.when ? Date.parse(row.when) : NaN;
+    if (!Number.isNaN(when)) entry.when = when;
     syncEntry(entry);
   }
 }
@@ -778,5 +969,105 @@ document.addEventListener("drop", async (event) => {
   if (file) await uploadTorrent(file);
 });
 
+// ---------------------------------------------------------------------------
+// The panel divider: dragging it resizes the left panel, and the width it is
+// left at survives a reload - a long torrent name that got cut off is what
+// the drag is for, so losing the width on every visit would defeat it.
+// localStorage is read through a try/catch on purpose: it throws in a
+// private window or with site data blocked, and a page that cannot remember
+// the width must still render at the default from app.css rather than break.
+const PANEL_WIDTH_KEY = "torpeek.panelWidth";
+const PANEL_MIN_WIDTH = 160;
+const PANEL_MAX_WIDTH = 640;
+const PANEL_RIGHT_MARGIN = 240; // the right column keeps at least this much room
+
+function clampPanelWidth(px) {
+  const roomMax = Math.max(PANEL_MIN_WIDTH, window.innerWidth - PANEL_RIGHT_MARGIN);
+  const max = Math.min(PANEL_MAX_WIDTH, roomMax);
+  return Math.min(max, Math.max(PANEL_MIN_WIDTH, px));
+}
+
+function loadPanelWidth() {
+  try {
+    const raw = localStorage.getItem(PANEL_WIDTH_KEY);
+    const width = raw ? parseFloat(raw) : NaN;
+    return Number.isFinite(width) ? width : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function savePanelWidth(px) {
+  try {
+    localStorage.setItem(PANEL_WIDTH_KEY, String(px));
+  } catch (err) {
+    // Best-effort only - the default width still works.
+  }
+}
+
+function applyPanelWidth(px) {
+  document.documentElement.style.setProperty("--panel-width", px + "px");
+}
+
+// panelWidth stays null until either a stored width was found or the divider
+// has been dragged once - only then is there anything to reclamp on resize
+// or to persist.
+let panelWidth = loadPanelWidth();
+if (panelWidth != null) {
+  panelWidth = clampPanelWidth(panelWidth);
+  applyPanelWidth(panelWidth);
+}
+
+let dragStartX = 0;
+let dragStartWidth = 0;
+
+el.resizer.addEventListener("pointerdown", (event) => {
+  if (event.button !== undefined && event.button !== 0) return;
+  dragStartX = event.clientX;
+  dragStartWidth = el.runsPanel.getBoundingClientRect().width;
+  el.resizer.classList.add("dragging");
+  el.resizer.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+el.resizer.addEventListener("pointermove", (event) => {
+  if (!el.resizer.classList.contains("dragging")) return;
+  panelWidth = clampPanelWidth(dragStartWidth + (event.clientX - dragStartX));
+  applyPanelWidth(panelWidth);
+});
+
+function endPanelDrag(event) {
+  if (!el.resizer.classList.contains("dragging")) return;
+  el.resizer.classList.remove("dragging");
+  try {
+    el.resizer.releasePointerCapture(event.pointerId);
+  } catch (err) {
+    // Already released (e.g. on pointercancel) - nothing more to do.
+  }
+  savePanelWidth(panelWidth);
+}
+
+el.resizer.addEventListener("pointerup", endPanelDrag);
+el.resizer.addEventListener("pointercancel", endPanelDrag);
+
+// Arrow keys on the focused divider give keyboard users the same control.
+el.resizer.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+  event.preventDefault();
+  const current = el.runsPanel.getBoundingClientRect().width;
+  panelWidth = clampPanelWidth(current + (event.key === "ArrowLeft" ? -16 : 16));
+  applyPanelWidth(panelWidth);
+  savePanelWidth(panelWidth);
+});
+
+// A width chosen at one viewport size can stop fitting after the window is
+// resized; only reclamp a width that was actually set, never impose one on
+// a page that is still using the CSS default.
+window.addEventListener("resize", () => {
+  if (panelWidth == null) return;
+  applyPanelWidth(clampPanelWidth(panelWidth));
+});
+
+updateSortIndicators();
 loadRuns();
 connect();
