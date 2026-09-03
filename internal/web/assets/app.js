@@ -744,8 +744,12 @@ function apply(ev) {
     case "metadata_ready":
       entry.name = ev.name;
       entry.torrentSummary.hidden = false;
+      // videos is the list itself, not a count: TOR-66 replaced the bare
+      // number with {index, path, length} per file so a picker has something
+      // to pick from. Only the count is wanted here - what a file is called
+      // and how big it is belongs to the picker (TOR-67), not this line.
       entry.torrentSummary.textContent =
-        ev.name + " — " + ev.selected.length + " of " + ev.videos + " video file(s) selected";
+        ev.name + " — " + ev.selected.length + " of " + ev.videos.length + " video file(s) selected";
       syncEntry(entry);
       logFor(entry, "metadata: " + ev.name + " (" + ev.infohash + ")");
       break;
