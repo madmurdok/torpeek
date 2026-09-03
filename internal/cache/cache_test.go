@@ -25,6 +25,7 @@ func populated() Run {
 		Videos: []File{
 			{Index: 0, Path: "Sintel/sintel.mp4", Bytes: 282738688, Offset: 0},
 		},
+		Selected: []int{0},
 		Complete: []int{0},
 	}
 }
@@ -80,6 +81,47 @@ func TestRunRecordsSourceAndPlanUnderTheirJSONNames(t *testing.T) {
 	}
 }
 
+// TestSaveRunRoundTripsSelected is the acceptance test for TOR-65's first
+// change: a record written now must say which files the run took on, not
+// only which torrent files exist (Videos) and which came out whole
+// (Complete).
+func TestSaveRunRoundTripsSelected(t *testing.T) {
+	dir := t.TempDir()
+	want := populated()
+
+	if err := SaveRun(dir, want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("a record just written was not a hit")
+	}
+	if len(got.Selected) != len(want.Selected) || got.Selected[0] != want.Selected[0] {
+		t.Errorf("selected = %v, want %v", got.Selected, want.Selected)
+	}
+}
+
+// TestRunRecordsSelectedUnderItsJSONName pins the on-disk field name the same
+// way TestRunRecordsSourceAndPlanUnderTheirJSONNames pins source and plan - a
+// rename here would silently stop a rerun from telling "never selected" apart
+// from "selected and failed".
+func TestRunRecordsSelectedUnderItsJSONName(t *testing.T) {
+	raw, err := json.Marshal(populated())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if _, ok := doc["selected"]; !ok {
+		t.Error("record has no \"selected\" - a rerun cannot tell never-selected from selected-and-failed without it")
+	}
+}
+
 // run04Shape is what saveRunRecord wrote before this task: no source, no
 // plan. It is typed by hand rather than built from Run{} with fields zeroed
 // out, so a future field added to Run cannot silently widen what this test
@@ -125,6 +167,63 @@ func TestLoadRunAcceptsA04ShapedRecord(t *testing.T) {
 		t.Errorf("videos lost: %+v", got.Videos)
 	}
 	if len(got.Complete) != 1 || got.Complete[0] != 0 {
+		t.Errorf("complete lost: %+v", got.Complete)
+	}
+	if got.Selected != nil {
+		t.Errorf("selected = %v, want nil - a 0.4.0 record never wrote it", got.Selected)
+	}
+}
+
+// run06Shape is what saveRunRecord wrote before this task added Selected:
+// Source and Plan (TOR-52) are present, but no "selected" key. Modeled on a
+// real record this build's own predecessor wrote (see queue53/out in this
+// task's scratchpad) rather than invented, so it reflects an actual disk
+// shape rather than the test author's guess at one.
+const run06Shape = `{
+  "version": 1,
+  "tool": "0.5.0",
+  "created_at": "2026-09-02T19:17:59.577415Z",
+  "source": "magnet:?xt=urn:btih:e4d37e62d14ba96d29b9e760148803b458aee5b6&dn=Sintel",
+  "infohash": "e4d37e62d14ba96d29b9e760148803b458aee5b6",
+  "name": "Sintel",
+  "private": false,
+  "plan": {
+    "count": 1,
+    "start": 0.05,
+    "end": 0.95,
+    "profile": "min-traffic",
+    "format": "jpeg",
+    "sequential": false
+  },
+  "videos": [
+    {"index": 2, "path": "Sintel/Sintel_Documentary_by_Ali_Boubred.avi", "bytes": 961242162, "offset": 463671},
+    {"index": 6, "path": "Sintel/sintel-2048-stereo.mp4", "bytes": 282690045, "offset": 962032655}
+  ],
+  "complete": [6, 2]
+}`
+
+// TestLoadRunAcceptsA06ShapedRecord is the acceptance criterion for TOR-65's
+// trap: adding Selected without bumping Version, so a record written before
+// Selected existed is still a cache hit rather than a miss that sends
+// everything back to the swarm. A field absent from the older JSON must read
+// back as its zero value (nil), not turn the whole record into a miss.
+func TestLoadRunAcceptsA06ShapedRecord(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, Name), []byte(run06Shape), 0o600); err != nil {
+		t.Fatalf("write pre-Selected record: %v", err)
+	}
+
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("a pre-Selected run.json was a miss; it must still be a hit")
+	}
+	if got.Selected != nil {
+		t.Errorf("selected = %v, want nil - it was never on disk", got.Selected)
+	}
+	if got.Source == "" || got.Plan == (Plan{}) {
+		t.Errorf("fields this record did carry were lost: source=%q plan=%+v", got.Source, got.Plan)
+	}
+	if len(got.Complete) != 2 {
 		t.Errorf("complete lost: %+v", got.Complete)
 	}
 }

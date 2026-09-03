@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -274,7 +275,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// Written even for a stopped run: what it did finish is still worth
 	// serving from disk next time, and a partial record is what resume will
 	// read to know where to pick up.
-	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, finished); err != nil {
+	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, selected, finished); err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	}
 
@@ -570,7 +571,21 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 // trackers, infohash) and holds no exported form of the original string, so
 // cfg.Source is the one place that string still is - and it is exactly what
 // was typed, unlike a parsed representation.
-func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, finished []int) error {
+//
+// Selected and Complete are merged with whatever record already sits in
+// layout.RunDir(), never replaced outright. ParamsKey deliberately excludes
+// the file selection (see its own doc comment), so a run over three files and
+// an earlier run over six share the very same directory. Rebuilding either
+// list from only this run's own files would make the narrower run erase the
+// wider one's results - the six files' frames would stay on disk while the
+// record forgot them, and a later request for one would needlessly go back
+// to the swarm. Merging means every file any run here has ever asked for, or
+// completed, stays recorded regardless of what any other run touched. A
+// missing or unreadable prior record (LoadRun reports ok=false) merges as
+// empty, so the first run into a directory behaves exactly as before.
+func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, selected []swarm.FileInfo, finished []int) error {
+	prior, _ := cache.LoadRun(layout.RunDir())
+
 	record := cache.Run{
 		Version:   cache.Version,
 		Tool:      version.Version,
@@ -588,17 +603,35 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 			Sequential: cfg.Sequential,
 		},
 		Videos:   make([]cache.File, 0, len(videos)),
-		Complete: finished,
+		Selected: mergeIndices(prior.Selected, indicesOf(selected)),
+		Complete: mergeIndices(prior.Complete, finished),
 	}
 	for _, v := range videos {
 		record.Videos = append(record.Videos, cache.File{
 			Index: v.Index, Path: v.Path, Bytes: v.Length, Offset: v.Offset,
 		})
 	}
-	if record.Complete == nil {
-		record.Complete = []int{}
-	}
 	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// mergeIndices unions two file-index lists into one, deduplicated and sorted
+// so the result is stable regardless of which run contributed which index.
+// It always returns a non-nil slice, even from two nil inputs, so a fresh
+// record's Selected and Complete serialize as "[]" rather than "null".
+func mergeIndices(existing, next []int) []int {
+	set := make(map[int]bool, len(existing)+len(next))
+	for _, i := range existing {
+		set[i] = true
+	}
+	for _, i := range next {
+		set[i] = true
+	}
+	out := make([]int, 0, len(set))
+	for i := range set {
+		out = append(out, i)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // reusableFrames picks out the capture points an earlier run already took,
