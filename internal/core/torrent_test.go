@@ -184,3 +184,90 @@ func TestEveryRunLeavesALoadableTorrentBehind(t *testing.T) {
 // isMagnet is only the test's own way of telling which of the two shapes
 // run.json holds; swarm.ParseSource is the real judge and is used above.
 func isMagnet(source string) bool { return len(source) > 7 && source[:7] == "magnet:" }
+
+// TestATorrentThatCannotBeWrittenDoesNotFailTheRun is TOR-79: the .torrent a
+// run keeps beside its frames is a convenience, and a convenience that fails
+// must not be reported the way an unopenable source is.
+//
+// The write is made to fail on its own by putting a non-empty DIRECTORY where
+// <infohash>.torrent belongs - the atomic rename cannot replace it - while
+// every other path under the run directory stays writable, so the frames,
+// the manifest and run.json all land exactly as they would have. Denying the
+// run directory's permissions would have failed all of those too, and then
+// there would be no healthy run left to make the point.
+func TestATorrentThatCannotBeWrittenDoesNotFailTheRun(t *testing.T) {
+	tools := locateTools(t)
+	fixture := oneClipTorrent(t, tools, 12)
+	seeder := fixture.StartSeeder(t)
+
+	root := t.TempDir()
+	cfg := DefaultConfig(fixture.TorrentPath, root, t.TempDir())
+	cfg.Swarm.DHT = false
+	cfg.Swarm.MetadataTimeout = 30 * time.Second
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Profile = swarm.MinTraffic
+	cfg.Plan = frames.Plan{Count: 2, Start: 0.1, End: 0.9}
+	cfg.Budget = Budget{MaxBytes: 64 << 20, MaxTime: 3 * time.Minute, WarnAt: 0.8}
+	cfg.Parallelism = 1
+	cfg.Bridge = bridge.DefaultConfig()
+
+	// The run's own directory, derived the way the engine derives it - the
+	// infohash read from the fixture itself rather than guessed.
+	mi, err := metainfo.LoadFromFile(fixture.TorrentPath)
+	if err != nil {
+		t.Fatalf("read the fixture's infohash: %v", err)
+	}
+	layout := output.Layout{
+		Root:     root,
+		InfoHash: mi.HashInfoBytes().HexString(),
+		Params:   ParamsKey(cfg),
+	}
+	occupied := filepath.Join(layout.TorrentPath(), "occupied")
+	if err := os.MkdirAll(occupied, 0o755); err != nil {
+		t.Fatalf("occupy the .torrent's place: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, runErr := NewEngine(tools).Run(ctx, cfg)
+	if runErr != nil {
+		t.Fatalf("run: %v", runErr)
+	}
+
+	var (
+		done   *Done
+		failed []Failed
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case Done:
+			done = &e
+		case Failed:
+			failed = append(failed, e)
+		}
+	}
+
+	if done == nil {
+		t.Fatal("the run published no Done; a .torrent it could not write must not end it")
+	}
+	for _, f := range failed {
+		t.Errorf("the run reported a failure (%s: %v); its frames were never in question", f.Code, f.Err)
+	}
+	if done.Frames != 2 {
+		t.Errorf("Done.Frames = %d, want 2 - the frames are what the run was asked for", done.Frames)
+	}
+	if done.TorrentPath != "" {
+		t.Errorf("Done.TorrentPath = %q, want empty - there is no file to offer", done.TorrentPath)
+	}
+	if len(done.Warnings) == 0 {
+		t.Error("Done carries no warning; a run that quietly loses its .torrent is the other half of this defect")
+	}
+
+	// The run is a cache hit afterwards, which is the point of not failing it.
+	if record, ok := cache.LoadRun(layout.RunDir()); !ok {
+		t.Error("no run record on disk")
+	} else if len(record.Complete) != 1 {
+		t.Errorf("record.Complete = %v, want the one file this run finished", record.Complete)
+	}
+}

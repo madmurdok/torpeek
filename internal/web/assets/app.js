@@ -1364,6 +1364,13 @@ function apply(ev) {
       syncEntry(entry);
       logFor(entry, "done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
           " file(s), " + ev.downloaded + " bytes in " + seconds(ev.elapsed_ms));
+      // A run that finished and still left something out says so here rather
+      // than by reading as failed, which is what it used to do when its
+      // .torrent could not be written (TOR-79). The badge stays "done"
+      // because the run is: the warning is about an artefact, not the frames.
+      for (const warning of ev.warnings || []) {
+        logFor(entry, "warning: " + warning);
+      }
       break;
 
     case "failed":

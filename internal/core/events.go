@@ -119,11 +119,28 @@ type Done struct {
 	// not one per file, and Done is the only run-scoped event a finished run
 	// is guaranteed to end on.
 	//
-	// Empty means this run has none to offer: a run whose write failed (the
-	// failure is reported on its own stream, it does not end the run), or a
-	// cached run recorded before torpeek kept one at all. A client must treat
-	// the empty case as "no link", never as "the file is at the usual place".
+	// Empty means this run has none to offer: a run whose write failed (see
+	// Warnings), or a cached run recorded before torpeek kept one at all. A
+	// client must treat the empty case as "no link", never as "the file is
+	// at the usual place".
 	TorrentPath string
+
+	// Warnings names what this run could not produce while still producing
+	// what it was asked for - a .torrent it failed to write, today.
+	//
+	// It exists because the alternative was worse and shipped once: a
+	// run-scoped Failed. That is the same event a source that cannot be
+	// opened produces, so a run whose twenty frames all landed read as
+	// "failed" in the panel because a 37 KB side artefact did not (TOR-79).
+	// A warning on the event a finished run is guaranteed to end on says
+	// both true things at once - it finished, and this is missing - where
+	// Failed said one false one.
+	//
+	// Frames, manifests and run.json are not candidates for this: a run that
+	// cannot write those has not produced what it was asked for, and
+	// reporting that as a warning would be the same lie in the other
+	// direction.
+	Warnings []string
 }
 
 // Failed is the last event of a run that could not continue. Per-file

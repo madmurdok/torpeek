@@ -210,9 +210,14 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// reason: it is a storage problem worth a person seeing, but it is not a
 	// reason to abandon frames that are otherwise fetchable, so the run
 	// carries on and simply has no .torrent to announce.
+	var warnings []string
 	torrentPath, err := saveTorrentFile(writer, torrent)
 	if err != nil {
-		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
+		// Not a Failed: this run's frames are unaffected, and a run-scoped
+		// Failed is how an unopenable source is reported, so borrowing it
+		// here made a healthy run read as a broken one. It travels on Done
+		// instead, which is where the path itself travels (TOR-79).
+		warnings = append(warnings, err.Error())
 	}
 
 	srv, err := bridge.Start(cfg.Bridge)
@@ -310,6 +315,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		DownloadedByte: spent,
 		Elapsed:        time.Since(started),
 		TorrentPath:    torrentPath,
+		Warnings:       warnings,
 	})
 }
 
