@@ -99,6 +99,12 @@ type RunRequest struct {
 	Source string `json:"source"`
 	// Mode is the capture profile by name, empty meaning the server's default.
 	Mode string `json:"mode,omitempty"`
+	// Files narrows the run to some of the torrent's video files - the same
+	// specs cfg.Files and swarm.Select already understand, so a tick-box UI
+	// need only send the indices metadata_ready just told it about. Empty
+	// means every video file, the same as leaving -file off on the command
+	// line.
+	Files []string `json:"files,omitempty"`
 	// Label overrides what run_state reports as the source, for a request
 	// whose Source is a server-side temp path nobody typed (an uploaded
 	// .torrent). Never set from JSON: it only exists on requests the server

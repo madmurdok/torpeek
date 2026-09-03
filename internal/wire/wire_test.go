@@ -7,6 +7,7 @@ import (
 
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/probe"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // TestFileStartedCarriesTrackDetail guards the summary panel's data: the
@@ -82,6 +83,49 @@ func TestFileStartedWithNoTracksIsEmptyNotNil(t *testing.T) {
 	subs, ok := m["subtitles"].([]map[string]any)
 	if !ok || subs == nil || len(subs) != 0 {
 		t.Errorf("subtitles = %#v, want an empty, non-nil slice", m["subtitles"])
+	}
+}
+
+// TestMetadataReadyCarriesFileList guards the file picker's only data
+// source (TOR-66): a frontend cannot offer indices, paths or sizes to pick
+// from if the wire boundary still collapses the file list to a count.
+func TestMetadataReadyCarriesFileList(t *testing.T) {
+	ev := core.MetadataReady{
+		Name:     "Release",
+		InfoHash: "abc",
+		Videos: []swarm.FileInfo{
+			{Index: 0, Path: "movie/episode-1.mkv", Length: 1_000_000, Offset: 0},
+			{Index: 1, Path: "movie/episode-2.mkv", Length: 2_000_000, Offset: 1_000_000},
+		},
+		Selected: []int{0, 1},
+	}
+
+	m := Event("", ev)
+
+	videos, ok := m["videos"].([]map[string]any)
+	if !ok || len(videos) != 2 {
+		t.Fatalf("videos = %#v, want 2 file entries", m["videos"])
+	}
+	if videos[0]["index"] != 0 || videos[0]["path"] != "movie/episode-1.mkv" || videos[0]["length"] != int64(1_000_000) {
+		t.Errorf("videos[0] = %v", videos[0])
+	}
+	if videos[1]["index"] != 1 || videos[1]["path"] != "movie/episode-2.mkv" || videos[1]["length"] != int64(2_000_000) {
+		t.Errorf("videos[1] = %v", videos[1])
+	}
+	if _, has := videos[0]["offset"]; has {
+		t.Errorf("videos[0] carries offset, which no picker needs: %v", videos[0])
+	}
+}
+
+// TestMetadataReadyWithNoVideosIsEmptyNotNil keeps the JSON shape stable
+// the same way file_started's audio/subtitles arrays do: an empty array, not
+// a null field a client would have to special-case.
+func TestMetadataReadyWithNoVideosIsEmptyNotNil(t *testing.T) {
+	m := Event("", core.MetadataReady{Name: "Release", InfoHash: "abc"})
+
+	videos, ok := m["videos"].([]map[string]any)
+	if !ok || videos == nil || len(videos) != 0 {
+		t.Errorf("videos = %#v, want an empty, non-nil slice", m["videos"])
 	}
 }
 
