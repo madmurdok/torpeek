@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -810,13 +809,10 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 		})
 	}
 
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode manifest: %w", err)
-	}
-	data = append(data, '\n')
-
-	return deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
+	// The records carry the absolute paths WriteFrame returned; WriteManifest
+	// is what turns them into the relative form that goes on disk, so this
+	// func never has to know that the two shapes differ (manifest.Frame.Path).
+	return deps.writer.WriteManifest(file.Index, file.Path, m)
 }
 
 // writeSheet composes the contact sheet from whatever frames this file's

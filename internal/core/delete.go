@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -124,14 +123,12 @@ func DeleteFrame(root, infoHash, params string, fileIndex, frameIndex int) error
 	}
 
 	m.Frames = kept
-	// Byte for byte what writeManifest produces, so a manifest that has been
-	// edited here is indistinguishable from one a run wrote.
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode manifest: %w", err)
-	}
-	data = append(data, '\n')
-	if _, err := writer.WriteFile(fileIndex, path, manifest.Name, data); err != nil {
+	// Through the same writer a run's own manifest goes through, so an edited
+	// manifest is byte for byte what a run would have written - the relative
+	// frame paths included, which is also how a manifest still holding the
+	// absolute paths of an older release quietly becomes portable the first
+	// time somebody deletes a frame from it.
+	if _, err := writer.WriteManifest(fileIndex, path, m); err != nil {
 		return err
 	}
 
@@ -236,6 +233,21 @@ func withoutIndex(indices []int, drop int) []int {
 
 // within reports whether path sits inside dir, which is how a manifest record
 // is checked to be describing a frame of its own run before it is unlinked.
+//
+// What reaches it changed with TOR-60, and the contract is worth stating
+// exactly. A frame path now arrives from cache.LoadManifest already resolved
+// against the file directory this very call derived from root/infoHash/params
+// (manifest.Resolved), so for anything a 0.8.0 run wrote the two arguments
+// are built by joining onto one and the same root string and this can no
+// longer answer no: it is comparing a prefix against itself, whatever
+// spelling of the root the caller was started with.
+//
+// It still earns its place for the one shape that does not: a manifest from
+// an earlier release whose absolute path could not be re-anchored inside the
+// run, which is a record naming a file somewhere else entirely and exactly
+// what must not be unlinked. That is the only case left where this compares
+// two independently-spelled paths - and the case TOR-77 is about, since
+// /tmp and /private/tmp are one directory that Clean cannot make one string.
 func within(dir, path string) bool {
 	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
 	if err != nil {

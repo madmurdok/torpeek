@@ -1,7 +1,6 @@
 package web
 
 import (
-	"encoding/json"
 	"net/http"
 	"os"
 	"testing"
@@ -34,11 +33,10 @@ func buildCachedRun(t *testing.T, root, infoHash, params string, run cache.Run, 
 		m.Frames[i].Path = path
 	}
 
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal manifest: %v", err)
-	}
-	if _, err := writer.WriteFile(m.File.Index, m.File.Path, manifest.Name, data); err != nil {
+	// Through the writer a live run uses, so the manifest on disk carries the
+	// recorded shape (frame paths relative to it) rather than the absolute
+	// ones this helper is holding.
+	if _, err := writer.WriteManifest(m.File.Index, m.File.Path, m); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 	if err := cache.SaveRun(layout.RunDir(), run); err != nil {

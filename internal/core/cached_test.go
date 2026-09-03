@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/json"
 	"os"
 	"testing"
 
@@ -41,11 +40,10 @@ func buildCachedRun(t *testing.T, root, infoHash, params string, run cache.Run, 
 			m.Frames[i].Path = path
 		}
 
-		data, err := json.MarshalIndent(m, "", "  ")
-		if err != nil {
-			t.Fatalf("marshal manifest for file %d: %v", idx, err)
-		}
-		if _, err := writer.WriteFile(idx, m.File.Path, manifest.Name, data); err != nil {
+		// Through the writer a live run uses, so what lands on disk is the
+		// real recorded shape - frame paths relative to their manifest -
+		// rather than whatever this test happens to hold in memory.
+		if _, err := writer.WriteManifest(idx, m.File.Path, m); err != nil {
 			t.Fatalf("write manifest for file %d: %v", idx, err)
 		}
 	}
