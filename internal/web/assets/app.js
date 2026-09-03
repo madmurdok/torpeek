@@ -1529,9 +1529,24 @@ async function uploadTorrent(file) {
 // the one shown on the right - "Take frames" should show something happening
 // immediately, not leave a person staring at whatever was on screen before.
 function began(info) {
+  // The answer to the POST is this run's FIRST state, never an update to one.
+  //
+  // The response and the socket race, and the socket can win: a multi-file
+  // torrent takes the slot for a metadata pass and can be listed and parked
+  // before the fetch settles (TOR-67), so run_state:needs-action may already
+  // have arrived. Writing the response's "running" over that showed a
+  // torrent as running, with a Cancel button and no picker, for a run that
+  // was in fact waiting for a person - until a reload read GET /runs and
+  // corrected it.
+  //
+  // An entry the socket has already created has already applied a state and
+  // knows better, and its existence is the whole test. A run whose socket
+  // delivered nothing yet - a page reconnecting - still gets its row from
+  // here, which is why the response is used at all.
+  const known = state.runs.has(info.id);
   const entry = ensureRun(info.id);
   entry.disk = false;
-  entry.state = info.state;
+  if (!known) entry.state = info.state;
   syncEntry(entry);
   selectRun(info.id);
 }
