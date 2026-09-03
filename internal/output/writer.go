@@ -7,12 +7,15 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	gopath "path"
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/madmurdok/torpeek/internal/manifest"
 )
 
 // SheetName is what the contact sheet is called on disk, next to a file's
@@ -150,6 +153,29 @@ func (w *Writer) WriteFile(fileIndex int, filePath, name string, data []byte) (s
 		return "", fmt.Errorf("create file directory: %w", err)
 	}
 	return writeAtomic(dir, name, data)
+}
+
+// WriteManifest encodes one file's manifest and writes it beside that file's
+// frames, recording every frame path relative to the directory it lands in.
+//
+// Relativizing here rather than at each caller is what makes a manifest with
+// an absolute path in it impossible to write by accident: this package is the
+// one that decides where a manifest goes (Layout.FileDir), so it is the only
+// one that can say what the paths inside it are relative to, and going
+// through it is the only way anything in this project puts a manifest on
+// disk. A run writes one at the end of each file and core.DeleteFrame writes
+// one back after removing a record; both are the same bytes for the same
+// manifest, which is what lets an edited manifest be indistinguishable from a
+// captured one.
+//
+// The encoding is indented and newline-terminated because a manifest is meant
+// to be read by a person as readily as by a program (REQUIREMENTS.md 2.8).
+func (w *Writer) WriteManifest(fileIndex int, filePath string, m manifest.Manifest) (string, error) {
+	data, err := json.MarshalIndent(m.Relative(w.layout.FileDir(fileIndex, filePath)), "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode manifest: %w", err)
+	}
+	return w.WriteFile(fileIndex, filePath, manifest.Name, append(data, '\n'))
 }
 
 // WriteTorrent stores the run's own .torrent in the run directory, next to
