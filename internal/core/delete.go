@@ -22,6 +22,18 @@ import (
 // for a person reading it.
 var ErrNoSuchFrame = errors.New("no such frame")
 
+// ErrSheetStale says the frame is gone and the contact sheet that depicted it
+// is not: the delete happened, the derived artefact did not follow.
+//
+// It is a separate sentinel because the two facts have different consequences
+// and reporting them as one made the page lie. A caller that treats every
+// error from DeleteFrame as a failed delete tells a person their frame is
+// still there while it is not, and only a reload corrects it - which is the
+// same class of untruth as a sheet that keeps depicting a frame nobody has
+// (TOR-78). Whoever handles this must report the delete as done and the
+// sheet as stale.
+var ErrSheetStale = errors.New("the contact sheet could not be rebuilt")
+
 // DeleteFrame removes one frame from a finished run: its record in the file's
 // manifest and its file on disk, leaving the rest of the run servable.
 //
@@ -138,7 +150,13 @@ func DeleteFrame(root, infoHash, params string, fileIndex, frameIndex int) error
 		}
 	}
 
-	return rebuildSheet(writer, fileDir, fileIndex, path, m)
+	// Wrapped, not returned as it comes: everything above this line has
+	// already happened, and a caller has to be able to tell "nothing was
+	// deleted" from "the frame went and its sheet did not".
+	if err := rebuildSheet(writer, fileDir, fileIndex, path, m); err != nil {
+		return fmt.Errorf("%w: %w", ErrSheetStale, err)
+	}
+	return nil
 }
 
 // rebuildSheet composes the contact sheet again from what the file has left.

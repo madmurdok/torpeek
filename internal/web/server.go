@@ -876,8 +876,16 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 		return FileDetail{}, fmt.Errorf("%w: %q is not a result set", errBadRequest, params)
 	}
 
-	if err := s.deleter(infoHash, params, fileIndex, frameIndex); err != nil {
-		return FileDetail{}, err
+	// A stale contact sheet is not a failed delete. The frame and its record
+	// are already gone by the time rebuilding the sheet is even attempted
+	// (core.DeleteFrame explains why in that order), so the error is carried
+	// back alongside the truth about the file rather than instead of it - the
+	// handler answers with both, and a person is told what happened rather
+	// than being told the delete failed and left to discover otherwise on a
+	// reload (TOR-78).
+	deleteErr := s.deleter(infoHash, params, fileIndex, frameIndex)
+	if deleteErr != nil && !errors.Is(deleteErr, core.ErrSheetStale) {
+		return FileDetail{}, deleteErr
 	}
 
 	detail, ok := s.fileDetail(infoHash, fileIndex)
@@ -885,9 +893,9 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 		// Explicitly empty rather than left nil: the page replaces its grid
 		// with this list, and a JSON null would read as "no answer" where
 		// what is meant is "no frames".
-		return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}, nil
+		return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}, deleteErr
 	}
-	return detail, nil
+	return detail, deleteErr
 }
 
 // SendToWatchDir copies one run's saved .torrent into the watch directory, so
