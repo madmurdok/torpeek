@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/core"
@@ -173,6 +175,46 @@ func humanBytes(n int64) string {
 	default:
 		return fmt.Sprintf("%d B", n)
 	}
+}
+
+// parseSize is humanBytes' inverse: it turns what a person types for
+// -cache-max-size, like "20G" or "512MB", into bytes. A bare number is
+// bytes; a trailing K/M/G/T (case-insensitive, a trailing "B" tolerated
+// either way) multiplies by the same power of 1024 humanBytes prints with -
+// so a ceiling typed as "20G" and a size this package later reports as
+// "20.0 GiB" name the same number of bytes. An empty string is 0, the "no
+// ceiling" default (REQUIREMENTS.md 2.9), so the flag's own default value
+// does not need a special case here.
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+
+	digits := s
+	mult := int64(1)
+	upper := strings.ToUpper(s)
+	suffixes := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"TB", 1 << 40}, {"GB", 1 << 30}, {"MB", 1 << 20}, {"KB", 1 << 10},
+		{"T", 1 << 40}, {"G", 1 << 30}, {"M", 1 << 20}, {"K", 1 << 10},
+		{"B", 1},
+	}
+	for _, sx := range suffixes {
+		if strings.HasSuffix(upper, sx.suffix) {
+			digits = strings.TrimSpace(s[:len(s)-len(sx.suffix)])
+			mult = sx.mult
+			break
+		}
+	}
+
+	n, err := strconv.ParseFloat(digits, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid size %q: want a number with an optional K/M/G/T suffix", s)
+	}
+	return int64(n * float64(mult)), nil
 }
 
 // listFiles prints what a torrent holds and returns without taking a frame.
