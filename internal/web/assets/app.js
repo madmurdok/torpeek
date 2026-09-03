@@ -157,16 +157,27 @@ function cancellable(state) {
   return state === "queued" || state === "running" || state === "needs-action";
 }
 
-// isPartial says whether some of what was asked for has frames and some does
-// not - Selected short of Complete, never Files short of Complete (TOR-72).
-// A torrent where three of six files were chosen and all three finished is
-// whole, not partial: Files counts files nobody asked for, which is not this
-// row's business. Zero Selected means nothing to compare (no disk record has
-// merged into this row yet) and reads as not partial, the same way it reads
-// as not done.
-function isPartial(entry) {
-  return !!entry.selected && entry.complete < entry.selected;
-}
+// entry.partial is GET /runs' own verdict on whether some of what was asked
+// for has frames and some does not (RunSummary.Partial in listing.go),
+// carried on the wire as row.partial and copied onto the entry by loadRuns -
+// never recomputed here. TOR-72 first wrote this comparison twice, once in
+// Go and once in a JS isPartial() that alone painted the badge; the two were
+// free to drift because nothing ever called the Go copy outside its own
+// tests. TOR-80 deleted the second copy: this page reads the answer, it does
+// not derive it, so a change to the one surviving rule (listing.go's
+// Partial()) changes what every badge shows, rather than leaving a Go test
+// green while the page keeps its own opinion.
+//
+// One thing this does NOT do: make a live run's badge able to turn partial
+// while the page is watching it happen. entry.partial is set once, by
+// loadRuns' initial GET /runs fetch, and every later update to this run
+// arrives over the WebSocket as a run_state record, which carries neither
+// Complete nor Selected (see listing.go's MarshalJSON doc). A run that goes
+// running -> done during this page's lifetime keeps whatever "partial"
+// GET /runs reported when the page loaded (false, since a run mid-flight has
+// nothing merged in yet) until the page is reloaded. That gap predates
+// TOR-80 and is unchanged by it - isPartial() before this change read the
+// same stale entry.complete/entry.selected pair for the same reason.
 
 // badgeState is what the badge is coloured by, which is not always the run's
 // own state: a finished run whose selected files did not all come out whole
@@ -176,12 +187,12 @@ function isPartial(entry) {
 // only ever a way of showing one.
 function badgeState(entry) {
   if (entry.disk) return "disk";
-  if (entry.state === "done" && isPartial(entry)) return "partial";
+  if (entry.state === "done" && entry.partial) return "partial";
   return entry.state;
 }
 
 function badgeLabel(entry) {
-  if (entry.disk) return isPartial(entry) ? "on disk (partial)" : "on disk";
+  if (entry.disk) return entry.partial ? "on disk (partial)" : "on disk";
   switch (entry.state) {
     case "queued": return "queued";
     case "running": return "running";
@@ -189,9 +200,10 @@ function badgeLabel(entry) {
     case "needs-action": return "choose files";
     // cache.Run does not record how a run ended, only what it covered - so
     // "done" from the registry says the run itself finished, not that every
-    // selected file came out whole. isPartial is what tells the two apart,
-    // exactly as it does for a disk row above (TOR-72).
-    case "done": return isPartial(entry) ? "partial" : "done";
+    // selected file came out whole. entry.partial is what tells the two
+    // apart, exactly as it does for a disk row above (TOR-72, wired to
+    // GET /runs' own "partial" field by TOR-80).
+    case "done": return entry.partial ? "partial" : "done";
     case "failed": return "failed";
     case "cancelled": return "cancelled";
     default: return entry.state || "…";
@@ -372,6 +384,11 @@ function newRunEntry(id) {
     id, disk: false, infohash: "", params: "",
     state: "", source: "", name: "", error: "", progress: "",
     files: 0, complete: 0, selected: 0,
+    // partial is GET /runs' own "partial" field (RunSummary.Partial in
+    // listing.go, TOR-80) - false here for the same reason files/complete/
+    // selected start at zero: nothing has merged a disk record into this
+    // entry yet, and loadRuns is the only place that changes.
+    partial: false,
     // when is this row's sort key for the default (date, newest-first) sort.
     // Set once, here, at creation - never touched again by a status update -
     // which is what keeps a live run from jumping position as events arrive.
@@ -1500,6 +1517,11 @@ async function loadRuns() {
     entry.files = row.files || 0;
     entry.complete = row.complete || 0;
     entry.selected = row.selected || 0;
+    // row.partial is the server's own verdict (listing.go's MarshalJSON,
+    // TOR-80), read as-is rather than recomputed from the counts above -
+    // see the comment above badgeState for why nothing here compares
+    // complete and selected itself.
+    entry.partial = !!row.partial;
     if (!disk) entry.state = row.state || entry.state;
     entry.error = row.error || entry.error;
     // row.when is GET /runs's own answer for this row - the newest lifecycle

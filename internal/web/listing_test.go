@@ -407,6 +407,74 @@ func TestDiskRowIsPartialWhenASelectedFileHasNoFrames(t *testing.T) {
 	}
 }
 
+// TestListRunsWirePartialField is TOR-80's guarantee that the verdict is on
+// the wire itself, not only reachable by calling RunSummary.Partial() on a
+// struct a Go test happens to hold. Every earlier test in this file decodes
+// GET /runs back into a []RunSummary and calls Partial() on the result,
+// which would keep passing even if MarshalJSON's "partial" key were deleted
+// entirely - json.Unmarshal silently ignores a field with no matching
+// destination, and Partial() would still recompute the same answer from the
+// decoded Selected/Complete. That is exactly the gap TOR-80 closes: app.js
+// does not decode into a Go struct and call a method, it reads whatever key
+// the response body actually has. So this test reads the raw body as a
+// generic map, the same shape app.js's fetch().then(r => r.json()) sees, and
+// asserts the "partial" key is present with the right boolean - byte-level,
+// not struct-level.
+func TestListRunsWirePartialField(t *testing.T) {
+	root := t.TempDir()
+	const (
+		doneHash    = "5555000000000000000000000000000000000f"
+		partialHash = "6666000000000000000000000000000000000f"
+	)
+
+	writeRun(t, root, doneHash, "deadbeef", cache.Run{
+		Version: cache.Version, InfoHash: doneHash, Name: "Wire Done",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}},
+		Selected: []int{0}, Complete: []int{0},
+	})
+	writeRun(t, root, partialHash, "deadbeef", cache.Run{
+		Version: cache.Version, InfoHash: partialHash, Name: "Wire Partial",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}},
+		Selected: []int{0, 1}, Complete: []int{0},
+	})
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, (&fakeRun{}).runner)
+
+	resp := get(t, ts.URL, "/runs")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs: status %d, want 200", resp.StatusCode)
+	}
+
+	var body struct {
+		Runs []map[string]any `json:"runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode GET /runs as raw maps: %v", err)
+	}
+
+	byHash := func(hash string) map[string]any {
+		for _, row := range body.Runs {
+			if row["infohash"] == hash {
+				return row
+			}
+		}
+		t.Fatalf("no row for infohash %s in %+v", hash, body.Runs)
+		return nil
+	}
+
+	done := byHash(doneHash)
+	if v, ok := done["partial"]; !ok || v != false {
+		t.Errorf(`row["partial"] = %#v, ok=%v, want false: %+v`, v, ok, done)
+	}
+
+	partial := byHash(partialHash)
+	if v, ok := partial["partial"]; !ok || v != true {
+		t.Errorf(`row["partial"] = %#v, ok=%v, want true: %+v`, v, ok, partial)
+	}
+}
+
 // TestPreTOR65RecordDegradesHonestly covers a record written before TOR-65:
 // Selected is absent (nil), not merely empty, because the field itself did
 // not exist yet. cache.Run.SelectedCount's documented fallback is Videos -

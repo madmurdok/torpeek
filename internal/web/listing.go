@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,8 +69,51 @@ type RunSummary struct {
 // disk-only row has no state to invent one for. Zero Selected reads as not
 // partial for the same reason it reads as not done: a row with no merged
 // disk record yet has nothing here to call either one.
+//
+// This is the one place that rule is written (TOR-80). TOR-72 added it here
+// and separately in app.js's isPartial(), and only the JS copy ever painted
+// a badge - every caller of this method was a test, so the two were free to
+// drift and nothing would fail. MarshalJSON below is what makes this copy
+// the load-bearing one: it puts the verdict on the wire under the same key
+// app.js now reads, so a page never recomputes it and a change here changes
+// what ships.
 func (r RunSummary) Partial() bool {
 	return r.Selected > 0 && r.Complete < r.Selected
+}
+
+// MarshalJSON adds a "partial" field to RunSummary's JSON, computed from
+// Partial() rather than left for a reader to derive from Selected and
+// Complete. That is the whole point of TOR-80: the two counts alone do not
+// settle anything, Partial()'s comparison does, and shipping only the counts
+// is exactly what let app.js's isPartial() become a second, silently
+// driftable copy of that comparison. Aliasing RunSummary rather than adding
+// a stored Partial field is deliberate: `alias` has RunSummary's fields and
+// struct tags but none of its methods, so encoding it falls through to the
+// default struct encoding instead of recursing back into this method, and
+// there is no second field for listRuns to remember to keep in sync with
+// Selected/Complete - Partial() alone stays the only place the comparison is
+// written.
+//
+// This does not make a live run's badge any more (or less) able to show
+// partial than it already was. Selected and Complete are only ever non-zero
+// once listRuns has merged a disk record in - never for a live entry that
+// has not yet reached a final state (see this type's own field comments) -
+// so Partial() answers false at exactly the moments it always did. The page
+// also learns of a run's state over the WebSocket (run_state records), not
+// only from this GET /runs response, and run_state carries neither count:
+// a run that goes running -> done while a page is open keeps whatever
+// "partial" this response last reported for it (false, if it had not
+// finished yet) until that page's next GET /runs. This method makes the
+// existing verdict authoritative on the wire; it does not add the counts to
+// a message that never carried them, and closing that gap would mean
+// putting Selected/Complete on run_state itself - a registry/event change,
+// not a listing one.
+func (r RunSummary) MarshalJSON() ([]byte, error) {
+	type alias RunSummary
+	return json.Marshal(struct {
+		alias
+		Partial bool `json:"partial"`
+	}{alias: alias(r), Partial: r.Partial()})
 }
 
 // diskRun is one run.json found under OutputRoot, read with cache.LoadRun -
