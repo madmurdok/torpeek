@@ -216,6 +216,10 @@ button:disabled { opacity: .5; }
 .run-badge[data-state="queued"] { background: #b3590022; color: #b35900; }
 .run-badge[data-state="done"] { background: #1a7f3722; color: #1a7f37; }
 .run-badge[data-state="failed"] { background: #b3261e22; color: #b3261e; }
+/* Partial is a finished run that did not finish everything it was asked for,
+   so it borrows the amber the queue and the need for a decision already use
+   rather than done's green (TOR-72). */
+.run-badge[data-state="partial"] { background: #b3590022; color: #b35900; }
 .run-badge[data-state="needs-action"] { background: #b3590022; color: #b35900; font-weight: 600; }
 .run-badge[data-state="cancelled"] { background: #8884; opacity: .8; }
 .run-badge[data-state="disk"] { background: #8883; }

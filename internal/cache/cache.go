@@ -65,6 +65,23 @@ type Run struct {
 	Complete []int `json:"complete"`
 }
 
+// SelectedCount is how many files this directory's runs have ever asked for -
+// the denominator a listing judges Complete against to call a result Partial
+// rather than Done (TOR-72). It is not simply len(Selected): the engine
+// already supported capturing a subset of a torrent's files before TOR-65
+// taught it to record which subset, so a nil Selected does not mean "nothing
+// was asked for" - it means this record predates the field and cannot say.
+// The honest fallback for that case is Videos, the same file count a listing
+// compared Complete against before Selected existed, so a pre-TOR-65 record
+// keeps reading exactly as it always did instead of gaining a Partial
+// verdict nothing about it actually changed.
+func (r Run) SelectedCount() int {
+	if r.Selected == nil {
+		return len(r.Videos)
+	}
+	return len(r.Selected)
+}
+
 // Plan is a run's parameters in the form they were asked for, since
 // ParamsKey only ever stores their sha256 prefix in the directory name and a
 // directory cannot be turned back into a description of what was requested.

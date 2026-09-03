@@ -151,14 +151,41 @@ function cancellable(state) {
   return state === "queued" || state === "running" || state === "needs-action";
 }
 
+// isPartial says whether some of what was asked for has frames and some does
+// not - Selected short of Complete, never Files short of Complete (TOR-72).
+// A torrent where three of six files were chosen and all three finished is
+// whole, not partial: Files counts files nobody asked for, which is not this
+// row's business. Zero Selected means nothing to compare (no disk record has
+// merged into this row yet) and reads as not partial, the same way it reads
+// as not done.
+function isPartial(entry) {
+  return !!entry.selected && entry.complete < entry.selected;
+}
+
+// badgeState is what the badge is coloured by, which is not always the run's
+// own state: a finished run whose selected files did not all come out whole
+// reads "partial", and colouring that with done's green would say the
+// opposite of the word inside it. Partial is not a state (cache.Run does not
+// record how a run ended, and TOR-72 derives this from counts alone) - it is
+// only ever a way of showing one.
+function badgeState(entry) {
+  if (entry.disk) return "disk";
+  if (entry.state === "done" && isPartial(entry)) return "partial";
+  return entry.state;
+}
+
 function badgeLabel(entry) {
-  if (entry.disk) return entry.complete && entry.complete === entry.files ? "on disk" : "on disk (partial)";
+  if (entry.disk) return isPartial(entry) ? "on disk (partial)" : "on disk";
   switch (entry.state) {
     case "queued": return "queued";
     case "running": return "running";
     case "replaying": return "reopening…";
     case "needs-action": return "choose files";
-    case "done": return "done";
+    // cache.Run does not record how a run ended, only what it covered - so
+    // "done" from the registry says the run itself finished, not that every
+    // selected file came out whole. isPartial is what tells the two apart,
+    // exactly as it does for a disk row above (TOR-72).
+    case "done": return isPartial(entry) ? "partial" : "done";
     case "failed": return "failed";
     case "cancelled": return "cancelled";
     default: return entry.state || "…";
@@ -167,7 +194,7 @@ function badgeLabel(entry) {
 
 function metaLabel(entry) {
   if (entry.progress) return entry.progress;
-  if (entry.disk) return entry.complete + " / " + entry.files + " file(s) complete";
+  if (entry.disk) return entry.complete + " / " + entry.selected + " file(s) complete";
   if (entry.error) return entry.error;
   return "";
 }
@@ -326,7 +353,7 @@ function newRunEntry(id) {
   const entry = {
     id, disk: false, infohash: "", params: "",
     state: "", source: "", name: "", error: "", progress: "",
-    files: 0, complete: 0,
+    files: 0, complete: 0, selected: 0,
     // when is this row's sort key for the default (date, newest-first) sort.
     // Set once, here, at creation - never touched again by a status update -
     // which is what keeps a live run from jumping position as events arrive.
@@ -416,9 +443,9 @@ function resetRunContent(entry) {
 }
 
 function syncEntry(entry) {
-  entry.rowEl.dataset.state = entry.disk ? "disk" : entry.state;
+  entry.rowEl.dataset.state = badgeState(entry);
   entry.rowBadge.textContent = badgeLabel(entry);
-  entry.rowBadge.dataset.state = entry.disk ? "disk" : entry.state;
+  entry.rowBadge.dataset.state = badgeState(entry);
   // The cell truncates, so the whole name has to be reachable some other way
   // than by widening the panel - a tooltip costs nothing and answers "which
   // Sintel is this" without moving the divider.
@@ -431,7 +458,7 @@ function syncEntry(entry) {
   reorderRuns();
 
   entry.detailBadge.textContent = badgeLabel(entry);
-  entry.detailBadge.dataset.state = entry.disk ? "disk" : entry.state;
+  entry.detailBadge.dataset.state = badgeState(entry);
   entry.detailTitle.textContent = entry.name || entry.source || shortId(entry.id);
   entry.detailCancel.hidden = entry.disk || !cancellable(entry.state);
   entry.detailError.hidden = !entry.error;
@@ -1325,6 +1352,7 @@ async function loadRuns() {
     entry.name = row.name || entry.name;
     entry.files = row.files || 0;
     entry.complete = row.complete || 0;
+    entry.selected = row.selected || 0;
     if (!disk) entry.state = row.state || entry.state;
     entry.error = row.error || entry.error;
     // row.when is GET /runs's own answer for this row - the newest lifecycle
