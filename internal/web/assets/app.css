@@ -303,6 +303,48 @@ button:disabled { opacity: .5; }
 
 .file-body { padding: .5rem .35rem 0; }
 
+/* The metadata accordion, one level inside a file's own (TOR-71): resolution,
+   codec, tracks - collapsed by default with no auto-expand exception, since
+   the frames are what the file was opened for and this is a detail on top of
+   that. Same idiom as .file-body: collapse is the `hidden` attribute alone,
+   and nothing here sets `display` on .meta-body, so the UA rule for
+   `[hidden]` is never beaten by a class selector (see .drop-overlay[hidden]
+   below for what that trap looks like when a rule does). */
+.meta { margin: 0 0 .5rem; }
+
+.meta-title { margin: 0; font-size: .85rem; }
+
+.meta-toggle {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: .2rem .35rem;
+  border: none;
+  border-radius: .35rem;
+  background: none;
+  font: inherit;
+  font-size: .8rem;
+  opacity: .75;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.meta-toggle:hover { background: #8882; }
+.meta-toggle:focus-visible { outline: 2px solid #1a7f37; outline-offset: -2px; }
+
+.meta-toggle-icon {
+  flex: 0 0 auto;
+  width: .7em;
+  opacity: .6;
+}
+.meta-toggle-icon::before { content: "▸"; }
+.meta-toggle[aria-expanded="true"] .meta-toggle-icon::before { content: "▾"; }
+
+.meta-body { padding: .3rem .35rem 0; }
+
 .specs {
   display: grid;
   grid-template-columns: auto 1fr;
