@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -177,6 +178,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	}
 
 	// The budget covers the whole run, so every file shares one tracker.
+	//
+	// budgetFor reads len(selected) right here, before the budget's clock
+	// starts (tracker.Context below). Whoever adds another way to narrow a
+	// run - the web UI (TOR-66/67/68) included - has to apply that
+	// selection earlier, into cfg.Files before swarm.Select runs above;
+	// narrowing the file list after this point would leave the budget sized
+	// for files no longer being fetched.
 	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent)
 
 	runCtx, cancel := tracker.Context(ctx)
@@ -190,6 +198,22 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	if err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 		return
+	}
+
+	// The .torrent is written before a single frame is fetched, not at the end
+	// beside the run record. It can only be reconstructed while this session
+	// is open - the info dictionary is what the swarm just handed over - and a
+	// run that is cancelled or stopped at its budget after two frames should
+	// still leave behind the one artefact that lets someone hand the torrent
+	// to a real client (TOR-73).
+	//
+	// A failure here is reported the way saveRunRecord's is, and for the same
+	// reason: it is a storage problem worth a person seeing, but it is not a
+	// reason to abandon frames that are otherwise fetchable, so the run
+	// carries on and simply has no .torrent to announce.
+	torrentPath, err := saveTorrentFile(writer, torrent)
+	if err != nil {
+		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	}
 
 	srv, err := bridge.Start(cfg.Bridge)
@@ -274,7 +298,8 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// Written even for a stopped run: what it did finish is still worth
 	// serving from disk next time, and a partial record is what resume will
 	// read to know where to pick up.
-	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, finished); err != nil {
+	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, selected, finished,
+		recordedSource(cfg.Source, src, torrentPath)); err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	}
 
@@ -285,6 +310,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		Frames:         made,
 		DownloadedByte: spent,
 		Elapsed:        time.Since(started),
+		TorrentPath:    torrentPath,
 	})
 }
 
@@ -565,17 +591,30 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 // Source and Plan, so it can be named and repeated without a session open to
 // ask what it was.
 //
-// cfg.Source is recorded rather than anything swarm.Source parsed it into:
-// Source keeps only what it needs to answer its own questions (privacy,
-// trackers, infohash) and holds no exported form of the original string, so
-// cfg.Source is the one place that string still is - and it is exactly what
-// was typed, unlike a parsed representation.
-func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo, finished []int) error {
+// What it records as the source is recordedSource's decision, not cfg.Source
+// outright - see there for why a .torrent run names the copy it just saved.
+//
+// Selected and Complete are merged with whatever record already sits in
+// layout.RunDir(), never replaced outright. ParamsKey deliberately excludes
+// the file selection (see its own doc comment), so a run over three files and
+// an earlier run over six share the very same directory. Rebuilding either
+// list from only this run's own files would make the narrower run erase the
+// wider one's results - the six files' frames would stay on disk while the
+// record forgot them, and a later request for one would needlessly go back
+// to the swarm. Merging means every file any run here has ever asked for, or
+// completed, stays recorded regardless of what any other run touched. A
+// missing or unreadable prior record (LoadRun reports ok=false) merges as
+// empty, so the first run into a directory behaves exactly as before.
+func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, videos []swarm.FileInfo,
+	selected []swarm.FileInfo, finished []int, source string) error {
+
+	prior, _ := cache.LoadRun(layout.RunDir())
+
 	record := cache.Run{
 		Version:   cache.Version,
 		Tool:      version.Version,
 		CreatedAt: time.Now().UTC(),
-		Source:    cfg.Source,
+		Source:    source,
 		InfoHash:  torrent.InfoHash(),
 		Name:      torrent.Name(),
 		Private:   torrent.Private(),
@@ -588,17 +627,77 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 			Sequential: cfg.Sequential,
 		},
 		Videos:   make([]cache.File, 0, len(videos)),
-		Complete: finished,
+		Selected: mergeIndices(prior.Selected, indicesOf(selected)),
+		Complete: mergeIndices(prior.Complete, finished),
 	}
 	for _, v := range videos {
 		record.Videos = append(record.Videos, cache.File{
 			Index: v.Index, Path: v.Path, Bytes: v.Length, Offset: v.Offset,
 		})
 	}
-	if record.Complete == nil {
-		record.Complete = []int{}
-	}
 	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// saveTorrentFile puts the torrent this run is working on into the run
+// directory, as a .torrent a client can load.
+//
+// Two packages meet here and neither is allowed to know the other: swarm
+// renders the metainfo (only it may touch anacrolix) and output decides where
+// a run's artefacts go and how they reach disk safely. This is the seam, and
+// it is three lines long precisely because both halves already exist.
+func saveTorrentFile(writer *output.Writer, torrent *swarm.Torrent) (string, error) {
+	data, err := torrent.TorrentFile()
+	if err != nil {
+		return "", fmt.Errorf("render the torrent file: %w", err)
+	}
+	return writer.WriteTorrent(data)
+}
+
+// recordedSource decides what run.json says this run was given.
+//
+// A magnet is recorded exactly as typed. It is the whole torrent in one line,
+// it costs nothing to keep, and pasting it back is literally how the run is
+// repeated - which is what cache.Run.Source promises.
+//
+// A .torrent source is recorded as the copy this run has just saved in its own
+// directory, not the path it was read from, because that path is not reliably
+// still there. The web UI stages a dropped .torrent in a temp directory and
+// removes it the moment the run's event stream ends (handleUploadTorrent's
+// cleanup, fired from pump before the client is even told the run finished),
+// so a record naming it described a file that provably did not exist by the
+// time anyone could read the record - a lie sitting on disk, in the one field
+// whose whole job is to be pasteable. The saved copy carries the same info
+// dictionary and therefore the same infohash, and it lives exactly as long as
+// the record that names it, so it is true for both the uploaded case and the
+// path-on-the-command-line case rather than only the one that was broken.
+//
+// With no saved copy - the write failed - the original path is still the most
+// honest thing left to say.
+func recordedSource(source string, src swarm.Source, torrentPath string) string {
+	if torrentPath == "" || src.IsMagnet() {
+		return source
+	}
+	return torrentPath
+}
+
+// mergeIndices unions two file-index lists into one, deduplicated and sorted
+// so the result is stable regardless of which run contributed which index.
+// It always returns a non-nil slice, even from two nil inputs, so a fresh
+// record's Selected and Complete serialize as "[]" rather than "null".
+func mergeIndices(existing, next []int) []int {
+	set := make(map[int]bool, len(existing)+len(next))
+	for _, i := range existing {
+		set[i] = true
+	}
+	for _, i := range next {
+		set[i] = true
+	}
+	out := make([]int, 0, len(set))
+	for i := range set {
+		out = append(out, i)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // reusableFrames picks out the capture points an earlier run already took,

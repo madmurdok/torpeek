@@ -30,10 +30,16 @@ type Run struct {
 	Tool      string    `json:"tool"`
 	CreatedAt time.Time `json:"created_at"`
 
-	// Source is the magnet URI or .torrent path this run was given - the
-	// string a person could paste back in to run it again. Absent from a
-	// record written before this field existed, in which case it reads back
-	// as "": a run found on disk that cannot say what it was asked for.
+	// Source is the string a person could paste back in to run this again: the
+	// magnet URI exactly as typed, or - for a .torrent - the copy the run kept
+	// in its own directory (output.Layout.TorrentPath) rather than wherever
+	// the file was read from. The distinction is not cosmetic: a .torrent
+	// dropped onto the web UI is staged in a temp directory that is deleted as
+	// the run ends, so recording that path put a name for a file that provably
+	// no longer existed in the one field promising to be pasteable
+	// (core.recordedSource). Absent from a record written before this field
+	// existed, in which case it reads back as "": a run found on disk that
+	// cannot say what it was asked for.
 	Source string `json:"source"`
 
 	InfoHash string `json:"infohash"`
@@ -50,10 +56,36 @@ type Run struct {
 	// run worked on. Without it a rerun could not tell "all files" from "the
 	// files that happened to be asked for last time" while staying offline.
 	Videos []File `json:"videos"`
-	// Complete lists the file indices whose frame set came out whole. A file
-	// with a failed capture point is deliberately absent: a rerun should try
-	// it again rather than serve a gap as a result.
+	// Selected lists every file index any run recorded in this directory has
+	// ever asked for - not only this run's own selection. Without it, a file
+	// index absent from Complete is ambiguous: never picked, or picked and
+	// failed. Cross-referenced with Complete, it tells the two apart. Absent
+	// from a record written before this field existed, in which case it
+	// reads back as nil: a pre-existing record cannot say what was asked for,
+	// only what came out whole.
+	Selected []int `json:"selected"`
+	// Complete lists the file indices whose frame set came out whole, across
+	// every run this directory has ever recorded - not only this run's own.
+	// A file with a failed capture point is deliberately absent: a rerun
+	// should try it again rather than serve a gap as a result.
 	Complete []int `json:"complete"`
+}
+
+// SelectedCount is how many files this directory's runs have ever asked for -
+// the denominator a listing judges Complete against to call a result Partial
+// rather than Done (TOR-72). It is not simply len(Selected): the engine
+// already supported capturing a subset of a torrent's files before TOR-65
+// taught it to record which subset, so a nil Selected does not mean "nothing
+// was asked for" - it means this record predates the field and cannot say.
+// The honest fallback for that case is Videos, the same file count a listing
+// compared Complete against before Selected existed, so a pre-TOR-65 record
+// keeps reading exactly as it always did instead of gaining a Partial
+// verdict nothing about it actually changed.
+func (r Run) SelectedCount() int {
+	if r.Selected == nil {
+		return len(r.Videos)
+	}
+	return len(r.Selected)
 }
 
 // Plan is a run's parameters in the form they were asked for, since

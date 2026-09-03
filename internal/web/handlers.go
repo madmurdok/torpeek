@@ -8,10 +8,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/madmurdok/torpeek/internal/core"
 )
 
 // maxTorrentUpload bounds a dropped .torrent, not the download that follows:
@@ -235,7 +238,21 @@ func (s *Server) handleUploadTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req := RunRequest{Source: path, Mode: r.FormValue("mode"), Label: "dropped .torrent"}
+	// The count comes off the same intake line a pasted magnet uses, so a
+	// dropped .torrent has to read it here: this handler builds its
+	// RunRequest by hand and would otherwise silently ignore the number the
+	// person just typed. An unparseable or absent field is no count at all,
+	// which is exactly what the server's default means - a drop is not the
+	// place to argue about a form value.
+	count, err := strconv.Atoi(strings.TrimSpace(r.FormValue("count")))
+	if err != nil {
+		count = 0
+	}
+
+	req := RunRequest{
+		Source: path, Mode: r.FormValue("mode"), Count: count,
+		Label: "dropped .torrent",
+	}
 	// startRun runs cleanup itself on every path that does not end up owning
 	// the file: a request it refuses, a run cancelled while it waits, a
 	// server that closes under it. A run that reaches the slot defers cleanup
@@ -310,10 +327,201 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// decideRequest is a picker's answer: this run, these files, this many
+// frames each.
+//
+// It names the run by id rather than by infohash, unlike the reopen request
+// next to it: this is about one entry in this process's registry - the one
+// parked and waiting - not about a torrent's results on disk, and the same
+// torrent may well have been added twice.
+type decideRequest struct {
+	ID    string   `json:"id"`
+	Files []string `json:"files"`
+	// Count is the intake's frames-per-file at the moment the button was
+	// pressed, so the number a person was looking at while ticking boxes is
+	// the number the run uses. Absent (or zero) leaves the run with whatever
+	// the original request carried.
+	Count int `json:"count,omitempty"`
+}
+
+// handleDecideRun puts a parked torrent back in the queue with the files
+// someone ticked (TOR-67). The answer is the same {id, state} shape POST
+// /runs gives, because that is what this is: the moment the run someone
+// asked for actually becomes a run.
+func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
+	var req decideRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.DecideRun(req.ID, req.Files, req.Count)
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// decideStatus maps a decision's four failures: a run this server does not
+// hold, a request that does not name a selection this torrent can satisfy, a
+// server that has closed, and - everything left - a run that is not waiting
+// to be told anything, which is the same conflict CancelRun reports for a
+// run that has already ended.
+func decideStatus(err error) int {
+	switch {
+	case errors.Is(err, ErrNoSuchRun):
+		return http.StatusNotFound
+	case errors.Is(err, errBadRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, errClosed):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusConflict
+	}
+}
+
 // handleListRuns answers the panel with the live queue plus everything
 // already on disk - see Server.listRuns for how the two are merged.
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": s.listRuns()})
+}
+
+// handleFileDetail answers one video file's frames across every result set
+// that torrent has on disk (TOR-69).
+//
+// This is the per-run detail request walkRuns' own comment set aside as
+// future work: the listing stays one run.json per directory, and the
+// frame-by-frame reads happen here, for one file, only when a person opens
+// it. It is also the only way a page can reach a sibling set at all - the
+// event stream carries no params name, and a replay is addressed by one
+// directory, so frames of the OTHER set were never announced to this page.
+//
+// Reads disk and nothing else, which is what keeps a cache hit free of the
+// network however it is opened.
+func (s *Server) handleFileDetail(w http.ResponseWriter, r *http.Request) {
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no such file")
+		return
+	}
+
+	detail, ok := s.fileDetail(r.PathValue("infohash"), index)
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such file")
+		return
+	}
+	// Wrapped under a key like every other response here (GET /runs answers
+	// {"runs": ...}), so a field can be added beside it later without the
+	// body changing shape.
+	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
+}
+
+// handleDeleteFrame removes one frame and answers with the file's refreshed
+// detail - the same body GET /runs/{infohash}/files/{index} returns,
+// recomputed after the delete, so the page re-renders from disk truth rather
+// than from its own idea of what just happened (TOR-70).
+//
+// The result set is a query parameter rather than a field in the body: a
+// DELETE with a body is legal but awkward on both sides (fetch allows one,
+// caches and proxies vary in what they do with it), and the set is part of
+// the address here, not a payload - infohash, file index, frame index and
+// params together name exactly one frame on disk.
+//
+// The three path segments answer 404 when they are malformed, matching what
+// the GET on the same path already does for an infohash that is not hex: a
+// path that cannot name a resource names nothing. params is a request
+// parameter rather than part of the path, so a malformed one is a 400 about
+// the request.
+func (s *Server) handleDeleteFrame(w http.ResponseWriter, r *http.Request) {
+	index, indexErr := strconv.Atoi(r.PathValue("index"))
+	frame, frameErr := strconv.Atoi(r.PathValue("frame"))
+	if indexErr != nil || frameErr != nil {
+		writeError(w, http.StatusNotFound, "no such frame")
+		return
+	}
+
+	detail, err := s.DeleteFrame(r.PathValue("infohash"),
+		strings.TrimSpace(r.URL.Query().Get("params")), index, frame)
+	if err != nil {
+		writeError(w, deleteStatus(err), err.Error())
+		return
+	}
+
+	// Wrapped under the same "file" key the GET answers with, so a page can
+	// read either response the same way.
+	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
+}
+
+// deleteStatus maps a delete's three failures: nothing there to remove, a
+// request that does not name a frame, and a server with no way to remove one.
+// Anything else is a write that failed, which is the server's problem.
+func deleteStatus(err error) int {
+	switch {
+	case errors.Is(err, core.ErrNoSuchFrame):
+		return http.StatusNotFound
+	case errors.Is(err, errBadRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, errDeleteUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// handleDefaults reports what a run does when the request does not say - the
+// frame count, and whether this server can hand a .torrent to a local client.
+//
+// It exists so the page can show the number actually in force rather than a
+// copy of it written into the HTML: the assets are static and served
+// straight out of the embed, with no templating step to substitute one in,
+// so without this the field would read 20 on a server started as -n 6. The
+// server does not decide the value; it repeats what the one shared
+// core.Config already says (Config.DefaultCount).
+//
+// watch is the same idea for -watch-dir, and it is a boolean rather than the
+// directory itself on purpose: the page needs to know whether to draw the
+// button, and the path would be an operational detail travelling to a browser
+// for nothing. Without it the page would have to guess, and the requirement
+// is that the button is ABSENT when there is no watch directory - not present
+// and failing when it is pressed.
+func (s *Server) handleDefaults(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": s.cfg.DefaultCount,
+		"watch": s.cfg.WatchDir != "",
+	})
+}
+
+// handleWatchTorrent copies a run's saved .torrent into the watch directory
+// so a client on this host queues it (TOR-73). See Server.SendToWatchDir for
+// why it is addressed by a files/{id} handle and why the copy is written
+// through a temporary name.
+func (s *Server) handleWatchTorrent(w http.ResponseWriter, r *http.Request) {
+	dest, err := s.SendToWatchDir(r.PathValue("id"))
+	if err != nil {
+		writeError(w, watchStatus(err), err.Error())
+		return
+	}
+
+	// The destination is answered rather than swallowed: it is the operator's
+	// own directory on the operator's own host, and seeing which file landed
+	// where is how a person confirms the drop worked without going to look.
+	writeJSON(w, http.StatusOK, map[string]any{"path": dest})
+}
+
+// watchStatus maps the two ways this can be turned away - a handle that names
+// no saved torrent, and a server with nowhere to put one - from the writes
+// that simply failed, which are the server's problem.
+func watchStatus(err error) int {
+	switch {
+	case errors.Is(err, errNoSuchTorrent):
+		return http.StatusNotFound
+	case errors.Is(err, errWatchUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // handleFile serves one file the run announced: a frame, a contact sheet or a
@@ -331,6 +539,21 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Stat(path); err != nil {
 		http.NotFound(w, r)
 		return
+	}
+
+	// A .torrent needs both headers stated, and ServeFile states neither.
+	// Go's mime table has no entry for the extension, so the sniffer sees
+	// bencode - "d8:announce..." - decides it is text, and the browser
+	// renders a page of gibberish instead of saving a file. Content-Type
+	// names what it actually is, and Content-Disposition is what turns the
+	// link into a save; ServeFile leaves an already-set Content-Type alone,
+	// so setting it here wins. The filename is the file's own name on disk,
+	// which output.Layout deliberately made the infohash: unique in whatever
+	// download folder it lands in, and hex, so nothing in it can break out
+	// of the quoted header value.
+	if isTorrentPath(path) {
+		w.Header().Set("Content-Type", "application/x-bittorrent")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(path)+`"`)
 	}
 
 	http.ServeFile(w, r, path)

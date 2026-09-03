@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
@@ -24,17 +26,10 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	engine := core.NewEngine(tools)
 
 	runner := func(ctx context.Context, req web.RunRequest) (<-chan core.Event, error) {
-		cfg := base
-		cfg.Source = req.Source
-
-		if req.Mode != "" {
-			profile, err := swarm.ProfileByName(req.Mode)
-			if err != nil {
-				return nil, err
-			}
-			cfg.Profile = profile
+		cfg, err := runConfig(base, req)
+		if err != nil {
+			return nil, err
 		}
-
 		return engine.Run(ctx, cfg)
 	}
 
@@ -47,10 +42,53 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return engine.Replay(base.OutputRoot, infoHash, params)
 	}
 
+	// Deleting one frame (TOR-70) is injected the same way and for the same
+	// reason: core owns everything under base.OutputRoot - it is the only
+	// package that writes there - and the rules a delete has to keep are the
+	// cache's, not a UI's. web validates the address and calls this; what a
+	// safe delete is stays in core.DeleteFrame.
+	deleter := func(infoHash, params string, fileIndex, frameIndex int) error {
+		return core.DeleteFrame(base.OutputRoot, infoHash, params, fileIndex, frameIndex)
+	}
+
+	// Listing a torrent's files before any of them is captured (TOR-67) is
+	// injected for the same reason again, and starts from the same base: the
+	// metadata pass and the run that follows it must share one cfg.Swarm -
+	// the same pinned port, the same DHT switch, the same known peers - or
+	// they would reach the same torrent by two different routes, and the
+	// second would be the first to find out. Only the source varies, which
+	// is why this takes one rather than a whole web.RunRequest: no other
+	// field of a request can change what a torrent contains.
+	//
+	// It takes a context because it is a wait on the swarm, not a file read
+	// (see web.Lister), and core.List is what bounds it: metadata only, the
+	// session closed and its pieces discarded before it returns.
+	lister := func(ctx context.Context, source string) (core.Contents, error) {
+		cfg := base
+		cfg.Source = source
+		return engine.List(ctx, cfg)
+	}
+
+	// Checked before anything is served rather than when the button is
+	// pressed: a mistyped -watch-dir is a command line to fix, and finding
+	// out about it as a failed drop - minutes later, from a browser, on a
+	// machine nobody is sitting at - is the wrong place to learn it. A
+	// missing directory is not created here either: this flag names a
+	// directory some torrent client is already watching, and inventing one
+	// nothing watches would look like it worked.
+	watchDir, err := resolveWatchDir(opts.WatchDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		return ExitUsage
+	}
+
 	cfg := web.DefaultConfig()
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
 	}
+	// Empty leaves the UI without the "send to my client" button entirely -
+	// see web.Config.WatchDir.
+	cfg.WatchDir = watchDir
 	cfg.BasePath = opts.BasePath
 	cfg.Token = opts.Token
 	// GET /runs lists what is already on disk (TOR-54) from the same root
@@ -59,8 +97,13 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// every run, so the listing and a run agree on where results live
 	// without web deciding that itself.
 	cfg.OutputRoot = base.OutputRoot
+	// GET /defaults reports this so the intake field can show the number a
+	// run would actually use. Same reason as OutputRoot above: base is the
+	// one core.Config this closure already builds every run from, so the
+	// page and a run agree without web deciding anything.
+	cfg.DefaultCount = base.Plan.Count
 
-	server, err := web.Start(ctx, cfg, runner, replayer)
+	server, err := web.Start(ctx, cfg, runner, replayer, deleter, lister)
 	if err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitFailed
@@ -103,6 +146,71 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	<-ctx.Done()
 	fmt.Fprintln(stdout, "torpeek: stopping")
 	return ExitOK
+}
+
+// runConfig turns one web request into the config its run executes with.
+// Extracted out of serveWeb's runner closure so the mapping - profile
+// lookup, file selection - can be tested without a running server or a real
+// torrent.
+//
+// req.Files, when the browser sent a selection, replaces base's own -file
+// flag rather than being merged with it: a person who ticked boxes in the
+// UI is choosing the whole selection, not adding to whatever the process
+// happened to be started with. An empty selection leaves base.Files alone,
+// which is what keeps -file working exactly as before for the source the
+// command line itself starts (opts.Source below) and for any request that
+// simply does not offer a picker.
+func runConfig(base core.Config, req web.RunRequest) (core.Config, error) {
+	cfg := base
+	cfg.Source = req.Source
+
+	if req.Mode != "" {
+		profile, err := swarm.ProfileByName(req.Mode)
+		if err != nil {
+			return core.Config{}, err
+		}
+		cfg.Profile = profile
+	}
+
+	if len(req.Files) > 0 {
+		cfg.Files = req.Files
+	}
+
+	// Zero means the request said nothing, so -n stands. Only the lower
+	// bound frames.Plan.Validate already enforces applies beyond that -
+	// there is no cap here, and n is per video file, so a torrent of six
+	// quality variants costs six times this number (TOR-50).
+	if req.Count > 0 {
+		cfg.Plan.Count = req.Count
+	}
+
+	return cfg, nil
+}
+
+// resolveWatchDir turns -watch-dir into the absolute path the server will
+// copy into, refusing anything that is not already a directory.
+//
+// Absolute, because the answer a run gives back names where the file landed
+// and a relative path would name it from a working directory the person
+// reading the answer is not in. Empty stays empty: that is the documented way
+// to say "no watch directory", and it must not become the current one.
+func resolveWatchDir(dir string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve the watch directory: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("watch directory %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("watch directory %s is not a directory", abs)
+	}
+	return abs, nil
 }
 
 // webAddr turns -web-host/-web-port into a listen address, leaving the

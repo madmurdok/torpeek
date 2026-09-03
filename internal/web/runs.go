@@ -5,13 +5,25 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"time"
+
+	"github.com/madmurdok/torpeek/internal/core"
 )
 
 // RunState is where a run is in its life.
 //
-// queued, running and replaying are the live states; done, failed and
-// cancelled are final and never change again. A client can rely on that: a
-// run it has seen end will not come back.
+// Three kinds of state, not two. queued, running and replaying are live: the
+// server is working on this run or about to be, and more events are coming
+// on their own. done, failed and cancelled are final and never change again;
+// a client can rely on that, a run it has seen end will not come back.
+//
+// needs-action is neither, and it is the first state that is neither. The
+// torrent's file list has arrived and nothing whatsoever happens next until
+// a person says which files to capture: no event is coming, nothing is being
+// downloaded, and no timer will end the wait. It is also the only state that
+// goes backwards - needs-action returns to queued when POST /runs/decide
+// carries the selection - so "has this run finished" and "is this run doing
+// something" are no longer each other's opposite. Ask final() for the first
+// question and run_state's own active flag for the second.
 type RunState string
 
 const (
@@ -40,9 +52,32 @@ const (
 	// never started, or while running, so it stopped early. Frames already
 	// written stay on disk (REQUIREMENTS.md section 2.10).
 	RunCancelled RunState = "cancelled"
+	// RunNeedsAction means the torrent turned out to hold more than one video
+	// file and is waiting for someone to say which of them to capture
+	// (REQUIREMENTS.md section 3.3). The metadata pass that produced the list
+	// is over; the capture has not begun.
+	//
+	// What it holds while it waits is nothing: no session, no context - the
+	// listing's own was released when it parked - and above all not the
+	// single slot, which went back to the queue before this state was
+	// entered (listThenRun). That is the whole point of the state: the
+	// torrent behind this one runs to completion while this one waits, and
+	// the waiting can last as long as a person takes, because it costs a map
+	// entry and a file list.
+	//
+	// It ends only by someone acting on it: POST /runs/decide puts it back in
+	// the queue with a selection, or a cancel ends it for good. Nothing times
+	// it out, deliberately - a bound would have to be either short enough to
+	// throw away a torrent someone is still thinking about or long enough to
+	// be no bound at all, and RunQueued already carries the same open-ended
+	// promise (trim never drops a non-final entry).
+	RunNeedsAction RunState = "needs-action"
 )
 
-// final reports whether the state can still change.
+// final reports whether the state can still change. needs-action is not
+// final: it is a run that has not happened yet, and a client that treated it
+// as over would stop showing a torrent that is only waiting to be told what
+// to take.
 func (s RunState) final() bool {
 	return s == RunDone || s == RunFailed || s == RunCancelled
 }
@@ -87,7 +122,22 @@ type runEntry struct {
 	// that never starts - refused, cancelled while queued, or dropped when
 	// the server closes - has nothing that could still be reading it, so its
 	// cleanup runs at that moment instead.
-	cleanup   func()
+	cleanup func()
+	// contents is what the metadata pass found: the torrent's name, its
+	// infohash and every video file in it, with the indices a selection
+	// names them by. Set only for an entry that paid for a listing, and kept
+	// afterwards because a decision has to be checked against the files the
+	// torrent actually holds rather than against whatever a page that has
+	// been open since yesterday sends. It is a handful of names and lengths;
+	// no payload, no session, nothing that has to be closed.
+	contents *core.Contents
+	// listed records that the metadata pass has already happened for this
+	// entry, so a torrent that parks and is then decided goes straight to
+	// its run instead of paying for the same listing a second time. Distinct
+	// from contents != nil on purpose: it is the question dispatch asks, and
+	// asking it by the presence of a field would tie the two together for no
+	// reason.
+	listed    bool
 	infoHash  string
 	err       error
 	queuedAt  time.Time

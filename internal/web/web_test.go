@@ -69,11 +69,37 @@ func newTestServerWithConfig(t *testing.T, cfg Config, runner Runner) (*Server, 
 }
 
 // newTestServerWithReplayer is newTestServerWithConfig plus a Replayer, for
-// the tests that reopen a run from disk (TOR-55).
+// the tests that reopen a run from disk (TOR-55). Its deleter is nil, which
+// is what TestDeleteFrameWithoutADeleterIsUnavailable relies on.
 func newTestServerWithReplayer(t *testing.T, cfg Config, runner Runner, replayer Replayer) (*Server, *httptest.Server) {
 	t.Helper()
+	return newTestServerWith(t, cfg, runner, replayer, nil)
+}
 
-	srv := newServer(context.Background(), cfg, runner, replayer)
+// newTestServerWith is the full form, for the tests that delete a frame
+// (TOR-70) and so need all three injected closures. Its lister is nil, which
+// is the no-parking path every test that is not about the picker takes -
+// see newTestServerWithLister for the ones that are.
+func newTestServerWith(t *testing.T, cfg Config, runner Runner, replayer Replayer, deleter Deleter) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), cfg, runner, replayer, deleter, nil)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Close()
+	})
+	return srv, ts
+}
+
+// newTestServerWithLister is newTestServer plus a Lister, for the tests that
+// park a torrent waiting for a file selection (TOR-67). Every other helper
+// here passes a nil lister, which is the no-parking path - so these are the
+// only tests in which a run has a metadata pass at all.
+func newTestServerWithLister(t *testing.T, runner Runner, lister Lister) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), DefaultConfig(), runner, nil, nil, lister)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() {
 		ts.Close()
@@ -182,6 +208,16 @@ func get(t *testing.T, base, path string) *http.Response {
 func uploadTorrent(t *testing.T, base string, content []byte, mode string) *http.Response {
 	t.Helper()
 
+	return uploadTorrentWithCount(t, base, content, mode, "")
+}
+
+// uploadTorrentWithCount is uploadTorrent for the tests that also send the
+// intake line's frame count (TOR-68), which the drop path reads off the same
+// form. An empty count writes no field at all, which is what a page with an
+// untouched field sends.
+func uploadTorrentWithCount(t *testing.T, base string, content []byte, mode, count string) *http.Response {
+	t.Helper()
+
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	part, err := mw.CreateFormFile("torrent", "release.torrent")
@@ -194,6 +230,11 @@ func uploadTorrent(t *testing.T, base string, content []byte, mode string) *http
 	if mode != "" {
 		if err := mw.WriteField("mode", mode); err != nil {
 			t.Fatalf("write mode field: %v", err)
+		}
+	}
+	if count != "" {
+		if err := mw.WriteField("count", count); err != nil {
+			t.Fatalf("write count field: %v", err)
 		}
 	}
 	if err := mw.Close(); err != nil {
@@ -675,7 +716,7 @@ func TestRunnerFailureIsReported(t *testing.T) {
 // reference, no absolute socket URL (REQUIREMENTS.md section 3.3).
 func TestWorksUnderABasePath(t *testing.T) {
 	fake := &fakeRun{}
-	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil)
+	srv := newServer(context.Background(), DefaultConfig(), fake.runner, nil, nil, nil)
 	t.Cleanup(func() { srv.Close() })
 
 	mounted := http.NewServeMux()
@@ -766,7 +807,7 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 	cfg.Addr = addr
 	cfg.BasePath = "torpeek" // no leading slash: normalizeBasePath's job
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -971,7 +1012,7 @@ func TestStartHonoursThePinnedAddr(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -1004,7 +1045,7 @@ func TestStartFailsLoudlyWhenAddrIsTaken(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Addr = addr
 
-	srv, err := Start(context.Background(), cfg, fake.runner, nil)
+	srv, err := Start(context.Background(), cfg, fake.runner, nil, nil, nil)
 	if err == nil {
 		srv.Close()
 		t.Fatalf("Start on the already-occupied %s succeeded, want an error", addr)
@@ -1060,7 +1101,11 @@ type fakeRuns struct {
 type fakeStream struct {
 	events chan core.Event
 	ctx    context.Context
-	once   sync.Once
+	// req is the request the runner was actually handed, so a test can check
+	// what reached the engine rather than what it asked for - the file
+	// selection a picker decided on (TOR-67) only exists here.
+	req  RunRequest
+	once sync.Once
 }
 
 func newFakeRuns() *fakeRuns {
@@ -1068,7 +1113,7 @@ func newFakeRuns() *fakeRuns {
 }
 
 func (f *fakeRuns) runner(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
-	stream := &fakeStream{events: make(chan core.Event, 32), ctx: ctx}
+	stream := &fakeStream{events: make(chan core.Event, 32), ctx: ctx, req: req}
 
 	f.mu.Lock()
 	f.runs[req.Source] = stream
@@ -1533,4 +1578,118 @@ func stagedUploads(t *testing.T) map[string]bool {
 		out[dir] = true
 	}
 	return out
+}
+
+// TestStartRunRejectsANegativeCount: a count that frames.Plan.Validate would
+// refuse is refused about the request instead, before anything is queued. The
+// alternative is a 202 followed minutes later by a failed run, for a number
+// the client could see was wrong the moment it sent it.
+func TestStartRunRejectsANegativeCount(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc","count":-1}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /runs with a negative count: status %d, want 400", resp.StatusCode)
+	}
+	if fake.starts != 0 {
+		t.Errorf("the runner was called %d times for a negative count, want 0", fake.starts)
+	}
+}
+
+// TestStartRunAcceptsAnAbsentCount pins the other half of treating zero as
+// "not stated": it is not a rejection, it is how a page that never touched
+// the field asks for the server's own -n.
+func TestStartRunAcceptsAnAbsentCount(t *testing.T) {
+	var got int
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("POST /runs with no count: status %d, want 202", resp.StatusCode)
+	}
+	if got != 0 {
+		t.Errorf("Count = %d, want 0 - the request said nothing", got)
+	}
+}
+
+// TestStartRunCarriesTheFrameCount is the wire half of TOR-68: the number
+// typed beside the mode select has to arrive on the RunRequest the runner
+// sees, which is where runConfig turns it into core.Config.Plan.Count.
+func TestStartRunCarriesTheFrameCount(t *testing.T) {
+	var got int
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc","count":6}`)
+
+	if got != 6 {
+		t.Errorf("Count = %d, want 6", got)
+	}
+}
+
+// TestUploadCarriesTheFrameCount: the drop path builds its RunRequest by
+// hand, so the count has to be read off the multipart form there too - a
+// dropped .torrent reads the same intake field as a pasted magnet.
+func TestUploadCarriesTheFrameCount(t *testing.T) {
+	var got int
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	uploadTorrentWithCount(t, ts.URL, []byte("torrent-bytes"), "", "6")
+
+	if got != 6 {
+		t.Errorf("Count = %d, want 6 from the multipart form", got)
+	}
+}
+
+// TestUploadWithAnUnreadableCountFallsBackToTheDefault: a form value that is
+// not a number is no count at all rather than a refused drop. A drop is not
+// the place to argue about a form field, and "no count" already means
+// exactly what the server's own default means.
+func TestUploadWithAnUnreadableCountFallsBackToTheDefault(t *testing.T) {
+	got := -1
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	resp := uploadTorrentWithCount(t, ts.URL, []byte("torrent-bytes"), "", "not-a-number")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("upload with an unreadable count: status %d, want 202", resp.StatusCode)
+	}
+	if got != 0 {
+		t.Errorf("Count = %d, want 0 - an unreadable field is no count", got)
+	}
+}
+
+// TestDefaultsReportsTheServersFrameCount is what lets the intake field show
+// the number actually in force. The assets are static, served straight out
+// of the embed with no templating step, so a default written into the HTML
+// would quietly disagree with a server started as -n 6; the page asks
+// instead.
+func TestDefaultsReportsTheServersFrameCount(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DefaultCount = 6
+	fake := &fakeRun{}
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	resp := get(t, ts.URL, "/defaults")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /defaults: status %d, want 200", resp.StatusCode)
+	}
+	if count, ok := decodeBody(t, resp)["count"].(float64); !ok || int(count) != 6 {
+		t.Errorf("count = %v, want 6", decodeBody(t, resp)["count"])
+	}
 }

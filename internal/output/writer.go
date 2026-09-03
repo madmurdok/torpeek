@@ -1,7 +1,7 @@
 // Package output writes what a run produces: full-resolution frames as they
 // become ready, the contact sheet assembled at the end, the JSON manifest, the
-// result cache keyed by infohash and run parameters, and the run state that
-// makes cancel and resume work.
+// .torrent the run was made from, the result cache keyed by infohash and run
+// parameters, and the run state that makes cancel and resume work.
 //
 // Requirements: sections 2.8, 2.9, 2.10 and 2.11.
 package output
@@ -22,10 +22,12 @@ const SheetName = "sheet.jpg"
 // Layout decides where a run's results live.
 //
 //	<root>/<infohash>/<params>/
-//	├── <file-slug>/
-//	│   ├── frames/000.jpg …
-//	│   ├── sheet.jpg
-//	│   └── manifest.json
+//	├── <infohash>.torrent
+//	├── run.json
+//	└── <file-slug>/
+//	    ├── frames/000.jpg …
+//	    ├── sheet.jpg
+//	    └── manifest.json
 //
 // Keying by infohash and by a hash of the parameters that change the result is
 // what lets an identical rerun be served from disk without going near the
@@ -39,6 +41,26 @@ type Layout struct {
 // RunDir is the directory holding everything this run produces.
 func (l Layout) RunDir() string {
 	return filepath.Join(l.Root, l.InfoHash, l.Params)
+}
+
+// TorrentPath is where the run's own .torrent is kept.
+//
+// It is named after the infohash rather than given a fixed name the way
+// run.json and sheet.jpg are, and the reason is that this is the one artefact
+// meant to LEAVE the run directory: it is what a browser downloads and what
+// gets dropped into a torrent client's watch directory, where "run.torrent"
+// would collide with every other run's and say nothing about which torrent it
+// is. The name is redundant with the directory two levels up, deliberately -
+// the redundancy is what survives the copy.
+//
+// It sits in the run directory beside run.json rather than one level up
+// beside the sibling parameter sets, even though the file is byte-identical
+// in every one of them: a parameter directory is the unit that gets removed,
+// and an artefact belonging to a run belongs where the rest of that run's
+// output is. Whoever serves it may therefore find the same file under several
+// params (see internal/web).
+func (l Layout) TorrentPath() string {
+	return filepath.Join(l.RunDir(), l.InfoHash+".torrent")
 }
 
 // FileDir is where one video file's results go.
@@ -127,7 +149,44 @@ func (w *Writer) WriteFile(fileIndex int, filePath, name string, data []byte) (s
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create file directory: %w", err)
 	}
+	return writeAtomic(dir, name, data)
+}
 
+// WriteTorrent stores the run's own .torrent in the run directory, next to
+// run.json rather than inside any one file's directory.
+//
+// It is the per-run counterpart of WriteFile, and it exists here rather than
+// beside cache.SaveRun for two reasons. cache owns a FORMAT - it marshals the
+// run record it defines and writes only that - whereas this package owns
+// WHERE a run's output lives (Layout) and how an artefact reaches disk
+// safely; a .torrent is an artefact of the run exactly as the contact sheet
+// is an artefact of a file, not a record cache can parse back. And doing it
+// here means one copy of the temp-write-and-rename discipline covers it: the
+// UI hands this file straight to a torrent client, so a reader must never be
+// able to see a half-written one, which is the same guarantee every other
+// write in this file already makes.
+func (w *Writer) WriteTorrent(data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("the torrent file for %s is empty", w.layout.InfoHash)
+	}
+	path := w.layout.TorrentPath()
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create run directory: %w", err)
+	}
+	return writeAtomic(dir, filepath.Base(path), data)
+}
+
+// writeAtomic puts data at dir/name by writing a temporary file beside it and
+// renaming it into place.
+//
+// The rename is what makes it atomic, and it only is because the temporary
+// file is created in the destination's own directory: a rename across
+// filesystems is a copy, and a copy is exactly the half-written state every
+// caller here is avoiding. The permissions are set on the temporary file
+// before the rename for the same reason - a file that appears already
+// readable rather than one that becomes readable a moment later.
+func writeAtomic(dir, name string, data []byte) (string, error) {
 	final := filepath.Join(dir, name)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {

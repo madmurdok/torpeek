@@ -325,3 +325,208 @@ func TestQueuedOrRunningNeverMergesWithADiskRecord(t *testing.T) {
 		}
 	}
 }
+
+// findByHash is the small lookup every TOR-72 test below needs: pull the one
+// row for an infohash out of the full listing, failing loudly if it is not
+// there rather than letting a nil-slice index panic obscure the point of the
+// test.
+func findByHash(t *testing.T, rows []RunSummary, hash string) RunSummary {
+	t.Helper()
+	for _, row := range rows {
+		if row.InfoHash == hash {
+			return row
+		}
+	}
+	t.Fatalf("no row for infohash %s in %+v", hash, rows)
+	return RunSummary{}
+}
+
+// TestDiskRowIsDoneWhenSelectedFilesAllComplete is TOR-72's acceptance
+// criterion for a disk-only row, the "not partial" half: three of six files
+// deliberately chosen (Selected), all three complete, two files nobody ever
+// asked for left over. That is Done, not Partial - Files (6) is deliberately
+// not the number Partial is judged against.
+func TestDiskRowIsDoneWhenSelectedFilesAllComplete(t *testing.T) {
+	root := t.TempDir()
+	const hash = "1111000000000000000000000000000000000f"
+
+	writeRun(t, root, hash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: hash,
+		Name:     "Chosen Three",
+		Videos: []cache.File{
+			{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}, {Index: 2, Path: "c.mkv"},
+			{Index: 3, Path: "d.mkv"}, {Index: 4, Path: "e.mkv"}, {Index: 5, Path: "f.mkv"},
+		},
+		Selected: []int{0, 2, 4},
+		Complete: []int{0, 2, 4},
+	})
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, (&fakeRun{}).runner)
+
+	row := findByHash(t, listRuns(t, ts.URL), hash)
+	if row.Files != 6 || row.Selected != 3 || row.Complete != 3 {
+		t.Fatalf("row files/selected/complete = %d/%d/%d, want 6/3/3", row.Files, row.Selected, row.Complete)
+	}
+	if row.Partial() {
+		t.Errorf("row is Partial, want Done: a narrower selection that fully finished is not a partial result: %+v", row)
+	}
+}
+
+// TestDiskRowIsPartialWhenASelectedFileHasNoFrames is the other half: one of
+// the files someone actually asked for came out with no frames. Complete is
+// short of Selected, which is exactly what Partial means - regardless of how
+// many other, never-requested files the torrent holds.
+func TestDiskRowIsPartialWhenASelectedFileHasNoFrames(t *testing.T) {
+	root := t.TempDir()
+	const hash = "2222000000000000000000000000000000000f"
+
+	writeRun(t, root, hash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: hash,
+		Name:     "One Selected File Failed",
+		Videos: []cache.File{
+			{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}, {Index: 2, Path: "c.mkv"},
+		},
+		Selected: []int{0, 2},
+		Complete: []int{0},
+	})
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, (&fakeRun{}).runner)
+
+	row := findByHash(t, listRuns(t, ts.URL), hash)
+	if row.Selected != 2 || row.Complete != 1 {
+		t.Fatalf("row selected/complete = %d/%d, want 2/1", row.Selected, row.Complete)
+	}
+	if !row.Partial() {
+		t.Errorf("row is Done, want Partial: a selected file (index 2) has no frames: %+v", row)
+	}
+}
+
+// TestPreTOR65RecordDegradesHonestly covers a record written before TOR-65:
+// Selected is absent (nil), not merely empty, because the field itself did
+// not exist yet. cache.Run.SelectedCount's documented fallback is Videos -
+// the same denominator a listing compared Complete against before Selected
+// existed - so this must read exactly as it always did: Partial when
+// Complete is short of the full file count, Done when it is not. It must not
+// read as "nothing was selected" (which would make every such record with
+// any complete file read as impossibly over 100% selected, or as never
+// partial no matter how incomplete it is).
+func TestPreTOR65RecordDegradesHonestly(t *testing.T) {
+	root := t.TempDir()
+	const (
+		wholeHash   = "3333000000000000000000000000000000000f"
+		partialHash = "4444000000000000000000000000000000000f"
+	)
+
+	// No Selected key at all - cache.Run's zero value for that field is nil,
+	// and this is written the same way a 0.4.0-shaped record is elsewhere in
+	// this file: by hand, so nothing here accidentally sends "[]" instead.
+	writeRun(t, root, wholeHash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: wholeHash,
+		Name:     "Old Record, Fully Captured",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}},
+		Complete: []int{0, 1},
+	})
+	writeRun(t, root, partialHash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: partialHash,
+		Name:     "Old Record, One File Short",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}},
+		Complete: []int{0},
+	})
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, (&fakeRun{}).runner)
+
+	rows := listRuns(t, ts.URL)
+
+	whole := findByHash(t, rows, wholeHash)
+	if whole.Selected != 2 {
+		t.Fatalf("whole record selected = %d, want 2 (fallback to Videos)", whole.Selected)
+	}
+	if whole.Partial() {
+		t.Errorf("fully-captured old record reads Partial, want Done: %+v", whole)
+	}
+
+	partial := findByHash(t, rows, partialHash)
+	if partial.Selected != 2 {
+		t.Fatalf("partial record selected = %d, want 2 (fallback to Videos)", partial.Selected)
+	}
+	if !partial.Partial() {
+		t.Errorf("one-file-short old record reads Done, want Partial: %+v", partial)
+	}
+}
+
+// TestLiveRowReadsDoneOrPartial is TOR-72's acceptance criterion for a live
+// row (one still carrying its own registry ID and State), the counterpart of
+// the disk-row tests above: the same Selected-vs-Complete arithmetic must
+// hold once a live, finished entry has merged with its own disk record
+// (TestMergesALiveFinishedRunWithItsOwnDiskRecord is the merge itself; this
+// is what TOR-72 layers on top of it).
+func TestLiveRowReadsDoneOrPartial(t *testing.T) {
+	root := t.TempDir()
+	const (
+		doneHash   = "5555000000000000000000000000000000000f"
+		doneSource = "magnet:?xt=urn:btih:" + doneHash
+		partHash   = "6666000000000000000000000000000000000f"
+		partSource = "magnet:?xt=urn:btih:" + partHash
+	)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	doneRun := startRun(t, ts.URL, doneSource)
+	fake.send(t, doneSource, core.MetadataReady{Name: "Live Done", InfoHash: doneHash})
+	waitFor(t, func() bool { return runInfo(t, srv, doneRun.id).InfoHash == doneHash })
+	writeRun(t, root, doneHash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: doneHash,
+		Name:     "Live Done",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}},
+		Selected: []int{0},
+		Complete: []int{0},
+	})
+	fake.finish(t, doneSource)
+	waitFor(t, func() bool { return runInfo(t, srv, doneRun.id).State == RunDone })
+
+	partRun := startRun(t, ts.URL, partSource)
+	fake.send(t, partSource, core.MetadataReady{Name: "Live Partial", InfoHash: partHash})
+	waitFor(t, func() bool { return runInfo(t, srv, partRun.id).InfoHash == partHash })
+	writeRun(t, root, partHash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: partHash,
+		Name:     "Live Partial",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}},
+		Selected: []int{0, 1},
+		Complete: []int{0},
+	})
+	fake.finish(t, partSource)
+	waitFor(t, func() bool { return runInfo(t, srv, partRun.id).State == RunDone })
+
+	rows := listRuns(t, ts.URL)
+
+	done := findByHash(t, rows, doneHash)
+	if done.ID != doneRun.id || done.State != "done" {
+		t.Fatalf("done row id/state = %q/%q, want the live id and state done: %+v", done.ID, done.State, done)
+	}
+	if done.Partial() {
+		t.Errorf("live row with its one selected file complete reads Partial, want Done: %+v", done)
+	}
+
+	partial := findByHash(t, rows, partHash)
+	if partial.ID != partRun.id || partial.State != "done" {
+		t.Fatalf("partial row id/state = %q/%q, want the live id and state done: %+v", partial.ID, partial.State, partial)
+	}
+	if !partial.Partial() {
+		t.Errorf("live row with a selected, incomplete file reads Done, want Partial: %+v", partial)
+	}
+}
