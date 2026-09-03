@@ -1,6 +1,9 @@
 package swarm
 
 import (
+	"bytes"
+	"fmt"
+
 	"github.com/anacrolix/torrent"
 )
 
@@ -79,4 +82,55 @@ func (t *Torrent) Downloaded() int64 {
 func (t *Torrent) Peers() (connected, seeds int) {
 	stats := t.t.Stats()
 	return stats.ActivePeers, stats.ConnectedSeeders
+}
+
+// TorrentFile renders this torrent as the bytes of a loadable .torrent file.
+//
+// The info dictionary is copied byte for byte from what the swarm actually
+// sent - for a magnet, the BEP 9 metadata anacrolix kept exactly as it
+// arrived - rather than re-encoded from the parsed struct, so the infohash of
+// the saved file is the infohash of the torrent. That is the only property
+// that makes saving one worth doing at all, and it is the property a test can
+// check by loading the file back rather than by trusting the write.
+//
+// Everything OUTSIDE the info dictionary is synthesised, not recovered, and
+// that difference is worth stating rather than implying: anacrolix's
+// newMetaInfo stamps a creation date of now, a comment of "dynamic metainfo
+// from client" and a created-by of "https://github.com/anacrolix/torrent"
+// (torrent.go), because the original wrapper is simply not part of what a
+// magnet fetches. The announce list is the real one - a magnet's tr=
+// parameters, or a .torrent's own - so the saved file still finds its swarm.
+// A .torrent written by torpeek is therefore a faithful TORRENT and an
+// unfaithful FILE: it will never be byte-identical to the one somebody
+// originally published, and nothing should compare it that way.
+//
+// carriedOverMetainfo is what keeps the result loadable rather than merely
+// written. anacrolix always allocates PieceLayers and a v1 torrent fills none
+// of it, while bencode's omitempty tests a map with IsNil - so an
+// empty-but-non-nil map is not omitted, it is written out as
+// "piece layers": de, and reads back as a torrent claiming v2 piece layers
+// with no roots to match: exactly the state TOR-49 found AddTorrent
+// rejecting file by file. UrlList is the same shape of problem one field
+// over (newMetaInfo allocates it empty for a torrent with no web seeds); it
+// is harmless to a loader, but it is a key describing something that does not
+// exist, so it is dropped here rather than written.
+func (t *Torrent) TorrentFile() ([]byte, error) {
+	mi := carriedOverMetainfo(t.t.Metainfo())
+	if len(mi.UrlList) == 0 {
+		mi.UrlList = nil
+	}
+	if len(mi.InfoBytes) == 0 {
+		// Unreachable through *Torrent, whose whole premise is that the
+		// metadata has arrived (newTorrent reads the file list at
+		// construction). Checked anyway, because the failure it guards
+		// against is a .torrent with no info dictionary written to disk and
+		// discovered only by whoever later tried to load it.
+		return nil, fmt.Errorf("torrent %q has no info dictionary to save", t.t.Name())
+	}
+
+	var buf bytes.Buffer
+	if err := mi.Write(&buf); err != nil {
+		return nil, fmt.Errorf("encode the torrent file: %w", err)
+	}
+	return buf.Bytes(), nil
 }

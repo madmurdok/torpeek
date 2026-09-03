@@ -227,3 +227,72 @@ func TestNewWriterRejectsEmptyRoot(t *testing.T) {
 		t.Error("NewWriter accepted an empty root")
 	}
 }
+
+// TestWriteTorrentLandsInTheRunDirectory is the per-run half of the layout:
+// the .torrent belongs beside run.json, not inside any one video file's
+// directory, and it is named after the infohash so it stays meaningful once
+// it is copied out of here - into a browser's downloads folder, or into a
+// torrent client's watch directory (TOR-73).
+func TestWriteTorrentLandsInTheRunDirectory(t *testing.T) {
+	layout := testLayout(t)
+	w, err := NewWriter(layout)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+
+	path, err := w.WriteTorrent([]byte("d8:announce0:e"))
+	if err != nil {
+		t.Fatalf("WriteTorrent: %v", err)
+	}
+
+	want := filepath.Join(layout.RunDir(), layout.InfoHash+".torrent")
+	if path != want {
+		t.Errorf("torrent written to %q, want %q", path, want)
+	}
+	if path != layout.TorrentPath() {
+		t.Errorf("WriteTorrent put the file at %q but Layout.TorrentPath says %q - "+
+			"a reader looking for it would not find it", path, layout.TorrentPath())
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the torrent back: %v", err)
+	}
+	if string(data) != "d8:announce0:e" {
+		t.Errorf("torrent contents = %q, want %q", data, "d8:announce0:e")
+	}
+
+	// The same guarantee every other write here makes, and it matters more
+	// for this one: the UI hands this file to a torrent client, which will
+	// refuse a half-written one.
+	entries, err := os.ReadDir(layout.RunDir())
+	if err != nil {
+		t.Fatalf("read the run directory: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			t.Errorf("temporary file %q left behind in the run directory", e.Name())
+		}
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat the torrent: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Errorf("torrent mode is %v, want 0644 - it is written for someone else to read", info.Mode().Perm())
+	}
+}
+
+// TestWriteTorrentRejectsEmptyData: an empty file would still be a file, and
+// a run directory holding a zero-byte .torrent is worse than one holding
+// none - the UI would offer a link to something no client can load.
+func TestWriteTorrentRejectsEmptyData(t *testing.T) {
+	w, err := NewWriter(testLayout(t))
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if _, err := w.WriteTorrent(nil); err == nil {
+		t.Fatal("WriteTorrent accepted an empty torrent")
+	}
+}

@@ -470,8 +470,8 @@ func deleteStatus(err error) int {
 	}
 }
 
-// handleDefaults reports what a run does when the request does not say -
-// today just the frame count.
+// handleDefaults reports what a run does when the request does not say - the
+// frame count, and whether this server can hand a .torrent to a local client.
 //
 // It exists so the page can show the number actually in force rather than a
 // copy of it written into the HTML: the assets are static and served
@@ -479,8 +479,49 @@ func deleteStatus(err error) int {
 // so without this the field would read 20 on a server started as -n 6. The
 // server does not decide the value; it repeats what the one shared
 // core.Config already says (Config.DefaultCount).
+//
+// watch is the same idea for -watch-dir, and it is a boolean rather than the
+// directory itself on purpose: the page needs to know whether to draw the
+// button, and the path would be an operational detail travelling to a browser
+// for nothing. Without it the page would have to guess, and the requirement
+// is that the button is ABSENT when there is no watch directory - not present
+// and failing when it is pressed.
 func (s *Server) handleDefaults(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"count": s.cfg.DefaultCount})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"count": s.cfg.DefaultCount,
+		"watch": s.cfg.WatchDir != "",
+	})
+}
+
+// handleWatchTorrent copies a run's saved .torrent into the watch directory
+// so a client on this host queues it (TOR-73). See Server.SendToWatchDir for
+// why it is addressed by a files/{id} handle and why the copy is written
+// through a temporary name.
+func (s *Server) handleWatchTorrent(w http.ResponseWriter, r *http.Request) {
+	dest, err := s.SendToWatchDir(r.PathValue("id"))
+	if err != nil {
+		writeError(w, watchStatus(err), err.Error())
+		return
+	}
+
+	// The destination is answered rather than swallowed: it is the operator's
+	// own directory on the operator's own host, and seeing which file landed
+	// where is how a person confirms the drop worked without going to look.
+	writeJSON(w, http.StatusOK, map[string]any{"path": dest})
+}
+
+// watchStatus maps the two ways this can be turned away - a handle that names
+// no saved torrent, and a server with nowhere to put one - from the writes
+// that simply failed, which are the server's problem.
+func watchStatus(err error) int {
+	switch {
+	case errors.Is(err, errNoSuchTorrent):
+		return http.StatusNotFound
+	case errors.Is(err, errWatchUnavailable):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // handleFile serves one file the run announced: a frame, a contact sheet or a
@@ -498,6 +539,21 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Stat(path); err != nil {
 		http.NotFound(w, r)
 		return
+	}
+
+	// A .torrent needs both headers stated, and ServeFile states neither.
+	// Go's mime table has no entry for the extension, so the sniffer sees
+	// bencode - "d8:announce..." - decides it is text, and the browser
+	// renders a page of gibberish instead of saving a file. Content-Type
+	// names what it actually is, and Content-Disposition is what turns the
+	// link into a save; ServeFile leaves an already-set Content-Type alone,
+	// so setting it here wins. The filename is the file's own name on disk,
+	// which output.Layout deliberately made the infohash: unique in whatever
+	// download folder it lands in, and hex, so nothing in it can break out
+	// of the quoted header value.
+	if isTorrentPath(path) {
+		w.Header().Set("Content-Type", "application/x-bittorrent")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(path)+`"`)
 	}
 
 	http.ServeFile(w, r, path)

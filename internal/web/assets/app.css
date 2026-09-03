@@ -232,6 +232,26 @@ button:disabled { opacity: .5; }
 .run-detail-cancel { margin-left: auto; }
 .run-detail-error { color: #b3261e; }
 
+/* The run's own .torrent (TOR-73), under the summary line it belongs to.
+   The link is styled as a button rather than as text: it and the send button
+   are two ways of doing the same thing to the same file, and one looking like
+   prose beside a control would read as the lesser of them. */
+.torrent-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: .5rem 0 0; }
+.torrent-save {
+  padding: .45rem .7rem;
+  font-size: .85rem;
+  border: 1px solid #8886;
+  border-radius: .35rem;
+  color: inherit;
+  text-decoration: none;
+}
+.torrent-save:hover { background: #8882; }
+.torrent-send { font-size: .85rem; }
+/* What happened to the last send, in the one place a person is already
+   looking. It is the only confirmation there can be: nothing here can watch a
+   torrent client pick the file up. */
+.torrent-note { font-size: .8rem; opacity: .75; }
+
 /* The picker a multi-file torrent parks on (TOR-67): nothing has been
    downloaded beyond the metadata, and nothing will be until someone ticks a
    box here. It sits between the torrent's summary line and its (still

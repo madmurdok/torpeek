@@ -59,6 +59,7 @@ type Options struct {
 	WebPort     int
 	BasePath    string
 	Token       string
+	WatchDir    string
 	Headless    bool
 	Peers       []string
 	Upload      bool
@@ -179,6 +180,7 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.IntVar(&opts.WebPort, "web-port", 0, fmt.Sprintf("port for the web UI (default: %d)", web.DefaultPort))
 	fs.StringVar(&opts.BasePath, "base-path", "", "path the UI is mounted under behind a reverse proxy, e.g. /torpeek (default: the site root, section 3.3)")
 	fs.StringVar(&opts.Token, "web-token", "", "access token required to use the UI/API (default: none on localhost, auto-generated and required once reachable beyond it - a non-loopback -web-host or a -base-path; set this to pin one across restarts, e.g. under systemd, section 3.3)")
+	fs.StringVar(&opts.WatchDir, "watch-dir", "", "directory a torrent client on this host watches for .torrent files; with -web, a run then offers a button that drops its .torrent there (default: none, and the button is absent)")
 	fs.BoolVar(&opts.Headless, "headless", false, "do not try to open a browser; only serve (for a seedbox with no desktop, section 3.3)")
 	fs.BoolVar(&opts.Upload, "upload", true, "serve pieces back to the swarm while running")
 	fs.BoolVar(&opts.DHT, "dht", true, "use DHT and PEX (never for a private torrent)")

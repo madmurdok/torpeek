@@ -54,7 +54,13 @@ const el = {
 // sort is the table's current order: key names the column (a <th data-sort>
 // value), dir is "asc" or "desc". The default - date, newest first - is what
 // the panel already showed before it became a table (TOR-62).
-const state = { runs: new Map(), selected: null, sort: { key: "when", dir: "desc" } };
+// watch says whether this server was started with a watch directory
+// (-watch-dir), which GET /defaults answers. It gates one button and nothing
+// else: without a watch directory the button is absent rather than present
+// and failing, so the page has to be told before it draws one. False until
+// loadDefaults answers, which is the safe way round - a button that appears a
+// moment late is better than one that is there and cannot work.
+const state = { runs: new Map(), selected: null, watch: false, sort: { key: "when", dir: "desc" } };
 
 function url(path) {
   const u = new URL(path, document.baseURI);
@@ -332,6 +338,18 @@ function newRunEntry(id) {
     "</header>" +
     '<p class="run-detail-error" hidden></p>' +
     '<p class="torrent-summary" hidden></p>' +
+    // The run's own .torrent, offered once the run has announced one (TOR-73).
+    // It sits under the summary line - a property of the torrent, like the
+    // summary itself - and deliberately not inside a file block: there is one
+    // .torrent per run, not one per video file.
+    '<p class="torrent-actions" hidden>' +
+      '<a class="torrent-save" download ' +
+        'title="The info dictionary is the one the swarm sent, so this file\'s infohash is the torrent\'s. ' +
+        'The wrapper around it is generated: the creation date is when the file was written, and the comment ' +
+        'and created-by name the BitTorrent library, not whoever published the torrent.">Save .torrent</a>' +
+      '<button type="button" class="torrent-send" hidden>Send to my client</button>' +
+      '<span class="torrent-note"></span>' +
+    '</p>' +
     // The picker sits between the torrent's own summary line and its files:
     // the one gap in this pane, and both of its neighbours are already
     // scoped to this entry, so a second torrent's picker cannot land in it.
@@ -371,6 +389,9 @@ function newRunEntry(id) {
     // Set once this run's first file block is built, so every file after it
     // defaults to collapsed - only the first one earns the auto-expand.
     autoExpanded: false,
+    // torrentURL is the files/{id} handle the run's own done event announced
+    // for its saved .torrent, empty for a run that has none to offer.
+    torrentURL: "",
     rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta,
     rowWhen: whenCell, rowCancel: cancel,
     detailEl,
@@ -379,6 +400,10 @@ function newRunEntry(id) {
     detailCancel: detailEl.querySelector(".run-detail-cancel"),
     detailError: detailEl.querySelector(".run-detail-error"),
     torrentSummary: detailEl.querySelector(".torrent-summary"),
+    torrentActions: detailEl.querySelector(".torrent-actions"),
+    torrentSave: detailEl.querySelector(".torrent-save"),
+    torrentSend: detailEl.querySelector(".torrent-send"),
+    torrentNote: detailEl.querySelector(".torrent-note"),
     pickerEl: detailEl.querySelector(".picker"),
     pickerTitle: detailEl.querySelector(".picker-title"),
     pickerList: detailEl.querySelector(".picker-list"),
@@ -405,6 +430,7 @@ function newRunEntry(id) {
   entry.pickerAll.addEventListener("click", () => setAllPicked(entry, true));
   entry.pickerNone.addEventListener("click", () => setAllPicked(entry, false));
   entry.pickerGo.addEventListener("click", () => decide(entry));
+  entry.torrentSend.addEventListener("click", () => sendTorrent(entry));
 
   return entry;
 }
@@ -440,6 +466,11 @@ function resetRunContent(entry) {
   entry.picked.clear();
   entry.pickerList.replaceChildren();
   entry.pickerEl.hidden = true;
+  // The .torrent link goes with the rest of what this run has shown. It comes
+  // back from the done event the replayed history ends on, so a reconnecting
+  // page rebuilds it rather than keeping a handle the server may no longer
+  // resolve.
+  showTorrent(entry, "");
 }
 
 function syncEntry(entry) {
@@ -1182,6 +1213,55 @@ function link(href, text) {
   return a;
 }
 
+// showTorrent reveals - or takes away - the run's own .torrent.
+//
+// The one thing that decides whether the link is there is whether the run
+// announced a URL for it, which the server only does when the file is really
+// on disk (server.go's record). So a run captured before torpeek kept one,
+// and a run whose write failed, simply have no link; nothing here guesses at
+// a path, and there is no broken link to press.
+//
+// The anchor carries a bare download attribute rather than a filename: the
+// server sends a Content-Disposition naming the file after its infohash,
+// which is what a browser uses, and putting a prettier name here would only
+// be a name that never takes effect.
+function showTorrent(entry, href) {
+  entry.torrentURL = href || "";
+  entry.torrentActions.hidden = !entry.torrentURL;
+  entry.torrentNote.textContent = "";
+  if (!entry.torrentURL) {
+    entry.torrentSend.hidden = true;
+    return;
+  }
+  entry.torrentSave.href = url(entry.torrentURL);
+  entry.torrentSend.hidden = !state.watch;
+}
+
+// sendTorrent asks the server to drop this run's .torrent into the watch
+// directory a torrent client on that host is already reading (TOR-73).
+//
+// It is a separate action from the link beside it, not a fallback for it: the
+// link saves the file where the BROWSER is, which on a seedbox deployment is
+// somebody's laptop, while this one queues the torrent where the UI itself is
+// running. The answer names the file that landed, which is the only
+// confirmation available - nothing here can watch a torrent client pick it up.
+async function sendTorrent(entry) {
+  if (!entry.torrentURL) return;
+
+  entry.torrentSend.disabled = true;
+  entry.torrentNote.textContent = "sending…";
+  try {
+    const info = await post(entry.torrentURL + "/watch", {});
+    entry.torrentNote.textContent = "sent to " + (info.path || "the watch directory");
+    logFor(entry, "torrent sent to " + (info.path || "the watch directory"));
+  } catch (err) {
+    entry.torrentNote.textContent = String(err.message || err);
+    logFor(entry, "sending the torrent failed: " + (err.message || err));
+  } finally {
+    entry.torrentSend.disabled = false;
+  }
+}
+
 function apply(ev) {
   if (ev.type === "run_state") {
     // The one message with no "run" key is the connection marker: it opens
@@ -1270,6 +1350,11 @@ function apply(ev) {
 
     case "done":
       entry.progress = "";
+      // The run's own .torrent rides on this event because there is one per
+      // run: a live run announces the file it just wrote, and a run reopened
+      // from disk announces the same one, so the link does not depend on
+      // which process captured it.
+      showTorrent(entry, ev.torrent_url);
       syncEntry(entry);
       logFor(entry, "done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
           " file(s), " + ev.downloaded + " bytes in " + seconds(ev.elapsed_ms));
@@ -1358,6 +1443,13 @@ async function loadDefaults() {
     if (!response.ok) throw new Error(response.statusText);
     const data = await response.json();
     if (Number.isInteger(data.count) && data.count > 0) el.count.value = data.count;
+    state.watch = data.watch === true;
+    // This can land after a reconnecting socket has already replayed a
+    // finished run, so anything already showing a .torrent is asked again
+    // whether it may offer the button.
+    for (const entry of state.runs.values()) {
+      entry.torrentSend.hidden = !state.watch || !entry.torrentURL;
+    }
   } catch (err) {
     log("could not read the defaults: " + (err.message || err));
   }

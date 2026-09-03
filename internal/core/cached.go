@@ -269,6 +269,17 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 		})
 	}
 
+	// A run reopened from disk offers the very same .torrent a live one does,
+	// so the link does not quietly depend on whether this process happened to
+	// be the one that captured the run. It is stated only when the file is
+	// actually there, for the same reason the sheet above is: a run recorded
+	// before torpeek kept one has none, and that has to stay a cache hit
+	// without a link rather than become a miss.
+	torrentPath := h.layout.TorrentPath()
+	if _, err := os.Stat(torrentPath); err != nil {
+		torrentPath = ""
+	}
+
 	bus.Publish(Done{
 		Files:  len(h.manifests),
 		Frames: frames,
@@ -277,6 +288,7 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 		DownloadedByte: 0,
 		Elapsed:        time.Since(started),
 		Reason:         StopCompleted,
+		TorrentPath:    torrentPath,
 	})
 }
 

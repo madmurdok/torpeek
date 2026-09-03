@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
@@ -67,10 +69,26 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return engine.List(ctx, cfg)
 	}
 
+	// Checked before anything is served rather than when the button is
+	// pressed: a mistyped -watch-dir is a command line to fix, and finding
+	// out about it as a failed drop - minutes later, from a browser, on a
+	// machine nobody is sitting at - is the wrong place to learn it. A
+	// missing directory is not created here either: this flag names a
+	// directory some torrent client is already watching, and inventing one
+	// nothing watches would look like it worked.
+	watchDir, err := resolveWatchDir(opts.WatchDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		return ExitUsage
+	}
+
 	cfg := web.DefaultConfig()
 	if addr := webAddr(opts.WebHost, opts.WebPort); addr != "" {
 		cfg.Addr = addr
 	}
+	// Empty leaves the UI without the "send to my client" button entirely -
+	// see web.Config.WatchDir.
+	cfg.WatchDir = watchDir
 	cfg.BasePath = opts.BasePath
 	cfg.Token = opts.Token
 	// GET /runs lists what is already on disk (TOR-54) from the same root
@@ -167,6 +185,32 @@ func runConfig(base core.Config, req web.RunRequest) (core.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// resolveWatchDir turns -watch-dir into the absolute path the server will
+// copy into, refusing anything that is not already a directory.
+//
+// Absolute, because the answer a run gives back names where the file landed
+// and a relative path would name it from a working directory the person
+// reading the answer is not in. Empty stays empty: that is the documented way
+// to say "no watch directory", and it must not become the current one.
+func resolveWatchDir(dir string) (string, error) {
+	if dir == "" {
+		return "", nil
+	}
+
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve the watch directory: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("watch directory %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("watch directory %s is not a directory", abs)
+	}
+	return abs, nil
 }
 
 // webAddr turns -web-host/-web-port into a listen address, leaving the

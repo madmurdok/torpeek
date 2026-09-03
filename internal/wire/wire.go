@@ -95,10 +95,14 @@ func event(ev core.Event) map[string]any {
 			"manifest_path": e.ManifestPath, "sheet_path": e.SheetPath,
 		}
 	case core.Done:
+		// torrent_path is the run's own .torrent, the run-scoped sibling of
+		// file_done's manifest_path and sheet_path. Always present, empty
+		// when the run has none to offer (core.Done explains when that is),
+		// so a consumer reads one key rather than testing for its absence.
 		return map[string]any{
 			"type": "done", "reason": string(e.Reason), "files": e.Files,
 			"frames": e.Frames, "downloaded": e.DownloadedByte,
-			"elapsed_ms": e.Elapsed.Milliseconds(),
+			"elapsed_ms": e.Elapsed.Milliseconds(), "torrent_path": e.TorrentPath,
 		}
 	case core.Failed:
 		msg := ""

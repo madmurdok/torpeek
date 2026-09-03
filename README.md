@@ -140,6 +140,7 @@ make fmt
 | `-web-port` | `8765` | port for the web UI |
 | `-base-path` | the site root | path the UI is mounted under behind a reverse proxy, e.g. `/torpeek` |
 | `-web-token` | none on localhost | access token required to use the UI/API; auto-generated and required once reachable beyond localhost (a non-loopback `-web-host` or a `-base-path`) - set this to pin one across restarts, e.g. under systemd |
+| `-watch-dir` | none | directory a torrent client on this host watches for `.torrent` files; with `-web`, a run then offers a button that drops its `.torrent` there. Without it the button is absent |
 | `-headless` | `false` | do not try to open a browser; only serve (for a seedbox with no desktop) |
 | `-peer` | — | comma-separated peers to contact directly |
 | `-upload` | `true` | serve pieces back to the swarm while running |
@@ -190,20 +191,41 @@ The page's cancel button stops whatever is in the slot, or drops a queued run,
 and keeps what was produced. If no browser can be opened — a headless
 machine, a seedbox — the address is printed and the server keeps serving.
 
+Once a run is over it offers its `.torrent`, saved beside its frames. **Save
+.torrent** downloads it to wherever the browser is; that is not the same thing
+as starting it, because the browser is usually not the seedbox. **Send to my
+client** is: with `-watch-dir` pointed at a directory a torrent client on the
+same host already watches, the button drops a copy there and the client picks
+it up. No credentials, no client API, and no button at all when the flag is
+not set.
+
 ### Output layout
 
 ```
+<out>/<infohash>/<run-params>/<infohash>.torrent
+<out>/<infohash>/<run-params>/run.json
 <out>/<infohash>/<run-params>/<NN-file-name>/frames/000.jpg
 ```
 
 The infohash and the run parameters are part of the path so two runs over the
 same torrent with different settings do not overwrite each other.
 
+Every run keeps the `.torrent` it was made from, magnets included — the
+metadata a magnet fetches is exactly what a `.torrent` file carries. The info
+dictionary is stored byte for byte as it arrived, so the saved file's infohash
+is the torrent's; everything around it is generated when the file is written,
+because a magnet never fetches it. The creation date is that moment and the
+comment and created-by name the BitTorrent library, not whoever published the
+torrent. The trackers are the real ones, so the file finds its swarm. It is a
+faithful torrent and not a byte-identical copy of the original file.
+
 ### For scripts
 
 `-json` writes one event per line, each with an explicit `type`, covering the
 whole run: `metadata_ready`, `file_started`, `frame_ready`, `frame_skipped`,
-`progress`, `budget_warning`, `file_done`, `done`, `failed`.
+`progress`, `budget_warning`, `file_done`, `done`, `failed`. `done` carries
+`torrent_path`, the run's own saved `.torrent`, the way `file_done` carries
+`sheet_path` and `manifest_path`.
 
 ```sh
 torpeek -json -n 6 movie.torrent | jq -r 'select(.type == "frame_ready") | .path'
