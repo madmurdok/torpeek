@@ -31,6 +31,28 @@ acceptance:
 fmt:
 	go fmt ./...
 
+# TOR-46 keeps an agent's worktree out of git; it does not remove one. This
+# does, and only the ones that are finished: a worktree whose branch is
+# already merged into main has nothing left to hand back. `git worktree
+# prune` cannot do this - it only forgets entries whose directory a human
+# already deleted, so a worktree left in place stays listed forever.
+#
+# Never forces. `git worktree remove` refuses a worktree with uncommitted
+# changes, which is exactly the protection wanted: an agent still working in
+# one keeps it, and says so.
+.PHONY: prune-worktrees
+prune-worktrees:
+	@for dir in .claude/worktrees/*; do \
+		[ -d "$$dir" ] || continue; \
+		branch=$$(git -C "$$dir" branch --show-current); \
+		if git branch --merged main | grep -qx "[ +*]*$$branch"; then \
+			echo "removing $$dir ($$branch, merged)"; \
+			git worktree remove "$$dir" || echo "  kept: $$dir has uncommitted work"; \
+		else \
+			echo "keeping  $$dir ($$branch, not merged)"; \
+		fi; \
+	done
+
 .PHONY: clean
 clean:
 	rm -rf bin dist
