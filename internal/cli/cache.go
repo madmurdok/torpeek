@@ -36,8 +36,13 @@ func runCache(opts Options, out string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "torpeek: -cache-clear wants infohash/params (see -cache-list), got %q\n", opts.CacheClear)
 			return ExitUsage
 		}
-		if err := cache.Clear(out, infoHash, params); err != nil {
+		removed, err := cache.Clear(out, infoHash, params)
+		if err != nil {
 			fmt.Fprintf(stderr, "torpeek: %v\n", err)
+			return ExitFailed
+		}
+		if !removed {
+			fmt.Fprintf(stderr, "torpeek: no cached set %s/%s under %s\n", infoHash, params, out)
 			return ExitFailed
 		}
 		fmt.Fprintf(stdout, "removed %s/%s\n", infoHash, params)
