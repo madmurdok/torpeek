@@ -23,6 +23,7 @@ const el = {
   status: document.getElementById("status"),
   form: document.getElementById("start"),
   source: document.getElementById("source"),
+  count: document.getElementById("count"),
   mode: document.getElementById("mode"),
   go: document.getElementById("go"),
   error: document.getElementById("error"),
@@ -560,6 +561,13 @@ function fileBlock(entry, index) {
       '<dl class="specs"></dl>' +
       '<div class="tracks"></div>' +
       '<p class="file-links" hidden></p>' +
+      '<p class="file-regen">' +
+        '<label class="file-regen-label">Frames' +
+          '<input class="file-regen-count" type="number" min="1" step="1" inputmode="numeric"' +
+          ' aria-label="Frames for this file">' +
+        "</label>" +
+        '<button type="button" class="file-regen-go">Regenerate</button>' +
+      "</p>" +
       '<p class="file-progress" hidden></p>' +
       '<div class="grid"></div>' +
     "</div>";
@@ -574,6 +582,8 @@ function fileBlock(entry, index) {
     specs: article.querySelector(".specs"),
     tracks: article.querySelector(".tracks"),
     links: article.querySelector(".file-links"),
+    regenCount: article.querySelector(".file-regen-count"),
+    regenGo: article.querySelector(".file-regen-go"),
     progress: article.querySelector(".file-progress"),
     grid: article.querySelector(".grid"),
     expanded: false,
@@ -583,12 +593,61 @@ function fileBlock(entry, index) {
   };
   entry.fileEntries.set(index, fentry);
 
+  fentry.regenCount.value = el.count.value;
+  fentry.regenGo.addEventListener("click", () => regenerate(entry, index, fentry));
+
   fentry.toggle.addEventListener("click", () => setFileExpanded(fentry, !fentry.expanded));
   setFileExpanded(fentry, !entry.autoExpanded);
   entry.autoExpanded = true;
   updateFileSummary(fentry);
 
   return fentry;
+}
+
+// regenerate asks for this one file again at a different frame count.
+//
+// It is an ordinary run, started exactly the way the intake line starts one:
+// the count is part of core.ParamsKey and frames.Plan spreads its points
+// evenly across the window, so asking for 21 moves every timestamp rather
+// than adding one to the 20 already taken. That makes it a SEPARATE result
+// set on disk, and nothing of the old one is touched or deleted - TOR-69 is
+// what later shows both sets as one grid.
+//
+// The profile is whatever the intake select currently shows: a finished
+// run's own profile is not on the wire (run_state does not carry it, and the
+// listing only has the opaque params hash), so this is the one mode a person
+// can actually see while pressing the button.
+//
+// A run started from a dropped .torrent cannot be repeated this way: its
+// source is a staged temp file, gone once the run ended, so the new run
+// fails the way any unopenable source does - with a failed row and the
+// server's own message. Keeping the .torrent is TOR-73.
+async function regenerate(entry, index, fentry) {
+  showError("");
+  if (!entry.source) {
+    showError("this torrent has no source to repeat");
+    return;
+  }
+
+  const n = parseInt(fentry.regenCount.value, 10);
+  const count = Number.isInteger(n) && n > 0 ? n : countValue();
+
+  fentry.regenGo.disabled = true;
+  try {
+    const info = await post("runs", {
+      source: entry.source,
+      mode: el.mode.value,
+      // swarm.Select already takes a torrent index as a spec, so the index
+      // the events arrived under is the whole selection.
+      files: [String(index)],
+      count,
+    });
+    began(info);
+  } catch (err) {
+    showError(String(err.message || err));
+  } finally {
+    fentry.regenGo.disabled = false;
+  }
 }
 
 function setFileExpanded(fentry, expanded) {
@@ -838,6 +897,36 @@ async function post(path, body) {
   return data;
 }
 
+// countValue reads the intake's frame count as something a request can carry.
+//
+// An empty field returns undefined rather than a number, and JSON.stringify
+// drops an undefined field entirely - so "I did not choose" and "no count on
+// the wire" are the same thing by construction, and the server's own -n
+// stays in force for a page that never touched the field. Anything that is
+// not a positive integer is treated the same way: the field's min="1" and
+// the server's own check are the two places a bad number is refused, not
+// here.
+function countValue() {
+  const n = parseInt(el.count.value, 10);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+// loadDefaults fills the count field with the number a run would actually
+// use - GET /defaults reports the server's own -n, since the page is served
+// straight out of the embed with no templating step that could substitute it
+// into the HTML. A failure is not fatal: the field stays empty, which sends
+// no count and therefore gets that same default anyway.
+async function loadDefaults() {
+  try {
+    const response = await fetch(url("defaults"));
+    if (!response.ok) throw new Error(response.statusText);
+    const data = await response.json();
+    if (Number.isInteger(data.count) && data.count > 0) el.count.value = data.count;
+  } catch (err) {
+    log("could not read the defaults: " + (err.message || err));
+  }
+}
+
 // loadRuns populates the panel with every torrent GET /runs already knows
 // about - what is still live in this process, and everything on disk under
 // OutputRoot - so a page that loads after a restart still finds them
@@ -892,6 +981,10 @@ async function uploadTorrent(file) {
   const body = new FormData();
   body.append("torrent", file);
   body.append("mode", el.mode.value);
+  // A drop reads the same intake field as a pasted magnet; the handler on
+  // the other side treats an absent value as the server's default.
+  const count = countValue();
+  if (count !== undefined) body.append("count", String(count));
   try {
     const response = await fetch(url("runs/upload"), { method: "POST", body });
     const info = await response.json().catch(() => ({}));
@@ -920,7 +1013,7 @@ el.form.addEventListener("submit", async (event) => {
   const source = el.source.value;
   el.go.disabled = true;
   try {
-    const info = await post("runs", { source, mode: el.mode.value });
+    const info = await post("runs", { source, mode: el.mode.value, count: countValue() });
     // Cleared the moment the server has accepted the run, not when it
     // finishes - that is the whole point: a second torrent can be queued up
     // right behind the first without waiting for anything.
@@ -1073,5 +1166,6 @@ window.addEventListener("resize", () => {
 });
 
 updateSortIndicators();
+loadDefaults();
 loadRuns();
 connect();

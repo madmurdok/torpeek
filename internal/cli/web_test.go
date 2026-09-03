@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/web"
 )
@@ -80,5 +81,44 @@ func TestRunConfigModeSelectsProfile(t *testing.T) {
 	}
 	if cfg.Profile.Name != swarm.MinTraffic.Name {
 		t.Errorf("Profile = %v, want %v", cfg.Profile.Name, swarm.MinTraffic.Name)
+	}
+}
+
+// TestRunConfigCarriesTheFrameCount is the inbound half of TOR-68: the
+// number typed beside the mode select has to reach core.Config.Plan.Count,
+// which is what ParamsKey hashes and Plan.Points spreads - so a count is
+// also what makes a regeneration a separate result set rather than an
+// edit of the first one.
+func TestRunConfigCarriesTheFrameCount(t *testing.T) {
+	base := core.Config{Plan: frames.DefaultPlan()}
+	req := web.RunRequest{Source: "magnet:?xt=urn:btih:abc", Count: 6}
+
+	cfg, err := runConfig(base, req)
+	if err != nil {
+		t.Fatalf("runConfig: %v", err)
+	}
+	if cfg.Plan.Count != 6 {
+		t.Errorf("Plan.Count = %d, want 6", cfg.Plan.Count)
+	}
+	if cfg.Plan.Start != base.Plan.Start || cfg.Plan.End != base.Plan.End {
+		t.Errorf("the count replaced the window too: %+v, want the base window %+v", cfg.Plan, base.Plan)
+	}
+}
+
+// TestRunConfigKeepsTheDashNFlagWhenTheWebSendsNoCount is the other half of
+// treating zero as "the request said nothing": -n is set before serveWeb
+// ever runs, and a request from a page that never touched the field - or
+// the server's own startup run - must not turn the count into zero, which
+// frames.Plan.Validate would then refuse outright.
+func TestRunConfigKeepsTheDashNFlagWhenTheWebSendsNoCount(t *testing.T) {
+	base := core.Config{Plan: frames.Plan{Count: 6, Start: frames.DefaultStart, End: frames.DefaultEnd}}
+	req := web.RunRequest{Source: "magnet:?xt=urn:btih:abc"}
+
+	cfg, err := runConfig(base, req)
+	if err != nil {
+		t.Fatalf("runConfig: %v", err)
+	}
+	if cfg.Plan.Count != 6 {
+		t.Errorf("Plan.Count = %d, want 6 preserved from -n", cfg.Plan.Count)
 	}
 }

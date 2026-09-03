@@ -48,6 +48,8 @@
           </label>
         </div>
         <div class="controls">
+          <input id="count" name="count" type="number" min="1" step="1" inputmode="numeric"
+                 aria-label="Frames per video file" title="Frames per video file">
           <select id="mode" name="mode">
             <option value="min-time">fastest</option>
             <option value="min-traffic">least traffic</option>
@@ -55,7 +57,8 @@
           <button id="go" type="submit">Take frames</button>
         </div>
       </form>
-      <p class="hint">You can also drop a .torrent file anywhere on this page. Adding another torrent while one is
+      <p class="hint">The number is frames per video file, so a torrent holding six quality variants costs six times
+        it. You can also drop a .torrent file anywhere on this page. Adding another torrent while one is
         already running just queues it - no need to wait.</p>
       <p id="error" class="error" hidden></p>
     </section>

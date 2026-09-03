@@ -182,6 +182,16 @@ func get(t *testing.T, base, path string) *http.Response {
 func uploadTorrent(t *testing.T, base string, content []byte, mode string) *http.Response {
 	t.Helper()
 
+	return uploadTorrentWithCount(t, base, content, mode, "")
+}
+
+// uploadTorrentWithCount is uploadTorrent for the tests that also send the
+// intake line's frame count (TOR-68), which the drop path reads off the same
+// form. An empty count writes no field at all, which is what a page with an
+// untouched field sends.
+func uploadTorrentWithCount(t *testing.T, base string, content []byte, mode, count string) *http.Response {
+	t.Helper()
+
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	part, err := mw.CreateFormFile("torrent", "release.torrent")
@@ -194,6 +204,11 @@ func uploadTorrent(t *testing.T, base string, content []byte, mode string) *http
 	if mode != "" {
 		if err := mw.WriteField("mode", mode); err != nil {
 			t.Fatalf("write mode field: %v", err)
+		}
+	}
+	if count != "" {
+		if err := mw.WriteField("count", count); err != nil {
+			t.Fatalf("write count field: %v", err)
 		}
 	}
 	if err := mw.Close(); err != nil {
@@ -1533,4 +1548,118 @@ func stagedUploads(t *testing.T) map[string]bool {
 		out[dir] = true
 	}
 	return out
+}
+
+// TestStartRunRejectsANegativeCount: a count that frames.Plan.Validate would
+// refuse is refused about the request instead, before anything is queued. The
+// alternative is a 202 followed minutes later by a failed run, for a number
+// the client could see was wrong the moment it sent it.
+func TestStartRunRejectsANegativeCount(t *testing.T) {
+	fake := &fakeRun{}
+	ts := testServer(t, fake.runner)
+
+	resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc","count":-1}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /runs with a negative count: status %d, want 400", resp.StatusCode)
+	}
+	if fake.starts != 0 {
+		t.Errorf("the runner was called %d times for a negative count, want 0", fake.starts)
+	}
+}
+
+// TestStartRunAcceptsAnAbsentCount pins the other half of treating zero as
+// "not stated": it is not a rejection, it is how a page that never touched
+// the field asks for the server's own -n.
+func TestStartRunAcceptsAnAbsentCount(t *testing.T) {
+	var got int
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("POST /runs with no count: status %d, want 202", resp.StatusCode)
+	}
+	if got != 0 {
+		t.Errorf("Count = %d, want 0 - the request said nothing", got)
+	}
+}
+
+// TestStartRunCarriesTheFrameCount is the wire half of TOR-68: the number
+// typed beside the mode select has to arrive on the RunRequest the runner
+// sees, which is where runConfig turns it into core.Config.Plan.Count.
+func TestStartRunCarriesTheFrameCount(t *testing.T) {
+	var got int
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc","count":6}`)
+
+	if got != 6 {
+		t.Errorf("Count = %d, want 6", got)
+	}
+}
+
+// TestUploadCarriesTheFrameCount: the drop path builds its RunRequest by
+// hand, so the count has to be read off the multipart form there too - a
+// dropped .torrent reads the same intake field as a pasted magnet.
+func TestUploadCarriesTheFrameCount(t *testing.T) {
+	var got int
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	uploadTorrentWithCount(t, ts.URL, []byte("torrent-bytes"), "", "6")
+
+	if got != 6 {
+		t.Errorf("Count = %d, want 6 from the multipart form", got)
+	}
+}
+
+// TestUploadWithAnUnreadableCountFallsBackToTheDefault: a form value that is
+// not a number is no count at all rather than a refused drop. A drop is not
+// the place to argue about a form field, and "no count" already means
+// exactly what the server's own default means.
+func TestUploadWithAnUnreadableCountFallsBackToTheDefault(t *testing.T) {
+	got := -1
+	runner := func(ctx context.Context, req RunRequest) (<-chan core.Event, error) {
+		got = req.Count
+		return nil, errors.New("stop here")
+	}
+	ts := testServer(t, runner)
+
+	resp := uploadTorrentWithCount(t, ts.URL, []byte("torrent-bytes"), "", "not-a-number")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Errorf("upload with an unreadable count: status %d, want 202", resp.StatusCode)
+	}
+	if got != 0 {
+		t.Errorf("Count = %d, want 0 - an unreadable field is no count", got)
+	}
+}
+
+// TestDefaultsReportsTheServersFrameCount is what lets the intake field show
+// the number actually in force. The assets are static, served straight out
+// of the embed with no templating step, so a default written into the HTML
+// would quietly disagree with a server started as -n 6; the page asks
+// instead.
+func TestDefaultsReportsTheServersFrameCount(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.DefaultCount = 6
+	fake := &fakeRun{}
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	resp := get(t, ts.URL, "/defaults")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /defaults: status %d, want 200", resp.StatusCode)
+	}
+	if count, ok := decodeBody(t, resp)["count"].(float64); !ok || int(count) != 6 {
+		t.Errorf("count = %v, want 6", decodeBody(t, resp)["count"])
+	}
 }
