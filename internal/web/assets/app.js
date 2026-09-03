@@ -715,6 +715,16 @@ function trackGroup(label, tracks, formatter) {
 // button - never from a later file_started/frame_ready/progress event - so
 // a person's click can neither be collapsed out from under them nor have
 // the expansion stolen back to file zero.
+//
+// One level inside that, the summary - specs and tracks - has its own
+// accordion (TOR-71), collapsed by default with no auto-expand exception:
+// the frames are what the file was opened for, the metadata is a detail on
+// top of that. Same shape as the file-level toggle - a header button plus a
+// body whose `hidden` attribute is the only thing collapse touches - and the
+// same rule: fentry.metaExpanded changes only inside setMetaExpanded, called
+// from exactly two places (the toggle's click handler, and once here at
+// creation), so a later file_started re-filling .specs/.tracks in place can
+// never reopen or reclose it.
 function fileBlock(entry, index) {
   let fentry = entry.fileEntries.get(index);
   if (fentry) return fentry;
@@ -730,8 +740,18 @@ function fileBlock(entry, index) {
       "</button>" +
     "</h2>" +
     '<div class="file-body">' +
-      '<dl class="specs"></dl>' +
-      '<div class="tracks"></div>' +
+      '<section class="meta">' +
+        '<h3 class="meta-title">' +
+          '<button type="button" class="meta-toggle" aria-expanded="false">' +
+            '<span class="meta-toggle-icon" aria-hidden="true"></span>' +
+            '<span class="meta-toggle-label">Metadata</span>' +
+          "</button>" +
+        "</h3>" +
+        '<div class="meta-body">' +
+          '<dl class="specs"></dl>' +
+          '<div class="tracks"></div>' +
+        "</div>" +
+      "</section>" +
       '<p class="file-links" hidden></p>' +
       '<p class="file-regen">' +
         '<label class="file-regen-label">Frames' +
@@ -751,6 +771,8 @@ function fileBlock(entry, index) {
     name: article.querySelector(".file-name"),
     summary: article.querySelector(".file-summary"),
     body: article.querySelector(".file-body"),
+    metaToggle: article.querySelector(".meta-toggle"),
+    metaBody: article.querySelector(".meta-body"),
     specs: article.querySelector(".specs"),
     tracks: article.querySelector(".tracks"),
     links: article.querySelector(".file-links"),
@@ -759,6 +781,7 @@ function fileBlock(entry, index) {
     progress: article.querySelector(".file-progress"),
     grid: article.querySelector(".grid"),
     expanded: false,
+    metaExpanded: false,
     // frames is this file's grid, keyed by timecode in milliseconds. The key
     // is what merges the result sets: frames.Plan pins the first and last
     // point to the window, so every regeneration lands on the first set's
@@ -795,6 +818,11 @@ function fileBlock(entry, index) {
   setFileExpanded(fentry, !entry.autoExpanded);
   entry.autoExpanded = true;
   updateFileSummary(fentry);
+
+  fentry.metaToggle.addEventListener("click", () => {
+    setMetaExpanded(fentry, !fentry.metaExpanded);
+  });
+  setMetaExpanded(fentry, false);
 
   return fentry;
 }
@@ -853,6 +881,20 @@ function setFileExpanded(fentry, expanded) {
   // The collapsed-only summary line and the specs panel say the same thing
   // two different ways; showing both at once would just repeat resolution.
   fentry.summary.hidden = expanded;
+}
+
+// setMetaExpanded is the file-level setFileExpanded's counterpart one level
+// down (TOR-71): the single function that may change whether a file's
+// metadata (.specs and .tracks) is on screen, called from exactly two
+// places - the metadata toggle's own click handler, and once at creation to
+// start every file's metadata collapsed, with no auto-expand exception. No
+// event that rebuilds .specs/.tracks in place (onFileStarted) touches
+// fentry.metaExpanded, so a person who opens the metadata keeps it open
+// through every event that follows.
+function setMetaExpanded(fentry, expanded) {
+  fentry.metaExpanded = expanded;
+  fentry.metaToggle.setAttribute("aria-expanded", String(expanded));
+  fentry.metaBody.hidden = !expanded;
 }
 
 // updateFileSummary keeps a collapsed row worth choosing by without opening
