@@ -327,6 +327,61 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// decideRequest is a picker's answer: this run, these files, this many
+// frames each.
+//
+// It names the run by id rather than by infohash, unlike the reopen request
+// next to it: this is about one entry in this process's registry - the one
+// parked and waiting - not about a torrent's results on disk, and the same
+// torrent may well have been added twice.
+type decideRequest struct {
+	ID    string   `json:"id"`
+	Files []string `json:"files"`
+	// Count is the intake's frames-per-file at the moment the button was
+	// pressed, so the number a person was looking at while ticking boxes is
+	// the number the run uses. Absent (or zero) leaves the run with whatever
+	// the original request carried.
+	Count int `json:"count,omitempty"`
+}
+
+// handleDecideRun puts a parked torrent back in the queue with the files
+// someone ticked (TOR-67). The answer is the same {id, state} shape POST
+// /runs gives, because that is what this is: the moment the run someone
+// asked for actually becomes a run.
+func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
+	var req decideRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.DecideRun(req.ID, req.Files, req.Count)
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// decideStatus maps a decision's four failures: a run this server does not
+// hold, a request that does not name a selection this torrent can satisfy, a
+// server that has closed, and - everything left - a run that is not waiting
+// to be told anything, which is the same conflict CancelRun reports for a
+// run that has already ended.
+func decideStatus(err error) int {
+	switch {
+	case errors.Is(err, ErrNoSuchRun):
+		return http.StatusNotFound
+	case errors.Is(err, errBadRequest):
+		return http.StatusBadRequest
+	case errors.Is(err, errClosed):
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusConflict
+	}
+}
+
 // handleListRuns answers the panel with the live queue plus everything
 // already on disk - see Server.listRuns for how the two are merged.
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
