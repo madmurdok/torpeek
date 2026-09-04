@@ -311,7 +311,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// serving from disk next time, and a partial record is what resume will
 	// read to know where to pick up.
 	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, selected, finished,
-		recordedSource(cfg.Source, src, torrentPath)); err != nil {
+		recordedSource(cfg.Source, src, torrentPath, torrent.Magnet())); err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 	} else if cfg.CacheCeiling > 0 {
 		// Only once this run's own record is safely written, and only when a
@@ -621,7 +621,8 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 // ask what it was.
 //
 // What it records as the source is recordedSource's decision, not cfg.Source
-// outright - see there for why a .torrent run names the copy it just saved.
+// outright - see there for why a .torrent run names a magnet reconstructed
+// from its infohash rather than any path.
 //
 // Selected and Complete are merged with whatever record already sits in
 // layout.RunDir(), never replaced outright. ParamsKey deliberately excludes
@@ -688,25 +689,38 @@ func saveTorrentFile(writer *output.Writer, torrent *swarm.Torrent) (string, err
 // it costs nothing to keep, and pasting it back is literally how the run is
 // repeated - which is what cache.Run.Source promises.
 //
-// A .torrent source is recorded as the copy this run has just saved in its own
-// directory, not the path it was read from, because that path is not reliably
-// still there. The web UI stages a dropped .torrent in a temp directory and
+// A .torrent source is recorded as the magnet its own infohash resolves to
+// (swarm.Torrent.Magnet), not a path at all. TOR-73 first tried the copy this
+// run had just saved in its own directory (output.Layout.TorrentPath),
+// because the path the source was actually read from is not reliably still
+// there - the web UI stages a dropped .torrent in a temp directory and
 // removes it the moment the run's event stream ends (handleUploadTorrent's
 // cleanup, fired from pump before the client is even told the run finished),
-// so a record naming it described a file that provably did not exist by the
-// time anyone could read the record - a lie sitting on disk, in the one field
-// whose whole job is to be pasteable. The saved copy carries the same info
-// dictionary and therefore the same infohash, and it lives exactly as long as
-// the record that names it, so it is true for both the uploaded case and the
-// path-on-the-command-line case rather than only the one that was broken.
+// so recording that path described a file that provably did not exist by the
+// time anyone could read the record. But TOR-73 left the saved copy's path
+// absolute, which is only true while the results tree sits exactly where it
+// was captured - and cache.Run.Source's own doc calls it "the string a
+// person could paste back in", a promise a moved tree breaks the same way
+// the temp file did (TOR-86). A magnet has no directory to depend on: it
+// reopens the same torrent by infohash, over DHT and trackers, from wherever
+// the tree - or the .torrent inside it - ends up.
 //
-// With no saved copy - the write failed - the original path is still the most
-// honest thing left to say.
-func recordedSource(source string, src swarm.Source, torrentPath string) string {
+// It is not what anyone typed, which is the one honest cost of this choice
+// over recordedSource's other candidate, a path relative to the run
+// directory: app.js's regenerate POSTs this string straight back to
+// swarm.ParseSource, which os.Stats it as a bare filesystem path with nothing
+// to join it against, so a relative path would only ever resolve by accident
+// of whatever directory the server happened to be running in - it is
+// portable to LOOK at, not portable to USE. The magnet is both.
+//
+// With no saved copy - the .torrent write failed - the original path is
+// still the most honest thing left to say, exactly as before TOR-86: this
+// path only replaces the case TOR-73 already covered.
+func recordedSource(source string, src swarm.Source, torrentPath, magnet string) string {
 	if torrentPath == "" || src.IsMagnet() {
 		return source
 	}
-	return torrentPath
+	return magnet
 }
 
 // mergeIndices unions two file-index lists into one, deduplicated and sorted

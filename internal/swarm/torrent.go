@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 // Torrent is a torrent whose metadata is known, exposing only what torpeek
@@ -50,6 +51,33 @@ func (t *Torrent) Name() string { return t.t.Name() }
 
 // InfoHash identifies the torrent and keys the result cache.
 func (t *Torrent) InfoHash() string { return t.t.InfoHash().HexString() }
+
+// Magnet is a magnet URI for this torrent - not necessarily anything anyone
+// typed, but a URI that reopens this very torrent from wherever a copy of
+// the tree ends up, which is what makes it worth recording as a run's source
+// (core.recordedSource, TOR-86).
+//
+// It carries the torrent's own announce list, and that is the load-bearing
+// part rather than a nicety. A magnet with nothing but an infohash can only
+// find peers through DHT, and a PRIVATE torrent must never touch DHT - it is
+// acceptance criterion 5 and the session enforces it by construction. So a
+// trackerless magnet would be a recorded source that either finds nobody or
+// could only work by breaking the one guarantee this project treats as
+// absolute. With the trackers copied, a private torrent reopens the way it
+// was opened in the first place: routeFor probes them with DHT off and only
+// then decides (TOR-49).
+//
+// The display name rides along because a magnet is meant to be pasted by a
+// person, and one that says nothing but forty hex characters tells them
+// nothing about what they are about to fetch.
+func (t *Torrent) Magnet() string {
+	mi := t.t.Metainfo()
+	return metainfo.Magnet{
+		InfoHash:    t.t.InfoHash(),
+		DisplayName: t.t.Name(),
+		Trackers:    mi.UpvertedAnnounceList().DistinctValues(),
+	}.String()
+}
 
 // Private reports the BEP 27 flag. When true, this torrent must never touch
 // DHT or PEX - the session guarantees that by construction.
