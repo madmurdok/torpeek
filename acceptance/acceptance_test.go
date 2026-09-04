@@ -51,16 +51,21 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	path := *reportPath
-	if path == "" {
-		path = filepath.Join("..", "docs", "results", version.Version+"-acceptance.md")
-	}
-	if err := report.Write(path); err != nil {
+	release := filepath.Join("..", "docs", "results", version.Version+"-acceptance.md")
+	path, err := report.WriteFor(*reportPath, release)
+	switch {
+	case err != nil && path == "":
+		// A subset ran and nobody said where to put it. Not writing is the
+		// point (TOR-96); the exit code is left alone because the criteria
+		// that did run reported their own verdicts, and a filtered run is a
+		// legitimate thing to do - it is only not a release report.
+		fmt.Fprintf(os.Stderr, "no report written: %v\n", err)
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "writing report: %v\n", err)
 		if code == 0 {
 			code = 1
 		}
-	} else {
+	default:
 		fmt.Fprintf(os.Stderr, "report written to %s\n", path)
 	}
 	os.Exit(code)
