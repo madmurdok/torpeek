@@ -11,7 +11,7 @@
 # Nothing here ends up in git - .gitignore carries /third_party/ffmpeg/. The
 # machinery is the deliverable; the binaries are a download.
 #
-# Three things this refuses to do, each because getting it wrong is how a
+# Four things this refuses to do, each because getting it wrong is how a
 # release ships something nobody chose:
 #
 #   - trust a download. The archive's sha256 is checked against the lock, and
@@ -27,6 +27,14 @@
 #     works for a target this machine cannot execute.
 #   - guess at a platform the lock says is blocked. It exits non-zero and names
 #     the reason, so the caller decides.
+#   - let the written source offer name a library it cannot hand over. The
+#     macOS GPL build links x264, and x264 is the one dependency upstream's
+#     build definition takes from a moving `master` URL rather than a pinned
+#     version, so the revision it compiled is recorded in our lock and nowhere
+#     else (TOR-98). Where a stanza names one, the source archive for it is
+#     downloaded and verified here, and the binaries are checked to carry the
+#     version string that revision's own source compiles into them - so a stale
+#     revision cannot outlive an upstream rebuild quietly.
 
 set -eu
 
@@ -51,6 +59,38 @@ sha256() {
 	else
 		die "need sha256sum or shasum"
 	fi
+}
+
+# tree_sha256 <source archive> <scratch dir> - sha256 over what a source
+# archive *contains*, rather than over its bytes: one `<sha256> <x|-> <path>`
+# line per file, sorted, hashed. Two reasons it is not just sha256 of the
+# tarball. The archive's own top directory is named after the ref it was asked
+# for, so the same commit arrives under `x264-master/` from one URL and
+# `x264-<sha>/` from another; and code.videolan.org builds these archives on
+# demand, so a GitLab upgrade can re-compress a tree into different bytes
+# without anything upstream having changed. The execute bit is part of the
+# hash because a `configure` that arrives without it does not build, which
+# would make the source we offer incomplete in the one way copying it around
+# tends to break. The x264 tree has no symlinks and no empty directories, so
+# files alone describe it.
+tree_sha256() {
+	rm -rf "$2"
+	mkdir -p "$2"
+	tar -xzf "$1" -C "$2" || die "could not unpack $(basename "$1")"
+
+	top=$(find "$2" -mindepth 1 -maxdepth 1)
+	[ -d "$top" ] || die "$(basename "$1") does not hold exactly one directory"
+
+	(
+		cd "$top" || exit 1
+		find . -type f | LC_ALL=C sort | while IFS= read -r member; do
+			if [ -x "$member" ]; then bit=x; else bit=-; fi
+			printf '%s %s  %s\n' "$(sha256 "$member")" "$bit" "$member"
+		done
+	) >"$2/manifest.txt"
+
+	sha256 "$2/manifest.txt"
+	rm -rf "$2"
 }
 
 download() {
@@ -167,6 +207,85 @@ docs/licensing.md; do not bump the hashes."
 	done
 }
 
+# check_x264 <ffmpeg> <ffprobe> - the guard on the one library the upstream
+# build definition does not pin, and therefore the one whose source the written
+# offer cannot name from upstream's own record (TOR-98). Nothing at all for a
+# stanza with no x264 keys, which is every LGPL platform: those builds contain
+# no x264 to account for.
+#
+# Two halves, because the claim has two halves. The marker ties the lock's
+# x264_commit to the binaries in front of us: x264 stamps no revision into what
+# it builds - its version.sh derives one from git and the build definition
+# unpacks a tarball that has none, which is why upstream's own versions.txt
+# says `0.165.x` - but encoder/set.c does compile in a version string with the
+# copyright year, and that string moves when x264's source does. So an engineer
+# who bumps ffmpeg_sha256 to a rebuilt upstream asset hits this rather than
+# leaving a revision behind that describes the previous binary. The second half
+# proves the source that revision names is still there and still that tree.
+check_x264() {
+	[ -n "$x264_commit" ] || return 0
+
+	for binary in "$1" "$2"; do
+		LC_ALL=C grep -q -a -F -- "$x264_marker" "$binary" ||
+			die "$platform: $(basename "$binary") does not carry the x264 version string of $x264_commit
+  looked for $x264_marker
+The lock says the x264 linked into this binary is revision $x264_commit
+(x264 build $x264_build). Either upstream rebuilt against a different x264 -
+in which case the revision has to be identified again, and docs/licensing.md
+says how it was done the first time - or this binary has no x264 in it at all,
+and the x264_* keys should go. Do not bump them to make this pass."
+	done
+
+	verify_x264_source
+}
+
+# verify_x264_source - download, or reuse, the x264 source the offer points at,
+# and prove it is the tree the lock claims. Both hashes are checked because
+# they fail differently: x264_source_sha256 is the archive's own bytes and
+# code.videolan.org builds those on demand, so the same commit can arrive
+# re-compressed; x264_tree_sha256 is over the contents and is what actually
+# has to hold. Same tree under new bytes is a note - the offer is about source,
+# not about a gzip - and a different tree is a hard failure, because then the
+# offer names something the binary was not built from.
+verify_x264_source() {
+	mkdir -p "$cache"
+	x264_file="$cache/$(basename "$x264_source")"
+
+	if [ ! -f "$x264_file" ] || [ "$(sha256 "$x264_file")" != "$x264_source_sha" ]; then
+		echo "$platform: downloading x264 source $(basename "$x264_file")"
+		download "$x264_source" "$x264_file.part" ||
+			die "$platform: x264 source download failed: $x264_source
+The written offer in the macOS archive points at this URL. If it is gone, the
+offer needs a mirror before the next release, not a note."
+		mv "$x264_file.part" "$x264_file"
+	fi
+
+	x264_got=$(sha256 "$x264_file")
+	x264_tree_got=$(tree_sha256 "$x264_file" "$cache/.x264-tree")
+
+	if [ "$x264_tree_got" != "$x264_tree_sha" ]; then
+		rm -f "$x264_file"
+		die "$platform: the x264 source at $x264_commit is not the tree the lock pins
+  expected tree $x264_tree_sha
+  got           $x264_tree_got
+A by-commit archive's contents cannot change, so either the download was
+mangled or that URL no longer serves that revision. The download was deleted;
+run this again, and if it fails the same way read docs/licensing.md before
+touching the lock - this is the source the macOS written offer hands over for
+the x264 inside the shipped binary."
+	fi
+
+	if [ "$x264_got" != "$x264_source_sha" ]; then
+		echo "$platform: NOTE the x264 archive was re-compressed upstream" >&2
+		echo "  x264_source_sha256 says $x264_source_sha" >&2
+		echo "  the file now hashes to $x264_got" >&2
+		echo "  its contents are unchanged ($x264_tree_sha), so this is a" >&2
+		echo "  different gzip of the same revision, not different source." >&2
+	fi
+
+	echo "$platform: x264 $x264_build source $x264_commit verified"
+}
+
 fetch_one() {
 	platform=$1
 
@@ -201,6 +320,12 @@ fetch_one() {
 	configure_requires=$(field "$platform" configure_requires)
 	configure_forbids=$(field "$platform" configure_forbids)
 	version=$(field "$platform" ffmpeg_version)
+	x264_commit=$(field "$platform" x264_commit)
+	x264_build=$(field "$platform" x264_build)
+	x264_source=$(field "$platform" x264_source)
+	x264_source_sha=$(field "$platform" x264_source_sha256)
+	x264_tree_sha=$(field "$platform" x264_tree_sha256)
+	x264_marker=$(field "$platform" x264_marker)
 
 	for required in url archive_sha archive_root ffmpeg_member ffprobe_member \
 		license_member ffmpeg_sha ffprobe_sha license_sha version \
@@ -229,6 +354,21 @@ fetch_one() {
 		die "$platform: license_sha256 is none but license_member names $license_member"
 	fi
 
+	# The x264 keys are all-or-nothing for the same reason: only the macOS
+	# stanzas carry them, and a set with one key missing would skip half of
+	# check_x264 while looking like it ran - a marker with no source to
+	# verify, or a source with no marker tying it to the binary.
+	x264_keys=0
+	for value in "$x264_commit" "$x264_build" "$x264_source" \
+		"$x264_source_sha" "$x264_tree_sha" "$x264_marker"; do
+		[ -z "$value" ] || x264_keys=$((x264_keys + 1))
+	done
+	if [ "$x264_keys" -ne 0 ] && [ "$x264_keys" -ne 6 ]; then
+		die "$platform: the x264_* keys are all-or-nothing, and this stanza has $x264_keys of 6
+Needed together: x264_commit x264_build x264_source x264_source_sha256
+x264_tree_sha256 x264_marker (docs/licensing.md, TOR-98)."
+	fi
+
 	# Per-platform, because two platforms' archives are both called
 	# ffmpeg.zip: one shared cache directory would have darwin-arm64 reuse
 	# the darwin-amd64 download and fail its hash for the wrong reason.
@@ -241,12 +381,16 @@ fetch_one() {
 	# Already correct: say so and touch nothing else. A release is cut more
 	# than once, and re-downloading 113 MB to prove it is the same 113 MB is
 	# a waste of somebody's evening. The configure guard still runs - it is
-	# a licence check, not a download step, and it costs a grep.
+	# a licence check, not a download step, and it costs a grep. So does the
+	# x264 guard: its 1 MB is not what the fast path exists to avoid, and a
+	# release cut from a warm tree should still have checked that the source
+	# its own written offer points at is reachable.
 	if [ -f "$ffmpeg_out" ] && [ -f "$ffprobe_out" ] &&
 		[ "$(sha256 "$ffmpeg_out")" = "$ffmpeg_sha" ] &&
 		[ "$(sha256 "$ffprobe_out")" = "$ffprobe_sha" ]; then
 		check_configuration "$ffmpeg_out"
 		check_configuration "$ffprobe_out"
+		check_x264 "$ffmpeg_out" "$ffprobe_out"
 		echo "$platform: ffmpeg $version already present and verified"
 		return 0
 	fi
@@ -309,6 +453,9 @@ guard against an asset quietly becoming a differently licensed build."
 		check_configuration "$tmp/$(member_path "$member")"
 	done
 
+	check_x264 "$tmp/$(member_path "$ffmpeg_member")" \
+		"$tmp/$(member_path "$ffprobe_member")"
+
 	mv -f "$tmp/$(member_path "$ffmpeg_member")" "$ffmpeg_out"
 	mv -f "$tmp/$(member_path "$ffprobe_member")" "$ffprobe_out"
 	if [ "$license_member" != none ]; then
@@ -327,7 +474,9 @@ guard against an asset quietly becoming a differently licensed build."
 		for key in source release_tag build_scripts variant license \
 			license_file ffmpeg_version ffmpeg_commit ffmpeg_source \
 			url archive_sha256 ffprobe_url ffprobe_archive_sha256 \
-			configure_requires configure_forbids; do
+			configure_requires configure_forbids x264_build \
+			x264_commit x264_source x264_source_sha256 \
+			x264_tree_sha256; do
 			value=$(field "$platform" "$key")
 			[ -n "$value" ] || continue
 			printf '%-22s = %s\n' "$key" "$value"

@@ -335,6 +335,26 @@ torpeek's source from its repository under MIT."
 		;;
 	esac
 
+	# The offer's second bullet - "how every library configured into it is
+	# obtained and built" - reaches every library in these binaries but one.
+	# x264 is the dependency upstream's build definition takes from a moving
+	# `master` URL instead of from a pinned version, so the revision that
+	# actually got compiled is recorded in our own lock and nowhere upstream,
+	# and the offer has to name it from there or not at all (TOR-98). A stanza
+	# with no x264 keys emits nothing: those are the LGPL builds, and they
+	# contain no x264 to account for.
+	if [ -n "$(field "$platform" x264_commit)" ]; then
+		offer_extra="$offer_extra- x264, at revision \`$(field "$platform" x264_commit)\`
+  (x264 build $(field "$platform" x264_build)) - the one library the build definition above takes
+  from a moving \`master\` URL rather than from a pinned version, and therefore
+  the one this project pins itself:
+  $(field "$platform" x264_source)
+  sha256 \`$(field "$platform" x264_source_sha256)\`.
+  How that revision was identified, and what the evidence does and does not
+  establish, is recorded in the project's \`docs/licensing.md\`.
+"
+	fi
+
 	# ffprobe usually rides in the same archive as ffmpeg and needs no row of
 	# its own; martin-riedl publishes one zip per executable, and a provenance
 	# table that named only the first would leave half of what is in the
