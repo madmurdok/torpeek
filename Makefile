@@ -53,6 +53,28 @@ check:
 acceptance:
 	go test -tags acceptance -timeout 60m -v ./acceptance/ $(ARGS)
 
+# Runs an unpacked release archive out of its own folder against a seeder on
+# loopback with nothing on PATH, and then runs it again with the bundled
+# ffmpeg deleted and requires that to fail (TOR-101). Both arms, always: the
+# first on its own cannot tell "the archive works" from "this machine has an
+# ffmpeg somewhere".
+#
+# ARCHIVE is a directory `make archives` produced and something unpacked;
+# MEDIA is one or more H.264 files to seed - render them with a GPL ffmpeg,
+# because the bundled LGPL build on Linux and Windows cannot encode h264 (it
+# only ever has to decode it).
+#
+#   make archives
+#   tar -xzf dist/torpeek-1.0.0-darwin-amd64.tar.gz -C /tmp
+#   make archive-check ARCHIVE=/tmp/torpeek-1.0.0-darwin-amd64 MEDIA=clip.mkv
+#
+# CI does not use this target: Windows runners have no make, so
+# .github/workflows/archives.yml spells the same `go test` out itself.
+.PHONY: archive-check
+archive-check:
+	go test -tags archivecheck -timeout 30m -v ./archivecheck/ \
+		-archive "$(ARCHIVE)" $(foreach m,$(MEDIA),-media "$(m)") $(ARGS)
+
 .PHONY: fmt
 fmt:
 	go fmt ./...

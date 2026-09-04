@@ -1,0 +1,298 @@
+# Runs each release archive on the operating system it was built for.
+#
+# torpeek 0.9.0 published four archives and two of them - windows-amd64 and
+# darwin-arm64 - had never been executed by anybody. The release notes said so
+# in those words, because the machine this project is developed on is an Intel
+# Mac: it can run neither a PE binary nor an arm64 Mach-O. TOR-26's acceptance
+# criterion is "each archive runs on a clean machine of its OS with no prior
+# installs", and for two platforms it was simply unmet.
+#
+# Actions gives a public repository runners for exactly those two gaps, so the
+# fix is a workflow rather than a borrowed laptop - and unlike a laptop it
+# answers the question for every release after this one (TOR-101).
+#
+# The shape, and why:
+#
+#   fixture   renders the H.264 clips the run is fed, once, on Linux. The
+#             bundled LGPL ffmpeg cannot ENCODE h264 - it does not need to,
+#             torpeek only ever decodes - so a fixture has to be made by a GPL
+#             ffmpeg, and the runners have one. Rendering it once and shipping
+#             it to the four jobs means all four decode identical bytes, which
+#             is what makes their results comparable; committing it instead
+#             would put a binary in a repository that has deliberately kept
+#             none.
+#   package   assembles all four archives with `make archives` - the exact
+#             command RELEASING.md step 7 names - on one Linux host, and
+#             uploads them. One packaging host, not four: an archive rebuilt
+#             on each runner is a different artefact from the one a release
+#             publishes, and verifying that would answer a question nobody
+#             asked. Building rather than downloading a published release is
+#             also the only option that works BEFORE publishing, which is the
+#             moment the answer is needed.
+#   run       downloads its own archive, checks it against the published
+#             SHA256SUMS, unpacks it the way a person on that OS would, and
+#             runs torpeek out of the unpacked folder with PATH pointing at an
+#             empty directory - then does it again with the bundled ffmpeg
+#             deleted and requires that to fail. Both arms live in
+#             archivecheck/; see its package comment for why one without the
+#             other proves nothing.
+name: archives
+
+on:
+  # The release gate. RELEASING.md step 8 dispatches this against the release
+  # branch and waits for four green jobs before anything is published.
+  workflow_dispatch:
+
+  # Automatic only where it can catch something. Packaging four ~200 MB
+  # archives and running two torrent-and-decode cycles per platform costs
+  # minutes, and a workflow that costs minutes on every push to every branch
+  # is a workflow somebody switches off - so it fires on a push only when the
+  # push touches the surface it verifies: the packaging scripts, the ffmpeg
+  # the archives carry, the code that locates that ffmpeg at run time, the
+  # check itself, or this file. Everything else waits for the dispatch above.
+  #
+  # Tags are deliberately not a trigger: `on.push` takes one filter set, and
+  # AND-ing these paths onto a tag push would make tag coverage depend on
+  # which files the release happened to touch. The dispatch is unconditional
+  # and is what the ritual calls for.
+  push:
+    branches: ['**']
+    paths:
+      - '.github/workflows/archives.yml'
+      - 'archivecheck/**'
+      - 'internal/ffmpeg/**'
+      - 'internal/torrenttest/**'
+      - 'internal/version/**'
+      - 'packaging/**'
+      - 'scripts/fetch-ffmpeg.sh'
+      - 'scripts/package.sh'
+      - 'third_party/ffmpeg.lock'
+      - 'Makefile'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: archives-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixture:
+    name: render the fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: install a GPL ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # Named rather than assumed: Ubuntu's ffmpeg is a GPL build with libx264
+      # configured in, but a fixture rendered by an ffmpeg without it would
+      # fail later, on another platform, as a decode error - a long way from
+      # its cause.
+      - name: confirm it can encode h264
+        run: |
+          ffmpeg -hide_banner -encoders | grep -q libx264
+          ffmpeg -hide_banner -version | head -2
+
+      # Two files, because a per-file manifest and a per-file contact sheet
+      # are only really asserted by a torrent holding more than one, and
+      # -parallel's default is 4. Two different resolutions so a manifest
+      # cannot pass by describing the other file. Keyframes every two seconds
+      # (-g 50 at 25 fps), which is what the capture planner needs to have
+      # anything to seek to.
+      - name: render two H.264 clips
+        run: |
+          mkdir -p fixture
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc=size=640x360:rate=25:duration=60" \
+            -c:v libx264 -g 50 -pix_fmt yuv420p -b:v 800k fixture/clip-a.mkv
+          ffmpeg -hide_banner -loglevel error -y \
+            -f lavfi -i "testsrc=size=480x270:rate=25:duration=40" \
+            -c:v libx264 -g 50 -pix_fmt yuv420p -b:v 500k fixture/clip-b.mkv
+          ffprobe -hide_banner -v error -of default=noprint_wrappers=1 \
+            -show_entries stream=codec_name,width,height,duration fixture/clip-a.mkv
+          ffprobe -hide_banner -v error -of default=noprint_wrappers=1 \
+            -show_entries stream=codec_name,width,height,duration fixture/clip-b.mkv
+          ls -l fixture
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixture
+          path: fixture
+          retention-days: 3
+
+  package:
+    name: build the archives
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Caching the DOWNLOADS, not the extracted binaries, and that
+      # distinction is the whole answer to whether a cache can be trusted
+      # here. scripts/fetch-ffmpeg.sh treats a cached archive exactly as it
+      # treats a fresh one: it hashes it against third_party/ffmpeg.lock
+      # before reusing it, re-extracts the members, hashes each of those, and
+      # greps the configure line embedded in every binary for the flags the
+      # lock requires and forbids. So a poisoned cache cannot pass - it fails
+      # the same check a substituted upstream asset would, which is what the
+      # lock exists for. Keyed on the lock's own contents, so a lock change is
+      # a miss rather than a stale hit.
+      - name: cache the verified ffmpeg downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg/.cache
+          key: ffmpeg-downloads-${{ hashFiles('third_party/ffmpeg.lock') }}
+
+      - name: make archives
+        run: make archives
+
+      - name: what was built
+        run: |
+          ls -l dist
+          cat dist/torpeek-*-SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archives
+          path: |
+            dist/torpeek-*.tar.gz
+            dist/torpeek-*.zip
+            dist/torpeek-*-SHA256SUMS.txt
+          retention-days: 3
+
+  run:
+    name: ${{ matrix.platform }} on ${{ matrix.os }}
+    needs: [fixture, package]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      # Never fail-fast. A Windows failure that cancelled the arm64 job would
+      # hide the other half of the answer this workflow exists to give, and
+      # those two are the entire reason it exists.
+      fail-fast: false
+      # The runner labels are pinned to an architecture, never to `-latest`,
+      # because architecture is the whole subject here: `macos-latest` moved
+      # from Intel to Apple silicon once already, and a matrix that let it
+      # move again would quietly stop testing one of the two macOS archives
+      # while still reporting four green jobs.
+      #
+      # macos-15-intel and not macos-13, which TOR-101 was written against:
+      # macos-13 has been retired, and it is not in actions/runner-images'
+      # table at all any more. The label is still accepted, which is the trap:
+      # a job asking for it queues with no runner ever assigned rather than
+      # failing. Measured on two runs of this workflow - 8m09s and 8m21s, both
+      # ended only by the next push superseding them, `runner_name` still
+      # empty - so the failure mode reads as slow CI rather than as a platform
+      # that is no longer being tested. macos-15-intel is the standard x64
+      # image that replaced it. macos-15 rather than macos-14 for the same reason
+      # one step earlier: macos-14 works today (it produced the first green
+      # arm64 run this workflow ever had) but is deprecated with a November
+      # end date, and a release gate should not be pinned to an image with a
+      # published expiry.
+      matrix:
+        include:
+          - platform: linux-amd64
+            os: ubuntu-latest
+            suffix: tar.gz
+          - platform: darwin-amd64
+            os: macos-15-intel # x64
+            suffix: tar.gz
+          - platform: darwin-arm64
+            os: macos-15 # Apple silicon
+            suffix: tar.gz
+          - platform: windows-amd64
+            os: windows-latest
+            suffix: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      # Go is here to compile archivecheck, not to build torpeek: the binary
+      # under test came out of the package job and is never rebuilt here.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: archives
+          path: downloaded
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fixture
+          path: fixture
+
+      # The checksum first, because that is what the release tells a person to
+      # do, and then the unpacking a person on this OS would actually do:
+      # tar on Linux and macOS, Explorer's own engine on Windows. The
+      # directory it lands in is fresh, holds nothing else, and nothing was
+      # installed to get here.
+      - name: check and unpack the archive
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eu
+          cd downloaded
+          archive=$(ls torpeek-*-${{ matrix.platform }}.${{ matrix.suffix }})
+          # macOS ships shasum, Linux sha256sum, the same way
+          # scripts/fetch-ffmpeg.sh has to cope with both.
+          if command -v sha256sum >/dev/null 2>&1; then
+            grep " $archive\$" torpeek-*-SHA256SUMS.txt | sha256sum -c -
+          else
+            grep " $archive\$" torpeek-*-SHA256SUMS.txt | shasum -a 256 -c -
+          fi
+          cd ..
+          mkdir -p unpacked
+          tar -xzf "downloaded/$archive" -C unpacked
+          echo "ARCHIVE_DIR=$GITHUB_WORKSPACE/unpacked/${archive%.tar.gz}" >>"$GITHUB_ENV"
+          ls -l "unpacked/${archive%.tar.gz}"
+
+      - name: check and unpack the archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Get-ChildItem "downloaded/torpeek-*-${{ matrix.platform }}.${{ matrix.suffix }}" | Select-Object -First 1
+          $sums = Get-ChildItem "downloaded/torpeek-*-SHA256SUMS.txt" | Select-Object -First 1
+          $line = Select-String -Path $sums -SimpleMatch $archive.Name | Select-Object -First 1
+          if (-not $line) { throw "$($archive.Name) is not in $($sums.Name)" }
+          $want = ($line.Line -split '\s+')[0]
+          $got = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLower()
+          if ($want -ne $got) { throw "checksum mismatch: want $want, got $got" }
+          Write-Host "$($archive.Name): sha256 $got matches $($sums.Name)"
+          # Expand-Archive is what Explorer uses, and the archive is a .zip
+          # rather than a .tar.gz for exactly that reason: it is the only
+          # unpacker a Windows machine is guaranteed to already have.
+          Expand-Archive -Path $archive.FullName -DestinationPath unpacked -Force
+          $dir = Join-Path (Get-Location) "unpacked/$($archive.BaseName)"
+          "ARCHIVE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Get-ChildItem $dir | Select-Object Mode, Length, Name
+
+      # go test rather than `make archive-check`: Windows runners have no
+      # make, and one command for all four platforms is one command that can
+      # be wrong. -v because the log IS the deliverable here - the whole point
+      # of this workflow is a run whose output says frames came out on this
+      # OS, so nothing about it is filtered or tailed.
+      #
+      # Absolute paths, from $GITHUB_WORKSPACE rather than $PWD, for two
+      # separate reasons that both bite: `go test ./archivecheck/` runs the
+      # test binary with the PACKAGE directory as its working directory, so a
+      # path relative to the workspace is not found; and on Windows the bash
+      # here is Git bash, whose $PWD is an MSYS path (/d/a/...) that a Go
+      # program cannot open. $GITHUB_WORKSPACE is native on every runner.
+      - name: run it out of the unpacked folder, with nothing on PATH
+        shell: bash
+        run: |
+          go test -tags archivecheck -v -timeout 25m ./archivecheck/ \
+            -archive "$ARCHIVE_DIR" \
+            -media "$GITHUB_WORKSPACE/fixture/clip-a.mkv" \
+            -media "$GITHUB_WORKSPACE/fixture/clip-b.mkv"
