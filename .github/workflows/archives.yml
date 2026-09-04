@@ -185,11 +185,14 @@ jobs:
       # while still reporting four green jobs.
       #
       # macos-15-intel and not macos-13, which TOR-101 was written against:
-      # macos-13 was retired while this was being built. The label is still
-      # accepted and a job asking for it simply queues forever with no runner
-      # ever assigned - measured, 13 minutes with runner_name empty - so this
-      # is not a cosmetic rename. macos-15-intel is the standard x64 image
-      # that replaced it. macos-15 rather than macos-14 for the same reason
+      # macos-13 has been retired, and it is not in actions/runner-images'
+      # table at all any more. The label is still accepted, which is the trap:
+      # a job asking for it queues with no runner ever assigned rather than
+      # failing. Measured on two runs of this workflow - 8m09s and 8m21s, both
+      # ended only by the next push superseding them, `runner_name` still
+      # empty - so the failure mode reads as slow CI rather than as a platform
+      # that is no longer being tested. macos-15-intel is the standard x64
+      # image that replaced it. macos-15 rather than macos-14 for the same reason
       # one step earlier: macos-14 works today (it produced the first green
       # arm64 run this workflow ever had) but is deprecated with a November
       # end date, and a release gate should not be pinned to an image with a
