@@ -15,7 +15,12 @@ import (
 
 // reportText writes progress a person reads. Frames are announced as they land
 // so a long run visibly advances.
-func reportText(events <-chan core.Event, stdout, stderr io.Writer) int {
+//
+// count is the run's frames-per-file, which the events deliberately do not
+// carry: it is this caller's own flag, and MetadataReady describes the torrent
+// rather than the request. It is here for one line - see the cost report on
+// MetadataReady, TOR-50.
+func reportText(events <-chan core.Event, stdout, stderr io.Writer, count int) int {
 	code := ExitOK
 
 	for ev := range events {
@@ -30,6 +35,25 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer) int {
 				fmt.Fprint(stdout, ", private torrent (DHT and PEX off)")
 			}
 			fmt.Fprintln(stdout)
+			// The cost, before any of it is spent. -n is frames PER video
+			// file and section 2.2 processes every one of them, so on a
+			// torrent bundling six quality variants the number in the flag
+			// means six times what it looks like: -n 6 against Sintel cost
+			// 223 MB where one file costs about 11 MB, and nobody chose the
+			// 20x (TOR-50). MetadataReady arrives before a single frame is
+			// fetched, which makes this the last moment the number is still
+			// only a plan.
+			//
+			// Frames, not megabytes: the picker in the web UI says
+			// "N file(s) x n = N frames" and this is deliberately the same
+			// arithmetic in the same order, because two interfaces quoting
+			// two different estimates of one run is the drift TOR-80 spent a
+			// ticket removing. A traffic figure would also have to guess the
+			// fetch window, and a guess is worse here than a count that is
+			// exactly right.
+			if count > 0 {
+				fmt.Fprintf(stdout, "  %d file(s) x %d = %d frames to fetch\n", len(e.Selected), count, len(e.Selected)*count)
+			}
 			if e.BlindDHT {
 				fmt.Fprintln(stderr, "  warning: this magnet carries no trackers, so DHT was used before the private flag could be checked")
 			}
