@@ -261,6 +261,14 @@ Exit codes distinguish the three outcomes a caller has to tell apart:
 | `2` | bad command line — nothing was attempted |
 | `3` | stopped at a budget or cancelled; what was produced is kept |
 
+## On a seedbox
+
+The managed-slot case has its own guide: no root, no Docker, ports from an
+allocated range, the UI behind nginx under a subdirectory, and a
+`systemd --user` unit — [docs/seedbox.md](docs/seedbox.md), with the unit and
+its environment template in `packaging/systemd/` and inside the Linux
+archive's `seedbox/` directory.
+
 ## Licence
 
 torpeek is MIT — see [LICENSE](LICENSE).
