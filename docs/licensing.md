@@ -252,16 +252,27 @@ BtbN publish `linuxarm64` and `winarm64` LGPL builds in the same releases, so
 adding either target later is a matter of two more stanzas in the lock and two
 more lines in `make cross`, not another search for a builder.
 
+## Settled since
+
+- **torpeek is MIT** (`LICENSE`, TOR-92). This document had it listed as open,
+  and it was the one blocker that had nothing to do with ffmpeg: a release of
+  an unlicensed program gives its recipients no rights at all, whatever is
+  bundled with it. Every module in the CGO-free build is MIT/BSD/ISC/Apache-2.0/
+  MPL-2.0, so nothing underneath constrained the choice.
+
+  It does **not** decide what the archive as a whole travels under. That is a
+  separate axis, and the LGPL decision above is what keeps it separate: an
+  LGPL ffmpeg invoked as its own process leaves torpeek's own terms to
+  torpeek. Were a GPL build bundled instead, the archive would have to be
+  distributed under the GPL - which MIT permits, since MIT is GPL-compatible
+  in that direction, but which is a decision about the archive, not about the
+  source.
+
 ## Still open
 
 These are named because leaving them unnamed is how they get missed, not
 because TOR-26 was meant to settle them.
 
-- **torpeek has no licence of its own.** There is no `LICENSE` file in the
-  repository. The LGPL decision was made specifically so this could stay open,
-  but a public release cannot: a GitHub release of an unlicensed program gives
-  its recipients no rights at all. This needs deciding before anything is
-  published, independently of ffmpeg.
 - **Patents are a separate axis from copyright.** H.264, HEVC and AAC are
   patent-encumbered, and no free-software licence - LGPL included - grants
   patent rights in the encoded formats. Distributing a decoder is the same

@@ -116,6 +116,7 @@ $(printf '  %-22s %s\n' \
 		"ffmpeg$exe" "frame decoding, used by torpeek" \
 		"ffprobe$exe" "container inspection, used by torpeek" \
 		"README.txt" "this file" \
+		"LICENSE" "torpeek's own licence (MIT)" \
 		"THIRD-PARTY-NOTICES.md" "what ffmpeg is, where it came from, its licence" \
 		"licenses/" "the full licence texts those notices refer to")
 
@@ -137,11 +138,14 @@ $unpack_note
 
 LICENCE
 
+torpeek is MIT; the text is in LICENSE.
+
 The ffmpeg and ffprobe here are LGPL builds, redistributed unmodified.
 THIRD-PARTY-NOTICES.md names the exact upstream build and commit, carries the
 written offer for the corresponding source, and points at the licence texts in
 licenses/. torpeek itself is a separate program that runs them as child
-processes; it does not link against them.
+processes; it does not link against them, which is why the two licences sit
+side by side here rather than one covering the other.
 EOF
 }
 
@@ -269,6 +273,12 @@ for platform in $platforms; do
 		"$root/packaging/licenses/ffmpeg/COPYING.GPLv3" \
 		"$root/packaging/licenses/ffmpeg/LICENSE.md" \
 		"$stage/licenses/ffmpeg/"
+
+	# torpeek's own licence, at the archive root rather than under licenses/,
+	# which is for what the archive carries on somebody else's behalf. A
+	# recipient of an unlicensed program has no rights at all, so this file
+	# is not optional decoration (TOR-92).
+	cp "$root/LICENSE" "$stage/LICENSE"
 	chmod +x "$stage/torpeek$exe" "$stage/ffmpeg$exe" "$stage/ffprobe$exe"
 
 	write_readme "$stage" "$platform" "$exe"

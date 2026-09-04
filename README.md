@@ -260,3 +260,12 @@ Exit codes distinguish the three outcomes a caller has to tell apart:
 | `1` | the run produced nothing |
 | `2` | bad command line — nothing was attempted |
 | `3` | stopped at a budget or cancelled; what was produced is kept |
+
+## Licence
+
+torpeek is MIT — see [LICENSE](LICENSE).
+
+The release archives are a separate question, because they carry a
+third-party ffmpeg build with its own terms: what travels inside them, why it
+is an LGPL build rather than a GPL one, and what that obliges is set out in
+[docs/licensing.md](docs/licensing.md).
