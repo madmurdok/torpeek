@@ -70,15 +70,21 @@ type RunSummary struct {
 // partial for the same reason it reads as not done: a row with no merged
 // disk record yet has nothing here to call either one.
 //
-// This is the one place that rule is written (TOR-80). TOR-72 added it here
-// and separately in app.js's isPartial(), and only the JS copy ever painted
-// a badge - every caller of this method was a test, so the two were free to
-// drift and nothing would fail. MarshalJSON below is what makes this copy
-// the load-bearing one: it puts the verdict on the wire under the same key
-// app.js now reads, so a page never recomputes it and a change here changes
-// what ships.
+// This is the one place that rule is written (TOR-80), by way of partial()
+// below, which TOR-87 pulled out so the run_state message a page's socket
+// gets when a run finishes (server.go's pump) can ask the identical
+// question without a RunSummary to ask it of - carrying it as a second,
+// hand-written comparison there would be exactly the two-copies problem
+// TOR-80 closed for app.js.
 func (r RunSummary) Partial() bool {
-	return r.Selected > 0 && r.Complete < r.Selected
+	return partial(r.Complete, r.Selected)
+}
+
+// partial is Partial()'s comparison, factored out to stay the only place it
+// is written even though TOR-87 needs to ask it from outside a RunSummary
+// (see that method's doc, and server.go's pump).
+func partial(complete, selected int) bool {
+	return selected > 0 && complete < selected
 }
 
 // MarshalJSON adds a "partial" field to RunSummary's JSON, computed from
@@ -98,16 +104,17 @@ func (r RunSummary) Partial() bool {
 // partial than it already was. Selected and Complete are only ever non-zero
 // once listRuns has merged a disk record in - never for a live entry that
 // has not yet reached a final state (see this type's own field comments) -
-// so Partial() answers false at exactly the moments it always did. The page
-// also learns of a run's state over the WebSocket (run_state records), not
-// only from this GET /runs response, and run_state carries neither count:
-// a run that goes running -> done while a page is open keeps whatever
-// "partial" this response last reported for it (false, if it had not
-// finished yet) until that page's next GET /runs. This method makes the
-// existing verdict authoritative on the wire; it does not add the counts to
-// a message that never carried them, and closing that gap would mean
-// putting Selected/Complete on run_state itself - a registry/event change,
-// not a listing one.
+// so Partial() answers false at exactly the moments it always did. TOR-80
+// left one gap here, closed by TOR-87 in server.go's pump rather than in
+// this method: the page also learns of a run's state over the WebSocket
+// (run_state records), and until TOR-87 run_state carried neither count, so
+// a run that went running -> done while a page was open kept whatever
+// "partial" this response had last reported (false, since a live entry has
+// nothing merged in) until that page's next GET /runs. Closing it here would
+// have meant this method reaching into the registry and the filesystem for
+// an entry it is never handed - the fix belongs where run_state itself is
+// built, once that message's own entry has reached a final state and (per
+// this package's normal merge rule) named exactly one disk record.
 func (r RunSummary) MarshalJSON() ([]byte, error) {
 	type alias RunSummary
 	return json.Marshal(struct {
@@ -253,6 +260,50 @@ func walkRuns(root string) []diskRun {
 		}
 	}
 	return out
+}
+
+// runRecordCounts reads the disk record(s) filed under one infohash and
+// answers with the counts a finished run just wrote there, or ok=false if
+// there is nothing (yet) to answer with. It exists for TOR-87: a run_state
+// message, unlike a GET /runs response, is built for one entry at a time as
+// the moment it names happens, so attaching that entry's counts calls for a
+// lookup keyed by its own infohash rather than a pass over every run under
+// OutputRoot (walkRuns) followed by matching one row back out of it.
+//
+// The ambiguity rule is listRuns' own, applied here to the same effect: an
+// infohash naming more than one params directory - two capture plans of the
+// same torrent - has no single record to answer from, so this reports
+// ok=false exactly as listRuns leaves such an entry unmerged rather than
+// guessing which directory a reload would have picked. An infohash naming
+// none (nothing has been written yet, or root does not exist) answers the
+// same way, for the same reason RunSummary's own zero counts do: there is
+// nothing here to call done or partial either one.
+func runRecordCounts(root, infoHash string) (files, complete, selected int, ok bool) {
+	if root == "" || infoHash == "" {
+		return 0, 0, 0, false
+	}
+
+	paramDirs, err := os.ReadDir(filepath.Join(root, infoHash))
+	if err != nil {
+		return 0, 0, 0, false
+	}
+
+	found := false
+	for _, paramDir := range paramDirs {
+		if !paramDir.IsDir() {
+			continue
+		}
+		run, loaded := cache.LoadRun(filepath.Join(root, infoHash, paramDir.Name()))
+		if !loaded {
+			continue
+		}
+		if found {
+			return 0, 0, 0, false
+		}
+		files, complete, selected = len(run.Videos), len(run.Complete), run.SelectedCount()
+		found = true
+	}
+	return files, complete, selected, found
 }
 
 // FileDetail is what GET /runs/{infohash}/files/{index} answers: one video

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
 )
@@ -596,5 +598,133 @@ func TestLiveRowReadsDoneOrPartial(t *testing.T) {
 	}
 	if !partial.Partial() {
 		t.Errorf("live row with a selected, incomplete file reads Done, want Partial: %+v", partial)
+	}
+}
+
+// waitRunState reads the socket until it sees a run_state for id in the
+// given state, discarding every other message (this run's earlier
+// lifecycle states, another run's events, anything else on the wire) along
+// the way - the finishing run_state this file's tests care about is not
+// necessarily the first message to arrive for id.
+func waitRunState(t *testing.T, conn *websocket.Conn, id, state string) map[string]any {
+	t.Helper()
+
+	for i := 0; i < 50; i++ {
+		ev := next(t, conn)
+		if ev["type"] == "run_state" && ev["run"] == id && ev["state"] == state {
+			return ev
+		}
+	}
+	t.Fatalf("never saw a run_state for %s in state %q within 50 messages", id, state)
+	return nil
+}
+
+// TestLiveRunStateCarriesPartialWhenItFinishes is TOR-87's acceptance
+// criterion, word for word: a page open while a run finishes learns the same
+// verdict a reload would - shown here by reading run_state straight off the
+// socket and asserting the fields a badge would be built from, never by
+// reasoning about a DOM (this package has none to reason about; app.js's own
+// copy of this contract is unchanged, per TOR-80, from reading exactly these
+// fields off the wire rather than recomputing them).
+//
+// The run's own selection (two files) does not all come out complete (one
+// does) - the exact shape Partial() calls true - and the disk record that
+// says so is written before fake.finish() the same way saveRunRecord writes
+// it before a real engine's Done event, per this ticket's own design note:
+// the honest source for these counts is the record the run just wrote.
+func TestLiveRunStateCarriesPartialWhenItFinishes(t *testing.T) {
+	root := t.TempDir()
+	const (
+		infoHash = "7777000000000000000000000000000000000f"
+		source   = "magnet:?xt=urn:btih:" + infoHash
+	)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	conn := dial(t, ts.URL)
+	if got := next(t, conn); got["type"] != "run_state" {
+		t.Fatalf("first message is %v, want the connection marker", got)
+	}
+
+	run := startRun(t, ts.URL, source)
+	fake.send(t, source, core.MetadataReady{Name: "Live Partial", InfoHash: infoHash, Selected: []int{0, 1}})
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == infoHash })
+
+	writeRun(t, root, infoHash, "deadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: infoHash,
+		Name:     "Live Partial",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}, {Index: 1, Path: "b.mkv"}},
+		Selected: []int{0, 1},
+		Complete: []int{0},
+	})
+	fake.finish(t, source)
+
+	ev := waitRunState(t, conn, run.id, "done")
+	if got, ok := ev["files"]; !ok || got != float64(2) {
+		t.Errorf(`run_state["files"] = %#v (present=%v), want 2: %+v`, got, ok, ev)
+	}
+	if got, ok := ev["complete"]; !ok || got != float64(1) {
+		t.Errorf(`run_state["complete"] = %#v (present=%v), want 1: %+v`, got, ok, ev)
+	}
+	if got, ok := ev["selected"]; !ok || got != float64(2) {
+		t.Errorf(`run_state["selected"] = %#v (present=%v), want 2: %+v`, got, ok, ev)
+	}
+	if got, ok := ev["partial"]; !ok || got != true {
+		t.Errorf(`run_state["partial"] = %#v (present=%v), want true: %+v`, got, ok, ev)
+	}
+}
+
+// TestLiveRunStateOmitsCountsWhenDiskRecordIsAmbiguous is the design decision
+// runRecordCounts documents: an infohash naming more than one params
+// directory (two capture plans of the same torrent) has no single record for
+// the finishing run_state to answer from, so it carries none of
+// files/complete/selected/partial at all - the same "list both, merge
+// neither" choice listRuns makes for GET /runs (see its own comment on the
+// merge condition). Guessing which of the two a reload would have shown
+// would risk a live badge disagreeing with the reload it is supposed to
+// match, which is worse than the pre-TOR-87 gap this ticket closed.
+func TestLiveRunStateOmitsCountsWhenDiskRecordIsAmbiguous(t *testing.T) {
+	root := t.TempDir()
+	const (
+		infoHash = "8888000000000000000000000000000000000f"
+		source   = "magnet:?xt=urn:btih:" + infoHash
+	)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	conn := dial(t, ts.URL)
+	if got := next(t, conn); got["type"] != "run_state" {
+		t.Fatalf("first message is %v, want the connection marker", got)
+	}
+
+	run := startRun(t, ts.URL, source)
+	fake.send(t, source, core.MetadataReady{Name: "Ambiguous", InfoHash: infoHash, Selected: []int{0}})
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == infoHash })
+
+	// Two different capture plans of the same torrent - core.ParamsKey's own
+	// case for two params directories under one infohash.
+	writeRun(t, root, infoHash, "deadbeef", cache.Run{
+		Version: cache.Version, InfoHash: infoHash, Name: "Ambiguous",
+		Videos: []cache.File{{Index: 0, Path: "a.mkv"}}, Selected: []int{0}, Complete: []int{0},
+	})
+	writeRun(t, root, infoHash, "beefdead", cache.Run{
+		Version: cache.Version, InfoHash: infoHash, Name: "Ambiguous",
+		Videos: []cache.File{{Index: 0, Path: "a.mkv"}}, Selected: []int{0},
+	})
+	fake.finish(t, source)
+
+	ev := waitRunState(t, conn, run.id, "done")
+	if _, ok := ev["files"]; ok {
+		t.Errorf(`run_state carries "files" = %#v for an ambiguous infohash, want it absent: %+v`, ev["files"], ev)
+	}
+	if _, ok := ev["partial"]; ok {
+		t.Errorf(`run_state carries "partial" = %#v for an ambiguous infohash, want it absent: %+v`, ev["partial"], ev)
 	}
 }
