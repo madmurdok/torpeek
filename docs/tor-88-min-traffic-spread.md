@@ -36,6 +36,36 @@ thing to watch.** The ticket was right that criterion 2 breaks first and right
 to file before it broke. The number to watch is the gap between the 44 MiB a
 run claims and the ceiling, not the release-to-release figure.
 
+## The 0.9.0 release run, against this document's own prediction
+
+Written after the fact, because a spread is only worth measuring if the next
+point is checked against it. `make acceptance` for 0.9.0 ran on 2026-09-04 at
+19:20, ~2h after the reps below, on a quiet machine (load 4.02):
+
+| | criterion 2 | criterion 1 |
+| --- | --- | --- |
+| predicted here (n = 18, normal regime) | 45.5-54.6 MiB, median 46.9 | - |
+| **0.9.0, measured** | **46.0 MiB in 33.5s** | 101.6 MiB in 61.1s |
+| 0.8.0 | 52.9 | 104.3 |
+| 0.7.0 | 47.5 | 103.7 |
+| 0.6.0 | 45.9 | 102.1 |
+
+46.0 lands just under the predicted median and below all three figures the
+ticket read as a climb, which is what an oscillating series does. Criterion 1
+sits at 101.6, and read out of the reports rather than from memory it has been
+102.1, 102.1, 102.1, 102.1, 103.7, 104.3, 101.6 from 0.3.0 to 0.9.0 - a 2.7
+MiB band over seven releases, against a 150 MiB ceiling. (0.2.0's 172.0 was
+the one miss, before seeking worked.) Whatever moves criterion 2 does not
+move criterion 1, which is the strongest single reason not to look for the
+cause in our own read path.
+
+What this run does NOT establish, and the reason it is recorded here rather
+than only in the report: one passing run is a sample from the normal regime,
+not evidence the elevated one is gone. The elevated regime produced 60.7-118.6
+MiB on this same code earlier the same day. A release whose acceptance run
+happens to land in it will fail criterion 2 with nothing wrong, and the fix
+for that is the ceiling question, not a re-run.
+
 ## 1. The history, read out of the reports rather than the ticket
 
 The ticket names three figures. There are eight, and they do not climb.
