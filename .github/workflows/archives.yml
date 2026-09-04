@@ -234,7 +234,7 @@ jobs:
           cd ..
           mkdir -p unpacked
           tar -xzf "downloaded/$archive" -C unpacked
-          echo "ARCHIVE_DIR=$PWD/unpacked/${archive%.tar.gz}" >>"$GITHUB_ENV"
+          echo "ARCHIVE_DIR=$GITHUB_WORKSPACE/unpacked/${archive%.tar.gz}" >>"$GITHUB_ENV"
           ls -l "unpacked/${archive%.tar.gz}"
 
       - name: check and unpack the archive
@@ -263,10 +263,17 @@ jobs:
       # be wrong. -v because the log IS the deliverable here - the whole point
       # of this workflow is a run whose output says frames came out on this
       # OS, so nothing about it is filtered or tailed.
+      #
+      # Absolute paths, from $GITHUB_WORKSPACE rather than $PWD, for two
+      # separate reasons that both bite: `go test ./archivecheck/` runs the
+      # test binary with the PACKAGE directory as its working directory, so a
+      # path relative to the workspace is not found; and on Windows the bash
+      # here is Git bash, whose $PWD is an MSYS path (/d/a/...) that a Go
+      # program cannot open. $GITHUB_WORKSPACE is native on every runner.
       - name: run it out of the unpacked folder, with nothing on PATH
         shell: bash
         run: |
           go test -tags archivecheck -v -timeout 25m ./archivecheck/ \
             -archive "$ARCHIVE_DIR" \
-            -media fixture/clip-a.mkv \
-            -media fixture/clip-b.mkv
+            -media "$GITHUB_WORKSPACE/fixture/clip-a.mkv" \
+            -media "$GITHUB_WORKSPACE/fixture/clip-b.mkv"
