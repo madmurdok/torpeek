@@ -117,9 +117,15 @@ prune-worktrees:
 # run from a release branch it will happily delete a branch main has never
 # seen. What `-d` does add is refusing a branch a worktree has checked out -
 # the same "an agent still working keeps it" protection prune-worktrees leans
-# on, rather than a keep-list this target would have to be told about. origin
-# carries no feature branches at all, so there is deliberately nothing remote
-# to prune.
+# on, rather than a keep-list this target would have to be told about.
+#
+# It does not touch origin, and that is now a choice rather than a vacuum: it
+# used to be true that origin carried nothing but main and release-*, and
+# TOR-101 ended that - a GitHub Actions workflow cannot be tested without
+# pushing the branch it lives on, so feature branches do reach origin now.
+# Deleting a remote branch is a push, and a push is not something a
+# housekeeping target should do behind anyone's back. `git push origin
+# --delete <branch>` by hand, once its work is in main.
 .PHONY: prune-branches
 prune-branches:
 	@git branch --merged main --format='%(refname:short)' \
