@@ -37,9 +37,12 @@ type Profile struct {
 // and section 2.5's "more parallel requests" is served by claiming a wider
 // window, which is what gives the library more to ask for at once.
 //
-// The numbers are intents. What reaches the swarm is these rounded up to whole
-// pieces, which is why they read as byte sizes rather than piece counts: the
-// intent is "about this much", and the torrent decides what that means.
+// The numbers are intents, not raised straight to the swarm: Window is a
+// claim and gets rounded up to whole pieces (WindowSize), which is why it
+// reads as a byte size rather than a piece count - "about this much", and the
+// torrent decides what that means. Readahead is only a hint about how far
+// ahead to want data and is passed through as written (ReadaheadSize; TOR-95)
+// - rounding a hint up turns it into a claim nobody made.
 //
 // What a capture point costs is set by how far the two reach past the wanted
 // offset together, not by either alone. Measured on the local seeder, per
@@ -84,9 +87,29 @@ func (p Profile) WindowSize(pieceLength int64) int64 {
 	return alignUp(p.Window, pieceLength)
 }
 
-// ReadaheadSize resolves the readahead intent the same way.
+// ReadaheadSize resolves the readahead intent - and, unlike WindowSize, does
+// NOT round it up to a whole piece (TOR-95).
+//
+// A window is a claim: the swarm is going to be asked for those bytes, so
+// rounding it up to a whole piece costs nothing that was not already being
+// paid. A readahead is only a hint about how far ahead the reader wants to
+// keep prefetching - and alignUp's floor of one whole piece turned every
+// reader into one that prefetches a full piece past its read position, on any
+// torrent whose piece length exceeds the readahead intent (256 KiB on this
+// torrent's 1 MiB pieces, i.e. every read).
+//
+// That manufactured prefetch reaches past what the caller actually asked for,
+// which matters because of what TOR-88 found in internal/bridge: the bridge
+// deliberately claims only the head of each range ffmpeg requests, not the
+// whole range, to avoid ordering an entire file to satisfy a request that
+// reads a few hundred kilobytes of it. A readahead rounded up to a full piece
+// reaches outside that head-only claim - exactly where Window.Release's
+// CancelPieces does not follow it, since Release only cancels the pieces the
+// window itself claimed. So the rounding did not just prefetch more than
+// asked; it prefetched into bytes no claim named and no Release could pull
+// back. Passing the intent through unrounded keeps the hint a hint.
 func (p Profile) ReadaheadSize(pieceLength int64) int64 {
-	return alignUp(p.Readahead, pieceLength)
+	return p.Readahead
 }
 
 func alignUp(intent, pieceLength int64) int64 {
