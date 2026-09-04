@@ -98,6 +98,17 @@ release that got it wrong.
    merely containing an LGPL library, and whose build definition lives on a
    small self-hosted Gitea.
 
+   **Three things for a release with macOS archives in it**, because their
+   offer names x264's source separately - it is the one library upstream's
+   build definition does not pin, so the revision lives in our lock (TOR-98,
+   [docs/licensing.md](docs/licensing.md)). Step 6 has already downloaded and
+   verified it: it is `third_party/ffmpeg/.cache/darwin-amd64/x264-<rev>.tar.gz`
+   and the identical file under `darwin-arm64`, and `x264_source_sha256` in the
+   lock is its checksum. Upload one copy. Of the three, this is the one most
+   worth serving ourselves: FFmpeg's tarball can always be re-fetched by tag
+   from ffmpeg.org, whereas the name the macOS build actually used - x264's
+   `master` - stops denoting this tree the moment x264 commits again.
+
 9. **`release_it` in the tracker, last.** It refuses unless every task in
    the release is done or cancelled, runs a test command through the same
    verifier task completion uses, and generates the notes from the tasks' own

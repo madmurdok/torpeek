@@ -6,7 +6,9 @@ breath: *"появляется вопрос лицензий (сборки ffmpe
 распространении — учесть при первом релизе."* This is that reckoning. It began
 as the "licensing position is documented" half of TOR-26's acceptance
 criterion and TOR-93 extended it, which is why it reads as a record of two
-decisions rather than one.
+decisions rather than one. TOR-98 added a third layer that is not a decision
+at all: what the macOS written offer can actually hand over, checked library by
+library rather than asserted.
 
 Nothing here is legal advice. It is a record of decisions, of what they
 oblige, and of which of those obligations the packaging machinery already
@@ -193,15 +195,24 @@ stating:
   `--enable-gpl` required on macOS and forbidden on Linux and Windows,
   `--enable-nonfree` forbidden on all four, because a nonfree build may not be
   redistributed by anybody at all.
+- **The x264 keys**, added by TOR-98, are the same idea applied to what the
+  written offer promises rather than to what the licence says. The macOS
+  stanzas name the x264 revision inside the binary, where its source is and
+  two hashes of it; the fetch verifies that source is still reachable and
+  still that tree, and greps the binaries for the version string that
+  revision compiles into them. It is in the lock because it is nowhere
+  upstream - x264 is the one library the builder does not pin, and the binary
+  records no revision of its own. "The one library that build definition does
+  not pin" is the evidence.
 
-The third guard exists because the first two cannot cover macOS and because
-neither covers the likeliest human failure. martin-riedl's zips hold one
-executable and nothing else - there is no licence text inside to checksum - so
-without it the macOS stanzas would have no licence check at all. And the hash
-guards only fire while the hashes are stale: an engineer who sees a mismatch,
-concludes "upstream rebuilt", and bumps the three numbers has just disarmed
-them. Measured, with the hashes bumped to match a GPL binary standing in for
-the Linux `-lgpl` one:
+The configure-line guard exists because the first two cannot cover macOS and
+because neither covers the likeliest human failure. martin-riedl's zips hold
+one executable and nothing else - there is no licence text inside to
+checksum - so without it the macOS stanzas would have no licence check at
+all. And the hash guards only fire while the hashes are stale: an engineer
+who sees a mismatch, concludes "upstream rebuilt", and bumps the three
+numbers has just disarmed them. Measured, with the hashes bumped to match a
+GPL binary standing in for the Linux `-lgpl` one:
 
 ```
 fetch-ffmpeg: linux-amd64: ffmpeg was configured with --enable-gpl
@@ -425,13 +436,153 @@ LGPL v3 because the parts of FFmpeg that are not GPL-only stay LGPL and their
 recipients keep LGPL rights in them. Which one governs the archive as a whole
 is stated in the notices, not implied by which files are present.
 
+### The one library that build definition does not pin
+
+The section above ends with "the corresponding source is FFmpeg 9.0.1
+unmodified, plus the `build_scripts` commit". That is true of FFmpeg, and true
+of every library configured into it but one. That one is what TOR-98 is
+about.
+
+martin-riedl's build script pins each dependency by a file under `version/`,
+and fetches **x264** from
+`code.videolan.org/videolan/x264/-/archive/master/x264-master.tar.gz` - a
+moving ref. Checked at the pinned build-script commit `f63b8aab8f` rather than
+taken from the ticket: `version/` holds 36 files and none of them is x264, and
+across all 39 `build-*.sh` scripts exactly one download names a moving ref -
+`build-x264.sh`'s. Every other one either substitutes a `$VERSION` into its
+URL or names an immutable commit (the pkg-config patches, on Windows only).
+It shows in what upstream publishes: in both macOS builds' `versions.txt`
+every line carries a real version - `x265 4.2`, `aom 3.14.1`, `dav1d 1.5.4` -
+except `x264 0.165.x`.
+
+torpeek never encodes H.264. The binary it redistributes contains x264 object
+code anyway, so x264's source is part of the corresponding source the macOS
+written offer covers - and "master, on 2026-08-18" is not a revision anybody
+can ask for.
+
+That it is the only gap of its kind was worth checking too, since the offer has
+to reach every GPL-licensed component and not just the awkward one. This build
+configures in three externals that require `--enable-gpl`: `--enable-libx264`,
+`--enable-libx265` and `--enable-libklvanc`. The build definition pins the
+second at x265 4.2 and the third at libklvanc 1.6.0, by version file, so
+following it gets their exact source. x264 is the exception, and everything
+else in the binary is either FFmpeg 9.0.1 itself or an LGPL-or-permissive
+library that is also pinned.
+
+**The direct fix does not exist: the binary does not know its own x264.** x264
+derives a revision from git in `version.sh`, and a GitLab `-/archive/master/`
+tarball carries no git metadata, so that script's fallback fires - `ver` keeps
+its literal default `x` and `X264_VERSION` is compiled in empty. Upstream's
+`0.165.x` is that fallback, printed. Measured on the shipped darwin-amd64
+binary, which this machine can execute, against a control:
+
+```
+shipped ffmpeg (martin-riedl 9.0.1, the binary in the archive):
+  x264 - core 165 - H.264/MPEG-4 AVC codec - Copyleft 2003-2025 - ...
+
+control: Homebrew ffmpeg 8.1.2, whose x264 is built from a git checkout:
+  x264 - core 165 r3222 b35605a - H.264/MPEG-4 AVC codec - Copyleft 2003-2025 - ...
+```
+
+Both lines come out of an actual encode - x264 writes that string into every
+stream as an unregistered-user-data SEI - so both are read off a running
+binary rather than off a website. The control is what makes the first line
+evidence rather than an absence: the identical extraction recovers `r3222
+b35605a` from a build whose x264 had git metadata, so a revision *would* have
+shown up had there been one. There is no second place to look either: `nm`
+finds 14 x264 symbols among 46 713 in the shipped binary, all of them trellis
+tables, and no `x264_encoder_open_165`.
+
+**What the repository knows instead.** The ticket assumed the tarball was
+already gone - that fetching `x264-master.tar.gz` today "would get something
+else". It does not. x264's `master` has not moved since **2025-09-16**, eleven
+months before these builds:
+
+| checked | result |
+|---|---|
+| commits on `master` after 2025-09-16 | none. The tip is `0480cb05fa188d37ae87e8f4fd8f1aea3711f7ee`, "riscv64: add compile support", committed 2025-09-10 |
+| when that commit reached `master` | merge request !184, merged 2025-09-16T08:18:12Z |
+| what that push left behind | pipeline 640136, ref `master`, sha `0480cb05`, created 2025-09-16T08:18:13Z - and it is the newest `master` pipeline the project has |
+| when the builds ran | the lock's `release_tag`s are unix seconds: 1787081194 = 2026-08-18T19:26:34Z (amd64), 1787073674 = 17:21:14Z (arm64) |
+| how upstream fetches | `functions.sh`'s `download` is a bare `curl -o "$NAME" -L -f "$URL"`: no cache and no mirror, so the build read that URL live |
+
+The pipeline row is the load-bearing one. A push to `master` creates a
+pipeline, and a later force-push does not delete the pipelines it already
+created - so a commit that sat on `master` during those eleven months and was
+afterwards removed from history would still be listed. None is.
+
+That the tree behind the moving URL is the same tree as `0480cb05` was checked
+by content, not by trusting the URL:
+
+| checked | result |
+|---|---|
+| `x264-master.tar.gz` fetched twice | byte-identical, sha256 `0cfddd00...48b789b` |
+| the `master` archive against the by-commit archive of `0480cb05` | all 270 files, same set, same content. The two gzips differ; the trees do not |
+| the same comparison against `master`'s previous tip `b35605a` | 7 files differ. So the comparison can come out negative, and does when it should |
+
+**What the artefact confirms, and what it cannot.** The binaries agree with
+that tree on both of the two things they are able to state, and they are not
+the same two. The build number, 165, comes out of a run, so it is amd64 only.
+The version string `encoder/set.c` compiles in - copyright year included - is
+a plain string in the bytes, and it is in all four macOS executables, arm64
+and `ffprobe` included, since `ffprobe` links the same libavcodec. Either
+reading excludes an older x264: at master commit `31e19f92` (2023-10-01) the
+build number was 164 and the string said `2003-2023`, and neither of those
+appears in any of these binaries.
+
+What the artefact **cannot** do is separate `0480cb05` from its own parent
+`b35605a`. Their diff is riscv64 support, `config.guess`, `config.sub`,
+`configure`, the Makefile, `checkasm.c` and one riscv-only macro in `x264.h` -
+nothing that changes a byte of an x86_64 or arm64 build's strings, which was
+read rather than assumed. The artefact narrows; the repository identifies.
+
+So, separating the two kinds of claim:
+
+- **Verified.** The source at `0480cb05` is fetchable, is `master`'s tip, and
+  is file-for-file the tree the moving URL serves - their gzips differ, their
+  contents do not. The shipped binaries contain x264 carrying that tree's
+  version string, and the one that can be run reports build 165. `0480cb05`
+  became `master`'s tip on 2025-09-16, and nothing has been pushed to `master`
+  since.
+- **Reasoned.** That the shipped binaries were therefore compiled from that
+  tree. Nothing in them says so; the argument is that upstream's script fetched
+  `master` live and `master` was this tree, and only this tree, across the
+  build date. The one way it could still be wrong is a rewrite of x264's
+  history that also removed the pipeline records of what it rewrote - which
+  would have misled every other observer of that repository too.
+
+**What the machinery does with it.** `third_party/ffmpeg.lock` now records, in
+both macOS stanzas, `x264_commit`, `x264_source`, `x264_source_sha256`,
+`x264_tree_sha256`, `x264_build` and `x264_marker`; `scripts/fetch-ffmpeg.sh`
+downloads that source and verifies it at fetch time, and `scripts/package.sh`
+names it in the written offer. Two hashes rather than one because they fail
+differently: the tarball's own bytes are what a mirror copies, while the tree
+hash - a sorted per-file `sha256` manifest, execute bit included - is what has
+to hold, so a re-compressed archive from the same commit can be told apart from
+a different tree. Both arms were exercised: repointing `x264_source` at
+`b35605a` fails hard with the two tree hashes printed, and pointing it at the
+`master` URL - different gzip, same commit - passes with a note. The
+`x264_marker` grep is the same idea as the configure-line check, aimed at the
+one failure hashes cannot catch: an engineer who bumps `ffmpeg_sha256` to a
+rebuilt upstream asset would otherwise leave a revision behind that describes
+the *previous* binary. With the lock's year edited to a 2024 tree's string the
+fetch stops, naming the revision it could not find.
+
+**Why this had to happen now.** The identification above is possible only while
+`master` still has not moved past the build. The next x264 commit costs
+nothing that is written down here - but from that moment `master` stops
+denoting this tree, and the only record that torpeek 1.0.0's macOS binaries
+contain `0480cb05` is this document and the lock. Recording it in the release
+that ships those binaries is the whole point; leaving it as an open item until
+the next release would have been leaving it until it was no longer checkable.
+
 ### What GPL distribution obliges, on macOS only
 
 | obligation | discharged by |
 |---|---|
 | convey the whole archive under the GPL, and say so | `README.txt` and `THIRD-PARTY-NOTICES.md`, both generated from the lock's `license`; the macOS wording says the archive as a whole is GPL v3-or-later and what the holder may do with it |
 | ship the licence text | `licenses/ffmpeg/COPYING.GPLv3`, plus `COPYING.LGPLv3` and FFmpeg's `LICENSE.md` |
-| make the complete corresponding source available | the written offer in `THIRD-PARTY-NOTICES.md`, naming the FFmpeg commit, the build definition commit, and - added for the GPL platforms - any patches the builder applies and the scripts controlling compilation and installation |
+| make the complete corresponding source available | the written offer in `THIRD-PARTY-NOTICES.md`, naming the FFmpeg commit, the build definition commit, and - added for the GPL platforms - any patches the builder applies and the scripts controlling compilation and installation. Plus, since TOR-98, x264's own revision and its sha256, because the build definition pins every library it configures in except that one: see "The one library that build definition does not pin" |
 | keep the binaries unmodified, or say what changed | redistributed byte for byte; `scripts/fetch-ffmpeg.sh` verifies each one's sha256 and its configure line against `third_party/ffmpeg.lock` |
 | not misrepresent the terms | a `license` value `package.sh` has no wording for is a hard failure, so the LGPL paragraphs cannot be emitted onto a GPL archive by omission |
 
@@ -590,10 +741,27 @@ more lines in `make cross`, not another search for a builder.
   and names what it skipped - it simply has nothing to skip. If a fifth
   platform is ever added without a build, it fails exactly as macOS used to.
 
+- **The macOS written offer names x264's source** (TOR-98). This document had
+  it listed as open, and as the one obligation the packaging machinery could
+  not discharge: the offer covers the corresponding source of everything in
+  the binary, the binary contains x264 object code, and upstream's build
+  definition takes x264 from a moving `master` URL instead of pinning it.
+
+  It is settled by identifying the revision from x264's repository rather than
+  from the binary - the binary cannot say, and the control arm above proves
+  that is an absence and not an oversight - and then pinning it the way every
+  other artefact here is pinned. `master` had not moved for the eleven months
+  around these builds, and the push records show it, so the tree upstream
+  fetched is still fetchable and now has two hashes in the lock and a bullet in
+  the offer. What is verified, what is reasoned, and the one hypothesis that
+  could still falsify it are in "The one library that build definition does not
+  pin"; what remains open is upstream's practice, not this release's offer, and
+  it is below.
+
 ## Still open
 
 These are named because leaving them unnamed is how they get missed, not
-because TOR-26 or TOR-93 was meant to settle them.
+because TOR-26, TOR-93 or TOR-98 was meant to settle them.
 
 - **Patents are a separate axis from copyright.** H.264, HEVC and AAC are
   patent-encumbered, and no free-software licence - LGPL included - grants
@@ -609,26 +777,49 @@ because TOR-26 or TOR-93 was meant to settle them.
   them. `third_party/ffmpeg.lock` records the URL to fetch it from. This
   matters more now than it did: on macOS the archive itself is under the GPL,
   so the offer is not a courtesy attached to a bundled library but the terms
-  the whole thing is conveyed under. Two commits have to be mirrored, not one -
-  `e47273f4d9` for Linux and Windows, `bf1b838f2a` for macOS - and the build
-  definitions sit on two hosts, one of them a small self-hosted Gitea.
-- **One library in the macOS build is not pinned by its build definition.**
-  martin-riedl's build script pins every dependency by a file under
-  `version/` - x265 4.2, aom 3.14.1, dav1d 1.5.4 and so on - except **x264**,
-  which `script/build-x264.sh` fetches from
-  `code.videolan.org/videolan/x264/-/archive/master/x264-master.tar.gz`. The
-  published `versions.txt` records what that produced (`x264 0.165.x`), but
-  "master, on 2026-08-18" is not a revision anybody can fetch back. torpeek
-  never encodes H.264, yet the binary it redistributes contains x264 object
-  code, so x264's source is part of the corresponding source the offer covers.
-  Mirroring at release time does **not** fix this retroactively - the exact
-  tree that build compiled is not addressable any more, and fetching
-  `x264-master.tar.gz` today would get something else. Closing it properly
-  means one of: asking upstream to pin x264 the way it pins x265, taking the
-  Linux/Windows route of a builder who pins everything, or building our own.
-  Flagged rather than solved because it is upstream's build definition, not
-  ours - and named here so that "the written offer is honoured" is not read as
-  covering more than it does.
+  the whole thing is conveyed under. **Three** things have to be mirrored, not
+  one: FFmpeg at `e47273f4d9` for Linux and Windows, FFmpeg at `bf1b838f2a`
+  for macOS, and - since TOR-98 - x264 at `0480cb05fa18`, which the macOS
+  offer names separately. The build definitions sit on two hosts, one of them a
+  small self-hosted Gitea. The x264 tarball is the one already sitting on
+  disk when a release is cut, because `scripts/fetch-ffmpeg.sh` downloads and
+  verifies it; RELEASING.md step 8 says where.
+- **Upstream still does not pin x264, so the next macOS build needs the same
+  work again - and it may not be possible next time.** TOR-98 settled the
+  offer for the build this release ships (above), not the practice that made
+  it necessary: `script/build-x264.sh` at build-script `main` today is
+  byte-identical to the pinned commit's, moving ref and all, so a future build
+  will again record `0.165.x` and again say nothing about what it compiled.
+
+  What the identification depends on is outside this project, and worth
+  stating precisely, because it is not "the tarball is still there". It is
+  that the gap between the last push to x264's `master` before the build and
+  the next one after it can be read from the repository, and that the build's
+  own timestamp falls inside it. Here that gap is eleven months wide and the
+  reading is unambiguous. A build cut minutes after a push would leave two
+  candidate trees with the build somewhere between them, and the artefact
+  cannot separate adjacent revisions - measured above. The identification also
+  depends on upstream still publishing that history: commit dates alone would
+  not have been enough, since a commit's date is not its push date, and it was
+  the pipeline records that supplied the second one.
+
+  So the honest statement of what is left is: **identifying the x264 in a
+  martin-riedl build is a per-build act, on evidence that only upstream's
+  repository holds, and this document is where its result lives.** For each
+  future macOS build: read which commit was `master`'s tip at the build's
+  timestamp from the commit list and the push records, check it against the
+  binary's own build number and version string, then fill in the six `x264_*`
+  keys - and if the two cannot be reconciled, say so instead of pinning a
+  guess.
+
+  Three things would remove the need. Asking upstream to pin x264 the way it
+  pins its other 36 dependencies is the cheap one and fixes it for everybody,
+  but it fixes future builds only and depends on somebody else. A builder who
+  pins everything - which is the Linux and Windows route already - would too,
+  and none exists for macOS. Building our own ffmpeg would make the question
+  ours to answer, at the cost of the pipeline TOR-26 priced and rejected. None
+  of the three was needed to make *this* release's offer name x264's source,
+  which is why none was taken.
 - **A `-lgpl-shared` or self-built ffmpeg** would change the archive layout,
   and `ffmpeg.Locate`'s second search directory (`third_party/ffmpeg` next to
   the binary) already exists for exactly that; nothing in Go needs to change
