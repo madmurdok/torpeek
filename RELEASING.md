@@ -50,14 +50,17 @@ release that got it wrong.
    It runs `make cross` first, so the binaries in them are the CGO-free ones
    step 3 tested, then fetches the bundled ffmpeg named in
    `third_party/ffmpeg.lock` and verifies every checksum in it - the archive's,
-   each binary's, and the licence text's - before assembling anything. It
-   writes `dist/torpeek-<v>-<platform>{,.tar.gz,.zip}` and
+   each binary's, and, where upstream ships one, the licence text's - as well
+   as the configure line each binary carries, against the flags its stanza
+   requires and forbids. All of that before assembling anything. It writes
+   `dist/torpeek-<v>-<platform>{,.tar.gz,.zip}` and
    `dist/torpeek-<v>-SHA256SUMS.txt`.
 
-   **It exits non-zero today, and that is correct**: both macOS platforms are
-   `status = blocked` for want of an LGPL ffmpeg, so two archives out of four
-   are not produced. Read the skip lines and
-   [docs/licensing.md](docs/licensing.md) rather than working around them - a
+   **It should exit zero and write four archives.** Since TOR-93 no platform
+   in the lock is blocked - Linux and Windows carry an LGPL ffmpeg, macOS a
+   GPL one - so there is nothing left to skip. The gate is still there: if it
+   exits non-zero, read the `SKIP` lines and
+   [docs/licensing.md](docs/licensing.md) rather than working around them, a
    three-of-four release must not be able to pass for a whole one.
 
 8. **Publish, if this release is for anybody else.** A GitHub release from
@@ -66,12 +69,16 @@ release that got it wrong.
    generated ones.
 
    Two things go up alongside the archives, both because of what they bundle:
-   `dist/torpeek-<v>-SHA256SUMS.txt`, and the FFmpeg source tarball for the
-   commit pinned in `third_party/ffmpeg.lock`. The second is the cheap way to
-   honour the written source offer that each archive carries - GPL v3 section
-   6(d) is satisfied by serving the source from the same place as the binary,
-   and an offer that points only at somebody else's repository depends on that
-   repository still being there.
+   `dist/torpeek-<v>-SHA256SUMS.txt`, and the FFmpeg source tarballs for the
+   commits pinned in `third_party/ffmpeg.lock` - **two of them now**, since
+   Linux/Windows and macOS are built from different FFmpeg commits. The second
+   is the cheap way to honour the written source offer that each archive
+   carries - GPL v3 section 6(d) is satisfied by serving the source from the
+   same place as the binary, and an offer that points only at somebody else's
+   repository depends on that repository still being there. It matters most for
+   the macOS archives, which are conveyed under the GPL as a whole rather than
+   merely containing an LGPL library, and whose build definition lives on a
+   small self-hosted Gitea.
 
 9. **Sweep the branches the release left behind.**
    `make prune-worktrees` then `make prune-branches`, once the release is in

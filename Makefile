@@ -21,8 +21,9 @@ cross:
 # carries /third_party/ffmpeg/), and it is a no-op once the binaries are there
 # and still match.
 #
-# Exits non-zero for a platform the lock marks blocked - today both macOS
-# ones, for want of an LGPL build worth shipping. See docs/licensing.md.
+# Exits non-zero for a platform the lock marks blocked. Nothing is blocked
+# today: since TOR-93 all four platforms have a bundled build, an LGPL one on
+# Linux and Windows and a GPL one on macOS. See docs/licensing.md.
 .PHONY: ffmpeg
 ffmpeg:
 	./scripts/fetch-ffmpeg.sh
