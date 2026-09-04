@@ -451,11 +451,23 @@ nothing". The live overshoot comes from something else the client asks for
 that our claims do not name, and finding it means instrumenting inside
 anacrolix's request strategy rather than in torpeek.
 
-**It is therefore not on this branch.** Shipping a fetch-window tuning change
-whose measurable benefit is confined to a local fixture, on the strength of an
-afternoon in which the live measurement moved by a factor of two on its own,
-would be tuning to a transient. The diff above is small enough to re-apply
-from this document when it has a ticket and a quiet-swarm A/B of its own.
+**It was therefore not on this branch** - shipping a fetch-window tuning
+change whose measurable benefit is confined to a local fixture, on the
+strength of an afternoon in which the live measurement moved by a factor of
+two on its own, would have been tuning to a transient.
+
+**It shipped in 1.0.0 as TOR-95**, on a different justification than a live
+win: the semantic one. A window is a claim and a readahead is a hint, and
+alignUp was turning the hint into a claim - so the change is a correction
+rather than a tuning, and its local determinism is the evidence, not a
+substitute for a live effect it never claimed. Re-measured then, interleaved,
+by two independent runs: 20.3-20.7 -> 15.8-16.7 MiB at load 40-60, and
+20.3-21.8 -> 17.1-18.6 MiB at load 435-485, every rep of both runs in the same
+direction with no overlap between arms. The second run's higher absolute
+numbers under load are themselves worth noting - this profile was already
+flagged in section 4 as the load-sensitive one, and it means the 4.5 MiB/frame
+ceiling sits closer than a quiet machine suggests. `ReadaheadSize` no longer
+rounds, and `TestReadaheadSizeIsNotRoundedUp` fails if anybody makes it.
 
 ## 9. What was deliberately not done
 
