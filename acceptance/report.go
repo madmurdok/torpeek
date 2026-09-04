@@ -15,6 +15,15 @@ import (
 	"time"
 )
 
+// Criteria is how many acceptance criteria REQUIREMENTS.md section 8 states.
+//
+// It is a constant rather than something counted at runtime because it is the
+// number a report has to be judged against: a run that produced six results
+// cannot be told apart from a complete one by looking at the six. Adding a
+// criterion to section 8 and forgetting to register it should break something
+// loudly, and this is that something.
+const Criteria = 7
+
 // Verdict is how a criterion came out.
 type Verdict string
 
@@ -63,6 +72,37 @@ func (r *Report) Add(res Result) { r.Results = append(r.Results, res) }
 // Measure is a convenience for building a measurement list.
 func Measure(name, format string, args ...any) Measurement {
 	return Measurement{Name: name, Value: fmt.Sprintf(format, args...)}
+}
+
+// WriteFor writes the report and answers where it went.
+//
+// explicit is the -report flag's value. Given, it is honoured as-is and
+// nothing is checked: a person who names a path has said what they are doing,
+// which is how TOR-88 took forty reps without touching docs/results.
+//
+// Empty means the release-named path - docs/results/<version>-acceptance.md -
+// and THAT one is refused unless every criterion ran. The refusal exists
+// because the alternative was observed: a `-run` filter that executed nothing
+// at all still wrote that file, with a header, a machine-state line, a table
+// header and zero rows, named exactly as the release's own evidence and
+// indistinguishable from a real one at a glance (TOR-96). In the main
+// checkout it would have overwritten the report a real run produced, and
+// TOR-76 had already cost this project one report that had to be regenerated
+// a release later.
+//
+// Refusing rather than stamping the file "partial": a partial report at the
+// canonical name is still the thing somebody diffs against last release.
+func (r *Report) WriteFor(explicit, releasePath string) (string, error) {
+	if explicit != "" {
+		return explicit, r.Write(explicit)
+	}
+	if len(r.Results) != Criteria {
+		return "", fmt.Errorf("%d of %d criteria ran, so this is not %s: "+
+			"a report named for the release must cover the release. "+
+			"Run every criterion, or pass -report <path> to write this subset somewhere else",
+			len(r.Results), Criteria, filepath.Base(releasePath))
+	}
+	return releasePath, r.Write(releasePath)
 }
 
 // Write renders the report as markdown at path.
