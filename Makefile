@@ -16,6 +16,31 @@ cross:
 	GOOS=linux   GOARCH=amd64 go build -o dist/linux-amd64/$(BINARY)       $(PKG)
 	GOOS=windows GOARCH=amd64 go build -o dist/windows-amd64/$(BINARY).exe $(PKG)
 
+# Downloads the bundled ffmpeg/ffprobe named in third_party/ffmpeg.lock and
+# verifies every checksum in it. Nothing it writes is in git (.gitignore
+# carries /third_party/ffmpeg/), and it is a no-op once the binaries are there
+# and still match.
+#
+# Exits non-zero for a platform the lock marks blocked - today both macOS
+# ones, for want of an LGPL build worth shipping. See docs/licensing.md.
+.PHONY: ffmpeg
+ffmpeg:
+	./scripts/fetch-ffmpeg.sh
+
+# The release archives: one folder per platform holding torpeek, ffmpeg,
+# ffprobe and the licence material that has to travel with them (TOR-26).
+#
+# Depends on cross rather than rebuilding, because cross is the build whose
+# flags were measured: CGO_ENABLED=0, and so bbolt rather than sqlite for the
+# piece-completion store (TOR-59). Packaging must ship that binary, not a
+# differently configured one.
+#
+# Fails at the end if any platform could not be packaged, so an incomplete
+# release cannot be mistaken for a whole one.
+.PHONY: archives
+archives: cross
+	./scripts/package.sh
+
 .PHONY: check
 check:
 	go vet ./...

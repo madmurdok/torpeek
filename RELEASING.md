@@ -46,7 +46,34 @@ release that got it wrong.
    that is the commit that produced the release, and an archive built later
    has something to be built from.
 
-7. **Sweep the branches the release left behind.**
+7. **Build the archives with `make archives`.**
+   It runs `make cross` first, so the binaries in them are the CGO-free ones
+   step 3 tested, then fetches the bundled ffmpeg named in
+   `third_party/ffmpeg.lock` and verifies every checksum in it - the archive's,
+   each binary's, and the licence text's - before assembling anything. It
+   writes `dist/torpeek-<v>-<platform>{,.tar.gz,.zip}` and
+   `dist/torpeek-<v>-SHA256SUMS.txt`.
+
+   **It exits non-zero today, and that is correct**: both macOS platforms are
+   `status = blocked` for want of an LGPL ffmpeg, so two archives out of four
+   are not produced. Read the skip lines and
+   [docs/licensing.md](docs/licensing.md) rather than working around them - a
+   three-of-four release must not be able to pass for a whole one.
+
+8. **Publish, if this release is for anybody else.** A GitHub release from
+   the tag, with the per-platform archives and their checksums, and notes a
+   person who has never read the tracker can act on - not a paste of the
+   generated ones.
+
+   Two things go up alongside the archives, both because of what they bundle:
+   `dist/torpeek-<v>-SHA256SUMS.txt`, and the FFmpeg source tarball for the
+   commit pinned in `third_party/ffmpeg.lock`. The second is the cheap way to
+   honour the written source offer that each archive carries - GPL v3 section
+   6(d) is satisfied by serving the source from the same place as the binary,
+   and an offer that points only at somebody else's repository depends on that
+   repository still being there.
+
+9. **Sweep the branches the release left behind.**
    `make prune-worktrees` then `make prune-branches`, once the release is in
    `main` - only then are its task branches merged from `main`'s point of
    view, which is what those targets judge against. Skipped for eight
@@ -55,11 +82,6 @@ release that got it wrong.
    per shipped release, and a release branch's tip is the only independent
    witness a tag could be checked against, which matters because
    `v0.1.0`..`v0.6.0` were backfilled long after the fact.
-
-8. **Publish, if this release is for anybody else.** A GitHub release from
-   the tag, with the per-platform archives and their checksums, and notes a
-   person who has never read the tracker can act on - not a paste of the
-   generated ones.
 
 ## Things that bite
 

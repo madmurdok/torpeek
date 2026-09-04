@@ -38,8 +38,9 @@ Some.Movie.2019.1080p/movie.mkv
 - **Stay a library.** The core prints nothing and knows nothing about how
   results are shown; the CLI and the web UI are two clients of it, and the TUI
   will be a third.
-- **Be one folder eventually.** No install, no daemon, no service: a binary
-  and the two ffmpeg executables next to it. That is not true yet — see below.
+- **Be one folder.** No install, no daemon, no service: a binary and the two
+  ffmpeg executables next to it. True on Linux and Windows; macOS still has to
+  be built from source — see below.
 
 ## Status
 
@@ -63,27 +64,45 @@ every torrent it knows about, live ones from memory and finished ones found on
 disk, so the list survives a restart. Opening a finished one from that list
 replays it from disk: no queue slot, no network request.
 
-Not built yet: the live TUI and release archives with bundled ffmpeg. The
-`min-time` and `min-traffic` profiles already differ in readahead and window
-size, but the strategies on top of them are still open. See
+Release archives now assemble for Linux and Windows: `make archives` builds
+one folder per platform holding torpeek, ffmpeg, ffprobe and their licence
+material. The Linux one has been run end to end on a clean Debian 12 with no
+ffmpeg installed and nothing on `PATH`; the Windows one is assembled and
+checksummed but has not yet been run on Windows. macOS is deliberately not
+among them — there is no prebuilt LGPL ffmpeg for it worth shipping, and
+torpeek will not quietly ship a GPL one;
+[docs/licensing.md](docs/licensing.md) sets out the choice that is left.
+Nothing has been published anywhere yet.
+
+Not built yet: the live TUI, and the macOS archives. The `min-time` and
+`min-traffic` profiles already differ in readahead and window size, but the
+strategies on top of them are still open. See
 [REQUIREMENTS.md](REQUIREMENTS.md) for what this is meant to become and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how it is put together.
 
 ## Requirements
 
-**There are no prebuilt binaries yet.** Release archives with ffmpeg bundled
-alongside the executable are planned but unbuilt, so the only way to run
-torpeek today is to compile it. That means two things have to be on the
-machine:
+**No archive has been published yet**, so today every route starts by
+compiling. Once one is: a Linux or Windows archive needs nothing installed —
+unpack it and run `./torpeek`, with ffmpeg and ffprobe already in the folder
+(`make archives` builds those two; see
+[docs/licensing.md](docs/licensing.md) for what the bundled binaries are and
+why macOS is not among them).
+
+Compiling needs two things on the machine:
 
 - **Go 1.27 or newer** — the version in `go.mod`. `go version` to check;
   [go.dev/dl](https://go.dev/dl/) to install.
 - **ffmpeg and ffprobe** — frame decoding and container inspection shell out
   to them. `brew install ffmpeg` on macOS, `apt install ffmpeg` on Debian or
-  Ubuntu. Developed against ffmpeg 8.1.
+  Ubuntu. Developed against ffmpeg 8.1; the release archives bundle 9.0.1. The
+  test suite additionally needs a GPL-capable ffmpeg, because it renders its
+  own fixtures with libx264 — which the bundled LGPL build cannot do, and does
+  not need to: torpeek only ever decodes H.264.
 
 torpeek looks for the two executables next to its own binary first — that is
-where a release archive will one day put them — and falls back to `PATH`.
+where the release archive puts them — then in `third_party/ffmpeg/` beside it,
+and only then falls back to `PATH`.
 
 ## Build from source
 
@@ -110,7 +129,9 @@ Other targets:
 
 ```sh
 make check     # vet + tests (the suite drives real torrents through a local seeder, so it is slow)
-make cross     # dist/{darwin,linux,windows}-*/
+make cross     # dist/{darwin,linux,windows}-*/ - the four binaries, CGO-free
+make ffmpeg    # third_party/ffmpeg/<platform>/ - the bundled LGPL ffmpeg, checksums verified
+make archives  # dist/torpeek-<version>-<platform>{,.tar.gz,.zip} - the release archives
 make fmt
 ```
 
