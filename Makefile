@@ -53,6 +53,23 @@ prune-worktrees:
 		fi; \
 	done
 
+# The tag's version is derived from the code, never passed in: a tag that
+# disagrees with internal/version is how a binary comes to claim a release
+# nobody shipped. NAME is the release's own name, for the annotation - the
+# tracker holds it, so it is the one thing this cannot derive.
+#
+# Refuses a dirty tree and an existing tag rather than asking. See
+# RELEASING.md for where this sits in the ritual.
+.PHONY: tag
+tag:
+	@v=$$(sed -n 's/^const Version = "\(.*\)"$$/\1/p' internal/version/version.go); \
+	if [ -z "$$v" ]; then echo "cannot read Version from internal/version/version.go" >&2; exit 1; fi; \
+	if [ -n "$$(git status --porcelain)" ]; then echo "working tree is dirty; tag what is committed" >&2; exit 1; fi; \
+	if git rev-parse -q --verify "refs/tags/v$$v" >/dev/null; then echo "v$$v already exists" >&2; exit 1; fi; \
+	msg="torpeek $$v"; \
+	if [ -n "$(NAME)" ]; then msg="$$msg - $(NAME)"; fi; \
+	git tag -a "v$$v" -m "$$msg" && echo "tagged v$$v at $$(git rev-parse --short HEAD)"
+
 .PHONY: clean
 clean:
 	rm -rf bin dist
