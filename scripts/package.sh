@@ -13,9 +13,16 @@
 # (TOR-59), so an archive must contain exactly the binary `make cross` made and
 # not one this script rebuilt with different flags.
 #
-# A platform with no LGPL ffmpeg is skipped, loudly, and the script exits
+# A platform with no bundled ffmpeg is skipped, loudly, and the script exits
 # non-zero at the end. Three archives out of four must not be able to pass for
 # a complete release (docs/licensing.md).
+#
+# The licence the archives travel under is not the same on every platform:
+# Linux and Windows bundle an LGPL ffmpeg, macOS a GPL one (TOR-93). Every
+# sentence the generated README.txt and THIRD-PARTY-NOTICES.md say about it is
+# therefore branched on the lock's own `license` field, and an unrecognised
+# value stops the release. A notices file that misnames the licence of what it
+# ships is worse than no notices file at all.
 
 set -eu
 
@@ -108,10 +115,63 @@ and ffprobe are linked against glibc, so on Alpine or another musl system they
 will not start. Install ffmpeg from the distribution's own packages there and
 delete the two copies here; torpeek falls back to PATH."
 		;;
+	darwin-*)
+		invoke="./torpeek"
+		unpack_note="Some unpacking tools drop the execute bit. If the shell says
+\"permission denied\": chmod +x torpeek ffmpeg ffprobe.
+
+BEFORE THE FIRST RUN, clear the download flag:
+
+  xattr -c torpeek
+
+torpeek's own binary carries no Apple Developer ID signature and is not
+notarised, and a browser marks everything it downloads. Unpacking carries that
+mark onto the files, and Gatekeeper then stops torpeek before it starts - in a
+terminal it simply never prints anything. Clearing the flag first avoids that;
+clearing it afterwards does not, because the refusal is remembered, so unpack
+the archive again if you have already hit it. The bundled ffmpeg and ffprobe
+are signed by their builder and start either way."
+		;;
 	*)
 		invoke="./torpeek"
 		unpack_note="Some unpacking tools drop the execute bit. If the shell says
 \"permission denied\": chmod +x torpeek ffmpeg ffprobe."
+		;;
+	esac
+
+	# The LICENCE section below is the one part of this file that is not the
+	# same on every platform, because what the archive travels under is not:
+	# LGPL on Linux and Windows, GPL on macOS (TOR-93). Computed here for the
+	# same reason as seedbox_line - a $( case ) inside the heredoc writes the
+	# case statement into README.txt instead of running it.
+	case $(field "$2" license) in
+	LGPL-3.0-or-later)
+		licence_note="The ffmpeg and ffprobe here are LGPL builds, redistributed unmodified.
+THIRD-PARTY-NOTICES.md names the exact upstream build and commit, carries the
+written offer for the corresponding source, and points at the licence texts in
+licenses/. torpeek itself is a separate program that runs them as child
+processes; it does not link against them, which is why the two licences sit
+side by side here rather than one covering the other."
+		;;
+	GPL-3.0-or-later)
+		licence_note="The ffmpeg and ffprobe here are GPL builds, redistributed unmodified, and this
+whole folder is passed on to you under the GNU GPL version 3 or later. Run it
+for any purpose, study it, copy it, change it and pass it on - under that same
+licence, and with THIRD-PARTY-NOTICES.md alongside, because the written offer
+for the complete corresponding source lives in it. That file also names the
+exact upstream build and commit and points at the licence texts in licenses/.
+
+torpeek's own source code is MIT and stays MIT: the text is in LICENSE, and MIT
+source may travel inside a GPL-licensed whole. What the GPL covers is this
+folder, not the project.
+
+The Linux and Windows archives of this release bundle an LGPL ffmpeg instead
+and are not under the GPL. macOS is the only platform with no LGPL build worth
+shipping, and there was no reason to take rights away from everyone else to
+make one sentence cover all three."
+		;;
+	*)
+		die "$2: no README wording for licence '$(field "$2" license)'"
 		;;
 	esac
 	cat >"$1/README.txt" <<EOF
@@ -151,18 +211,101 @@ LICENCE
 
 torpeek is MIT; the text is in LICENSE.
 
-The ffmpeg and ffprobe here are LGPL builds, redistributed unmodified.
-THIRD-PARTY-NOTICES.md names the exact upstream build and commit, carries the
-written offer for the corresponding source, and points at the licence texts in
-licenses/. torpeek itself is a separate program that runs them as child
-processes; it does not link against them, which is why the two licences sit
-side by side here rather than one covering the other.
+$licence_note
 EOF
 }
 
 write_notices() {
 	# $1 archive directory, $2 platform
 	platform=$2
+	licence=$(field "$platform" license)
+	licence_file=$(field "$platform" license_file)
+
+	# Four paragraphs differ per platform, and each of them would be a lie on
+	# the other one: which text is the licence, what the build has configured
+	# in, what that obliges the person holding the archive to do, and whether
+	# torpeek's own aggregation argument is the end of the story. Branched on
+	# the lock's `license` rather than assumed, and an unrecognised value
+	# stops the release instead of defaulting to the older LGPL wording,
+	# because that default is exactly the defect this file cannot afford
+	# (TOR-93).
+	case $licence in
+	LGPL-3.0-or-later)
+		licence_para="**Licence: $licence.** Full text in
+\`licenses/ffmpeg/$licence_file\`; the GNU GPL v3, which the LGPL v3
+incorporates by reference, is in \`licenses/ffmpeg/COPYING.GPLv3\`. FFmpeg's own
+summary of which of its files are under which licence is in
+\`licenses/ffmpeg/LICENSE.md\`."
+		build_para="These are **LGPL** builds: FFmpeg's GPL-only components (libx264, libx265, the
+GPL filters) are not configured in. They are redistributed **unmodified**, byte
+for byte as published by the upstream builder."
+		offer_extra=""
+		aggregation_para="torpeek is a separate program. It never links FFmpeg: it runs \`ffmpeg\` and
+\`ffprobe\` as child processes and talks to them over their command line, stdout
+and stderr (see \`internal/ffmpeg\`). Bundling the two executables in one
+folder is aggregation, not combination, so nothing here constrains torpeek's
+own licence."
+		;;
+	GPL-3.0-or-later)
+		licence_para="**Licence: $licence.** Full text in
+\`licenses/ffmpeg/$licence_file\`. The GNU LGPL v3 is in
+\`licenses/ffmpeg/COPYING.LGPLv3\` and still applies to the parts of FFmpeg
+that are not GPL-only, so those keep their LGPL rights inside this GPL whole.
+FFmpeg's own summary of which of its files are under which licence is in
+\`licenses/ffmpeg/LICENSE.md\`."
+		build_para="These are **GPL** builds: FFmpeg's GPL-only components - libx264, libx265 and
+the GPL filters - **are** configured in. They are redistributed **unmodified**,
+byte for byte as published by the upstream builder.
+
+**What that means for you.** This archive is passed on to you as a whole under
+the **GNU GPL version 3 or later**. You may run it for any purpose, study it,
+copy it, change it and pass it on, provided you pass it on under that same
+licence and hand on the written offer below with it.
+
+torpeek's own source code is **MIT** and stays MIT - the text is in
+\`LICENSE\`. MIT is GPL-compatible, so MIT source may travel inside a
+GPL-licensed whole; what the GPL covers here is this archive, not the project's
+repository.
+
+**The other platforms' archives are not under the GPL.** The Linux and Windows
+archives of torpeek $version bundle an LGPL ffmpeg. macOS is the only platform
+with no LGPL build worth shipping (\`docs/licensing.md\`), and downgrading
+everybody else's rights to make one sentence cover all three would have bought
+nothing."
+		offer_extra="- any patches the builder applies on top of that commit before configuring and
+  compiling, together with the scripts that control compilation and
+  installation. Both are part of the build definition named above, and this
+  offer covers them as much as it covers FFmpeg itself.
+"
+		aggregation_para="torpeek is a separate program. It never links FFmpeg: it runs \`ffmpeg\` and
+\`ffprobe\` as child processes and talks to them over their command line, stdout
+and stderr (see \`internal/ffmpeg\`). Bundling the two executables in one
+folder is aggregation, not combination, which is why torpeek's own source stays
+MIT and its repository is unaffected by what travels beside it here.
+
+This *archive*, though, is offered to you under the GPL as a whole. MIT permits
+that, and it means nobody holding the folder has to work out for themselves
+where the aggregate ends: redistribute this folder under the GPL, and take
+torpeek's source from its repository under MIT."
+		;;
+	*)
+		die "$platform: no notices wording for licence '$licence'"
+		;;
+	esac
+
+	# ffprobe usually rides in the same archive as ffmpeg and needs no row of
+	# its own; martin-riedl publishes one zip per executable, and a provenance
+	# table that named only the first would leave half of what is in the
+	# folder unaccounted for.
+	ffprobe_archive_rows=""
+	if [ -n "$(field "$platform" ffprobe_url)" ]; then
+		# The backticks are markdown, not command substitution.
+		# shellcheck disable=SC2016
+		ffprobe_archive_rows=$(printf '\n| upstream archive (ffprobe) | %s |\n| archive sha256 (ffprobe) | `%s` |' \
+			"$(field "$platform" ffprobe_url)" \
+			"$(field "$platform" ffprobe_archive_sha256)")
+	fi
+
 	cat >"$1/THIRD-PARTY-NOTICES.md" <<EOF
 # Third-party notices - torpeek $version ($platform)
 
@@ -171,15 +314,9 @@ which licence, and where its source is.
 
 ## FFmpeg (ffmpeg, ffprobe)
 
-**Licence: $(field "$platform" license).** Full text in
-\`licenses/ffmpeg/COPYING.LGPLv3\`; the GNU GPL v3, which the LGPL v3
-incorporates by reference, is in \`licenses/ffmpeg/COPYING.GPLv3\`. FFmpeg's own
-summary of which of its files are under which licence is in
-\`licenses/ffmpeg/LICENSE.md\`.
+$licence_para
 
-These are **LGPL** builds: FFmpeg's GPL-only components (libx264, libx265, the
-GPL filters) are not configured in. They are redistributed **unmodified**, byte
-for byte as published by the upstream builder.
+$build_para
 
 | | |
 |---|---|
@@ -188,7 +325,7 @@ for byte as published by the upstream builder.
 | prebuilt by | $(field "$platform" source), release \`$(field "$platform" release_tag)\` |
 | build variant | $(field "$platform" variant) |
 | upstream archive | $(field "$platform" url) |
-| archive sha256 | \`$(field "$platform" archive_sha256)\` |
+| archive sha256 | \`$(field "$platform" archive_sha256)\` |$ffprobe_archive_rows
 | ffmpeg sha256 | \`$(field "$platform" ffmpeg_sha256)\` |
 | ffprobe sha256 | \`$(field "$platform" ffprobe_sha256)\` |
 
@@ -198,9 +335,9 @@ The complete corresponding source code for the FFmpeg build in this archive is:
 
 - FFmpeg itself, at commit \`$(field "$platform" ffmpeg_commit)\`:
   $(field "$platform" ffmpeg_source)
-- the build definition that produced this binary, including the versions of
-  every library configured into it: $(field "$platform" build_scripts)
-
+- the build definition that produced this binary, including how every library
+  configured into it is obtained and built: $(field "$platform" build_scripts)
+$offer_extra
 For a period of three years from the date this archive was distributed, and on
 request, the torpeek project will provide a complete machine-readable copy of
 that source on a physical medium or by equivalent means, for no more than the
@@ -209,11 +346,7 @@ https://github.com/madmurdok/torpeek to ask.
 
 ## torpeek
 
-torpeek is a separate program. It never links FFmpeg: it runs \`ffmpeg\` and
-\`ffprobe\` as child processes and talks to them over their command line, stdout
-and stderr (see \`internal/ffmpeg\`). Bundling the two executables in one
-folder is aggregation, not combination, so nothing here constrains torpeek's
-own licence.
+$aggregation_para
 
 torpeek is compiled from Go source. The 73 Go modules linked into this
 executable (the CGO-free build's set, listed by
@@ -280,6 +413,13 @@ for platform in $platforms; do
 	cp "$binary" "$stage/torpeek$exe"
 	cp "$ffmpeg_src" "$stage/ffmpeg$exe"
 	cp "$ffprobe_src" "$stage/ffprobe$exe"
+	# All three texts on every platform, whichever of them is *the* licence
+	# there. An LGPL v3 archive needs the GPL v3 too, because LGPL v3
+	# incorporates it by reference; a GPL v3 archive needs the LGPL v3 too,
+	# because the parts of FFmpeg that are not GPL-only stay LGPL and their
+	# recipients keep LGPL rights in them. Which one governs the archive as a
+	# whole is what the lock's `license_file` names and the notices state -
+	# not which files were copied (TOR-93).
 	cp "$root/packaging/licenses/ffmpeg/COPYING.LGPLv3" \
 		"$root/packaging/licenses/ffmpeg/COPYING.GPLv3" \
 		"$root/packaging/licenses/ffmpeg/LICENSE.md" \
@@ -335,9 +475,9 @@ for platform in $platforms; do
 done
 
 # Every archive of this version that is on disk, not only the ones this run
-# rebuilt. Packaging one platform at a time is normal - the macOS one is
-# blocked, and a fix gets retried alone - and a checksum file that forgot the
-# other platforms each time would be worse than none.
+# rebuilt. Packaging one platform at a time is normal - a platform whose
+# upstream build has moved gets retried alone - and a checksum file that forgot
+# the other platforms each time would be worse than none.
 mkdir -p "$dist"
 sums="$dist/torpeek-$version-SHA256SUMS.txt"
 : >"$sums"
