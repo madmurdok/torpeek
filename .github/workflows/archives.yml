@@ -178,16 +178,32 @@ jobs:
       # hide the other half of the answer this workflow exists to give, and
       # those two are the entire reason it exists.
       fail-fast: false
+      # The runner labels are pinned to an architecture, never to `-latest`,
+      # because architecture is the whole subject here: `macos-latest` moved
+      # from Intel to Apple silicon once already, and a matrix that let it
+      # move again would quietly stop testing one of the two macOS archives
+      # while still reporting four green jobs.
+      #
+      # macos-15-intel and not macos-13, which TOR-101 was written against:
+      # macos-13 was retired while this was being built. The label is still
+      # accepted and a job asking for it simply queues forever with no runner
+      # ever assigned - measured, 13 minutes with runner_name empty - so this
+      # is not a cosmetic rename. macos-15-intel is the standard x64 image
+      # that replaced it. macos-15 rather than macos-14 for the same reason
+      # one step earlier: macos-14 works today (it produced the first green
+      # arm64 run this workflow ever had) but is deprecated with a November
+      # end date, and a release gate should not be pinned to an image with a
+      # published expiry.
       matrix:
         include:
           - platform: linux-amd64
             os: ubuntu-latest
             suffix: tar.gz
           - platform: darwin-amd64
-            os: macos-13 # Intel
+            os: macos-15-intel # x64
             suffix: tar.gz
           - platform: darwin-arm64
-            os: macos-14 # Apple silicon
+            os: macos-15 # Apple silicon
             suffix: tar.gz
           - platform: windows-amd64
             os: windows-latest
