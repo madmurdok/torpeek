@@ -462,6 +462,19 @@ guard against an asset quietly becoming a differently licensed build."
 		mv -f "$tmp/$(member_path "$license_member")" "$dest/LICENSE.txt"
 	fi
 	chmod +x "$ffmpeg_out" "$ffprobe_out"
+
+	# The downloaded archives have no reader left. Measured (TOR-103): the
+	# cache held 380 MiB beside 748 MiB of extracted binaries, and moving it
+	# away changed nothing - every platform still answered "already present
+	# and verified", because the fast path above hashes the EXTRACTED files
+	# and never looks here. Keeping a third of a gigabyte for a case that
+	# cannot arise is not a cache, it is a leak.
+	#
+	# The x264 source tarball is deliberately not touched: it is ~1 MiB, it
+	# is never extracted into anything lasting, and without it every fetch
+	# re-downloads it.
+	rm -f "$cache/$(basename "$url")"
+	[ -z "$ffprobe_url" ] || rm -f "$cache/$(basename "$ffprobe_url")"
 	rm -rf "$tmp"
 
 	# A copy of the provenance travels with the binaries, so a

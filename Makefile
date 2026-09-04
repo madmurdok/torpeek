@@ -152,3 +152,22 @@ tag:
 .PHONY: clean
 clean:
 	rm -rf bin dist
+
+# Separate from clean, and deliberately so: `clean` is run casually and this
+# costs a download to undo - about 220 MiB of upstream archives, re-fetched and
+# re-verified by scripts/fetch-ffmpeg.sh (TOR-103).
+#
+# What it reclaims is roughly 750 MiB, measured: two static ffmpeg binaries per
+# platform at ~110 MiB each, across four platforms. Nothing here is in git -
+# .gitignore carries /third_party/ffmpeg/ - so this only ever costs time.
+#
+# It used to be 1.1 GiB, because the fetch kept every downloaded archive in a
+# cache nothing ever read again; the fetch now drops each one once its
+# binaries are extracted and verified (TOR-103).
+#
+# Keeping them is what lets `make archives` run with no network at all: the
+# fetch script hashes what is already extracted and skips the download when it
+# matches, which is why the cache under .cache/ can go and these cannot.
+.PHONY: clean-ffmpeg
+clean-ffmpeg:
+	rm -rf third_party/ffmpeg
