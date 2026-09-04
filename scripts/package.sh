@@ -79,6 +79,17 @@ write_readme() {
 	exe=$3
 	# How a person on that platform actually types it, and the one
 	# unpacking note that only applies off Windows.
+	# One extra line in the file list on the platform that has a seedbox
+	# directory. Computed here rather than as a $( case ) inside the heredoc
+	# below: that does not parse, and it fails by writing the case statement
+	# itself into README.txt.
+	seedbox_line=""
+	case $2 in
+	linux-*)
+		seedbox_line=$(printf '\n  %-22s %s' "seedbox/" "systemd unit and guide for a managed slot with no root")
+		;;
+	esac
+
 	case $2 in
 	windows-*)
 		invoke="torpeek.exe"
@@ -118,7 +129,7 @@ $(printf '  %-22s %s\n' \
 		"README.txt" "this file" \
 		"LICENSE" "torpeek's own licence (MIT)" \
 		"THIRD-PARTY-NOTICES.md" "what ffmpeg is, where it came from, its licence" \
-		"licenses/" "the full licence texts those notices refer to")
+		"licenses/" "the full licence texts those notices refer to")$seedbox_line
 
 Nothing has to be installed. Keep the three executables in the same folder:
 torpeek looks for ffmpeg and ffprobe next to itself before it falls back to
@@ -279,6 +290,22 @@ for platform in $platforms; do
 	# recipient of an unlicensed program has no rights at all, so this file
 	# is not optional decoration (TOR-92).
 	cp "$root/LICENSE" "$stage/LICENSE"
+
+	# Linux additionally carries what a seedbox deployment needs, which
+	# REQUIREMENTS 4.1 asks for by name: "the same files as the desktop
+	# archive, plus a systemd unit and instructions" (TOR-31). Linux only -
+	# a systemd unit on Windows is noise, and docs/seedbox.md's steps are
+	# systemd's and nginx's.
+	case "$platform" in
+	linux-*)
+		mkdir -p "$stage/seedbox"
+		cp "$root/packaging/systemd/torpeek.service" \
+			"$root/packaging/systemd/torpeek.env.example" \
+			"$root/docs/seedbox.md" \
+			"$stage/seedbox/"
+		;;
+	esac
+
 	chmod +x "$stage/torpeek$exe" "$stage/ffmpeg$exe" "$stage/ffprobe$exe"
 
 	write_readme "$stage" "$platform" "$exe"
