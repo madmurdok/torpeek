@@ -63,6 +63,20 @@ func TestReadRangeFetchesOnlyTheWindow(t *testing.T) {
 
 	downloaded := tor.Downloaded()
 
+	// What the run ORDERED, which is the figure acceptance criterion 2 is
+	// judged on (TOR-94). ReadRange claimed and then RELEASED before it
+	// returned, and the figure has to survive that: it is the set of pieces
+	// this run asked for at least once, not the set it is asking for now.
+	//
+	// Exact rather than approximate, because the geometry is exact: a 64 KiB
+	// read at a piece-aligned 4 MiB is widened to min-traffic's 1 MiB window,
+	// which is four of this fixture's 256 KiB pieces (16..20).
+	claimedPieces, claimedByte := tor.Claimed()
+	if claimedPieces != 4 || claimedByte != 1<<20 {
+		t.Errorf("Claimed() = %d pieces / %d bytes, want 4 / %d - the window is four pieces here",
+			claimedPieces, claimedByte, int64(1<<20))
+	}
+
 	// Measuring right after the read is not enough: an unbounded claim would
 	// still be fetching in the background and the counter would not have
 	// caught up yet. Releasing the window must actually stop the transfer, so
@@ -70,8 +84,9 @@ func TestReadRangeFetchesOnlyTheWindow(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	settled := tor.Downloaded()
 
-	t.Logf("downloaded %d bytes during the read, %d after settling (%.1f%% of the file) to read %d bytes at offset %d",
-		downloaded, settled, 100*float64(settled)/float64(testPayloadSize), readLength, readOffset)
+	t.Logf("downloaded %d bytes during the read, %d after settling (%.1f%% of the file) to read %d bytes at offset %d; claimed %d bytes in %d pieces",
+		downloaded, settled, 100*float64(settled)/float64(testPayloadSize), readLength, readOffset,
+		claimedByte, claimedPieces)
 
 	// The window plus readahead is a handful of pieces; a quarter of the file
 	// is a generous ceiling that still fails loudly if the whole file is
@@ -366,4 +381,59 @@ func withOfflineDHT(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { tuneClientForTest = nil })
+}
+
+// TestClaimedCountsEachPieceOnce is the accounting behind acceptance
+// criterion 2 (TOR-94), on geometry rather than on a swarm.
+//
+// The distinctness is the whole point: a single acceptance run claims 326
+// pieces' worth of windows covering 44 distinct pieces, one of them claimed
+// and released 82 times, and every re-read after the first is free. A counter
+// that added up claims instead of pieces would report 326 MiB for a run that
+// orders 44.
+func TestClaimedCountsEachPieceOnce(t *testing.T) {
+	const pieceLength = 1 << 20
+	// Ten pieces, the last one short: 9 MiB plus 256 KiB.
+	const length = 9*pieceLength + 256<<10
+
+	tor := &Torrent{
+		files:       []FileInfo{{Index: 0, Path: "movie.mkv", Length: length, Offset: 0}},
+		pieceLength: pieceLength,
+		numPieces:   10,
+		length:      length,
+	}
+
+	steps := []struct {
+		name       string
+		claim      PieceRange
+		wantPieces int
+		wantBytes  int64
+	}{
+		{"first claim", PieceRange{0, 2}, 2, 2 * pieceLength},
+		{"overlapping claim adds only what is new", PieceRange{1, 3}, 3, 3 * pieceLength},
+		{"the same claim again adds nothing", PieceRange{1, 3}, 3, 3 * pieceLength},
+		{"a disjoint claim adds all of itself", PieceRange{5, 7}, 5, 5 * pieceLength},
+		{"the last piece is only as big as what is left", PieceRange{9, 10}, 6, 5*pieceLength + 256<<10},
+	}
+
+	for _, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			tor.noteClaimed(step.claim)
+
+			pieces, bytes := tor.Claimed()
+			if pieces != step.wantPieces || bytes != step.wantBytes {
+				t.Errorf("after claiming %+v: Claimed() = %d pieces / %d bytes, want %d / %d",
+					step.claim, pieces, bytes, step.wantPieces, step.wantBytes)
+			}
+		})
+	}
+
+	// Claiming the same piece a hundred more times must not move it, which is
+	// the 82-re-reads case at the scale it actually happens.
+	for i := 0; i < 100; i++ {
+		tor.noteClaimed(PieceRange{1, 3})
+	}
+	if pieces, bytes := tor.Claimed(); pieces != 6 || bytes != 5*pieceLength+256<<10 {
+		t.Errorf("a hundred repeat claims moved the figure to %d pieces / %d bytes", pieces, bytes)
+	}
 }

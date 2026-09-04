@@ -3,6 +3,7 @@ package swarm
 import (
 	"bytes"
 	"fmt"
+	"sync"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -19,6 +20,15 @@ type Torrent struct {
 	// caching them keeps the piece arithmetic testable without a client.
 	pieceLength int64
 	numPieces   int
+	length      int64
+
+	// What this run ordered from the swarm, as distinct pieces. Written only
+	// by noteClaimed (fetch.go), which Claim is the single funnel into; read
+	// by Claimed below. Guarded because claims are issued from every capture
+	// point in flight and from every range ffmpeg has open at once.
+	claimMu     sync.Mutex
+	claimedSeen map[int]struct{}
+	claimedByte int64
 }
 
 func newTorrent(t *torrent.Torrent) *Torrent {
@@ -39,7 +49,13 @@ func newTorrent(t *torrent.Torrent) *Torrent {
 		})
 	}
 
-	tor := &Torrent{t: t, private: private, files: files, numPieces: t.NumPieces()}
+	tor := &Torrent{
+		t:         t,
+		private:   private,
+		files:     files,
+		numPieces: t.NumPieces(),
+		length:    t.Length(),
+	}
 	if info != nil {
 		tor.pieceLength = info.PieceLength
 	}
@@ -90,7 +106,7 @@ func (t *Torrent) Files() []FileInfo { return t.files }
 func (t *Torrent) Videos() []FileInfo { return SelectVideos(t.files) }
 
 // Length is the total size of the torrent's contents.
-func (t *Torrent) Length() int64 { return t.t.Length() }
+func (t *Torrent) Length() int64 { return t.length }
 
 // PieceLength is the swarm's unit of exchange, and so the floor on what any
 // single frame can cost.
@@ -104,6 +120,39 @@ func (t *Torrent) NumPieces() int { return t.numPieces }
 func (t *Torrent) Downloaded() int64 {
 	stats := t.t.Stats()
 	return stats.BytesReadUsefulData.Int64()
+}
+
+// Claimed is what this run ASKED the swarm for: how many distinct pieces some
+// Claim has covered, and what they weigh.
+//
+// It is the other half of Downloaded, and the gap between the two is the
+// interesting quantity rather than an error term. Downloaded is every useful
+// byte that ARRIVED, whoever asked for it; Claimed is what torpeek itself
+// ordered. On the acceptance torrent min-traffic claims a deterministic 44
+// pieces, to the byte, every run, while what arrived has been measured from
+// 45.5 to 118.6 MiB on byte-identical code - reader prefetch, and chunks that
+// keep coming from several peers after a Release, between 2.3 and 12.3 MiB of
+// it while no request is open at all (docs/tor-88-min-traffic-spread.md).
+// Acceptance criterion 2 is judged on THIS figure for exactly that reason
+// (REQUIREMENTS.md section 8, TOR-94). A run's traffic BUDGET is deliberately
+// not (section 2.6): a budget protects a link and a quota, and bytes already
+// on the wire cost the same whoever asked for them.
+//
+// Cumulative and monotonic. A piece claimed, released and claimed again - one
+// piece goes through that 82 times in a single acceptance run - counts once,
+// and Release never takes anything back off this figure. What it measures is
+// the set of pieces the run ordered at least once, which is the part that is
+// deterministic; how long each order stood is a different question and not
+// this one.
+//
+// This is a measurement seam, not a protocol: it stops at core.Done, which is
+// where the acceptance harness reads it, and deliberately does not travel into
+// internal/wire's event JSON or into the manifest's cost record (section 2.8),
+// neither of which anybody has asked to grow a second traffic number.
+func (t *Torrent) Claimed() (pieces int, bytes int64) {
+	t.claimMu.Lock()
+	defer t.claimMu.Unlock()
+	return len(t.claimedSeen), t.claimedByte
 }
 
 // Peers reports how many peers are connected and how many of them are seeds.

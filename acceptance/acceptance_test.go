@@ -85,12 +85,17 @@ func machineState() string {
 // ---- harness -------------------------------------------------------------
 
 type outcome struct {
-	frames     int
-	files      int
-	downloaded int64
-	elapsed    time.Duration
-	reason     core.StopReason
-	failures   []core.Failed
+	frames int
+	files  int
+	// downloaded is what arrived; claimed is what the run ordered, in bytes
+	// and in distinct pieces. Criterion 2 is judged on the second
+	// (REQUIREMENTS.md section 8, TOR-94) and reports all three.
+	downloaded    int64
+	claimed       int64
+	claimedPieces int
+	elapsed       time.Duration
+	reason        core.StopReason
+	failures      []core.Failed
 	// paths are the frames written, in the order they were reported.
 	paths []string
 	// byFile remembers one frame path per file, which is how a manifest is
@@ -154,14 +159,12 @@ func run(ctx context.Context, t *testing.T, cfg core.Config, stopAfter int) outc
 			got.failures = append(got.failures, e)
 		case core.Done:
 			got.files, got.downloaded = e.Files, e.DownloadedByte
+			got.claimed, got.claimedPieces = e.ClaimedByte, e.ClaimedPieces
 			got.elapsed, got.reason = e.Elapsed, e.Reason
 		}
 	}
 	return got
 }
-
-func mib(n int64) string          { return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20)) }
-func secs(d time.Duration) string { return fmt.Sprintf("%.1fs", d.Seconds()) }
 
 // liveTorrent gets the torrent under test, fetching it if no path was given.
 func liveTorrent(t *testing.T) string {

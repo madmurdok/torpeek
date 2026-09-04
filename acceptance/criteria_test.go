@@ -21,6 +21,14 @@ import (
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
+// The ceilings REQUIREMENTS.md section 8 states, unchanged.
+//
+// maxMinTrafficByte in particular is still 60 MiB. TOR-94 changed what it is
+// compared against - what the run orders, not what the swarm sends - and
+// deliberately did not move it: a ceiling raised to fit an observation stops
+// being a criterion, and against the 44 MiB a min-traffic run actually orders
+// there is 16 MiB of headroom for the fetch plan to grow into before anybody
+// has to argue about the number.
 const (
 	maxMinTimeBytes   = 150 << 20
 	maxMinTimeElapsed = 2 * time.Minute
@@ -35,6 +43,16 @@ const (
 // affordable (TOR-88). A plain `make acceptance` still runs both, in order,
 // and measures each exactly as before - the subtest carries no state, and the
 // data and output directories were already one fresh pair per criterion.
+//
+// The two criteria are judged on different figures, and the table below says
+// which. Criterion 1's ceiling is 150 MB against arrivals that have sat inside
+// a 2.7 MiB band for seven releases, so it is judged on what arrived, as it
+// always was. Criterion 2's ceiling is judged on what the run ORDERED, because
+// what arrives there is not torpeek's to control: it missed the 60 MiB ceiling
+// in 21 of 22 runs during one afternoon on byte-identical code, while the
+// order stayed a deterministic 44 pieces to the byte (TOR-94, and
+// docs/tor-88-min-traffic-spread.md for how that was established). Both runs
+// report both numbers and the gap.
 func TestCriteria1And2MinTimeAndMinTraffic(t *testing.T) {
 	torrent := liveTorrent(t)
 	report.Torrents = append(report.Torrents, "live: "+*torrentURL+" (file "+*fileSpec+")")
@@ -43,14 +61,15 @@ func TestCriteria1And2MinTimeAndMinTraffic(t *testing.T) {
 	defer cancel()
 
 	for _, c := range []struct {
-		number  int
-		profile swarm.Profile
-		title   string
-		maxByte int64
-		maxTime time.Duration
+		number   int
+		profile  swarm.Profile
+		title    string
+		maxByte  int64
+		maxTime  time.Duration
+		judgedOn Figure
 	}{
-		{1, swarm.MinTime, "min-time: 20 frames within 2 minutes and 150 MB", maxMinTimeBytes, maxMinTimeElapsed},
-		{2, swarm.MinTraffic, "min-traffic: the same 20 frames within 60 MB", maxMinTrafficByte, 0},
+		{1, swarm.MinTime, "min-time: 20 frames within 2 minutes and 150 MB", maxMinTimeBytes, maxMinTimeElapsed, OnDownloaded},
+		{2, swarm.MinTraffic, "min-traffic: the same 20 frames ordering at most 60 MB", maxMinTrafficByte, 0, OnClaimed},
 	} {
 		t.Run(fmt.Sprintf("criterion%d", c.number), func(t *testing.T) {
 			cfg := baseConfig(t, torrent, t.TempDir(), t.TempDir())
@@ -59,38 +78,79 @@ func TestCriteria1And2MinTimeAndMinTraffic(t *testing.T) {
 
 			got := run(ctx, t, cfg, 0)
 
+			traffic := Traffic{
+				ClaimedByte:    got.claimed,
+				ClaimedPieces:  got.claimedPieces,
+				DownloadedByte: got.downloaded,
+				Ceiling:        c.maxByte,
+				JudgedOn:       c.judgedOn,
+			}
+
+			overCeiling := "over the traffic ceiling"
+			if c.judgedOn == OnClaimed {
+				overCeiling = "ordered more than the traffic ceiling, so the run's own fetch plan grew"
+			}
+
 			verdict := Met
 			note := ""
 			if got.frames != cfg.Plan.Count {
 				verdict, note = Missed, "the frame set was not complete"
-			} else if got.downloaded > c.maxByte {
-				verdict, note = Missed, "over the traffic ceiling"
+			} else if c.judgedOn == OnClaimed && got.claimed == 0 {
+				// A verdict taken on a figure that can only read zero when
+				// the instrument is broken must not come out "met". Twenty
+				// frames off a live swarm ordered pieces by definition, so
+				// zero here means the counter is not being fed - which is
+				// exactly the failure a criterion re-based on a new
+				// measurement is exposed to (TOR-94).
+				verdict, note = Missed, "the run reports ordering nothing while producing a full "+
+					"frame set, so the claimed figure is not being measured and there is no verdict to take"
+			} else if traffic.Judged() > c.maxByte {
+				verdict, note = Missed, overCeiling
 			} else if c.maxTime > 0 && got.elapsed > c.maxTime {
 				verdict, note = Missed, "over the time ceiling"
 			}
 			if verdict == Met {
 				note = "measured against one file of a public torrent; the criterion names a ~10 GB film, " +
 					"and the largest file here is smaller than that"
+				if c.judgedOn == OnClaimed {
+					// Required by TOR-94 rather than decoration: a passing run
+					// says nothing about the elevated regime, which produced
+					// 60.7-118.6 MiB of arrivals on this same code and would
+					// have failed this criterion with nothing wrong.
+					note += ". The verdict is taken on what the run ordered, which is deterministic; " +
+						"actual traffic is reported beside it and is a SAMPLE of this swarm at this " +
+						"moment rather than a guarantee - unchanged code has produced 45.5 to 118.6 MiB " +
+						"of it (docs/tor-88-min-traffic-spread.md)"
+					if got.downloaded > c.maxByte {
+						note += ", and on this very run it was over the same ceiling"
+					}
+				}
 			}
 
 			// One machine-readable line per rep, so a spread can be read out
-			// of `go test -v` without diffing eight report files.
-			t.Logf("TOR88 criterion=%d profile=%s bytes=%d mib=%.1f elapsed_s=%.1f frames=%d/%d shifted=%d reason=%s",
+			// of `go test -v` without diffing eight report files. The claimed
+			// fields are appended rather than inserted, so a line from this
+			// build still parses beside TOR-88's forty reps.
+			t.Logf("TOR88 criterion=%d profile=%s bytes=%d mib=%.1f elapsed_s=%.1f frames=%d/%d shifted=%d reason=%s claimed_bytes=%d claimed_mib=%.1f claimed_pieces=%d",
 				c.number, c.profile.Name, got.downloaded, float64(got.downloaded)/(1<<20),
-				got.elapsed.Seconds(), got.frames, cfg.Plan.Count, got.shifted, got.reason)
+				got.elapsed.Seconds(), got.frames, cfg.Plan.Count, got.shifted, got.reason,
+				got.claimed, float64(got.claimed)/(1<<20), got.claimedPieces)
+
+			measured := []Measurement{Measure("frames", "%d of %d", got.frames, cfg.Plan.Count)}
+			measured = append(measured, traffic.Measurements()...)
+			measured = append(measured,
+				Measure("elapsed", "%s", secs(got.elapsed)),
+				Measure("outcome", "%s", got.reason),
+			)
 
 			report.Add(Result{
 				Number: c.number, Title: c.title, Verdict: verdict, Note: note,
-				Measured: []Measurement{
-					Measure("frames", "%d of %d", got.frames, cfg.Plan.Count),
-					Measure("downloaded", "%s (ceiling %s)", mib(got.downloaded), mib(c.maxByte)),
-					Measure("elapsed", "%s", secs(got.elapsed)),
-					Measure("outcome", "%s", got.reason),
-				},
+				Measured: measured,
 			})
 
 			if verdict == Missed {
-				t.Errorf("criterion %d: %s (%s in %s)", c.number, note, mib(got.downloaded), secs(got.elapsed))
+				t.Errorf("criterion %d: %s (ordered %s in %d pieces, %s arrived, in %s)",
+					c.number, note, mib(got.claimed), got.claimedPieces, mib(got.downloaded), secs(got.elapsed))
 			}
 		})
 	}

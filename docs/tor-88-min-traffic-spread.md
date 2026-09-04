@@ -508,6 +508,16 @@ rounds, and `TestReadaheadSizeIsNotRoundedUp` fails if anybody makes it.
 3. **Have the acceptance report record what a run claimed, not only what it
    spent.** 44 distinct pieces is deterministic; 60.8 MiB is not. A report
    carrying both would have made this ticket a five-minute read.
+
+   **Done in 1.0.0 as TOR-94**, together with item 5 below, which it turned
+   out to be the same decision. `swarm.Torrent` now counts the distinct
+   pieces any `Claim` covers - `Claim` is the single funnel, and a reader's
+   readahead deliberately does not reach it - and carries the figure out on
+   `core.Done` as far as the acceptance harness, no further. The report
+   prints ordered, arrived and the gap for both criteria. Measured against
+   this document's own trace on the local seeder, the counter independently
+   reproduces the numbers the scratch patch logged: 36 pieces for min-time
+   and 15 for min-traffic, both short by the same 0.3 MiB tail piece.
 4. **Do not run the acceptance suite in a tight loop against the public
    torrent, and say how long the machine had been quiet.** The figure is not
    stationary under that load: it doubled after ~25 back-to-back runs and
@@ -517,3 +527,15 @@ rounds, and `TestReadaheadSizeIsNotRoundedUp` fails if anybody makes it.
    measures our fetch plan plus whatever the swarm pushes at us; the intent it
    encodes — "the thrifty profile does not pull the film" — is about the plan,
    which is a deterministic 44 MiB.
+
+   **Settled in 1.0.0 as TOR-94**: the criterion is judged on what the run
+   ORDERED, and actual traffic plus the gap are reported beside it rather
+   than folded into it. The 60 MiB ceiling did not move - against a 44 MiB
+   order it is 16 MiB of room for the fetch plan to grow into, and the plan
+   is the part this project controls. Criterion 1 stays on arrivals: its 150
+   MB ceiling sits over a figure inside a 2.7 MiB band for seven releases, so
+   there is nothing there to protect and re-basing it would have cost the
+   release-to-release comparison. REQUIREMENTS.md 8.2 says all of this in the
+   requirement itself, and 2.6 says why a run's traffic BUDGET keeps counting
+   arrivals: a budget protects a link, and bytes on the wire cost the same
+   whoever asked for them.

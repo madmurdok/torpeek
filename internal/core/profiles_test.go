@@ -38,7 +38,18 @@ func TestMinTrafficCostsLessThanMinTime(t *testing.T) {
 	fixture := torrenttest.BuildDir(t, dir, 1<<20)
 	seeder := fixture.StartSeeder(t)
 
-	cost := func(profile swarm.Profile) (int64, time.Duration, int) {
+	// What one profile cost, in both figures: what arrived, and what the run
+	// ordered (TOR-94). The second is the interesting one to compare between
+	// profiles, because it is the part torpeek decides.
+	type cost struct {
+		downloaded    int64
+		claimed       int64
+		claimedPieces int
+		elapsed       time.Duration
+		frames        int
+	}
+
+	measure := func(profile swarm.Profile) cost {
 		t.Helper()
 
 		cfg := DefaultConfig(fixture.TorrentPath, t.TempDir(), t.TempDir())
@@ -55,13 +66,11 @@ func TestMinTrafficCostsLessThanMinTime(t *testing.T) {
 			t.Fatalf("run %s: %v", profile.Name, err)
 		}
 
-		var bytes int64
-		var elapsed time.Duration
-		got := 0
+		var got cost
 		for _, ev := range collect(t, events) {
 			switch e := ev.(type) {
 			case FrameReady:
-				got++
+				got.frames++
 			case FrameSkipped:
 				// Not a failure on its own - the frame-count check below
 				// decides that - but never silent. A skipped point is the
@@ -72,24 +81,48 @@ func TestMinTrafficCostsLessThanMinTime(t *testing.T) {
 			case Failed:
 				t.Errorf("%s: %s: %v", profile.Name, e.Code, e.Err)
 			case Done:
-				bytes, elapsed = e.DownloadedByte, e.Elapsed
+				got.downloaded, got.elapsed = e.DownloadedByte, e.Elapsed
+				got.claimed, got.claimedPieces = e.ClaimedByte, e.ClaimedPieces
 			}
 		}
-		return bytes, elapsed, got
+		return got
 	}
 
-	timeBytes, timeElapsed, timeFrames := cost(swarm.MinTime)
-	trafficBytes, trafficElapsed, trafficFrames := cost(swarm.MinTraffic)
+	minTime := measure(swarm.MinTime)
+	minTraffic := measure(swarm.MinTraffic)
 
-	t.Logf("min-time:    %6.1f MiB in %s for %d frames (%.2f MiB/frame)",
+	timeBytes, timeElapsed, timeFrames := minTime.downloaded, minTime.elapsed, minTime.frames
+	trafficBytes, trafficElapsed, trafficFrames := minTraffic.downloaded, minTraffic.elapsed, minTraffic.frames
+
+	t.Logf("min-time:    %6.1f MiB in %s for %d frames (%.2f MiB/frame), ordered %.1f MiB in %d pieces",
 		float64(timeBytes)/(1<<20), timeElapsed.Round(100*time.Millisecond), timeFrames,
-		float64(timeBytes)/(1<<20)/float64(timeFrames))
-	t.Logf("min-traffic: %6.1f MiB in %s for %d frames (%.2f MiB/frame)",
+		float64(timeBytes)/(1<<20)/float64(timeFrames),
+		float64(minTime.claimed)/(1<<20), minTime.claimedPieces)
+	t.Logf("min-traffic: %6.1f MiB in %s for %d frames (%.2f MiB/frame), ordered %.1f MiB in %d pieces",
 		float64(trafficBytes)/(1<<20), trafficElapsed.Round(100*time.Millisecond), trafficFrames,
-		float64(trafficBytes)/(1<<20)/float64(trafficFrames))
-	t.Logf("difference:  %6.1f MiB (%.0f%% of min-time)",
+		float64(trafficBytes)/(1<<20)/float64(trafficFrames),
+		float64(minTraffic.claimed)/(1<<20), minTraffic.claimedPieces)
+	t.Logf("difference:  %6.1f MiB arrived (%.0f%% of min-time), %.1f MiB ordered",
 		float64(timeBytes-trafficBytes)/(1<<20),
-		100*float64(timeBytes-trafficBytes)/float64(timeBytes))
+		100*float64(timeBytes-trafficBytes)/float64(timeBytes),
+		float64(minTime.claimed-minTraffic.claimed)/(1<<20))
+
+	// The claimed figure is what acceptance criterion 2's verdict is now taken
+	// on (TOR-94), so it has to be shown capable of reading something other
+	// than one number: two profiles that order deliberately different amounts
+	// must produce different figures here, in the right order. A counter left
+	// unwired, or one summing claims instead of distinct pieces and so
+	// saturating at the file, would pass every other check in this file.
+	if minTraffic.claimed == 0 || minTime.claimed == 0 {
+		t.Errorf("a profile ordered nothing (min-time %d, min-traffic %d bytes); "+
+			"the claimed figure is not being counted at all",
+			minTime.claimed, minTraffic.claimed)
+	}
+	if minTraffic.claimed >= minTime.claimed {
+		t.Errorf("min-traffic ordered %d bytes in %d pieces and min-time %d in %d; "+
+			"the thrifty profile must ORDER less, not merely receive less",
+			minTraffic.claimed, minTraffic.claimedPieces, minTime.claimed, minTime.claimedPieces)
+	}
 
 	if timeFrames != trafficFrames {
 		t.Fatalf("the profiles produced different frame counts (%d and %d); "+

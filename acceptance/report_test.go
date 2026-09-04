@@ -112,3 +112,133 @@ func TestAnExplicitPathIsHonouredForASubset(t *testing.T) {
 		t.Errorf("%s was written too, which is the file this must never touch", release)
 	}
 }
+
+// TestTrafficReportsBothFiguresAndTheGap is the shape TOR-94 exists to
+// produce: three rows, with the ceiling attached to the one that decided the
+// verdict and the other explicitly marked as not having decided anything.
+func TestTrafficReportsBothFiguresAndTheGap(t *testing.T) {
+	// The figures TOR-88 measured on rep 8: a deterministic 44-piece order,
+	// 60.8 MiB arriving, 16.8 MiB of it unasked.
+	traffic := Traffic{
+		ClaimedByte:    44 << 20,
+		ClaimedPieces:  44,
+		DownloadedByte: 60*(1<<20) + 838861,
+		Ceiling:        60 << 20,
+		JudgedOn:       OnClaimed,
+	}
+
+	if got, want := traffic.Judged(), int64(44<<20); got != want {
+		t.Errorf("Judged() = %d, want the claimed %d - the verdict must not be taken on arrivals", got, want)
+	}
+
+	rows := traffic.Measurements()
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want claimed, downloaded and the gap: %+v", len(rows), rows)
+	}
+	byName := map[string]string{}
+	for _, m := range rows {
+		byName[m.Name] = m.Value
+	}
+
+	claimed := byName["claimed"]
+	switch {
+	case !strings.Contains(claimed, "44.0 MiB"):
+		t.Errorf("claimed row does not say what was ordered: %q", claimed)
+	case !strings.Contains(claimed, "44 pieces"):
+		t.Errorf("claimed row drops the piece count, which is the deterministic part: %q", claimed)
+	case !strings.Contains(claimed, "ceiling of 60.0 MiB"):
+		t.Errorf("the ceiling is not on the row it applies to: %q", claimed)
+	}
+
+	downloaded := byName["downloaded"]
+	switch {
+	case !strings.Contains(downloaded, "60.8 MiB"):
+		t.Errorf("downloaded row does not say what arrived: %q", downloaded)
+	case !strings.Contains(downloaded, "not judged"):
+		t.Errorf("downloaded row does not say it decided nothing, which is how a reader "+
+			"comes to think the ceiling protects it: %q", downloaded)
+	case strings.Contains(downloaded, "ceiling"):
+		t.Errorf("the ceiling is repeated on a row it does not apply to: %q", downloaded)
+	}
+
+	gap := byName["unclaimed arrivals"]
+	if !strings.Contains(gap, "+16.8 MiB") {
+		t.Errorf("gap row = %q, want the +16.8 MiB between the two figures", gap)
+	}
+	if !strings.Contains(gap, "38.2%") {
+		t.Errorf("gap row does not scale the gap against the claim: %q", gap)
+	}
+}
+
+// TestTrafficJudgedOnArrivalsKeepsCriterion1AsItWas: the other arm. Without
+// this, "judged on the claim" could be hard-coded and nothing would notice.
+func TestTrafficJudgedOnArrivalsKeepsCriterion1AsItWas(t *testing.T) {
+	traffic := Traffic{
+		ClaimedByte:    84 << 20,
+		ClaimedPieces:  84,
+		DownloadedByte: 101*(1<<20) + 629146,
+		Ceiling:        150 << 20,
+		JudgedOn:       OnDownloaded,
+	}
+
+	if got, want := traffic.Judged(), traffic.DownloadedByte; got != want {
+		t.Errorf("Judged() = %d, want the downloaded %d", got, want)
+	}
+
+	byName := map[string]string{}
+	for _, m := range traffic.Measurements() {
+		byName[m.Name] = m.Value
+	}
+	if got := byName["downloaded"]; !strings.Contains(got, "ceiling of 150.0 MiB") {
+		t.Errorf("downloaded row does not carry the ceiling it is judged against: %q", got)
+	}
+	if got := byName["claimed"]; !strings.Contains(got, "not judged") {
+		t.Errorf("claimed row does not say it decided nothing here: %q", got)
+	}
+}
+
+// TestTrafficGapGoesBothWays: fewer bytes can arrive than were ordered - a
+// piece already on disk, or a run that ended before its last order landed -
+// and a report that rendered that as "+-2.0 MiB" or as a positive number
+// would be lying about the direction.
+func TestTrafficGapGoesBothWays(t *testing.T) {
+	traffic := Traffic{ClaimedByte: 15 << 20, ClaimedPieces: 15, DownloadedByte: 13 << 20}
+
+	var gap string
+	for _, m := range traffic.Measurements() {
+		if m.Name == "unclaimed arrivals" {
+			gap = m.Value
+		}
+	}
+	if !strings.HasPrefix(gap, "-2.0 MiB") {
+		t.Errorf("gap row = %q, want it to lead with -2.0 MiB", gap)
+	}
+}
+
+// TestMeasurementsSurviveTheReport keeps the rows and the renderer honest
+// together: the three figures have to reach the file, not just the struct.
+func TestMeasurementsSurviveTheReport(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "one-rep.md")
+
+	var r Report
+	r.Tool = "9.9.9"
+	r.Add(Result{Number: 2, Title: "min-traffic", Verdict: Met,
+		Measured: Traffic{
+			ClaimedByte: 44 << 20, ClaimedPieces: 44,
+			DownloadedByte: 60 << 20, Ceiling: 60 << 20, JudgedOn: OnClaimed,
+		}.Measurements()})
+
+	if _, err := r.WriteFor(path, filepath.Join(dir, "9.9.9-acceptance.md")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	for _, want := range []string{"claimed", "44 pieces", "downloaded", "unclaimed arrivals", "not judged"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the written report does not contain %q:\n%s", want, body)
+		}
+	}
+}
