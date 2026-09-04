@@ -286,6 +286,16 @@ jobs:
       # path relative to the workspace is not found; and on Windows the bash
       # here is Git bash, whose $PWD is an MSYS path (/d/a/...) that a Go
       # program cannot open. $GITHUB_WORKSPACE is native on every runner.
+      # TEMPORARY (TOR-101, reverted in the next commit): break the archive
+      # on purpose, so the run below can be seen going red. A check nobody has
+      # watched fail is a check nobody has any reason to believe.
+      - name: SABOTAGE - delete the bundled ffmpeg from the unpacked archive
+        shell: bash
+        run: |
+          rm -f "$ARCHIVE_DIR/ffmpeg" "$ARCHIVE_DIR/ffmpeg.exe" \
+                "$ARCHIVE_DIR/ffprobe" "$ARCHIVE_DIR/ffprobe.exe"
+          ls -l "$ARCHIVE_DIR"
+
       - name: run it out of the unpacked folder, with nothing on PATH
         shell: bash
         run: |
