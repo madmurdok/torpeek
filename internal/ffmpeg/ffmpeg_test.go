@@ -174,6 +174,29 @@ func TestExecutableName(t *testing.T) {
 	}
 }
 
+// TestExecutableNameForEveryTarget names each target instead of inheriting it.
+// The release archive for Windows holds ffmpeg.exe and ffprobe.exe, and the
+// test above can only ever exercise the branch for the machine it runs on -
+// so on a mac or a Linux runner the case the Windows archive depends on would
+// go unchecked (TOR-26).
+func TestExecutableNameForEveryTarget(t *testing.T) {
+	cases := []struct {
+		goos, base, want string
+	}{
+		{"windows", "ffmpeg", "ffmpeg.exe"},
+		{"windows", "ffprobe", "ffprobe.exe"},
+		{"linux", "ffmpeg", "ffmpeg"},
+		{"linux", "ffprobe", "ffprobe"},
+		{"darwin", "ffmpeg", "ffmpeg"},
+		{"darwin", "ffprobe", "ffprobe"},
+	}
+	for _, c := range cases {
+		if got := executableNameFor(c.goos, c.base); got != c.want {
+			t.Errorf("executableNameFor(%q, %q) = %q, want %q", c.goos, c.base, got, c.want)
+		}
+	}
+}
+
 // TestVersionsAgainstRealTools is a smoke test against whatever ffmpeg the
 // machine has; it is skipped where there is none.
 func TestVersionsAgainstRealTools(t *testing.T) {

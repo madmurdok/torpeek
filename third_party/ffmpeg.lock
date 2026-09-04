@@ -1,0 +1,80 @@
+# Where the bundled ffmpeg and ffprobe come from.
+#
+# One stanza per release platform, keyed by the same name `make cross` uses for
+# its output directory. This file is the provenance record for TOR-26: it names
+# the upstream build, the exact FFmpeg commit inside it, and the sha256 of both
+# the archive and of each binary extracted from it. scripts/fetch-ffmpeg.sh
+# verifies every one of those hashes before anything is packaged, so a silent
+# substitution upstream fails the fetch instead of shipping.
+#
+# `license` is not decoration. torpeek distributes these binaries inside its
+# own release archive, so only an LGPL build may appear here - a GPL build
+# would extend the GPL over the distributed whole. See docs/licensing.md for
+# the decision and what it obliges. `license_sha256` pins the licence text the
+# upstream archive itself carries: if BtbN ever repointed an -lgpl asset at a
+# GPL build, that text would change and the fetch would refuse.
+#
+# status = ok       this platform has a bundled ffmpeg and can be packaged
+# status = blocked  no LGPL build we would ship exists yet; `reason` says why
+#
+# Keys are read by a plain awk parser: `key = value`, one per line, no quoting,
+# no continuations.
+
+[linux-amd64]
+status         = ok
+source         = BtbN/FFmpeg-Builds
+release_tag    = autobuild-2026-08-31-13-27
+build_scripts  = https://github.com/BtbN/FFmpeg-Builds/tree/8267213e26c1031621e6e1210fe3aa4867214f6a
+variant        = lgpl, static (no external shared libraries beyond glibc)
+license        = LGPL-3.0-or-later
+ffmpeg_version = n9.0.1-11-ge47273f4d9
+ffmpeg_commit  = e47273f4d9227152dcbf543cebaf9e2430ddbcc4
+ffmpeg_source  = https://github.com/FFmpeg/FFmpeg/archive/e47273f4d9227152dcbf543cebaf9e2430ddbcc4.tar.gz
+url            = https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0.tar.xz
+archive_sha256 = 204fc02692b11249c3e688ad18538ce2939129a1fc6abc32a6b2638a024496cf
+archive_root   = ffmpeg-n9.0.1-11-ge47273f4d9-linux64-lgpl-9.0
+ffmpeg_member  = bin/ffmpeg
+ffprobe_member = bin/ffprobe
+license_member = LICENSE.txt
+ffmpeg_sha256  = ed57193f048a65bfb0aa3c360639d7f7109ca014405201e3ea478c9ca4ea20fc
+ffprobe_sha256 = 0e3357bef1737ec02ae600e7f6e4e409966d8d0647521ca523c622be574137b7
+license_sha256 = da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768
+
+[windows-amd64]
+status         = ok
+source         = BtbN/FFmpeg-Builds
+release_tag    = autobuild-2026-08-31-13-27
+build_scripts  = https://github.com/BtbN/FFmpeg-Builds/tree/8267213e26c1031621e6e1210fe3aa4867214f6a
+variant        = lgpl, static (no external DLLs beyond the Windows system ones)
+license        = LGPL-3.0-or-later
+ffmpeg_version = n9.0.1-11-ge47273f4d9
+ffmpeg_commit  = e47273f4d9227152dcbf543cebaf9e2430ddbcc4
+ffmpeg_source  = https://github.com/FFmpeg/FFmpeg/archive/e47273f4d9227152dcbf543cebaf9e2430ddbcc4.tar.gz
+url            = https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-win64-lgpl-9.0.zip
+archive_sha256 = 2484854ad6988d34560f4e6ea7a6ecb9dde0af7c229d2591815d056b04ec4f56
+archive_root   = ffmpeg-n9.0.1-11-ge47273f4d9-win64-lgpl-9.0
+ffmpeg_member  = bin/ffmpeg.exe
+ffprobe_member = bin/ffprobe.exe
+license_member = LICENSE.txt
+ffmpeg_sha256  = 63a0b3c76a245bc0d986853612d9ec43a2a2d1f1c7a3fa40ee459c248075b3a6
+ffprobe_sha256 = 1ce64d9fdbfce857de2dd1f157c37eaa61c7501a356273dbcbe8b1674aef5879
+license_sha256 = da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768
+
+# macOS has no prebuilt LGPL ffmpeg from a source worth trusting. Every static
+# macOS build on offer is --enable-gpl (evermeet.cx adds --enable-nonfree on
+# top; ffmpeg.martin-riedl.de, OSXExperts and the npm/PyPI repackagers of them
+# are all GPL), and the one genuinely LGPL macOS build - conda-forge's
+# ffmpeg-*-lgpl_* - is dynamically linked against a 69-library, 139 MB closure
+# rather than being two self-contained files. Filling these two stanzas in is a
+# decision for a person, not for the packaging script: see docs/licensing.md,
+# "The macOS gap". Until then `make archives` builds what it can and exits
+# non-zero naming what it could not, so a three-of-four release cannot pass for
+# a whole one.
+
+[darwin-amd64]
+status = blocked
+reason = no prebuilt LGPL ffmpeg/ffprobe for macOS; see docs/licensing.md
+
+[darwin-arm64]
+status = blocked
+reason = no prebuilt LGPL ffmpeg/ffprobe for macOS; see docs/licensing.md
