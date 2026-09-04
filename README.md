@@ -101,7 +101,7 @@ ffmpeg and ffprobe already in the folder. Pick one from
 | --- | --- |
 | `linux-amd64` | Needs a **glibc** distribution — Debian, Ubuntu, Fedora, RHEL, Arch. Not Alpine or another musl system: torpeek itself is static and has no libc at all, but the bundled ffmpeg is linked against glibc. There, install ffmpeg from the distribution and delete the two bundled copies; torpeek falls back to `PATH`. |
 | `windows-amd64` | **Unzip the whole folder first.** Explorer will run `torpeek.exe` straight out of the zip preview, and from there it cannot see the `ffmpeg.exe` that is supposed to be beside it. |
-| `darwin-amd64` / `darwin-arm64` | **Run `xattr -c torpeek` before the first launch.** macOS quarantines downloaded files and this binary is not signed, so an un-cleared first run is held by Gatekeeper and hangs silently instead of failing. Clearing the flag afterwards does not help — macOS remembers the refusal per file. |
+| `darwin-amd64` / `darwin-arm64` | **Run `sh first-run.command` first** — it is in the archive, clears the download flag from the folder and then starts torpeek. macOS quarantines downloaded files and this binary is not signed, so an un-cleared first run is stopped before any of torpeek's own code runs: nothing printed in the terminal, just a process that dies after a few seconds (measured, TOR-97). That is why there is a script rather than a line to remember — clearing the flag afterwards may not help, and then only a freshly unpacked copy starts. |
 
 Check a download against `torpeek-<version>-SHA256SUMS.txt` on the same page.
 [docs/licensing.md](docs/licensing.md) says what the bundled binaries are and

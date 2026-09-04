@@ -13,6 +13,11 @@
 # (TOR-59), so an archive must contain exactly the binary `make cross` made and
 # not one this script rebuilt with different flags.
 #
+# Two platforms carry one extra thing each, and both are in the archive because
+# the platform cannot do without them: Linux a systemd unit for a seedbox slot
+# (REQUIREMENTS 4.1), macOS a first-run launcher, because there a downloaded
+# torpeek is stopped by Gatekeeper before it can say so itself (TOR-97).
+#
 # A platform with no bundled ffmpeg is skipped, loudly, and the script exits
 # non-zero at the end. Three archives out of four must not be able to pass for
 # a complete release (docs/licensing.md).
@@ -97,6 +102,25 @@ write_readme() {
 		;;
 	esac
 
+	# The macOS archive carries a launcher, and it is the first thing a person
+	# there has to run rather than an extra (TOR-97), so it is listed directly
+	# under torpeek instead of at the end of the folder list.
+	firstrun_line=""
+	case $2 in
+	darwin-*)
+		firstrun_line=$(printf '\n  %-22s %s' "first-run.command" "clears the download flag and starts torpeek")
+		;;
+	esac
+
+	# A section of its own, above RUNNING IT rather than below it, because on
+	# macOS it has to be read before the first command is typed and a note
+	# printed after the commands is a note read after them (TOR-97). The
+	# leading and trailing newline in the value are load-bearing: with them
+	# the section gets its blank line on either side, and empty - which is
+	# every other platform - the same heredoc line renders as exactly the one
+	# blank line that already separated the two sections.
+	first_note=""
+
 	case $2 in
 	windows-*)
 		invoke="torpeek.exe"
@@ -118,19 +142,36 @@ delete the two copies here; torpeek falls back to PATH."
 	darwin-*)
 		invoke="./torpeek"
 		unpack_note="Some unpacking tools drop the execute bit. If the shell says
-\"permission denied\": chmod +x torpeek ffmpeg ffprobe.
+\"permission denied\": chmod +x torpeek ffmpeg ffprobe. first-run.command does
+that too, so if you started there you will not meet this."
+		first_note="
+FIRST RUN ON macOS
 
-BEFORE THE FIRST RUN, clear the download flag:
+  sh first-run.command
 
-  xattr -c torpeek
+Run that once, in this folder, before anything else. macOS marks every file a
+browser downloads, unpacking carries the mark onto these files, and torpeek's
+own binary carries no Apple Developer ID signature and is not notarised - so a
+marked torpeek is stopped by the system on its first run before it prints
+anything at all. The terminal shows no error: the process sits there for a few
+seconds and dies, and macOS may put a dialog on screen about a program it
+cannot check. Nothing torpeek could print would help, because it is stopped
+before any of its own code runs. The script clears the mark from this folder,
+checks that it is gone, and only then starts torpeek.
 
-torpeek's own binary carries no Apple Developer ID signature and is not
-notarised, and a browser marks everything it downloads. Unpacking carries that
-mark onto the files, and Gatekeeper then stops torpeek before it starts - in a
-terminal it simply never prints anything. Clearing the flag first avoids that;
-clearing it afterwards does not, because the refusal is remembered, so unpack
-the archive again if you have already hit it. The bundled ffmpeg and ffprobe
-are signed by their builder and start either way."
+The order is why this is a script and not a line to remember. Clearing the mark
+before the first attempt works; clearing it afterwards may not, because macOS
+can remember a refused launch per file. If you have already run ./torpeek and
+nothing happened, unpack the archive again into a new folder and run the line
+above there first.
+
+By hand it is \`xattr -c torpeek ffmpeg ffprobe\`, before the first ./torpeek.
+Double-clicking first-run.command in Finder does what the line above does, but
+the script is a downloaded file too, so macOS may stop it in turn - typing the
+line always works, because the shell reads the script instead of launching it.
+The bundled ffmpeg and ffprobe are signed by their builder and start either
+way.
+"
 		;;
 	*)
 		invoke="./torpeek"
@@ -183,7 +224,8 @@ video file, plus a technical summary.
 WHAT IS IN THIS FOLDER
 
 $(printf '  %-22s %s\n' \
-		"torpeek$exe" "the program - this is the only thing you run" \
+		"torpeek$exe" "the program - this is the only thing you run")$firstrun_line
+$(printf '  %-22s %s\n' \
 		"ffmpeg$exe" "frame decoding, used by torpeek" \
 		"ffprobe$exe" "container inspection, used by torpeek" \
 		"README.txt" "this file" \
@@ -195,7 +237,7 @@ Nothing has to be installed. Keep the three executables in the same folder:
 torpeek looks for ffmpeg and ffprobe next to itself before it falls back to
 whatever the machine has on PATH, and the copies here are the ones this build
 was tested with.
-
+$first_note
 RUNNING IT
 
   $invoke -n 6 -out ./frames some.torrent
@@ -443,6 +485,16 @@ for platform in $platforms; do
 			"$root/packaging/systemd/torpeek.env.example" \
 			"$root/docs/seedbox.md" \
 			"$stage/seedbox/"
+		;;
+	# macOS only, and not decoration: a quarantined torpeek is stopped before
+	# any of its own code runs, so it cannot report the one thing that would
+	# fix it. Something else has to run first, and this is that something -
+	# it clears the flag from the folder, proves it is gone and then launches
+	# torpeek, which is an order nobody can get wrong (TOR-97). The generated
+	# README.txt above leads with it.
+	darwin-*)
+		cp "$root/packaging/macos/first-run.command" "$stage/first-run.command"
+		chmod +x "$stage/first-run.command"
 		;;
 	esac
 
