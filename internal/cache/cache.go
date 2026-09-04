@@ -31,15 +31,37 @@ type Run struct {
 	CreatedAt time.Time `json:"created_at"`
 
 	// Source is the string a person could paste back in to run this again: the
-	// magnet URI exactly as typed, or - for a .torrent - the copy the run kept
-	// in its own directory (output.Layout.TorrentPath) rather than wherever
-	// the file was read from. The distinction is not cosmetic: a .torrent
-	// dropped onto the web UI is staged in a temp directory that is deleted as
-	// the run ends, so recording that path put a name for a file that provably
-	// no longer existed in the one field promising to be pasteable
-	// (core.recordedSource). Absent from a record written before this field
-	// existed, in which case it reads back as "": a run found on disk that
-	// cannot say what it was asked for.
+	// magnet URI exactly as typed, or - for a .torrent - the magnet its own
+	// infohash resolves to (swarm.Torrent.Magnet), rather than any path
+	// (core.recordedSource). A path was tried twice and failed twice: TOR-73
+	// first recorded wherever the file was read from, which broke the moment
+	// a web upload's staged temp copy was deleted at the run's end; then the
+	// copy the run kept in its own directory (output.Layout.TorrentPath),
+	// which stayed true only until the results tree itself moved (TOR-86) -
+	// and Source is read back long after a run ends, so both are exactly the
+	// kind of path this field cannot assume stays put. A reconstructed magnet
+	// depends on neither: it names the torrent by infohash, not by where
+	// anything sits.
+	//
+	// This is a value change, not a shape change - Source was always a plain
+	// string - so a record written before TOR-86 reads back exactly as it
+	// always did: a path, true only where it was captured, and stale the
+	// moment that tree moves. Nothing here detects which shape a given string
+	// is (there is nothing to detect: both are valid strings, and this field
+	// is never parsed, only displayed and pasted - see below), so Version did
+	// not need bumping for this either, the same trap TOR-52 documented for
+	// this very struct.
+	//
+	// Absent from a record written before this field existed, in which case it
+	// reads back as "": a run found on disk that cannot say what it was asked
+	// for.
+	//
+	// Never stat'ed, opened or joined against a directory by this package or
+	// its one reader (web.walkRuns, into RunSummary.Source) - the closest
+	// thing to a consumer is app.js's regenerate, which POSTs this string
+	// straight back to swarm.ParseSource as either a magnet or a path, which
+	// is exactly why a path recorded here can never assume where it will be
+	// read from.
 	Source string `json:"source"`
 
 	InfoHash string `json:"infohash"`

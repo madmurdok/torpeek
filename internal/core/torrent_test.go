@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,7 +54,11 @@ func oneClipTorrent(t *testing.T, tools ffmpeg.Tools, seconds int) torrenttest.F
 // swarm sent; a .torrent source had one, and what it did NOT have was an
 // honest run.json - the web UI stages an upload in a temp directory it
 // deletes when the run ends, so the recorded source named a file that was
-// already gone. The Source assertions below are that lie's regression test.
+// already gone. The Source assertions below are that lie's regression test -
+// and, since TOR-86, both arms record a magnet: a .torrent source no longer
+// names any path at all, precisely because a path (the temp upload, then the
+// saved copy TOR-73 tried instead) kept being the thing that stopped being
+// true out from under this field.
 //
 // The two runs deliberately ask for different frame counts: ParamsKey hashes
 // the count, so they write sibling result directories instead of the second
@@ -81,15 +86,16 @@ func TestEveryRunLeavesALoadableTorrentBehind(t *testing.T) {
 	for _, arm := range []struct {
 		name       string
 		cfg        Config
-		wantSource func(saved string) string
+		wantSource func(infoHash string) string
 	}{
 		{
 			name: "from a .torrent file",
 			cfg:  base(fixture.TorrentPath, 2),
-			// The saved copy, not the path the file was read from: that path
-			// is a temp file for an uploaded .torrent and is deleted as the
-			// run ends.
-			wantSource: func(saved string) string { return saved },
+			// The magnet the infohash resolves to - not the path the file was
+			// read from (a temp file for an uploaded .torrent, deleted as the
+			// run ends) and not the saved copy either (TOR-73's answer, true
+			// only until the results tree moves, TOR-86).
+			wantSource: func(infoHash string) string { return "magnet:?xt=urn:btih:" + infoHash },
 		},
 		{
 			name: "from a magnet",
@@ -168,22 +174,29 @@ func TestEveryRunLeavesALoadableTorrentBehind(t *testing.T) {
 			if !ok {
 				t.Fatal("no run record was written")
 			}
-			if want := arm.wantSource(saved); record.Source != want {
-				t.Errorf("run.json records source %q, want %q", record.Source, want)
+			// By what it resolves to, not by its exact text - see the
+			// same assertion in engine_test.go for why a magnet's
+			// display name and trackers must not make a test fail.
+			if want := arm.wantSource(metadata.InfoHash); !strings.Contains(record.Source, want) {
+				t.Errorf("run.json records source %q, want it to name %q", record.Source, want)
 			}
-			// Whatever it records has to still be there, which is the whole
-			// point of the field: a source naming a deleted temp file is the
-			// lie this arm exists to catch.
-			if _, err := os.Stat(record.Source); err != nil && !isMagnet(record.Source) {
-				t.Errorf("run.json records source %q, which is not on disk: %v", record.Source, err)
+			// Whatever it records has to still resolve to this torrent, which
+			// is the whole point of the field: a source naming a deleted temp
+			// file (before TOR-73) or a path a moved tree left behind
+			// (before TOR-86) is the lie this arm exists to catch. Neither
+			// arm records a path any more, so the check is the same for
+			// both: parse it back and ask what it names.
+			recordedSrc, err := swarm.ParseSource(record.Source)
+			if err != nil {
+				t.Fatalf("run.json's source %q does not even parse: %v", record.Source, err)
+			}
+			if hash, err := recordedSrc.InfoHash(); err != nil || hash.HexString() != metadata.InfoHash {
+				t.Errorf("run.json's source %q resolves to infohash %v (err %v), want %s",
+					record.Source, hash, err, metadata.InfoHash)
 			}
 		})
 	}
 }
-
-// isMagnet is only the test's own way of telling which of the two shapes
-// run.json holds; swarm.ParseSource is the real judge and is used above.
-func isMagnet(source string) bool { return len(source) > 7 && source[:7] == "magnet:" }
 
 // TestATorrentThatCannotBeWrittenDoesNotFailTheRun is TOR-79: the .torrent a
 // run keeps beside its frames is a convenience, and a convenience that fails

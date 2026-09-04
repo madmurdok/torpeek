@@ -3,8 +3,10 @@ package swarm
 import (
 	"bytes"
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -306,5 +308,78 @@ func TestSavedTorrentKeepsInfoKeysTorpeekDoesNotModel(t *testing.T) {
 	_, data, _ := saveAndReload(t, tor)
 	if !bytes.Contains(data, []byte("9:publisher")) {
 		t.Error("the saved file lost the publisher key, so its info dictionary was rebuilt rather than copied")
+	}
+}
+
+// TestMagnetCarriesTheTorrentsOwnTrackers is the private-torrent stake in
+// what core.recordedSource writes (TOR-86).
+//
+// A magnet holding nothing but an infohash can only find peers through DHT,
+// and a private torrent must never touch DHT - so recording one as a
+// private run's source would leave a string that either finds nobody or
+// could only work by breaking acceptance criterion 5. Carrying the
+// trackers makes it reopenable the way it was opened: routeFor probes them
+// with DHT off and only then decides.
+//
+// It opens a real torrent rather than building a magnet beside the code
+// under test. The first version of this test constructed the URI itself
+// from a hand-made metainfo, which passed just as happily against the
+// trackerless implementation it was written to catch - it was measuring
+// the library's formatting, not ours. torrenttest deliberately writes
+// torrents with no announce URL (so nothing in a test can reach a
+// tracker), so the fixture's own file is re-written here with one; the
+// address is unroutable and the seeder is passed directly, so no announce
+// has to succeed for this to mean anything.
+func TestMagnetCarriesTheTorrentsOwnTrackers(t *testing.T) {
+	const announce = "http://tracker.invalid/announce"
+
+	fixture := torrenttest.Build(t, "movie.mkv", testPayloadSize, testPieceLength)
+	seederAddr := fixture.StartSeeder(t)
+
+	mi, err := metainfo.LoadFromFile(fixture.TorrentPath)
+	if err != nil {
+		t.Fatalf("load the fixture: %v", err)
+	}
+	mi.Announce = announce
+
+	withTracker := filepath.Join(t.TempDir(), "tracked.torrent")
+	f, err := os.Create(withTracker)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := mi.Write(f); err != nil {
+		f.Close()
+		t.Fatalf("write: %v", err)
+	}
+	f.Close()
+
+	src, err := ParseSource(withTracker)
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false
+	cfg.MetadataTimeout = 30 * time.Second
+	cfg.Peers = []string{seederAddr}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	session, tor, err := Open(ctx, cfg, src)
+	if err != nil {
+		t.Fatalf("open the tracked torrent: %v", err)
+	}
+	defer session.Close()
+
+	magnet := tor.Magnet()
+	if !strings.Contains(magnet, "tr="+url.QueryEscape(announce)) {
+		t.Errorf("magnet %q carries no tr= for the torrent's own announce URL; a private run recorded with this could only be reopened over DHT", magnet)
+	}
+	if !strings.Contains(magnet, "dn=") {
+		t.Errorf("magnet %q carries no display name; a person pasting it sees only hex", magnet)
+	}
+	if !strings.Contains(magnet, tor.InfoHash()) {
+		t.Errorf("magnet %q does not name the torrent's own infohash", magnet)
 	}
 }
