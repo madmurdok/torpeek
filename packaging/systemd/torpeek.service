@@ -1,0 +1,77 @@
+# torpeek as a systemd --user service, for a managed host with no root and no
+# Docker (REQUIREMENTS 4.1). Copy to ~/.config/systemd/user/torpeek.service,
+# fill in ~/.config/torpeek/env, then see docs/seedbox.md - the ports in that
+# env file are the part nobody may guess.
+#
+# Nothing here needs privileges: --user units run as the account that owns
+# them, from files inside its own home directory.
+
+[Unit]
+Description=torpeek - preview a video torrent without downloading it
+Documentation=https://github.com/madmurdok/torpeek
+# A managed slot's network comes up long before a user session does, so this
+# is about ordering within the session rather than waiting for an interface.
+After=network-online.target
+
+[Service]
+Type=simple
+
+# Every port is read from here, and none has a default this unit relies on:
+# the allocated range is per-account, so a hardcoded port would be somebody
+# else's port. The file also carries the access token, which is why it is
+# read from a 0600 file rather than written into the unit - `systemctl cat`
+# and `systemd-analyze` both print a unit's own text.
+EnvironmentFile=%h/.config/torpeek/env
+
+# -headless: there is no desktop to open a browser on.
+# -web-host 127.0.0.1: nginx is on this same host and proxies to loopback, so
+#   the UI never needs to be reachable directly (REQUIREMENTS 3.3).
+# -base-path: the UI lives under a subdirectory, and every page URL it emits
+#   is relative to it.
+# -web-token: pinned, so a restart does not invalidate the URL people have.
+#   Left unset, torpeek generates one at startup precisely because a
+#   -base-path makes it reachable beyond loopback.
+# -torrent-port and -bridge-port: both inside the allocated range. The
+#   BitTorrent port would otherwise be OS-assigned, which is the rule broken
+#   most easily and least visibly.
+# -parallel: 2, not the desktop default. A shared slot's IO is a neighbour's
+#   IO (REQUIREMENTS 4.1).
+# -cache-max-size: the output tree grows only from runs, and the disk it
+#   grows on is somebody else's quota. Unset means no eviction at all.
+# -watch-dir: the directory the slot's own torrent client watches. This is
+#   the deployment that feature exists for - the UI runs here and the browser
+#   runs on a laptop, so a download link would put the .torrent on the
+#   laptop. Empty means the button is simply absent.
+#
+# Every variable is written ${BRACED}, not $BARE, and that is not style: an
+# unset $BARE expands to NO argument at all, which silently shifts the flag
+# after it onto the wrong value. ${BRACED} expands to one empty argument, and
+# every flag here treats empty as "not set" (checked, for -cache-max-size and
+# -watch-dir).
+ExecStart=%h/bin/torpeek \
+	-web \
+	-headless \
+	-web-host 127.0.0.1 \
+	-web-port ${TORPEEK_WEB_PORT} \
+	-base-path ${TORPEEK_BASE_PATH} \
+	-web-token ${TORPEEK_WEB_TOKEN} \
+	-torrent-port ${TORPEEK_TORRENT_PORT} \
+	-bridge-port ${TORPEEK_BRIDGE_PORT} \
+	-parallel 2 \
+	-out %h/torpeek-out \
+	-cache-max-size ${TORPEEK_CACHE_MAX_SIZE} \
+	-watch-dir ${TORPEEK_WATCH_DIR}
+
+Restart=on-failure
+RestartSec=5s
+
+# A crash loop on a shared host is rude. Ten restarts in five minutes and
+# systemd gives up rather than hammering the swarm and the disk.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# The service reads and writes exactly two trees of its own, both in $HOME.
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -63,7 +63,19 @@ type Tools struct {
 // executableName adds the platform's extension. Windows will not run a bare
 // "ffmpeg", which is the whole reason this is not a plain string concat.
 func executableName(base string) string {
-	if runtime.GOOS == "windows" {
+	return executableNameFor(runtime.GOOS, base)
+}
+
+// executableNameFor is executableName with the target named rather than
+// inherited, so the Windows case can be tested from anywhere.
+//
+// That split is not decoration. The Windows release archive holds ffmpeg.exe
+// and ffprobe.exe, and a lookup that asked for a bare "ffmpeg" would find
+// neither - yet on a mac or a Linux runner the windows branch of a
+// runtime.GOOS switch is unreachable, so nothing that runs in this project's
+// tests or CI would ever notice it break (TOR-26).
+func executableNameFor(goos, base string) string {
+	if goos == "windows" {
 		return base + ".exe"
 	}
 	return base

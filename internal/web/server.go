@@ -1276,7 +1276,37 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 	}
 	entry.state, entry.err, entry.endedAt = outcome, failure, time.Now()
 	s.releaseSlotLocked(entry)
-	rec := s.runStateRecordLocked(entry, false)
+	infoHash := entry.infoHash
+	s.mu.Unlock()
+
+	// TOR-87: the registry itself still holds no counts (RunSummary's own doc
+	// on Files/Complete/Selected explains why - a live entry has not written
+	// a record), but the run that just ended has, via saveRunRecord inside
+	// run() before its Done event ever reached this loop. Reading it back
+	// here, once, is what lets this one run_state - the only one whose
+	// verdict could ever disagree with what a page's last GET /runs told it
+	// - carry the same Files/Complete/Selected/Partial a reload would show,
+	// instead of leaving the page to find out only when it asks again.
+	// Every earlier run_state this run published (queued, running, ...) is
+	// live and non-final, exactly the case listing.go's RunSummary already
+	// reports zero counts for, so there is nothing to add to those.
+	//
+	// The lookup runs unlocked, like the hub publish and cleanup call around
+	// it: a directory read has no business holding the registry lock any
+	// longer than deciding what to read needs it for (see beginRun's own
+	// comment on this).
+	files, complete, selected, hasCounts := 0, 0, 0, false
+	if infoHash != "" {
+		files, complete, selected, hasCounts = runRecordCounts(s.cfg.OutputRoot, infoHash)
+	}
+
+	s.mu.Lock()
+	fields := s.runStateFieldsLocked(entry, false)
+	if hasCounts {
+		fields["files"], fields["complete"], fields["selected"] = files, complete, selected
+		fields["partial"] = partial(complete, selected)
+	}
+	rec := record{data: encode(fields)}
 	s.mu.Unlock()
 
 	// The context outlives the channel only to be released here; the run is
@@ -1387,6 +1417,17 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 //
 // The caller must hold s.mu: every field read here is written under it.
 func (s *Server) runStateRecordLocked(entry *runEntry, reset bool) record {
+	return record{data: encode(s.runStateFieldsLocked(entry, reset))}
+}
+
+// runStateFieldsLocked is runStateRecordLocked before encoding, split out so
+// pump's finishing call (TOR-87) can add the counts a just-written disk
+// record carries and still go through the one place every other field of
+// this message is decided. Every other caller of runStateRecordLocked wants
+// exactly this map, unchanged.
+//
+// The caller must hold s.mu: every field read here is written under it.
+func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]any {
 	m := map[string]any{
 		"type": "run_state", "run": entry.id, "state": string(entry.state),
 		"active": entry.state == RunRunning || entry.state == RunReplaying,
@@ -1398,7 +1439,7 @@ func (s *Server) runStateRecordLocked(entry *runEntry, reset bool) record {
 	if entry.err != nil {
 		m["error"] = entry.err.Error()
 	}
-	return record{data: encode(m)}
+	return m
 }
 
 // needsActionRecordLocked is the file list a parked torrent is waiting on.

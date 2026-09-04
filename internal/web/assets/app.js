@@ -168,16 +168,15 @@ function cancellable(state) {
 // Partial()) changes what every badge shows, rather than leaving a Go test
 // green while the page keeps its own opinion.
 //
-// One thing this does NOT do: make a live run's badge able to turn partial
-// while the page is watching it happen. entry.partial is set once, by
-// loadRuns' initial GET /runs fetch, and every later update to this run
-// arrives over the WebSocket as a run_state record, which carries neither
-// Complete nor Selected (see listing.go's MarshalJSON doc). A run that goes
-// running -> done during this page's lifetime keeps whatever "partial"
-// GET /runs reported when the page loaded (false, since a run mid-flight has
-// nothing merged in yet) until the page is reloaded. That gap predates
-// TOR-80 and is unchanged by it - isPartial() before this change read the
-// same stale entry.complete/entry.selected pair for the same reason.
+// A live run's badge can turn partial while the page is watching it happen,
+// as of TOR-87: the run_state that announces running -> done also carries
+// files/complete/selected/partial, read straight off the record this run
+// just wrote to disk (server.go's pump), and apply() copies partial from it
+// the same way loadRuns copies it from row.partial - never recomputing it.
+// Every earlier run_state for this run (queued, running, ...) carries none
+// of those fields, so entry.partial keeps whatever loadRuns' initial fetch
+// gave it (false, since a run mid-flight has nothing merged in) until this
+// one arrives.
 
 // badgeState is what the badge is coloured by, which is not always the run's
 // own state: a finished run whose selected files did not all come out whole
@@ -1301,6 +1300,21 @@ function apply(ev) {
     if (ev.source) entry.source = ev.source;
     if (ev.infohash) entry.infohash = ev.infohash;
     entry.error = ev.error || "";
+    // ev.partial rides on exactly one run_state a run ever publishes: the one
+    // sent after this run's own record was written to disk (server.go's
+    // pump, TOR-87) - the only moment the verdict this page is already
+    // showing (false, from GET /runs, since a live entry had nothing merged
+    // in yet) could turn out to be wrong. Every other run_state - queued,
+    // running, needs-action - carries no such field, so entry.partial stays
+    // whatever loadRuns or the previous run_state left it at; this still
+    // reads it rather than recomputing it from entry.complete/entry.selected
+    // for the same reason loadRuns does (see the comment above badgeState).
+    if (ev.partial !== undefined) {
+      entry.files = ev.files || 0;
+      entry.complete = ev.complete || 0;
+      entry.selected = ev.selected || 0;
+      entry.partial = !!ev.partial;
+    }
     if (!cancellable(entry.state)) entry.progress = "";
     syncEntry(entry);
     return;
