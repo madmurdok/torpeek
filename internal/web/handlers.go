@@ -444,14 +444,21 @@ func (s *Server) handleDeleteFrame(w http.ResponseWriter, r *http.Request) {
 
 	detail, err := s.DeleteFrame(r.PathValue("infohash"),
 		strings.TrimSpace(r.URL.Query().Get("params")), index, frame)
-	if err != nil {
+	if err != nil && !errors.Is(err, core.ErrSheetStale) {
 		writeError(w, deleteStatus(err), err.Error())
 		return
 	}
 
 	// Wrapped under the same "file" key the GET answers with, so a page can
 	// read either response the same way.
-	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
+	body := map[string]any{"file": detail}
+	if err != nil {
+		// The delete happened; something derived from it did not. Answering
+		// 200 says the first, and the warning says the second - where a 500
+		// said neither truthfully.
+		body["warning"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // deleteStatus maps a delete's three failures: nothing there to remove, a

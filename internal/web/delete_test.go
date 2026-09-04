@@ -3,12 +3,15 @@ package web
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/output"
 )
 
 // deleteParams is a result set spelled the way core.ParamsKey spells one -
@@ -332,4 +335,61 @@ func sameTimes(got, want []int64) bool {
 		}
 	}
 	return true
+}
+
+// TestADeleteWhoseSheetCannotBeRebuiltStillHappened is TOR-78: the contact
+// sheet is derived from the frames, so its failure is news about the sheet,
+// not about the delete - which by then has already happened, because
+// core.DeleteFrame rebuilds the sheet only after the manifest is written and
+// the frame unlinked.
+//
+// The sheet is made unwritable by putting a non-empty DIRECTORY where the
+// file belongs: the manifest write, which happens first and in the same
+// directory, still succeeds, and only the sheet's own rename fails. Denying
+// the directory's permissions instead would have failed the manifest write
+// too, and then there would be no delete to report.
+func TestADeleteWhoseSheetCannotBeRebuiltStillHappened(t *testing.T) {
+	root := t.TempDir()
+	writeSet(t, root, detailHash, deleteParams, 4, 6, "Sintel/sintel.mp4", 43700, 308900, 576300, 833600)
+
+	fileDir := fileDirOf(t, root, detailHash, deleteParams, 6, "Sintel/sintel.mp4")
+	sheet := filepath.Join(fileDir, output.SheetName)
+	if err := os.Remove(sheet); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("clear the sheet: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sheet, "occupied"), 0o755); err != nil {
+		t.Fatalf("put a directory where the sheet goes: %v", err)
+	}
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWith(t, cfg, (&fakeRun{}).runner, nil, realDeleter(root))
+
+	resp := deleteFrame(t, ts.URL, detailHash, "6", "1", "?params="+deleteParams)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE: status %d, want 200 - the frame is gone, whatever became of the sheet", resp.StatusCode)
+	}
+
+	body := decodeBody(t, resp)
+	if warning, _ := body["warning"].(string); warning == "" {
+		t.Error("the response carries no warning; a sheet that still depicts a deleted frame has to be reported somewhere")
+	}
+
+	file, ok := body["file"].(map[string]any)
+	if !ok {
+		t.Fatalf("no file in the answer: %+v", body)
+	}
+	frames, _ := file["frames"].([]any)
+	if len(frames) != 3 {
+		t.Errorf("the answer lists %d frames, want the three survivors", len(frames))
+	}
+
+	// And on disk, which is what the page would see on a reload.
+	m, loaded := cache.LoadManifest(fileDir)
+	if !loaded {
+		t.Fatal("the manifest is unreadable after the delete")
+	}
+	if len(m.Frames) != 3 {
+		t.Errorf("the manifest holds %d records, want 3 - the delete must have happened", len(m.Frames))
+	}
 }

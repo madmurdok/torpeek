@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -30,6 +29,14 @@ type Config struct {
 	Source string
 	// OutputRoot is where results are written.
 	OutputRoot string
+
+	// CacheCeiling is the size ceiling on the whole tree under OutputRoot
+	// (REQUIREMENTS.md 2.9). Zero - the default, never set by a flag - means
+	// no ceiling: cache.Evict is not even called, and the tree grows without
+	// limit until a person clears it themselves. A positive value is bytes,
+	// checked once per run (see saveRunRecord's caller in run()), since the
+	// tree only ever grows from a run finishing.
+	CacheCeiling int64
 
 	Plan    frames.Plan
 	Profile swarm.Profile
@@ -211,9 +218,14 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// reason: it is a storage problem worth a person seeing, but it is not a
 	// reason to abandon frames that are otherwise fetchable, so the run
 	// carries on and simply has no .torrent to announce.
+	var warnings []string
 	torrentPath, err := saveTorrentFile(writer, torrent)
 	if err != nil {
-		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
+		// Not a Failed: this run's frames are unaffected, and a run-scoped
+		// Failed is how an unopenable source is reported, so borrowing it
+		// here made a healthy run read as a broken one. It travels on Done
+		// instead, which is where the path itself travels (TOR-79).
+		warnings = append(warnings, err.Error())
 	}
 
 	srv, err := bridge.Start(cfg.Bridge)
@@ -301,6 +313,22 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	if err := saveRunRecord(cfg, writer.Layout(), torrent, videos, selected, finished,
 		recordedSource(cfg.Source, src, torrentPath)); err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
+	} else if cfg.CacheCeiling > 0 {
+		// Only once this run's own record is safely written, and only when a
+		// ceiling was actually asked for (REQUIREMENTS.md 2.9's default is no
+		// eviction at all - skipping the call entirely also skips the scan
+		// cost of Evict finding that out for itself on every run).
+		//
+		// This run's own directory is named explicitly as the one set Evict
+		// must never remove: the single-slot queue (REQUIREMENTS.md 3.3)
+		// guarantees this is the only run writing right now, but a failure
+		// here must not cost a person the frames this run just finished
+		// producing - so, like a .torrent that could not be written
+		// (TOR-79), it becomes a warning on Done rather than a run-scoped
+		// Failed.
+		if _, err := cache.Evict(cfg.OutputRoot, cfg.CacheCeiling, writer.Layout().RunDir()); err != nil {
+			warnings = append(warnings, fmt.Sprintf("cache eviction: %v", err))
+		}
 	}
 
 	spent, _ := tracker.Spent()
@@ -311,6 +339,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		DownloadedByte: spent,
 		Elapsed:        time.Since(started),
 		TorrentPath:    torrentPath,
+		Warnings:       warnings,
 	})
 }
 
@@ -810,13 +839,10 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 		})
 	}
 
-	data, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("encode manifest: %w", err)
-	}
-	data = append(data, '\n')
-
-	return deps.writer.WriteFile(file.Index, file.Path, manifest.Name, data)
+	// The records carry the absolute paths WriteFrame returned; WriteManifest
+	// is what turns them into the relative form that goes on disk, so this
+	// func never has to know that the two shapes differ (manifest.Frame.Path).
+	return deps.writer.WriteManifest(file.Index, file.Path, m)
 }
 
 // writeSheet composes the contact sheet from whatever frames this file's

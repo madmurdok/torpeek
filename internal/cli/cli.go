@@ -71,6 +71,14 @@ type Options struct {
 	List        bool
 	Files       []string
 
+	// CacheMaxSize is -cache-max-size as typed, parsed by config() with
+	// parseSize rather than here: a bad value must be a usage error the same
+	// way -mode and -format already are, and config() is where those live.
+	CacheMaxSize  string
+	CacheList     bool
+	CacheClear    string
+	CacheClearAll bool
+
 	scratch string
 }
 
@@ -89,6 +97,21 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if opts.Version {
 		fmt.Fprintln(stdout, version.Version)
 		return ExitOK
+	}
+
+	// The cache commands are the other mode that starts with nothing to work
+	// on - a person inspecting or clearing what is already on disk names no
+	// torrent at all, the same way -version does not - so they are handled
+	// before the "give a magnet link" check below, and before opts.config()
+	// does work (a temporary piece directory, most of all) that a cache-only
+	// invocation has no use for.
+	if opts.CacheList || opts.CacheClearAll || opts.CacheClear != "" {
+		out, err := filepath.Abs(opts.Output)
+		if err != nil {
+			fmt.Fprintf(stderr, "torpeek: %v\n", err)
+			return ExitFailed
+		}
+		return runCache(opts, out, stdout, stderr)
 	}
 
 	// The UI is the one mode that starts with nothing to work on: the source
@@ -189,6 +212,10 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.BoolVar(&opts.Web, "web", false, "serve the web UI and open it in a browser instead of running on the command line")
 	fs.BoolVar(&opts.List, "list", false, "list the torrent's video files and exit, without taking frames")
 	fs.BoolVar(&opts.Version, "version", false, "print version and exit")
+	fs.StringVar(&opts.CacheMaxSize, "cache-max-size", "", "size ceiling for the whole -out tree; over it, whole cached result sets are removed oldest-first after each run (default: unset, no eviction at all, section 2.9); a number with an optional K/M/G/T suffix, e.g. 20G")
+	fs.BoolVar(&opts.CacheList, "cache-list", false, "list cached result sets under -out with their size and date, and exit (no torrent argument needed)")
+	fs.StringVar(&opts.CacheClear, "cache-clear", "", "remove one cached result set, named infohash/params as -cache-list prints it, and exit (no torrent argument needed)")
+	fs.BoolVar(&opts.CacheClearAll, "cache-clear-all", false, "remove every cached result set under -out, and exit (no torrent argument needed)")
 
 	var peers string
 	fs.StringVar(&peers, "peer", "", "comma-separated peer addresses to contact directly")
@@ -257,6 +284,12 @@ func (o *Options) config() (core.Config, error) {
 
 	// Zero means "decide once the file count is known", which the engine does.
 	cfg.Budget = core.Budget{MaxBytes: o.MaxBytes, MaxTime: o.MaxTime, WarnAt: 0.8}
+
+	ceiling, err := parseSize(o.CacheMaxSize)
+	if err != nil {
+		return core.Config{}, fmt.Errorf("-cache-max-size: %w", err)
+	}
+	cfg.CacheCeiling = ceiling
 
 	return cfg, nil
 }

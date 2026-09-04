@@ -153,7 +153,20 @@ func LoadRun(paramsDir string) (Run, bool) {
 	return run, true
 }
 
-// LoadManifest reads one file's manifest from its result directory.
+// LoadManifest reads one file's manifest from its result directory, with
+// every frame path resolved against that directory.
+//
+// This is the only place in the project that parses a manifest.json, which is
+// what makes it the seam: a frame path is recorded relative to the manifest
+// (manifest.Frame.Path) and only this func knows which directory the record
+// came out of, so it is the one place that can turn the record back into
+// something openable. Everything downstream - cache.Usable, core's replay and
+// delete, the web listing, sheet.Build - therefore keeps seeing a path it can
+// hand to os.Open, exactly as it did when the path on disk was absolute, and
+// none of them has to learn where a manifest lives.
+//
+// The counterpart on the way out is output.Writer.WriteManifest, which is the
+// only place one is written.
 func LoadManifest(fileDir string) (manifest.Manifest, bool) {
 	data, err := os.ReadFile(filepath.Join(fileDir, manifest.Name))
 	if err != nil {
@@ -164,7 +177,16 @@ func LoadManifest(fileDir string) (manifest.Manifest, bool) {
 	if err := json.Unmarshal(data, &m); err != nil || m.Version != manifest.Version {
 		return manifest.Manifest{}, false
 	}
-	return m, true
+	return m.Resolved(fileDir, onDisk), true
+}
+
+// onDisk is what manifest.Resolved asks about a candidate location. Existence
+// alone, deliberately: whether a frame is whole enough to serve is Usable's
+// judgement to make, on one path, and duplicating a weaker version of it here
+// would give two answers to one question.
+func onDisk(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // Usable reports whether a manifest still describes something on disk.
@@ -172,6 +194,11 @@ func LoadManifest(fileDir string) (manifest.Manifest, bool) {
 // Frames outlive nothing: a directory can be cleaned out from under a manifest
 // at any time, and serving paths to files that are gone would be worse than
 // admitting a miss and fetching again.
+//
+// It judges the manifest as LoadManifest handed it over - paths already
+// resolved against the directory the record was read from - so it is asking
+// whether the frames of THIS results tree are there, not whether the tree the
+// run originally wrote still exists somewhere.
 func Usable(m manifest.Manifest) bool {
 	if len(m.Frames) == 0 {
 		return false

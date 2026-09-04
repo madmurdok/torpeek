@@ -76,8 +76,35 @@ var (
 
 // Session owns a BitTorrent client for the lifetime of one run.
 type Session struct {
-	cl      *torrent.Client
-	cfg     Config
+	cl  *torrent.Client
+	cfg Config
+	// store is the storage this session handed its client, kept so it can be
+	// closed again. anacrolix closes each TORRENT's storage when the client
+	// closes (Client.Close waits on its closeGroup for exactly that), but it
+	// never closes the ClientImpl it was given - reasonably, since it did not
+	// make it. We did, so we do.
+	//
+	// Proof, since this is a claim about somebody else's code: client.go
+	// registers an onClose for the storage it builds itself, inside
+	// `if storageImpl == nil`, and nothing anywhere closes a
+	// cfg.DefaultStorage that was handed in. So before this, every session
+	// left its piece-completion database open for the life of the process,
+	// and a client that failed to start leaked one outright.
+	//
+	// This is also the whole of TOR-59's "couldn't open piece completion db:
+	// timeout". That db is bbolt, held under an exclusive flock with a
+	// one-second timeout, and a leaked storage held it for the life of the
+	// process - so the second client of a public-magnet restart, and the
+	// second run over one data dir, timed out on the lock and silently fell
+	// back to in-memory bookkeeping. completion_test.go pins both shapes, and
+	// they separate the arms cleanly: with this Close removed every run warns
+	// and the db stays held; with it, none of 126 runs did, 120 of them at
+	// load averages between 84 and 265. It looked unexplained only because
+	// bbolt is the default piece completion solely when cgo is off - the
+	// shipped build - while a bare `go test` has cgo on and gets sqlite,
+	// which shares the file and never warns. Build with CGO_ENABLED=0 (make
+	// check) to see any of it.
+	store   storage.ClientImplCloser
 	dhtOn   bool
 	blindly bool // DHT was used before the private flag could be checked
 }
@@ -200,7 +227,8 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// stays silent and its clients decide what a person sees, so nothing below
 	// Critical is allowed through.
 	tc.Logger = alog.Default.FilterLevel(alog.Critical)
-	tc.DefaultStorage = storage.NewFileByInfoHash(cfg.DataDir)
+	store := storage.NewFileByInfoHash(cfg.DataDir)
+	tc.DefaultStorage = store
 	tc.NoUpload = !cfg.Upload
 	tc.NoDHT = !dht
 	tc.DisablePEX = !dht
@@ -224,9 +252,15 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
+		// The storage was opened before the client and nothing else will
+		// close it now. Left behind, its flock on .torrent.bolt.db outlives
+		// the failure for the life of the process, so the next attempt -
+		// after a pinned port frees up, say - would be the one that silently
+		// falls back to in-memory bookkeeping.
+		store.Close()
 		return nil, fmt.Errorf("start torrent session: %w", err)
 	}
-	return &Session{cl: cl, cfg: cfg, dhtOn: dht}, nil
+	return &Session{cl: cl, cfg: cfg, store: store, dhtOn: dht}, nil
 }
 
 // add attaches the source to this session's client and waits for metadata.
@@ -298,6 +332,16 @@ func (s *Session) Close() error {
 	}
 	errs := s.cl.Close()
 	s.cl = nil
+
+	// After the client, never before: Client.Close is what closes the
+	// torrents whose data this storage holds, and closing it out from under
+	// them would be closing a file somebody is still writing to.
+	if s.store != nil {
+		if err := s.store.Close(); err != nil {
+			errs = append(errs, err)
+		}
+		s.store = nil
+	}
 	return errors.Join(errs...)
 }
 

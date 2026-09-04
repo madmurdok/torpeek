@@ -99,11 +99,20 @@ func event(ev core.Event) map[string]any {
 		// file_done's manifest_path and sheet_path. Always present, empty
 		// when the run has none to offer (core.Done explains when that is),
 		// so a consumer reads one key rather than testing for its absence.
-		return map[string]any{
+		done := map[string]any{
 			"type": "done", "reason": string(e.Reason), "files": e.Files,
 			"frames": e.Frames, "downloaded": e.DownloadedByte,
 			"elapsed_ms": e.Elapsed.Milliseconds(), "torrent_path": e.TorrentPath,
 		}
+		// Present only when there is something to warn about, unlike
+		// torrent_path above: an absent path is a fact a reader must handle
+		// either way, while an absent warning is nothing at all, and a
+		// consumer that sees the key knows without checking a length that
+		// this run left something out (TOR-79).
+		if len(e.Warnings) > 0 {
+			done["warnings"] = e.Warnings
+		}
+		return done
 	case core.Failed:
 		msg := ""
 		if e.Err != nil {
