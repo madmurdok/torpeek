@@ -113,18 +113,36 @@ is how TOR-93 proved it really is one rather than a mislabelled LGPL build; see
 "Run, on darwin/amd64". That capability is incidental. torpeek asks for `mjpeg`
 and `png` on every platform and nothing else.
 
-**What has not been run:** the windows-amd64 archive, on Windows. It is
-assembled and checksummed, and its ffmpeg comes from the same BtbN release and
-the same `-lgpl` configuration as the Linux one, but the only claim anybody
-can make about it today is structural. Two things about it are worth an
-actual test before it is published: that Explorer's unzip leaves the three
-executables in one folder, and that `ffmpeg.Locate` finds `ffmpeg.exe` rather
-than a bare `ffmpeg` - the second is what
-`TestExecutableNameForEveryTarget` in `internal/ffmpeg` now pins, because the
-older test could only ever exercise the branch for the machine running it.
-The darwin-arm64 archive is in the same position for the same reason: it is
-assembled and checksummed, and nothing but an Apple Silicon machine can say
-more (TOR-93). The darwin-amd64 one has been run - see below.
+**What has been run, and where.** All four archives, each on a clean machine
+of its own operating system, by `.github/workflows/archives.yml` - the same
+two arms as above, and the same conclusion drawn the same way (TOR-101). Until
+that workflow existed the windows-amd64 and darwin-arm64 archives had never
+been executed at all, because this project is developed on an Intel Mac, which
+can run neither a PE binary nor an arm64 Mach-O; everything anybody could say
+about those two was structural.
+
+The two things worth an actual test on Windows both now have one. Unpacking
+the `.zip` with `Expand-Archive` - the same ZIP implementation Explorer's
+"Extract All" uses, though not the GUI itself - leaves torpeek.exe, ffmpeg.exe
+and ffprobe.exe in one folder; and `ffmpeg.Locate` does find `ffmpeg.exe`
+rather than a bare `ffmpeg`, which the control arm states outright by failing
+with `searched: ...\torpeek-1.0.0-windows-amd64-no-ffmpeg\ffmpeg.exe`. That
+branch of `executableNameFor` was pinned by
+`TestExecutableNameForEveryTarget` in `internal/ffmpeg` for want of anything
+better; it has now also executed on Windows.
+
+On darwin-arm64 the open question was whether an arm64 Mach-O nobody signed
+with a Developer ID would start at all - the kernel refuses an arm64 binary
+with no valid signature outright, rather than merely warning. Three of them
+start: the bundled ffmpeg and ffprobe, signed by their builder, and torpeek's
+own binary, which carries only the ad-hoc signature the Go linker applies when
+cross-linking for darwin/arm64 from a Linux host.
+
+**What still has not been run:** the Gatekeeper path the macOS README.txt
+warns about. CI never downloads an archive through a browser, so
+`com.apple.quarantine` is never set on the files it unpacks, and the
+`xattr -c torpeek` advice those archives carry remains advice nobody has
+tested. Everything about that instruction is unchanged by these runs.
 
 ## What LGPL distribution obliges, and where each obligation lives
 

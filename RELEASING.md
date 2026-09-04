@@ -63,7 +63,30 @@ release that got it wrong.
    [docs/licensing.md](docs/licensing.md) rather than working around them, a
    three-of-four release must not be able to pass for a whole one.
 
-8. **Publish, if this release is for anybody else.** A GitHub release from
+8. **Run the archives on the operating systems they are for.**
+   `gh workflow run archives.yml --ref release-<v>`, then
+   `gh run watch <id>`. Four jobs have to go green, one per archive: each
+   downloads the archive the same workflow built, unpacks it the way a person
+   on that OS would, and runs torpeek out of the unpacked folder against a
+   seeder on loopback with `PATH` pointing at an empty directory - then does
+   it again with the bundled ffmpeg deleted and requires that pass to fail.
+
+   This step is here because 0.9.0 published two archives nobody had ever
+   run - windows-amd64 and darwin-arm64 - and said so in its notes. It was
+   not carelessness: this machine is an Intel Mac and can execute neither a
+   PE binary nor an arm64 Mach-O, so "build it and check the checksum" was
+   the whole of what step 7 could honestly claim (TOR-101).
+
+   The workflow also fires by itself on a push that touches the packaging
+   scripts, `third_party/ffmpeg.lock`, `internal/ffmpeg`, `archivecheck/` or
+   `internal/version` - which is to say on step 1's version bump - so the
+   dispatch here is usually a re-confirmation rather than the first run. Read
+   the four logs rather than the four ticks: each one prints the version
+   line of the ffmpeg it actually executed and the count of frames, contact
+   sheets and manifests that came out. `make archive-check` is the same pair
+   of arms by hand, against an archive already unpacked.
+
+9. **Publish, if this release is for anybody else.** A GitHub release from
    the tag, with the per-platform archives and their checksums, and notes a
    person who has never read the tracker can act on - not a paste of the
    generated ones.
@@ -80,15 +103,15 @@ release that got it wrong.
    merely containing an LGPL library, and whose build definition lives on a
    small self-hosted Gitea.
 
-9. **Sweep the branches the release left behind.**
-   `make prune-worktrees` then `make prune-branches`, once the release is in
-   `main` - only then are its task branches merged from `main`'s point of
-   view, which is what those targets judge against. Skipped for eight
-   releases running, this is how fifty-one dead branches came to hide the
-   three that were live (TOR-89). `release-*` is kept: `origin` carries one
-   per shipped release, and a release branch's tip is the only independent
-   witness a tag could be checked against, which matters because
-   `v0.1.0`..`v0.6.0` were backfilled long after the fact.
+10. **Sweep the branches the release left behind.**
+    `make prune-worktrees` then `make prune-branches`, once the release is in
+    `main` - only then are its task branches merged from `main`'s point of
+    view, which is what those targets judge against. Skipped for eight
+    releases running, this is how fifty-one dead branches came to hide the
+    three that were live (TOR-89). `release-*` is kept: `origin` carries one
+    per shipped release, and a release branch's tip is the only independent
+    witness a tag could be checked against, which matters because
+    `v0.1.0`..`v0.6.0` were backfilled long after the fact.
 
 ## Things that bite
 

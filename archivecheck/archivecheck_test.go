@@ -27,6 +27,17 @@
 // ~100 MB unpacked archive handed to it and takes minutes, so it has no
 // business in `go test ./...`.
 //
+// Why a test and not a cmd/. The seeder this needs is a real BitTorrent
+// client, and ARCHITECTURE.md's standing rule is that internal/swarm is the
+// only place in the project that imports anacrolix/torrent - a rule worth
+// more than the convenience of a standalone binary. Test code was already the
+// documented exception to it (internal/torrenttest owns exactly this seeder,
+// for the same reason: several packages need one), so writing this as a test
+// keeps the rule intact AND deletes the duplicate seeder the throwaway
+// version of this harness carried. A cmd/archivecheck would have been a
+// second production importer of anacrolix and a second copy of
+// StartSeeder, to gain nothing: CI has a Go toolchain either way.
+//
 // Run with:
 //
 //	make archive-check ARCHIVE=dist/torpeek-1.0.0-darwin-amd64 MEDIA=clip.mkv

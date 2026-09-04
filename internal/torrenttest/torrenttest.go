@@ -3,6 +3,13 @@
 //
 // It is test scaffolding that lives outside _test.go files only because more
 // than one package needs it.
+//
+// Since TOR-101 one of those callers is archivecheck/, which runs a release
+// archive's own torpeek binary as a child process against a seeder started
+// here. That is why this package is worth keeping general rather than folding
+// into whichever _test.go needed it last: it is now also the reason the
+// archive gate does not have to import anacrolix/torrent itself, which
+// ARCHITECTURE.md reserves for internal/swarm.
 package torrenttest
 
 import (

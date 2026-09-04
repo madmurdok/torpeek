@@ -66,10 +66,16 @@ replays it from disk: no queue slot, no network request.
 
 Release archives now assemble for all four targets: `make archives` builds one
 folder per platform holding torpeek, ffmpeg, ffprobe and their licence
-material. The Linux one has been run end to end on a clean Debian 12 with no
-ffmpeg installed and nothing on `PATH`, and the macOS Intel one the same way on
-macOS itself; the Windows and Apple Silicon ones are assembled and checksummed
-but have not been run on their platforms. **The macOS archives are distributed
+material. **All four are run on a clean machine of their own operating system
+before a release goes out** — out of the unpacked folder, against a seeder on
+loopback, with `PATH` pointing at an empty directory so the bundled ffmpeg is
+the only decoder anything could have used. Windows and Apple Silicon included:
+neither can be executed on the machine this is developed on, which is why
+0.9.0 shipped two archives nobody had ever run. That is a GitHub Actions
+workflow now ([`.github/workflows/archives.yml`](.github/workflows/archives.yml)),
+and it runs a second, identical pass with the bundled binaries deleted and
+requires *that* to fail — a green run that would also be green with no ffmpeg
+in the folder would prove nothing. **The macOS archives are distributed
 under the GPL and the Linux and Windows ones are not** — there is no prebuilt
 LGPL ffmpeg for macOS worth shipping, torpeek's own source is MIT and so is
 free to travel inside a GPL whole, and there was no reason to downgrade the
@@ -134,6 +140,8 @@ make check     # vet + tests (the suite drives real torrents through a local see
 make cross     # dist/{darwin,linux,windows}-*/ - the four binaries, CGO-free
 make ffmpeg    # third_party/ffmpeg/<platform>/ - the bundled ffmpeg, checksums verified
 make archives  # dist/torpeek-<version>-<platform>{,.tar.gz,.zip} - the release archives
+make archive-check ARCHIVE=<unpacked dir> MEDIA=<clip.mkv>
+               # run an unpacked archive with nothing on PATH, both arms (CI does this per OS)
 make fmt
 ```
 
