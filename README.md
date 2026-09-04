@@ -156,6 +156,9 @@ make archives  # dist/torpeek-<version>-<platform>{,.tar.gz,.zip} - the release 
 make archive-check ARCHIVE=<unpacked dir> MEDIA=<clip.mkv>
                # run an unpacked archive with nothing on PATH, both arms (CI does this per OS)
 make fmt
+
+make clean        # bin/ and dist/
+make clean-ffmpeg # third_party/ffmpeg/ - about 750 MB, and a ~220 MB download to undo
 ```
 
 ## Usage

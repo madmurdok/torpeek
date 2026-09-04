@@ -541,9 +541,26 @@ for platform in $platforms; do
 		;;
 	esac
 
-	printf '%s: %s unpacked, %s as %s\n' \
+	# The staging directory has done its job once the archive exists, and it
+	# is not small: four platforms left 869 MiB of it behind after a release
+	# build, a byte-for-byte second copy of what the archives already hold
+	# (TOR-103). The archive is the artefact to inspect - `tar tzf` and
+	# `unzip -l` read it without unpacking, and archivecheck/ unpacks it the
+	# way a person would rather than reaching in here.
+	#
+	# KEEP_STAGE=1 keeps it, for the one case the deletion would cost
+	# something: comparing two builds file by file, where re-running
+	# packaging to get the tree back is slower than having kept it.
+	if [ "${KEEP_STAGE:-0}" = 1 ]; then
+		kept=" (staging kept: $stage)"
+	else
+		rm -rf "$stage"
+		kept=""
+	fi
+
+	printf '%s: %s unpacked, %s as %s%s\n' \
 		"$platform" "$(mib "$unpacked")" "$(mib "$(bytes "$archive")")" \
-		"$(basename "$archive")"
+		"$(basename "$archive")" "$kept"
 done
 
 # Every archive of this version that is on disk, not only the ones this run
