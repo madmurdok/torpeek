@@ -73,6 +73,15 @@ release that got it wrong.
    and an offer that points only at somebody else's repository depends on that
    repository still being there.
 
+9. **Sweep the branches the release left behind.**
+   `make prune-worktrees` then `make prune-branches`, once the release is in
+   `main` - only then are its task branches merged from `main`'s point of
+   view, which is what those targets judge against. Skipped for eight
+   releases running, this is how fifty-one dead branches came to hide the
+   three that were live (TOR-89). `release-*` is kept: `origin` carries one
+   per shipped release, and a release branch's tip is the only independent
+   witness a tag could be checked against, which matters because
+   `v0.1.0`..`v0.6.0` were backfilled long after the fact.
 ## Things that bite
 
 - **`git branch --merged main | grep 'Merge release'` is not a tag list.**

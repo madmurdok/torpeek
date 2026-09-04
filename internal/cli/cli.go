@@ -174,7 +174,7 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if opts.JSON {
 		return reportJSON(events, stdout, stderr)
 	}
-	return reportText(events, stdout, stderr)
+	return reportText(events, stdout, stderr, cfg.Plan.Count)
 }
 
 func parse(args []string, stderr io.Writer) (Options, error) {

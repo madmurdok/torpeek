@@ -232,6 +232,92 @@ func TestLoadRunAcceptsA06ShapedRecord(t *testing.T) {
 	}
 }
 
+// run080Shape is a REAL run.json written by the actual 0.8.0 build - checked
+// out at tag v0.8.0 in a separate worktree and run once against a local
+// swarm with a .torrent source, not typed out from this task's own idea of
+// what TOR-73 wrote - the same discipline manifest07Shape documents for the
+// manifest side. "source" is TOR-73's shape: the absolute path of the
+// .torrent copy the run saved in its own directory
+// (output.Layout.TorrentPath). It names a temp directory that this build
+// deleted the moment the capture test ended, which is the point: this is
+// exactly what TOR-86 calls a path to nothing, preserved here so a reader can
+// be tested against it rather than a paraphrase of it.
+const run080Shape = `{
+  "version": 1,
+  "tool": "0.8.0",
+  "created_at": "2026-09-04T09:22:59.13528Z",
+  "source": "/var/folders/ps/r478n82d1zb82phf7k1dsy6w0000gp/T/TestCaptureRunFixtureTOR862853530860/003/d7ed5220021b0170ae969e532c268ca884b357f5/1f34641acf26018c/d7ed5220021b0170ae969e532c268ca884b357f5.torrent",
+  "infohash": "d7ed5220021b0170ae969e532c268ca884b357f5",
+  "name": "001",
+  "private": false,
+  "plan": {
+    "count": 3,
+    "start": 0.1,
+    "end": 0.9,
+    "profile": "min-traffic",
+    "format": "jpeg",
+    "sequential": false
+  },
+  "videos": [
+    {
+      "index": 0,
+      "path": "001/episode-1.mkv",
+      "bytes": 160471,
+      "offset": 0
+    }
+  ],
+  "selected": [
+    0
+  ],
+  "complete": [
+    0
+  ]
+}`
+
+// TestLoadRunAcceptsAn080ShapedRecord is TOR-86's acceptance criterion for the
+// format: cache.Run's shape did not change (Source is still a plain string,
+// under the same JSON key), only what a NEW record puts in that string, so a
+// record written by 0.8.0 must keep reading exactly as it always did - Version
+// unchanged, every field intact, Source included even though it is now a
+// stale absolute path rather than the magnet a build made after TOR-86 would
+// have written. Nothing about LoadRun tells the two shapes of Source apart,
+// because nothing needs to: this field is only ever displayed and pasted (see
+// its own doc comment), never parsed or joined by this package, so there is
+// no shape for a reader to detect - the same trap TOR-52 documented for this
+// very struct.
+func TestLoadRunAcceptsAn080ShapedRecord(t *testing.T) {
+	if !strings.Contains(run080Shape, `"tool": "0.8.0"`) {
+		t.Fatal("the fixture is no longer an 0.8.0 record - it must stay the captured one")
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, Name), []byte(run080Shape), 0o600); err != nil {
+		t.Fatalf("write the 0.8.0 record: %v", err)
+	}
+
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("an 0.8.0-shaped run.json was a miss; it must still be a hit")
+	}
+	const wantSource = "/var/folders/ps/r478n82d1zb82phf7k1dsy6w0000gp/T/TestCaptureRunFixtureTOR862853530860/" +
+		"003/d7ed5220021b0170ae969e532c268ca884b357f5/1f34641acf26018c/d7ed5220021b0170ae969e532c268ca884b357f5.torrent"
+	if got.Source != wantSource {
+		t.Errorf("source = %q, want the recorded path unchanged: %q", got.Source, wantSource)
+	}
+	if got.InfoHash != "d7ed5220021b0170ae969e532c268ca884b357f5" || got.Name != "001" {
+		t.Errorf("fields the 0.8.0 record did carry were lost: %+v", got)
+	}
+	if got.Plan.Count != 3 || got.Plan.Profile != "min-traffic" {
+		t.Errorf("plan lost: %+v", got.Plan)
+	}
+	if len(got.Videos) != 1 || got.Videos[0].Path != "001/episode-1.mkv" {
+		t.Errorf("videos lost: %+v", got.Videos)
+	}
+	if len(got.Selected) != 1 || len(got.Complete) != 1 {
+		t.Errorf("selected/complete lost: selected=%v complete=%v", got.Selected, got.Complete)
+	}
+}
+
 // The tests below are TOR-60's at the seam that reads a manifest: LoadManifest
 // is the only place in the project that parses one, so it is the only place
 // that can turn a recorded frame path back into a file, and the only place

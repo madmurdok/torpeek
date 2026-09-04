@@ -1,15 +1,18 @@
 package core
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/output"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // This file is TOR-60's: a results tree is a library, and a library that
@@ -418,5 +421,98 @@ func TestReplayOfARunWrittenByAnEarlierRelease(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("frame %q is not there: %v", path, err)
 		}
+	}
+}
+
+// TestRecordedSourceOfAMovedTorrentRunStaysPasteable is TOR-86's acceptance
+// criterion: a run started from a .torrent file, then relocated along with
+// everything else in its results tree, must still name a source a person
+// could paste back in to run it again - cache.Run.Source's own promise.
+//
+// TOR-73 recorded the .torrent copy the run saved beside run.json
+// (output.Layout.TorrentPath), which is an ABSOLUTE path - true only while
+// the tree sits exactly where it was captured, and therefore exactly the
+// kind of string TOR-60 already taught this project not to trust once a
+// directory can move. recordedSource now records the magnet its own infohash
+// resolves to instead, which depends on no directory at all, so it stays
+// exactly as true after the move as before it.
+//
+// The check is deliberately more than "the string looks like a magnet": it
+// is run back through swarm.ParseSource - the very function app.js's
+// regenerate hands this string to over the wire - and the infohash that
+// comes out must be the run's own. That is what "pasteable" and "true" mean
+// operationally: parses, and names the right torrent, from wherever the tree
+// now lives.
+func TestRecordedSourceOfAMovedTorrentRunStaysPasteable(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 10, "200k")
+
+	base := t.TempDir()
+	from := filepath.Join(base, "from")
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.OutputRoot = from // overridden so only this subdirectory is moved, not t.TempDir() itself
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var infoHash string
+	for _, ev := range collect(t, events) {
+		if e, ok := ev.(MetadataReady); ok {
+			infoHash = e.InfoHash
+		}
+	}
+	if infoHash == "" {
+		t.Fatal("no MetadataReady event carried an infohash")
+	}
+	params := ParamsKey(cfg)
+
+	before, ok := cache.LoadRun(output.Layout{Root: from, InfoHash: infoHash, Params: params}.RunDir())
+	if !ok {
+		t.Fatal("no run record was written")
+	}
+	if !strings.HasPrefix(before.Source, "magnet:") {
+		t.Fatalf("recorded source %q is not even a magnet before the move - "+
+			"recordedSource's fix did not run", before.Source)
+	}
+
+	to := filepath.Join(base, "to")
+	if err := os.Rename(from, to); err != nil {
+		t.Fatalf("move the results tree: %v", err)
+	}
+	if _, err := os.Stat(from); !os.IsNotExist(err) {
+		t.Fatalf("the original is still there, so this proves nothing: %v", err)
+	}
+
+	after, ok := cache.LoadRun(output.Layout{Root: to, InfoHash: infoHash, Params: params}.RunDir())
+	if !ok {
+		t.Fatal("the run record is not readable from its new location")
+	}
+	if after.Source != before.Source {
+		t.Errorf("Source changed just from moving the tree: %q -> %q", before.Source, after.Source)
+	}
+	if !strings.HasPrefix(after.Source, "magnet:") {
+		t.Fatalf("recorded source %q is not a magnet", after.Source)
+	}
+
+	src, err := swarm.ParseSource(after.Source)
+	if err != nil {
+		t.Fatalf("the recorded source does not parse after the move: %v", err)
+	}
+	if !src.IsMagnet() {
+		t.Fatalf("swarm.ParseSource(%q) did not read it back as a magnet", after.Source)
+	}
+	hash, err := src.InfoHash()
+	if err != nil {
+		t.Fatalf("infohash of the parsed source: %v", err)
+	}
+	if hash.HexString() != infoHash {
+		t.Errorf("recorded source names infohash %s, want %s", hash.HexString(), infoHash)
 	}
 }

@@ -78,6 +78,31 @@ prune-worktrees:
 		fi; \
 	done
 
+# Fifty-one branches whose work is already in main make a branch listing
+# unreadable and hide the three that are actually live (TOR-89). Only the ref
+# is deleted: every commit on them is reachable from main and from the release
+# tags, so nothing here loses work.
+#
+# release-* is kept on purpose. origin carries one branch per shipped release,
+# and a release branch's tip is the only independent witness a tag could be
+# checked against - the v0.1.0..v0.6.0 tags were backfilled after the fact
+# (TOR-85), so "the tag says so" is not by itself evidence of where a release
+# was cut.
+#
+# Local refs only. `--merged main` is the load-bearing guard, not the `-d`:
+# measured, `git branch -d` judges "fully merged" against the CURRENT HEAD, so
+# run from a release branch it will happily delete a branch main has never
+# seen. What `-d` does add is refusing a branch a worktree has checked out -
+# the same "an agent still working keeps it" protection prune-worktrees leans
+# on, rather than a keep-list this target would have to be told about. origin
+# carries no feature branches at all, so there is deliberately nothing remote
+# to prune.
+.PHONY: prune-branches
+prune-branches:
+	@git branch --merged main --format='%(refname:short)' \
+		| grep -vxE 'main|release-.*' \
+		| while read -r b; do git branch -d "$$b"; done
+
 # The tag's version is derived from the code, never passed in: a tag that
 # disagrees with internal/version is how a binary comes to claim a release
 # nobody shipped. NAME is the release's own name, for the annotation - the

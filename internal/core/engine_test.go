@@ -986,21 +986,26 @@ func TestRerunIsServedFromDiskWithoutTheSwarm(t *testing.T) {
 	if !ok {
 		t.Fatal("no run record for the first run")
 	}
-	// TOR-73 changed what "the path a person could rerun" means for a
-	// .torrent source, and the change is the point rather than a detail: it
-	// is now the copy the run kept in its own directory, not the path the
-	// file was read from. The web UI stages a dropped .torrent in a temp
-	// directory it deletes as the run ends, so the path this used to expect
-	// was one that provably no longer existed by the time anybody read the
-	// record. The saved copy has the same infohash and lives as long as the
-	// record naming it, which is what makes the field true rather than
-	// usually-true.
-	if want := layout.TorrentPath(); record.Source != want {
-		t.Errorf("record source = %q, want the copy this run kept: %q", record.Source, want)
+	// TOR-73 first changed what "the string a person could rerun" means for
+	// a .torrent source to the copy the run kept in its own directory rather
+	// than the path the file was read from - the web UI stages a dropped
+	// .torrent in a temp directory it deletes as the run ends, so the path
+	// this used to expect was one that provably no longer existed by the
+	// time anybody read the record. TOR-86 then found the saved copy's path
+	// only true while the results tree stayed exactly where it was
+	// captured, and replaced it with the magnet the infohash resolves to -
+	// true, and pasteable, from anywhere the tree ends up.
+	// Asserted by what it resolves to rather than by its exact text: a
+	// magnet legitimately carries a display name and the torrent's own
+	// trackers beside the infohash (swarm.Torrent.Magnet explains why the
+	// trackers are not optional), and a test comparing the whole string
+	// breaks on every one of those improvements while proving nothing more.
+	if !strings.Contains(record.Source, metadata.InfoHash) {
+		t.Errorf("record source = %q, want a magnet naming this torrent's infohash %s", record.Source, metadata.InfoHash)
 	}
-	if _, err := os.Stat(record.Source); err != nil {
-		t.Errorf("record source %q is not on disk: %v - the whole point of the field is that it can be pasted back",
-			record.Source, err)
+	if src, err := swarm.ParseSource(record.Source); err != nil || !src.IsMagnet() {
+		t.Errorf("record source %q does not parse back as a magnet (err=%v) - "+
+			"the whole point of the field is that it can be pasted back", record.Source, err)
 	}
 	wantPlan := cache.Plan{
 		Count: first.Plan.Count, Start: first.Plan.Start, End: first.Plan.End,
