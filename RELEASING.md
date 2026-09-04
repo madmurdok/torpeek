@@ -36,17 +36,12 @@ release that got it wrong.
    Read criterion 2's traffic against the previous releases' figures, not
    only against its ceiling - it has been climbing.
 
-5. **`release_it` in the tracker.** It refuses unless every task in the
-   release is done or cancelled, runs a test command through the same
-   verifier task completion uses, and generates the notes from the tasks'
-   own summaries.
-
-6. **Merge into `main` - after asking.** Then `make tag`, then push the
+5. **Merge into `main` - after asking.** Then `make tag`, then push the
    branch, `main` and the tag together. The tag goes on the release merge:
    that is the commit that produced the release, and an archive built later
    has something to be built from.
 
-7. **Build the archives with `make archives`.**
+6. **Build the archives with `make archives`.**
    It runs `make cross` first, so the binaries in them are the CGO-free ones
    step 3 tested, then fetches the bundled ffmpeg named in
    `third_party/ffmpeg.lock` and verifies every checksum in it - the archive's,
@@ -63,7 +58,7 @@ release that got it wrong.
    [docs/licensing.md](docs/licensing.md) rather than working around them, a
    three-of-four release must not be able to pass for a whole one.
 
-8. **Publish, if this release is for anybody else.** A GitHub release from
+7. **Publish, if this release is for anybody else.** A GitHub release from
    the tag, with the per-platform archives and their checksums, and notes a
    person who has never read the tracker can act on - not a paste of the
    generated ones.
@@ -80,6 +75,24 @@ release that got it wrong.
    merely containing an LGPL library, and whose build definition lives on a
    small self-hosted Gitea.
 
+8. **`release_it` in the tracker, last.** It refuses unless every task in
+   the release is done or cancelled, runs a test command through the same
+   verifier task completion uses, and generates the notes from the tasks' own
+   summaries.
+
+   **It is last because it cannot be earlier.** It was step 5 for one
+   release, and 0.9.0 discovered why that cannot work: the publish is itself a
+   task in the release, it needs the tag, and the tag goes on the merge - so a
+   release_it that demands every task be done waits on a step that waits on it
+   (TOR-99). Nothing about the order is a preference.
+
+   What that costs, stated rather than glossed: release_it's test command no
+   longer runs before anything irreversible. So it is not what guards the
+   publish, and it was never really the guard - **steps 3 and 4 are**, plus
+   `make tag` refusing a dirty tree and deriving the version from the code.
+   Read those as the gate. release_it is the record: it marks the release
+   shipped and writes down what was in it.
+
 9. **Sweep the branches the release left behind.**
    `make prune-worktrees` then `make prune-branches`, once the release is in
    `main` - only then are its task branches merged from `main`'s point of
@@ -92,10 +105,14 @@ release that got it wrong.
 
 ## Things that bite
 
+- **A release that publishes itself cannot gate on itself.** `release_it`
+  refuses a release with an unfinished task, and the publish is a task; the
+  publish needs a tag, the tag needs the merge. Whatever else moves, those
+  three cannot be ordered so that release_it comes first - see step 8.
 - **`git branch --merged main | grep 'Merge release'` is not a tag list.**
   A merge of a release branch *into a task branch* reads almost the same
   ("Merge release-0.7.0: ...") and is not a release. Read the messages.
 - **The version in code is the source of truth for the tag.** `make tag`
   derives it rather than taking an argument, so the two cannot disagree.
 - **`release_it` is one-shot.** It refuses a release already released, so
-  the tracker will not let step 5 happen twice.
+  the tracker will not let step 8 happen twice.
