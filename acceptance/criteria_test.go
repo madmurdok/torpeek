@@ -4,6 +4,7 @@ package acceptance
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,6 +28,13 @@ const (
 )
 
 // Criterion1And2 share a run each, over one file of the live torrent.
+//
+// Each criterion is its own subtest so that one of them can be repeated on its
+// own: `-run 'TestCriteria1And2MinTimeAndMinTraffic/criterion2'` costs one
+// min-traffic run instead of both, which is what makes a spread of reps
+// affordable (TOR-88). A plain `make acceptance` still runs both, in order,
+// and measures each exactly as before - the subtest carries no state, and the
+// data and output directories were already one fresh pair per criterion.
 func TestCriteria1And2MinTimeAndMinTraffic(t *testing.T) {
 	torrent := liveTorrent(t)
 	report.Torrents = append(report.Torrents, "live: "+*torrentURL+" (file "+*fileSpec+")")
@@ -44,39 +52,47 @@ func TestCriteria1And2MinTimeAndMinTraffic(t *testing.T) {
 		{1, swarm.MinTime, "min-time: 20 frames within 2 minutes and 150 MB", maxMinTimeBytes, maxMinTimeElapsed},
 		{2, swarm.MinTraffic, "min-traffic: the same 20 frames within 60 MB", maxMinTrafficByte, 0},
 	} {
-		cfg := baseConfig(t, torrent, t.TempDir(), t.TempDir())
-		cfg.Profile = c.profile
-		cfg.Files = []string{*fileSpec}
+		t.Run(fmt.Sprintf("criterion%d", c.number), func(t *testing.T) {
+			cfg := baseConfig(t, torrent, t.TempDir(), t.TempDir())
+			cfg.Profile = c.profile
+			cfg.Files = []string{*fileSpec}
 
-		got := run(ctx, t, cfg, 0)
+			got := run(ctx, t, cfg, 0)
 
-		verdict := Met
-		note := ""
-		if got.frames != cfg.Plan.Count {
-			verdict, note = Missed, "the frame set was not complete"
-		} else if got.downloaded > c.maxByte {
-			verdict, note = Missed, "over the traffic ceiling"
-		} else if c.maxTime > 0 && got.elapsed > c.maxTime {
-			verdict, note = Missed, "over the time ceiling"
-		}
-		if verdict == Met {
-			note = "measured against one file of a public torrent; the criterion names a ~10 GB film, " +
-				"and the largest file here is smaller than that"
-		}
+			verdict := Met
+			note := ""
+			if got.frames != cfg.Plan.Count {
+				verdict, note = Missed, "the frame set was not complete"
+			} else if got.downloaded > c.maxByte {
+				verdict, note = Missed, "over the traffic ceiling"
+			} else if c.maxTime > 0 && got.elapsed > c.maxTime {
+				verdict, note = Missed, "over the time ceiling"
+			}
+			if verdict == Met {
+				note = "measured against one file of a public torrent; the criterion names a ~10 GB film, " +
+					"and the largest file here is smaller than that"
+			}
 
-		report.Add(Result{
-			Number: c.number, Title: c.title, Verdict: verdict, Note: note,
-			Measured: []Measurement{
-				Measure("frames", "%d of %d", got.frames, cfg.Plan.Count),
-				Measure("downloaded", "%s (ceiling %s)", mib(got.downloaded), mib(c.maxByte)),
-				Measure("elapsed", "%s", secs(got.elapsed)),
-				Measure("outcome", "%s", got.reason),
-			},
+			// One machine-readable line per rep, so a spread can be read out
+			// of `go test -v` without diffing eight report files.
+			t.Logf("TOR88 criterion=%d profile=%s bytes=%d mib=%.1f elapsed_s=%.1f frames=%d/%d shifted=%d reason=%s",
+				c.number, c.profile.Name, got.downloaded, float64(got.downloaded)/(1<<20),
+				got.elapsed.Seconds(), got.frames, cfg.Plan.Count, got.shifted, got.reason)
+
+			report.Add(Result{
+				Number: c.number, Title: c.title, Verdict: verdict, Note: note,
+				Measured: []Measurement{
+					Measure("frames", "%d of %d", got.frames, cfg.Plan.Count),
+					Measure("downloaded", "%s (ceiling %s)", mib(got.downloaded), mib(c.maxByte)),
+					Measure("elapsed", "%s", secs(got.elapsed)),
+					Measure("outcome", "%s", got.reason),
+				},
+			})
+
+			if verdict == Missed {
+				t.Errorf("criterion %d: %s (%s in %s)", c.number, note, mib(got.downloaded), secs(got.elapsed))
+			}
 		})
-
-		if verdict == Missed {
-			t.Errorf("criterion %d: %s (%s in %s)", c.number, note, mib(got.downloaded), secs(got.elapsed))
-		}
 	}
 }
 
