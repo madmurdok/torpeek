@@ -138,11 +138,13 @@ start: the bundled ffmpeg and ffprobe, signed by their builder, and torpeek's
 own binary, which carries only the ad-hoc signature the Go linker applies when
 cross-linking for darwin/arm64 from a Linux host.
 
-**What still has not been run:** the Gatekeeper path the macOS README.txt
+**What still has not been run in CI:** the Gatekeeper path the macOS README.txt
 warns about. CI never downloads an archive through a browser, so
-`com.apple.quarantine` is never set on the files it unpacks, and the
-`xattr -c torpeek` advice those archives carry remains advice nobody has
-tested. Everything about that instruction is unchanged by these runs.
+`com.apple.quarantine` is never set on the files it unpacks, and nothing in
+`archives.yml` exercises it. It has since been run by hand on darwin/amd64,
+with the attribute written directly - see "Gatekeeper" below (TOR-97), which is
+also what replaced that advice with `first-run.command` in the archive. On
+darwin/arm64 it is still untested, and from an Intel Mac untestable.
 
 ## What LGPL distribution obliges, and where each obligation lives
 
@@ -491,20 +493,78 @@ TOR-26 flagged the consequence without measuring it. Measured now, on macOS
   the `.pkg` did not matter here.
 - **torpeek's own binary does not.** It carries no Developer ID (the amd64
   build is unsigned; the arm64 one is ad-hoc linker-signed, which is not the
-  same thing), so its first execution under quarantine is held by Gatekeeper:
-  the process sits at 0% CPU with an 8 KB resident set, prints nothing, and in
-  a terminal with no GUI to answer the dialog it simply never returns.
+  same thing), so its first execution under quarantine is stopped: the process
+  sits at 0% CPU with an 8 KB resident set and prints nothing.
 - Clearing the flag **before** the first attempt works (`xattr -c torpeek`, or
-  clearing it on the tarball before extracting). Clearing it **afterwards**
-  does not - the refusal is remembered per file - but a fresh copy of the same
-  bytes runs. The generated macOS `README.txt` says exactly this, in that
-  order, because the order is what makes the difference.
+  clearing it on the tarball before extracting), and a fresh copy of the same
+  bytes runs. Clearing it **afterwards** is the case that cannot be relied on:
+  TOR-93 found the refusal remembered per file, TOR-97 did not - see below.
 
 So the Gatekeeper problem the macOS archives now have is torpeek's own signing
 gap, not the bundled ffmpeg's, and it is the same gap the Linux and Windows
 archives are spared only because their platforms have no equivalent. It is not
-a licensing question and this ticket does not solve it; it is recorded here
-because "macOS archives exist now" is what made it reachable.
+a licensing question; TOR-93 recorded it here because "macOS archives exist
+now" is what made it reachable, and TOR-97 then did what can be done about it
+without buying a Developer ID.
+
+**Where the stop happens, and what that rules out (TOR-97).** The question that
+decides the remedy is whether any of torpeek's own code runs before the stop,
+because if none does, no message the program contains can ever be read.
+Measured on the same machine, darwin/amd64, with
+`xattr -w com.apple.quarantine "0081;00000000;Safari;"` standing in for the
+download - a fresh copy of identical bytes in every arm, since the decision is
+remembered per file:
+
+| arm | what came out |
+|---|---|
+| clean copy, `./torpeek -version` | `1.0.0`, exit 0, after 1.6 s |
+| quarantined copy, same command | nothing at all; SIGKILL after 1.6 s |
+| quarantined copy of a build whose **first statement in `main`** writes `PROBE: reached Go main` to stderr | nothing at all; SIGKILL after 8.5 s |
+| clean copy of that same probe build | `PROBE: reached Go main`, then `1.0.0` |
+| quarantined 2 MB hello-world Go binary | nothing at all; SIGKILL after 3.8 s |
+
+**The process never reaches `main`.** The kernel says so itself - one
+`(AppleSystemPolicy) ASP: Security policy would not allow process: <pid>,
+<path>` in the unified log per stopped launch - and `ps` shows the process
+parked at 0% CPU with an 8 KB resident set for the whole of its short life,
+which is a blocked `execve` rather than a program that started and stalled.
+That same signature also appears *transiently* on a clean unsigned binary's
+first run (1.6 s, against 0.5 s on its second, while XProtect looks at the new
+file), so the timing is not the evidence. The printing is: identical bytes,
+one copy marked and one not, and only the unmarked one speaks.
+
+That rules out the tidy remedy. A startup check inside torpeek that read
+`com.apple.quarantine` on its own executable could only ever be read by
+somebody whose run was **not** stopped, so `cmd/torpeek/main.go` carries a note
+saying why the check is absent instead of carrying the check. What can run is
+something that runs *before* torpeek, and that is what the macOS archives now
+ship: `packaging/macos/first-run.command` clears the flag from the folder,
+checks that it is really gone, restores the execute bit and only then launches
+torpeek - one action, in the one order that works. The generated `README.txt`
+leads with it, in a section above the commands it has to precede rather than a
+note below them.
+
+Two things came out differently from TOR-93, and are recorded as measured
+rather than reconciled. First, **the stop did not wait**: the held process was
+killed by the system after 1.6-11.7 s in all seven quarantined launches, so in
+a terminal the run ends rather than hanging. Dialogs did appear - the person
+logged in at this machine watched them stack up and asked what was trying to
+open - but nothing in the terminal showed one, and the kill did not wait for
+an answer. Second, clearing the flag **after** a stopped attempt did let that
+same file run, where TOR-93 found the refusal remembered per file. Both
+probably turn on what the launching context is allowed to prompt: TOR-93's runs
+came from an interactive Terminal, TOR-97's from an agent session under the
+same Aqua login. The archive's wording is therefore that clearing afterwards
+*may* not help and that unpacking again does, which is true under both
+measurements, and the script prints that same advice itself if torpeek dies of
+SIGKILL after a clean clear.
+
+**darwin/arm64 remains untested and cannot be tested from an Intel Mac.** Its
+binary is ad-hoc linker-signed rather than unsigned, and the kernel's rule
+there is stricter - it refuses an arm64 Mach-O with no valid signature outright
+- so a stop is at least as likely; whether it looks the same is unknown.
+`first-run.command` travels in both macOS archives because the remedy does not
+depend on the answer.
 
 ## Size
 

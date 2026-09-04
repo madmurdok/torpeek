@@ -23,6 +23,13 @@
 // can tell the two states apart; running only the first arm is not a weaker
 // version of this check, it is not this check.
 //
+// A third test runs on macOS only and is not a third arm of that pair:
+// TestMacOSFirstRunLauncherStartsTorpeek executes the archive's own
+// first-run.command, which is the line its README.txt leads with there
+// (TOR-97). It proves the launcher starts torpeek. It proves nothing about
+// Gatekeeper, which is what the launcher is for and which no runner can be
+// made to enforce, because nothing here was ever downloaded.
+//
 // It sits behind a build tag for the reason acceptance/ does: it needs a
 // ~100 MB unpacked archive handed to it and takes minutes, so it has no
 // business in `go test ./...`.
@@ -190,6 +197,56 @@ func TestArchiveWithoutItsOwnFFmpegFails(t *testing.T) {
 	}
 	t.Logf("RESULT: failed as it had to, exit %d - the bundled ffmpeg is what the other arm used",
 		got.exit)
+}
+
+// TestMacOSFirstRunLauncherStartsTorpeek runs the macOS archive's launcher the
+// way its README.txt tells a person to, because there it is the first thing
+// anybody runs and until TOR-97 nothing had ever executed it.
+//
+// It deliberately does not test what the launcher is for. A runner never
+// downloads the archive through a browser, so com.apple.quarantine is set on
+// nothing here and the clearing step has nothing to clear; the Gatekeeper arms
+// were measured by hand and written down in docs/licensing.md instead. What
+// this catches is the launcher broken as a launcher - a syntax error, a path
+// resolved against the caller's directory instead of its own, a torpeek it
+// fails to start - which is a regression CI can see and a person could not.
+//
+// `sh first-run.command`, not `./first-run.command`: that is the line
+// README.txt gives, and the one that works on a downloaded copy, because the
+// shell reads the script rather than executing it.
+func TestMacOSFirstRunLauncherStartsTorpeek(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skipf("first-run.command travels in the macOS archives only; this is %s", runtime.GOOS)
+	}
+	dir, _ := requireArchive(t)
+
+	script := filepath.Join(dir, "first-run.command")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("no first-run.command in %s: %v", dir, err)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		t.Errorf("first-run.command is mode %v, not executable - a double-click cannot run it",
+			info.Mode().Perm())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	// From somewhere else on purpose: a double-click starts Terminal in the
+	// user's home directory, so the script has to find the archive from its
+	// own path rather than from the working directory. -version is the
+	// cheapest thing torpeek can be asked that proves it started.
+	cmd := exec.CommandContext(ctx, "/bin/sh", script, "-version")
+	cmd.Dir = t.TempDir()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("sh first-run.command -version: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), version.Version) {
+		t.Fatalf("the launcher did not start torpeek %s; it printed:\n%s", version.Version, out)
+	}
+	t.Logf("RESULT: launcher started torpeek from %s:\n%s", cmd.Dir, out)
 }
 
 // ---- the run -------------------------------------------------------------
