@@ -332,11 +332,17 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	}
 
 	spent, _ := tracker.Spent()
+	// Read off the torrent rather than through the budget tracker: the budget
+	// is enforced on what arrived (REQUIREMENTS.md 2.6) and has no business
+	// knowing about claims, while the torrent is the thing that placed them.
+	claimedPieces, claimedByte := torrent.Claimed()
 	bus.Publish(Done{
 		Reason:         stopped,
 		Files:          done,
 		Frames:         made,
 		DownloadedByte: spent,
+		ClaimedByte:    claimedByte,
+		ClaimedPieces:  claimedPieces,
 		Elapsed:        time.Since(started),
 		TorrentPath:    torrentPath,
 		Warnings:       warnings,

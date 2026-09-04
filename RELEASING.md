@@ -33,8 +33,16 @@ release that got it wrong.
    can honestly say `<v>`. 0.7.0 shipped without a report and the run had to
    be done from a branch off `main` a release later to avoid signing 0.7.0's
    measurements with 0.8.0's number (TOR-76).
-   Read criterion 2's traffic against the previous releases' figures, not
-   only against its ceiling - it has been climbing.
+   Criterion 2's verdict is taken on what the run ORDERED, not on what
+   arrived (REQUIREMENTS.md 8.2, TOR-94), and the report carries three
+   numbers: ordered, arrived, and the gap. The first is deterministic and is
+   the one worth comparing release to release. The second samples this
+   swarm's mood at this moment - it has read 45.5 to 118.6 MiB on unchanged
+   code - so a high figure there is a thing to look into, not a release to
+   block. A gap that grows release over release is the interesting signal.
+   Give the machine a quiet half-hour before starting: the arrival figure
+   doubled after about 25 back-to-back runs and needed well over 20 minutes
+   of idle to come back, so a release run should be a cold run (TOR-88).
 
 5. **Merge into `main` - after asking.** Then `make tag`, then push the
    branch, `main` and the tag together. The tag goes on the release merge:

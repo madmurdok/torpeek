@@ -211,8 +211,62 @@ func (t *Torrent) Claim(file int, off, length int64, p Profile) (*Window, error)
 	for i := pieces.Begin; i < pieces.End; i++ {
 		t.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
 	}
+	t.noteClaimed(pieces)
 
 	return &Window{t: t, pieces: pieces}, nil
+}
+
+// noteClaimed records an order against the run's claimed figure (Claimed, in
+// torrent.go), which is what acceptance criterion 2 is judged on.
+//
+// It sits inside Claim because Claim is the single funnel: every piece torpeek
+// orders in this project is ordered here, by ReadRange below or by
+// internal/bridge's Fetch, which is where everything ffmpeg asks for arrives.
+// Two things deliberately do NOT reach this counter, and they are the whole
+// reason it exists:
+//
+//   - a reader's readahead (Reader, below). That is a hint about how far ahead
+//     to want data, not an order for particular pieces, and since TOR-95 it is
+//     not even rounded up to one. Counting it would fold the manufactured
+//     prefetch back into the figure meant to exclude it.
+//   - anything a peer sends unasked. There is nothing to count at claim time,
+//     which is the point: 1.5-74.5 MiB of it has been measured arriving on
+//     unchanged code, some of it after Release (TOR-88).
+func (t *Torrent) noteClaimed(pieces PieceRange) {
+	t.claimMu.Lock()
+	defer t.claimMu.Unlock()
+
+	if t.claimedSeen == nil {
+		t.claimedSeen = make(map[int]struct{}, pieces.Len())
+	}
+	for i := pieces.Begin; i < pieces.End; i++ {
+		if _, seen := t.claimedSeen[i]; seen {
+			continue
+		}
+		t.claimedSeen[i] = struct{}{}
+		t.claimedByte += t.pieceBytes(i)
+	}
+}
+
+// pieceBytes is what one piece actually weighs: pieceLength for every piece
+// but the torrent's last, which is whatever is left over.
+//
+// Answered from the geometry cached at construction rather than from the
+// client, so the arithmetic stays testable without a swarm - the same reason
+// pieceLength and numPieces are cached at all. The tail matters here and
+// nowhere else: a claim covering the final piece of a torrent whose length is
+// not a whole multiple of the piece length would otherwise report bytes that
+// cannot exist.
+func (t *Torrent) pieceBytes(i int) int64 {
+	if t.pieceLength <= 0 || i < 0 || (t.numPieces > 0 && i >= t.numPieces) {
+		return 0
+	}
+	if t.numPieces > 0 && i == t.numPieces-1 {
+		if tail := t.length - int64(t.numPieces-1)*t.pieceLength; tail > 0 && tail < t.pieceLength {
+			return tail
+		}
+	}
+	return t.pieceLength
 }
 
 // Pieces reports which pieces this window covers.
@@ -220,6 +274,13 @@ func (w *Window) Pieces() PieceRange { return w.pieces }
 
 // Release drops the window's claim. Pieces already downloaded stay on disk and
 // cost nothing to reuse; what stops is asking peers for the rest.
+//
+// It does not touch the run's claimed figure (Claimed, in torrent.go), and
+// must not: that figure is the set of pieces this run ordered at least once,
+// and an order the run placed was placed whether or not it was later
+// withdrawn. Releasing 44 pieces back down to nothing would report a run that
+// asked for nothing - and on the acceptance torrent it would do so 82 times
+// for a single piece.
 func (w *Window) Release() {
 	if w == nil || w.released {
 		return
