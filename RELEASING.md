@@ -82,6 +82,7 @@ release that got it wrong.
    per shipped release, and a release branch's tip is the only independent
    witness a tag could be checked against, which matters because
    `v0.1.0`..`v0.6.0` were backfilled long after the fact.
+
 ## Things that bite
 
 - **`git branch --merged main | grep 'Merge release'` is not a tag list.**
