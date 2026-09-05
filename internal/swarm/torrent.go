@@ -123,6 +123,29 @@ func (t *Torrent) Downloaded() int64 {
 	return stats.BytesReadUsefulData.Int64()
 }
 
+// Uploaded is the piece data this run has SENT to peers, in bytes - the mirror
+// of Downloaded, off the same stats the library keeps for the other direction
+// (BytesWrittenData against BytesReadUsefulData). Payload only: handshakes,
+// requests and the rest of the protocol are not in it, which is what makes it
+// comparable with Downloaded rather than merely adjacent to it.
+//
+// This happens because torpeek asks for it. Config.Upload is on by default and
+// says why - peers reciprocate, which helps min-time - and `-upload=false`
+// turns it off.
+//
+// NOTHING CAPS IT, and that is worth knowing rather than discovering on a
+// bill. The traffic budget counts RECEIVED bytes, deliberately and for a
+// stated reason (REQUIREMENTS.md 2.6: a limit protects the link and the quota,
+// and bytes already on the wire do not care who asked for them), so a ceiling
+// of 150 MB bounds what arrives and says nothing about what leaves. On a link
+// or a seedbox quota that charges both directions, the only lever is the flag.
+// This figure existing is what lets a person see the problem at all; capping it
+// would be a decision nobody has taken yet.
+func (t *Torrent) Uploaded() int64 {
+	stats := t.t.Stats()
+	return stats.BytesWrittenData.Int64()
+}
+
 // Claimed is what this run ASKED the swarm for: how many distinct pieces some
 // Claim has covered, and what they weigh.
 //
