@@ -42,6 +42,21 @@ const el = {
   lightboxImg: document.getElementById("lightbox-img"),
   lightboxCaption: document.getElementById("lightbox-caption"),
   lightboxClose: document.getElementById("lightbox-close"),
+  compare: document.getElementById("compare"),
+  compareClose: document.getElementById("compare-close"),
+  compareA: document.getElementById("compare-a"),
+  compareB: document.getElementById("compare-b"),
+  compareStage: document.getElementById("compare-stage"),
+  compareShotA: document.getElementById("compare-shot-a"),
+  compareShotB: document.getElementById("compare-shot-b"),
+  compareGap: document.getElementById("compare-gap"),
+  compareGapCode: document.getElementById("compare-gap-code"),
+  comparePrev: document.getElementById("compare-prev"),
+  compareNext: document.getElementById("compare-next"),
+  compareFlip: document.getElementById("compare-flip"),
+  comparePlace: document.getElementById("compare-place"),
+  compareTimes: document.getElementById("compare-times"),
+  compareNote: document.getElementById("compare-note"),
 };
 
 // Every torrent this page knows about lives here, keyed by run id - or, for a
@@ -897,6 +912,10 @@ function fileBlock(entry, index) {
           ' aria-label="Frames for this file">' +
         "</label>" +
         '<button type="button" class="file-regen-go">Regenerate</button>' +
+        // Compare sits beside Regenerate because it is the same thought one
+        // step later: Regenerate is how a second result set comes to exist,
+        // and this is what a second set is FOR (TOR-109).
+        '<button type="button" class="file-compare">Compare…</button>' +
       "</p>" +
       '<p class="file-progress" hidden></p>' +
       '<div class="grid"></div>' +
@@ -916,6 +935,7 @@ function fileBlock(entry, index) {
     links: article.querySelector(".file-links"),
     regenCount: article.querySelector(".file-regen-count"),
     regenGo: article.querySelector(".file-regen-go"),
+    compareGo: article.querySelector(".file-compare"),
     progress: article.querySelector(".file-progress"),
     grid: article.querySelector(".grid"),
     expanded: false,
@@ -961,6 +981,7 @@ function fileBlock(entry, index) {
 
   fentry.regenCount.value = el.count.value;
   fentry.regenGo.addEventListener("click", () => regenerate(entry, index, fentry));
+  fentry.compareGo.addEventListener("click", () => openCompare(entry.infohash, index));
 
   fentry.toggle.addEventListener("click", () => {
     const expanded = !fentry.expanded;
@@ -1442,6 +1463,344 @@ el.lightbox.addEventListener("click", (event) => {
   // A click that lands on the dialog element itself, rather than anything
   // inside it, is a click on the backdrop.
   if (event.target === el.lightbox) el.lightbox.close();
+});
+
+// ---------------------------------------------------------------------------
+// COMPARING TWO RUNS BY FLIPPING (TOR-109).
+//
+// FLIPPING BEATS TILING, and that is the whole design rather than a
+// preference: the same frame, in the same screen position, one keypress
+// apart, makes a difference visible that a side-by-side grid hides, because
+// the eye compares against its own afterimage rather than across a gap. So
+// this is not two grids next to each other, and everything below exists to
+// keep one promise - THE PICTURE DOES NOT MOVE.
+//
+// What that costs, concretely:
+//   - the stage's shape is decided from the arms' own resolution before
+//     either frame loads (app.css's --compare-aspect), never from whichever
+//     image happened to arrive first;
+//   - both arms' frames are given a src at the same moment, so a flip is a
+//     visibility toggle over already-decoded pixels rather than a fetch;
+//   - a src is only ever re-assigned when it actually changes, so flipping
+//     back and forth never re-decodes anything;
+//   - nothing above the picture, and nothing sized, changes on a flip. The
+//     dialog is centred by the browser, so a single wrapped line below the
+//     stage would re-centre the dialog and slide the picture.
+//
+// The server does the pairing (internal/web/compare.go). That is not
+// plumbing: "the same frame" across two encodes of one film means the nearest
+// capture point BY FRACTION OF DURATION, the durations live in the manifests,
+// and a page deriving that itself would be a second place the rule is
+// written.
+
+const compare = {
+  // sets is every result set on disk, from GET /compare/sets - the picker's
+  // options, refreshed each time the dialog opens so a run that finished in
+  // the meantime is offered.
+  sets: [],
+  // a and b are the two arms' addresses ("infohash:params:index"), built by
+  // the server and never spelled here.
+  a: "", b: "",
+  // data is the comparison itself; at is which position is on screen, and
+  // live which arm. Those last two are the entire flipbook's state.
+  data: null,
+  at: 0,
+  live: "a",
+};
+
+// compareSetLabel is how one result set reads in the picker. The params key
+// is included in full and last: two sets of the same file of the same torrent
+// differ in nothing a person can see except their frame counts, and two runs
+// at the SAME count (a different profile, say) do not differ in that either -
+// the key is the only thing that always tells them apart.
+function compareSetLabel(set) {
+  const parts = [set.name || shortId(set.infohash), basename(set.path)];
+  parts.push(set.frames === set.points
+    ? set.points + " frames"
+    : set.frames + " of " + set.points + " frames");
+  if (set.duration_ms) parts.push(timecode(set.duration_ms));
+  parts.push(set.params);
+  return parts.join(" · ");
+}
+
+function fillComparePickers() {
+  for (const picker of [el.compareA, el.compareB]) {
+    picker.replaceChildren(...compare.sets.map((set) => {
+      const option = document.createElement("option");
+      option.value = set.addr;
+      option.textContent = compareSetLabel(set);
+      return option;
+    }));
+    picker.disabled = compare.sets.length === 0;
+  }
+}
+
+// chooseArms picks what the dialog opens on, given the file it was opened
+// from. The two result sets of THAT file come first when there are two -
+// which is the pairing a person pressing Compare on a file they just
+// regenerated is asking for - and otherwise it falls back to that file
+// against whatever else is on disk, which is the cross-torrent case. Both are
+// only a default: the two pickers are then free.
+function chooseArms(infohash, index) {
+  const mine = compare.sets.filter((set) => set.infohash === infohash && set.index === index);
+  const first = mine[0] || compare.sets[0];
+  if (!first) return ["", ""];
+  const second = mine[1] || compare.sets.find((set) => set.addr !== first.addr);
+  return [first.addr, second ? second.addr : ""];
+}
+
+async function openCompare(infohash, index) {
+  try {
+    const response = await fetch(url("compare/sets"));
+    if (!response.ok) throw new Error(response.statusText);
+    compare.sets = (await response.json()).sets || [];
+  } catch (err) {
+    compare.sets = [];
+    log("could not read what there is to compare: " + (err.message || err));
+  }
+
+  fillComparePickers();
+  const [a, b] = chooseArms(infohash, index);
+  compare.a = a;
+  compare.b = b;
+  el.compareA.value = a;
+  el.compareB.value = b;
+
+  if (!el.compare.open) el.compare.showModal();
+  // Focused straight away, so the keys work without a person having to find
+  // something to click first - the feature is one keypress.
+  el.compareStage.focus();
+  await loadComparison();
+}
+
+async function loadComparison() {
+  compare.data = null;
+  compare.at = 0;
+  compare.live = "a";
+
+  if (!compare.a || !compare.b) {
+    renderComparison("There is only one result set on disk so far - " +
+      "regenerate a file at a different frame count, or capture another torrent, " +
+      "and there will be something to flip against.");
+    return;
+  }
+  if (compare.a === compare.b) {
+    renderComparison("Both pickers name the same result set; pick a different one for the second.");
+    return;
+  }
+
+  const target = url("compare");
+  target.searchParams.set("a", compare.a);
+  target.searchParams.set("b", compare.b);
+  try {
+    const response = await fetch(target);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || response.statusText);
+    compare.data = body.comparison || null;
+  } catch (err) {
+    renderComparison(String(err.message || err));
+    return;
+  }
+  renderComparison("");
+}
+
+// comparisonNote is what the pairing left out, said out loud rather than
+// silently dropped. A set of 8 flipped against a set of 20 has twelve points
+// that are simply not in the flipbook - pairing them with whatever happened
+// to be nearest would put a difference on screen that the film caused rather
+// than the encode - and a person who counted twenty frames in the grid needs
+// to be told that, not left to wonder where they went.
+function comparisonNote(data) {
+  if (!data.positions || data.positions.length === 0) {
+    return "These two sets share no capture point near enough to pair, so there is " +
+      "nothing here that is the same moment of the same film.";
+  }
+  const parts = [];
+  const orphans = [];
+  if (data.a.unpaired) orphans.push(data.a.unpaired + " of set 1's " + data.a.points);
+  if (data.b.unpaired) orphans.push(data.b.unpaired + " of set 2's " + data.b.points);
+  if (orphans.length) {
+    parts.push(orphans.join(" and ") + " capture points have no partner in the other set, " +
+      "so they are not positions here");
+  }
+  if (data.basis === "time") {
+    parts.push("paired by timecode rather than by fraction of duration: one of these files " +
+      "never said how long it is");
+  }
+  return parts.join(" · ");
+}
+
+// aspectOf is the stage's shape, taken from an arm's own resolution. It is
+// set once per comparison and never per position: every frame of one encode
+// has the same resolution, and a stage that re-shaped itself as the pictures
+// arrived would move the picture, which is the one thing this must not do.
+function aspectOf(arm) {
+  // A bare number, not "w / h": app.css also multiplies this inside a calc()
+  // to bound the stage's height without breaking its shape, and only a number
+  // can be multiplied. aspect-ratio takes either form.
+  return arm && arm.width > 0 && arm.height > 0 ? String(arm.width / arm.height) : "";
+}
+
+function renderComparison(message) {
+  const data = compare.data;
+  el.compareNote.textContent = message || (data ? comparisonNote(data) : "");
+  el.compareNote.title = el.compareNote.textContent;
+
+  const positions = (data && data.positions) || [];
+  el.compareStage.style.setProperty("--compare-aspect",
+    (data && (aspectOf(data.a) || aspectOf(data.b))) || "1.7778");
+
+  if (positions.length === 0) {
+    el.compareShotA.removeAttribute("src");
+    el.compareShotB.removeAttribute("src");
+    el.compareStage.dataset.live = "a";
+    el.compareStage.dataset.gap = "false";
+    el.comparePlace.textContent = "0 / 0";
+    el.compareTimes.replaceChildren();
+    el.comparePrev.disabled = true;
+    el.compareNext.disabled = true;
+    el.compareFlip.disabled = true;
+    markLiveArm();
+    return;
+  }
+
+  el.comparePrev.disabled = false;
+  el.compareNext.disabled = false;
+  el.compareFlip.disabled = false;
+  renderComparePosition();
+}
+
+// setCompareShot gives one arm its picture. Both arms are set for every
+// position, whichever is live, so the flip that follows is a visibility
+// toggle over pixels the browser has already decoded.
+function setCompareShot(img, frame, label) {
+  if (!frame.url) {
+    // Nothing was captured here. An empty src would ask the browser to fetch
+    // this very page, so the attribute goes away entirely and .compare-gap
+    // says what happened instead.
+    img.removeAttribute("src");
+    img.alt = "";
+    return;
+  }
+  const href = String(url(frame.url));
+  if (img.getAttribute("src") !== href) img.src = href;
+  img.alt = label + " at " + timecode(frame.time_ms);
+}
+
+// armTime is one arm's entry in the bar: which set, where its frame came
+// from, and - for a point that produced nothing - the engine's own reason.
+//
+// The shift is shown only for a frame that EXISTS, and that is TOR-118's trap
+// avoided rather than a tidy-up. manifest.ShiftFailed serialises to the word
+// "unavailable", which is also one of the two failure CODES, so a failed
+// point rendered with both reads "01:23 unavailable — no frame" and invites
+// exactly the wrong conclusion: that the shift is the reason. On a point with
+// no frame the shift says only THAT it was lost; frame.error is what says
+// what lost it, and it is the one worth the space.
+function armTime(label, frame, live) {
+  const span = document.createElement("span");
+  if (live) span.className = "compare-live";
+  span.textContent = label + " " + timecode(frame.time_ms) + (frame.url
+    ? (frame.shift ? " " + frame.shift : "")
+    : " — " + (frame.error || "no frame"));
+  return span;
+}
+
+function markLiveArm() {
+  for (const label of el.compare.querySelectorAll(".compare-arm")) {
+    label.dataset.live = String(label.dataset.arm === compare.live);
+  }
+}
+
+function renderComparePosition() {
+  const data = compare.data;
+  const position = data.positions[compare.at];
+
+  setCompareShot(el.compareShotA, position.a, "set 1");
+  setCompareShot(el.compareShotB, position.b, "set 2");
+
+  const shown = compare.live === "a" ? position.a : position.b;
+  el.compareStage.dataset.live = compare.live;
+  el.compareStage.dataset.gap = shown.url ? "false" : "true";
+  el.compareGapCode.textContent = shown.error || "no frame";
+  el.compareStage.title = shown.url
+    ? "set " + (compare.live === "a" ? "1" : "2") + " at " + timecode(shown.time_ms) +
+      " - press to flip to the other set"
+    : "set " + (compare.live === "a" ? "1" : "2") + " captured nothing at " +
+      timecode(shown.time_ms) + (shown.error ? " (" + shown.error + ")" : "");
+
+  el.comparePlace.textContent = (compare.at + 1) + " / " + data.positions.length;
+  el.compareTimes.replaceChildren(
+    armTime("1", position.a, compare.live === "a"),
+    document.createTextNode("  "),
+    armTime("2", position.b, compare.live === "b"),
+  );
+  markLiveArm();
+}
+
+function flipCompare() {
+  showCompareArm(compare.live === "a" ? "b" : "a");
+}
+
+function showCompareArm(arm) {
+  if (!compare.data || !compare.data.positions || compare.data.positions.length === 0) return;
+  compare.live = arm;
+  renderComparePosition();
+}
+
+// stepCompare moves along the film. It wraps rather than stopping at the
+// ends: the flipbook is short - eight positions, twenty at most - and a
+// person walking it with one finger should not have to turn round.
+function stepCompare(delta) {
+  const positions = (compare.data && compare.data.positions) || [];
+  if (positions.length === 0) return;
+  compare.at = (compare.at + delta + positions.length) % positions.length;
+  renderComparePosition();
+}
+
+el.compareA.addEventListener("change", () => {
+  compare.a = el.compareA.value;
+  loadComparison();
+});
+el.compareB.addEventListener("change", () => {
+  compare.b = el.compareB.value;
+  loadComparison();
+});
+
+el.compareStage.addEventListener("click", flipCompare);
+el.compareFlip.addEventListener("click", flipCompare);
+el.comparePrev.addEventListener("click", () => stepCompare(-1));
+el.compareNext.addEventListener("click", () => stepCompare(1));
+el.compareClose.addEventListener("click", () => el.compare.close());
+el.compare.addEventListener("click", (event) => {
+  // A click on the dialog element itself, rather than anything inside it, is
+  // a click on the backdrop - the same rule the lightbox uses.
+  if (event.target === el.compare) el.compare.close();
+});
+
+el.compare.addEventListener("keydown", (event) => {
+  const tag = (event.target.tagName || "").toLowerCase();
+  // Someone using the pickers is choosing a set, not steering the flipbook -
+  // arrow keys belong to the select then.
+  if (tag === "select" || tag === "input" || tag === "textarea") return;
+  // Space on a focused button is that button's own activation; intercepting
+  // it here would flip twice for one press.
+  if (tag === "button" && event.key === " ") return;
+
+  switch (event.key) {
+    case "ArrowLeft": stepCompare(-1); break;
+    case "ArrowRight": stepCompare(1); break;
+    case "ArrowUp":
+    case "ArrowDown":
+    case " ":
+    case "f":
+    case "F": flipCompare(); break;
+    case "1": showCompareArm("a"); break;
+    case "2": showCompareArm("b"); break;
+    // Escape is the dialog's own, and everything else belongs to the page.
+    default: return;
+  }
+  event.preventDefault();
 });
 
 function onFileDone(entry, ev) {

@@ -418,6 +418,49 @@ func (s *Server) handleFileDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"file": detail})
 }
 
+// handleCompareSets answers every result set on disk a comparison can be
+// pointed at (TOR-109) - see CompareSet for why this is its own request
+// rather than more fields on GET /runs.
+func (s *Server) handleCompareSets(w http.ResponseWriter, r *http.Request) {
+	// An empty list is a 200, not a 404: "nothing has been captured yet" is a
+	// true answer to this question, and the picker draws it as such.
+	writeJSON(w, http.StatusOK, map[string]any{"sets": s.comparableSets()})
+}
+
+// handleCompare answers the positions two result sets share, for a page that
+// flips between them (TOR-109). Both arms are query parameters rather than
+// path segments because a comparison has two addresses and a path can only be
+// one; parseSetAddr is what stops either of them becoming a path this server
+// never meant to read.
+//
+// A malformed arm is a 400 - the request cannot be read - where an arm that
+// is well formed and names nothing is a 404, the same split the DELETE on a
+// frame already makes between its params parameter and its path.
+func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
+	a, aOK := parseSetAddr(r.URL.Query().Get("a"))
+	b, bOK := parseSetAddr(r.URL.Query().Get("b"))
+	if !aOK || !bOK {
+		writeError(w, http.StatusBadRequest,
+			"each arm must be spelled infohash:params:index")
+		return
+	}
+	if a == b {
+		writeError(w, http.StatusBadRequest,
+			"the two arms are the same result set; there is nothing to flip between")
+		return
+	}
+
+	comparison, err := s.comparison(a, b)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Wrapped under a key like every other response here, so a field can be
+	// added beside it later without the body changing shape.
+	writeJSON(w, http.StatusOK, map[string]any{"comparison": comparison})
+}
+
 // handleDeleteFrame removes one frame and answers with the file's refreshed
 // detail - the same body GET /runs/{infohash}/files/{index} returns,
 // recomputed after the delete, so the page re-renders from disk truth rather
