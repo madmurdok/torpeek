@@ -205,6 +205,14 @@
      functional here, not a costume. */
   --mono: "Torpeek Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
+  /* The page's own body size. A token rather than a number written into
+     `body` alone because since TOR-138 there is a second place that has to
+     state it: the detail renders inside the torrent table, whose rows are
+     deliberately smaller (.82rem), and a detail inheriting the table's row
+     size would come out a size smaller than it did in the pane it moved out
+     of. Two places, one value. */
+  --text: 14px;
+
   --track: .14em;
 }
 
@@ -213,7 +221,7 @@
 
 body {
   margin: 0;
-  font: 14px/1.5 var(--sans);
+  font: var(--text)/1.5 var(--sans);
   background: var(--bg);
   color: var(--ink);
 }
@@ -424,12 +432,19 @@ button:disabled { opacity: .5; }
    stays put (position: sticky) so the sort controls are never scrolled away.
 
    TOR-137 first bounded this to 22rem so it would scroll inside a fixed box.
-   That is removed deliberately: the table is about to grow rows that expand
-   into the whole detail panel (TOR-138), and a panel of frames inside a
+   That is removed deliberately, and TOR-138 is why: the table now grows rows
+   that expand into the whole detail panel, and a panel of frames inside a
    352-pixel scroll window is not what an accordion is for. So the table grows
-   and the PAGE scrolls, with the intake pinned above it - which is also why
-   the header row's sticky top is offset rather than zero, so it comes to rest
-   under the intake instead of behind it. */
+   and the PAGE scrolls, with the intake pinned above it. Do not put a bounded
+   scroll box back here - an expanded row needs the page's own height.
+
+   overflow-x stays. It is the horizontal escape hatch for a narrow viewport,
+   and it is also the reason the detail's own content must keep its
+   min-content width small: a detail cell wider than the wrap would widen the
+   TABLE, which would resize every other row's columns - a reflow reaching
+   well beyond the row that was opened. Everything inside .run-detail either
+   wraps, ellipsises or has a min-width of a pixel per block, so the measured
+   min-content of a detail row stays under the columns' own. */
 .run-table-wrap { overflow-x: auto; }
 .run-list-empty { font-size: .82rem; opacity: .6; margin: 0; }
 
@@ -470,7 +485,23 @@ button:disabled { opacity: .5; }
 
 .run-row { border-bottom: 1px solid var(--rule); }
 .run-row:hover { background: var(--hover); }
-.run-row.selected { background: var(--accent-dim); box-shadow: inset 3px 0 0 var(--accent); }
+/* An open row wears the accent, which is the design system's own rule for it
+   (see :root): "this is live or this is where you are". With the accordion
+   several rows can be where you are at once, and the marking says so for each
+   of them. The inset rail continues down the detail cell below (see
+   .run-detail-cell), so an open torrent and its detail read as one block
+   rather than as a row and a loose panel under it.
+
+   The bottom rule goes transparent rather than away: a line between the
+   torrent and its own detail would cut that block in half at exactly the
+   place it must not be. Transparent rather than `border-bottom: none`, so the
+   row keeps the same height open as closed and opening one does not nudge
+   every row below it by a pixel. */
+.run-row[data-expanded="true"] {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+  border-bottom-color: transparent;
+}
 
 /* A name is cut off, not shredded. `max-width: 0` with `width: 100%` is what
    makes a table cell shrinkable enough for an ellipsis to happen at all - a
@@ -480,7 +511,9 @@ button:disabled { opacity: .5; }
    which is exactly what widening the panel gives it more of. */
 .run-cell-name { min-width: 0; max-width: 0; width: 100%; }
 .run-row-main {
-  display: block;
+  display: flex;
+  align-items: baseline;
+  gap: .3rem;
   width: 100%;
   min-width: 0;
   text-align: left;
@@ -493,8 +526,21 @@ button:disabled { opacity: .5; }
   cursor: pointer;
 }
 
+/* The disclosure triangle, deliberately the same object as .file-toggle-icon
+   one level down: opening a torrent and opening one of its files are the same
+   gesture, so they should not be two different marks. A fixed width, so the
+   name starts at the same x whichever way the triangle points. */
+.run-toggle-icon {
+  flex: 0 0 auto;
+  width: .7em;
+  opacity: .6;
+}
+.run-toggle-icon::before { content: "▸"; }
+.run-row-main[aria-expanded="true"] .run-toggle-icon::before { content: "▾"; }
+
 .run-name {
-  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -558,13 +604,58 @@ button:disabled { opacity: .5; }
 .run-badge[data-state="cancelled"] { background: var(--s3); color: var(--ink-3); }
 .run-badge[data-state="disk"] { background: var(--s3); color: var(--ink-2); }
 
+/* THE EXPANDED ROW (TOR-138). One detail per torrent, in its own <tr> under
+   the torrent's line, and the row's `hidden` attribute is the whole of
+   collapse - NOTHING here sets `display` on .run-detail-row, so the UA's own
+   [hidden] rule is never beaten by a class selector at equal specificity.
+   That trap has cost this file twice (see .drop-overlay[hidden] below, and
+   the corner-bracket gate this block replaced).
+
+   There is no empty state left to write a rule for. The old pane always
+   existed and said "Select a torrent above" when nothing was chosen, which
+   needed .detail-empty, a `hidden` toggle on it, and a :has() gate to keep
+   the brackets off it - three moving parts encoding one condition. A closed
+   row simply has no detail on screen, so the condition is now structural and
+   all three are gone. The one genuinely empty state, no torrents at all, is
+   #run-list-empty above and always was.
+
+   `.run-table` is carried in the selector below on purpose: `.run-table td`
+   further up sets the shared cell padding and is (0,1,1), so a bare
+   `.run-detail-cell` at (0,1,0) would lose to it and the padding here would
+   silently not apply - the same equal-specificity trap the [hidden] note
+   above is about, in its other form. */
+.run-table .run-detail-cell {
+  /* No cell padding of its own: .run-detail below owns the inset, so the
+     detail's own width is the table's, which is what keeps the frame grid the
+     same width it had in the old full-width pane. */
+  padding: 0;
+  /* One rung up from the page, and the accent rail continued from the open
+     row above it, so the pair reads as one block. */
+  background: var(--s1);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 /* Corner brackets instead of a closed border - a border costing four short
    strokes rather than a rectangle, which is how the HUD vocabulary and
-   "space instead of borders" turn out to agree (TOR-112).
+   "space instead of borders" turn out to agree (TOR-112). They frame the
+   detail, and since TOR-138 there is one detail per open row, so there is one
+   pair of brackets per open row rather than one for the page.
    The glow is a FILTER, not a box-shadow: box-shadow follows the element's
-   box, so on an L drawn from two borders it paints a glowing rectangle. */
-.detail { min-width: 0; position: relative; padding-top: .35rem; }
-.detail::before, .detail::after {
+   box, so on an L drawn from two borders it paints a glowing rectangle.
+   Positioned INSIDE the container rather than outdented as the pane's were:
+   .run-table-wrap scrolls on overflow-x, and a bracket hanging past the left
+   edge would either be clipped or add a scrollbar. */
+.run-detail {
+  min-width: 0;
+  position: relative;
+  padding: .9rem 1rem 1.2rem;
+  /* Back to the page's own body size. The detail is inside .run-table now,
+     and the table's .82rem is meant for the one-line torrent rows, not for a
+     panel of prose, specs and captions that used to render at body size in a
+     pane of its own. */
+  font-size: var(--text);
+}
+.run-detail::before, .run-detail::after {
   content: "";
   position: absolute;
   width: 12px;
@@ -574,17 +665,8 @@ button:disabled { opacity: .5; }
   filter: var(--stroke-glow);
   opacity: .8;
 }
-.detail::before { top: 0; left: -6px; border-top: 2px solid; border-left: 2px solid; }
-.detail::after { bottom: 0; right: -6px; border-bottom: 2px solid; border-right: 2px solid; }
-/* Gating this took two tries and the second one is the point. `:empty` never
-   fires: the pane always holds .detail-empty. But .detail-empty is never
-   removed either - app.js toggles its `hidden` attribute - so gating on the
-   element alone hid the brackets forever, which looked like it worked. The
-   gate is the attribute, which is the same [hidden] trap this file already
-   warns about under .drop-overlay. */
-.detail:has(.detail-empty:not([hidden]))::before,
-.detail:has(.detail-empty:not([hidden]))::after { display: none; }
-.detail-empty { opacity: .6; margin-top: .5rem; }
+.run-detail::before { top: .35rem; left: .35rem; border-top: 2px solid; border-left: 2px solid; }
+.run-detail::after { bottom: .35rem; right: .35rem; border-bottom: 2px solid; border-right: 2px solid; }
 
 .run-detail-header { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .run-detail-title { overflow-wrap: anywhere; }
