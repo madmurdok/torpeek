@@ -325,6 +325,14 @@ button:disabled { opacity: .5; }
 }
 .run-meta { display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: -.01em; color: var(--ink-3); overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
 
+/* TOR-117: a name read off a magnet's own dn= is not confirmed - anyone can
+   put anything after it - so it must never look like one. Italic plus the
+   same muted ink .run-meta already uses is the smallest difference that
+   still reads as "not settled yet"; the title attribute (app.js) carries the
+   rest of the explanation. Shared by .run-name and .run-detail-title, the
+   only two places a name is shown. */
+.run-name-provisional { font-style: italic; color: var(--ink-3); }
+
 .run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .run-cell-status { white-space: nowrap; }
 /* Deliberately NOT nowrap-with-a-max-width, which is what this was first and

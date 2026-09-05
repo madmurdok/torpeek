@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -343,6 +344,21 @@ func findByHash(t *testing.T, rows []RunSummary, hash string) RunSummary {
 	return RunSummary{}
 }
 
+// findByID is findByHash's counterpart for a row that has not told the
+// registry its infohash yet - queued, or running before its own metadata has
+// arrived (TOR-117's own gap) - where InfoHash is empty and ID is the only
+// key a live row can be found by.
+func findByID(t *testing.T, rows []RunSummary, id string) RunSummary {
+	t.Helper()
+	for _, row := range rows {
+		if row.ID == id {
+			return row
+		}
+	}
+	t.Fatalf("no row for id %s in %+v", id, rows)
+	return RunSummary{}
+}
+
 // TestDiskRowIsDoneWhenSelectedFilesAllComplete is TOR-72's acceptance
 // criterion for a disk-only row, the "not partial" half: three of six files
 // deliberately chosen (Selected), all three complete, two files nobody ever
@@ -598,6 +614,231 @@ func TestLiveRowReadsDoneOrPartial(t *testing.T) {
 	}
 	if !partial.Partial() {
 		t.Errorf("live row with a selected, incomplete file reads Done, want Partial: %+v", partial)
+	}
+}
+
+// TestQueuedAndRunningRowsCarryProvisionalNameFromMagnetDn is TOR-117's
+// acceptance criterion, straight off the payload the ticket was filed
+// against: a running row with nothing confirmed yet - no name, no counts -
+// carries the magnet's own dn= instead, visibly marked provisional (Name
+// stays empty; ProvisionalName is what carries it), and a queued row behind
+// it gets the same treatment rather than a special case for "running" alone.
+func TestQueuedAndRunningRowsCarryProvisionalNameFromMagnetDn(t *testing.T) {
+	root := t.TempDir()
+	const (
+		runningHash   = "e4d37e6200000000000000000000000000000000"
+		runningSource = "magnet:?xt=urn:btih:" + runningHash + "&dn=Sintel&tr=http%3A%2F%2Ftracker.invalid%2Fannounce"
+		queuedHash    = "f5e48f7300000000000000000000000000000000"
+		queuedSource  = "magnet:?xt=urn:btih:" + queuedHash + "&dn=Big+Buck+Bunny"
+	)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	running := startRun(t, ts.URL, runningSource)
+	if running.state != "running" {
+		t.Fatalf("first run is %q, want running - the slot was free", running.state)
+	}
+	queued := startRun(t, ts.URL, queuedSource)
+	if queued.state != "queued" {
+		t.Fatalf("second run is %q, want queued", queued.state)
+	}
+
+	rows := listRuns(t, ts.URL)
+
+	// Looked up by ID, not InfoHash: neither run has told the registry its
+	// infohash yet (that arrives with core.MetadataReady, per RunInfo's own
+	// doc comment) - which is exactly the point being tested, so InfoHash
+	// is not a usable key here.
+	runningRow := findByID(t, rows, running.id)
+	if runningRow.Name != "" {
+		t.Errorf("running row Name = %q, want empty - nothing has confirmed it yet", runningRow.Name)
+	}
+	if runningRow.ProvisionalName != "Sintel" {
+		t.Errorf("running row ProvisionalName = %q, want %q (the magnet's own dn=)", runningRow.ProvisionalName, "Sintel")
+	}
+	if runningRow.Files != 0 || runningRow.Complete != 0 || runningRow.Selected != 0 {
+		t.Errorf("running row counts = %d/%d/%d, want 0/0/0 - this is the exact gap TOR-117 is about", runningRow.Files, runningRow.Complete, runningRow.Selected)
+	}
+
+	queuedRow := findByID(t, rows, queued.id)
+	if queuedRow.Name != "" {
+		t.Errorf("queued row Name = %q, want empty", queuedRow.Name)
+	}
+	if queuedRow.ProvisionalName != "Big Buck Bunny" {
+		t.Errorf("queued row ProvisionalName = %q, want %q (dn= percent-decoded)", queuedRow.ProvisionalName, "Big Buck Bunny")
+	}
+}
+
+// TestConfirmedNameSupersedesProvisionalNameOnceMetadataArrives is the other
+// half: once the torrent's own metadata says a name, that is what Name
+// reports, and ProvisionalName goes back to empty rather than sitting beside
+// it - a client is never asked to choose between the two (see
+// RunSummary.ProvisionalName). The magnet's dn= here is deliberately wrong,
+// the way anyone's dn= might be, so this also proves the confirmed name wins
+// even when it disagrees with what the magnet claimed.
+func TestConfirmedNameSupersedesProvisionalNameOnceMetadataArrives(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "a1a1000000000000000000000000000000000000"
+		source = "magnet:?xt=urn:btih:" + hash + "&dn=Guessed+Wrong"
+	)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	run := startRun(t, ts.URL, source)
+	if run.state != "running" {
+		t.Fatalf("run is %q, want running", run.state)
+	}
+
+	// By ID, not InfoHash: the registry has not learned it yet at this point.
+	before := findByID(t, listRuns(t, ts.URL), run.id)
+	if before.Name != "" || before.ProvisionalName != "Guessed Wrong" {
+		t.Fatalf("before metadata: Name=%q ProvisionalName=%q, want empty/%q", before.Name, before.ProvisionalName, "Guessed Wrong")
+	}
+
+	fake.send(t, source, core.MetadataReady{Name: "The Torrent's Real Name", InfoHash: hash})
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == hash })
+
+	after := findByHash(t, listRuns(t, ts.URL), hash)
+	if after.Name != "The Torrent's Real Name" {
+		t.Errorf("after metadata: Name = %q, want the confirmed name", after.Name)
+	}
+	if after.ProvisionalName != "" {
+		t.Errorf("after metadata: ProvisionalName = %q, want empty - Name is confirmed now, nothing left for it to stand in for", after.ProvisionalName)
+	}
+}
+
+// TestNeedsActionRowCarriesConfirmedNameFromItsOwnMetadataPass covers the
+// other live state TOR-117 says must not be special-cased away: a torrent
+// parked in needs-action has already paid for its metadata pass
+// (listThenRun), so it has a confirmed Name from entry.contents even though
+// nothing has been written to disk yet - no merge, no ProvisionalName
+// fallback needed, because there is something better to report.
+func TestNeedsActionRowCarriesConfirmedNameFromItsOwnMetadataPass(t *testing.T) {
+	root := t.TempDir()
+	const source = "magnet:?xt=urn:btih:b2b2000000000000000000000000000000000000&dn=Guessed+Wrong"
+
+	lister := newFakeLister()
+	lister.holds(source, 2) // more than one video file, so it parks
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfigAndLister(t, cfg, fake.runner, lister.list)
+
+	run := startRun(t, ts.URL, source)
+	waitFor(t, func() bool {
+		rows := listRuns(t, ts.URL)
+		for _, row := range rows {
+			if row.ID == run.id {
+				return row.State == "needs-action"
+			}
+		}
+		return false
+	})
+
+	row := findByHash(t, listRuns(t, ts.URL), fmt.Sprintf("%040x", len(source)))
+	if row.State != "needs-action" {
+		t.Fatalf("row state = %q, want needs-action", row.State)
+	}
+	// fakeLister.holds names it "release for " + source - see needsaction_test.go.
+	wantName := "release for " + source
+	if row.Name != wantName {
+		t.Errorf("needs-action row Name = %q, want %q (its own metadata pass, not the disk - there is no disk record yet)", row.Name, wantName)
+	}
+	if row.ProvisionalName != "" {
+		t.Errorf("needs-action row ProvisionalName = %q, want empty - Name is already confirmed, dn= has nothing left to offer", row.ProvisionalName)
+	}
+}
+
+// TestUploadedTorrentRowCarriesNoProvisionalName is the ".torrent-sourced run
+// has instead" half of TOR-117's own instructions: a dn= is a magnet-only
+// convention (swarm.MagnetDisplayName), so a dropped .torrent's row - whose
+// Source is a label ("dropped .torrent"), never a magnet URI - must not
+// carry a ProvisionalName invented from it. There is genuinely nothing to
+// offer here; the row falls back the way it always did (app.js's source/id
+// fallback), and this proves the API does not manufacture something that
+// looks like one.
+func TestUploadedTorrentRowCarriesNoProvisionalName(t *testing.T) {
+	root := t.TempDir()
+	fake := &fakeRun{}
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	resp := uploadTorrent(t, ts.URL, []byte("d8:announce...e"), "")
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/upload: status %d, want 202", resp.StatusCode)
+	}
+
+	rows := listRuns(t, ts.URL)
+	if len(rows) != 1 {
+		t.Fatalf("GET /runs listed %d rows, want 1: %+v", len(rows), rows)
+	}
+	if rows[0].ProvisionalName != "" {
+		t.Errorf("uploaded-.torrent row ProvisionalName = %q, want empty - a .torrent's Source has no dn= to read", rows[0].ProvisionalName)
+	}
+	if rows[0].Name != "" {
+		t.Errorf("uploaded-.torrent row Name = %q, want empty - nothing has confirmed it yet", rows[0].Name)
+	}
+}
+
+// TestRunStateCarriesProvisionalNameThenConfirmedName is TOR-117's guarantee
+// for a page that is already open, not only for one that reloads: the very
+// first run_state a new run publishes (queued/running, reset:true) carries
+// the same provisional_name a GET /runs row would, and the run_state that
+// eventually announces the run is done carries name instead - the live
+// socket and the polled listing never disagree about which of the two a
+// client should show (runStateFieldsLocked and listRuns share the one rule).
+func TestRunStateCarriesProvisionalNameThenConfirmedName(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "c3c3000000000000000000000000000000000000"
+		source = "magnet:?xt=urn:btih:" + hash + "&dn=Guessed+Wrong"
+	)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	conn := dial(t, ts.URL)
+	if got := next(t, conn); got["type"] != "run_state" {
+		t.Fatalf("first message is %v, want the connection marker", got)
+	}
+
+	run := startRun(t, ts.URL, source)
+
+	first := next(t, conn)
+	if first["type"] != "run_state" || first["reset"] != true {
+		t.Fatalf("first message for the new run is %v, want a reset run_state", first)
+	}
+	if _, ok := first["name"]; ok {
+		t.Errorf(`run_state carries "name" = %#v before any metadata arrived, want it absent: %+v`, first["name"], first)
+	}
+	if got, ok := first["provisional_name"]; !ok || got != "Guessed Wrong" {
+		t.Errorf(`run_state["provisional_name"] = %#v (present=%v), want %q: %+v`, got, ok, "Guessed Wrong", first)
+	}
+
+	fake.send(t, source, core.MetadataReady{Name: "The Torrent's Real Name", InfoHash: hash})
+	writeRun(t, root, hash, "deadbeef", cache.Run{
+		Version: cache.Version, InfoHash: hash, Name: "The Torrent's Real Name",
+		Videos: []cache.File{{Index: 0, Path: "a.mkv"}}, Selected: []int{0}, Complete: []int{0},
+	})
+	fake.finish(t, source)
+
+	done := waitRunState(t, conn, run.id, "done")
+	if got, ok := done["name"]; !ok || got != "The Torrent's Real Name" {
+		t.Errorf(`run_state["name"] = %#v (present=%v), want %q: %+v`, got, ok, "The Torrent's Real Name", done)
+	}
+	if _, ok := done["provisional_name"]; ok {
+		t.Errorf(`run_state carries "provisional_name" = %#v once the name is confirmed, want it absent: %+v`, done["provisional_name"], done)
 	}
 }
 

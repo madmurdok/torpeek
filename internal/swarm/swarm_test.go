@@ -102,6 +102,66 @@ func TestSourcePrivacy(t *testing.T) {
 	})
 }
 
+// TestMagnetDisplayName is TOR-117's acceptance criterion for the one
+// building block the web panel's provisional name is built on: a magnet's
+// own dn=, and nothing else, with no network and no session - source.go's
+// own doc comment on MagnetDisplayName.
+func TestMagnetDisplayName(t *testing.T) {
+	cases := []struct {
+		name     string
+		source   string
+		wantName string
+		wantOK   bool
+	}{
+		{
+			name:     "a magnet with dn=",
+			source:   "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Sintel&tr=http%3A%2F%2Ftracker.invalid%2Fannounce",
+			wantName: "Sintel", wantOK: true,
+		},
+		{
+			// A real torrent name carries spaces and punctuation percent-
+			// encoded in the URI - exactly what ParseMagnetUri exists to
+			// undo, so this proves MagnetDisplayName rides on that rather
+			// than doing its own string surgery.
+			name:     "a magnet whose dn= is percent-encoded",
+			source:   "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Sintel.2010.1080p",
+			wantName: "Sintel.2010.1080p", wantOK: true,
+		},
+		{
+			name:   "a magnet with no dn=",
+			source: "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&tr=http%3A%2F%2Ftracker.invalid%2Fannounce",
+			wantOK: false,
+		},
+		{
+			// A .torrent-sourced run has nothing here at all: a dn= is a
+			// magnet-only convention, and a filesystem path is not a magnet
+			// URI regardless of what it is named.
+			name:   "a .torrent path, not a magnet",
+			source: "/tmp/some-upload/movie.torrent",
+			wantOK: false,
+		},
+		{
+			name:   "not a magnet at all",
+			source: "",
+			wantOK: false,
+		},
+		{
+			name:   "a magnet that fails to parse",
+			source: "magnet:?xt=urn:btih:not-valid-hex&dn=Sintel",
+			wantOK: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := MagnetDisplayName(tc.source)
+			if ok != tc.wantOK || got != tc.wantName {
+				t.Fatalf("MagnetDisplayName(%q) = (%q, %v), want (%q, %v)", tc.source, got, ok, tc.wantName, tc.wantOK)
+			}
+		})
+	}
+}
+
 // TestRouteFor covers the guarantee that must never regress: a torrent known to
 // be private is never routed onto the DHT, whatever the config asks for.
 func TestRouteFor(t *testing.T) {
