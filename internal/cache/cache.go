@@ -242,20 +242,36 @@ func onDisk(path string) bool {
 // resolved against the directory the record was read from - so it is asking
 // whether the frames of THIS results tree are there, not whether the tree the
 // run originally wrote still exists somewhere.
+//
+// IT ASKS ONE QUESTION, and until TOR-124 it asked two. It used to refuse any
+// manifest holding a ShiftFailed frame, which is not a fact about the disk at
+// all: a point the engine reported as producing nothing has no file to have
+// lost, so there is nothing there for this function to check. Bundling the two
+// meant one manifest with one unreachable capture point was indistinguishable
+// from a results directory somebody had emptied - and the consequence was that
+// a run with a single gap could never be reopened, which is what TOR-124 came
+// from. Whether a run came out WHOLE is a different question, and Run.Complete
+// is the field that answers it; the two gates now ask one thing each.
+//
+// A manifest with no frame on disk is still refused, whether it never had one
+// or lost the lot: it describes nothing that can be shown, so there is nothing
+// to serve from it either way. That is the floor, and it is deliberately a
+// floor rather than a completeness test - one frame of twelve is a partial
+// result a person can look at, none of twelve is not a result.
 func Usable(m manifest.Manifest) bool {
-	if len(m.Frames) == 0 {
-		return false
-	}
+	served := 0
 	for _, f := range m.Frames {
-		if f.Shift == manifest.ShiftFailed {
-			return false
-		}
-		if f.Path == "" {
-			return false
+		if f.Shift == manifest.ShiftFailed || f.Path == "" {
+			// The engine itself recorded that this point produced nothing
+			// (manifest.ShiftFailed's own doc: "Path is empty and Error says
+			// why"). There is no file to look for, so this says nothing about
+			// whether the results are still on disk.
+			continue
 		}
 		if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
 			return false
 		}
+		served++
 	}
-	return true
+	return served > 0
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -594,5 +595,104 @@ func TestAnOlderRecordReadsBackWithNoClaim(t *testing.T) {
 	}
 	if got.InfoHash == "" || got.Plan.Count == 0 {
 		t.Errorf("adding Claimed cost the older record its other fields: %+v", got)
+	}
+}
+
+// TOR-124: Usable asks about the disk, and only about the disk.
+
+// usableFixture writes n frames into dir and returns a manifest describing
+// them, with the indices in failed recorded the way the engine records a point
+// that produced nothing - no path, ShiftFailed, a code in Error.
+func usableFixture(t *testing.T, dir string, n int, failed ...int) manifest.Manifest {
+	t.Helper()
+
+	out := map[int]bool{}
+	for _, i := range failed {
+		out[i] = true
+	}
+
+	frames := make([]manifest.Frame, n)
+	for i := range frames {
+		ms := int64(i * 1000)
+		frames[i] = manifest.Frame{Index: i, RequestedMS: ms, ActualMS: &ms, Width: 640, Height: 360}
+		if out[i] {
+			frames[i].Shift = manifest.ShiftFailed
+			frames[i].Error = "read_stalled"
+			continue
+		}
+		path := filepath.Join(dir, "frame-"+strconv.Itoa(i)+".jpg")
+		if err := os.WriteFile(path, []byte{0xFF, 0xD8, byte(i)}, 0o600); err != nil {
+			t.Fatalf("write frame %d: %v", i, err)
+		}
+		frames[i].Path = path
+	}
+	return manifest.Manifest{Version: manifest.Version, Frames: frames}
+}
+
+func TestUsableAcceptsARunWithUnreachableCapturePoints(t *testing.T) {
+	dir := t.TempDir()
+	m := usableFixture(t, dir, 12, 5, 6, 7, 8, 9, 10, 11)
+
+	if !Usable(m) {
+		t.Error("a manifest with five frames on disk and seven points the engine could " +
+			"not reach was refused. Those seven have no file to have lost, so they say " +
+			"nothing about the disk - and refusing on them is what made a holed run " +
+			"impossible to reopen (TOR-124)")
+	}
+}
+
+func TestUsableStillRefusesAFrameGoneFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	m := usableFixture(t, dir, 4)
+
+	if !Usable(m) {
+		t.Fatal("the fixture is not usable to begin with")
+	}
+	if err := os.Remove(m.Frames[2].Path); err != nil {
+		t.Fatalf("remove a frame: %v", err)
+	}
+	if Usable(m) {
+		t.Error("a manifest promising a frame the disk no longer has was accepted; " +
+			"that is the one question this function exists to answer")
+	}
+}
+
+func TestUsableRefusesAManifestWithNoFrameOnDiskAtAll(t *testing.T) {
+	dir := t.TempDir()
+
+	// Every point failed: the run produced nothing, so there is nothing to
+	// show - a floor, not a completeness test.
+	all := usableFixture(t, dir, 3, 0, 1, 2)
+	if Usable(all) {
+		t.Error("a manifest whose every point failed was accepted; one frame of twelve " +
+			"is a partial result, none of twelve is not a result")
+	}
+
+	if Usable(manifest.Manifest{Version: manifest.Version}) {
+		t.Error("a manifest with no frames at all was accepted")
+	}
+}
+
+// TestUsableJudgesTheDiskNotTheRecord states the split in one place: the same
+// manifest is usable or not purely on whether its frames are there, and the
+// failed points are constant across both arms.
+func TestUsableJudgesTheDiskNotTheRecord(t *testing.T) {
+	dir := t.TempDir()
+	m := usableFixture(t, dir, 6, 4, 5)
+
+	if !Usable(m) {
+		t.Fatal("four frames on disk, two unreachable points: want usable")
+	}
+	for _, f := range m.Frames {
+		if f.Path == "" {
+			continue
+		}
+		if err := os.Remove(f.Path); err != nil {
+			t.Fatalf("remove %s: %v", f.Path, err)
+		}
+	}
+	if Usable(m) {
+		t.Error("the same manifest with its frames deleted is still usable; the " +
+			"judgement is not reading the disk")
 	}
 }

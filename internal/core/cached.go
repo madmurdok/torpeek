@@ -56,7 +56,9 @@ func (e *Engine) serveFromCache(cfg Config, src swarm.Source, bus *Bus, started 
 		return false
 	}
 
-	hit, ok := loadCacheHit(layout, record, selected)
+	// true: this is a live request being answered off disk, so the answer has
+	// to be the whole of what was asked for.
+	hit, ok := loadCacheHit(layout, record, selected, true)
 	if !ok {
 		return false
 	}
@@ -108,13 +110,17 @@ func (e *Engine) ReplayRun(root, infoHash, params string, bus *Bus) {
 	}
 
 	videos := videosFromRecord(record)
-	selected := completedVideos(videos, record.Complete)
+	selected := producedVideos(layout, videos)
 	if len(selected) == 0 {
-		miss("the run at " + layout.RunDir() + " has no complete file")
+		miss("the run at " + layout.RunDir() + " has no frames on disk")
 		return
 	}
 
-	hit, ok := loadCacheHit(layout, record, selected)
+	// false: reopening shows what the run produced, gaps included. The gaps
+	// are published as the skips they were and the page marks them (TOR-110),
+	// so a partial result can no longer be mistaken for a whole one - which is
+	// the premise the old refusal rested on.
+	hit, ok := loadCacheHit(layout, record, selected, false)
 	if !ok {
 		miss("a frame from the run at " + layout.RunDir() + " is missing on disk")
 		return
@@ -153,24 +159,6 @@ func videosFromRecord(record cache.Run) []swarm.FileInfo {
 	return videos
 }
 
-// completedVideos narrows videos to the indices record.Complete names, in
-// videos' own order. It is ReplayRun's stand-in for a live request's
-// cfg.Files: reopening has no selection of its own, only what the run it is
-// replaying actually finished.
-func completedVideos(videos []swarm.FileInfo, complete []int) []swarm.FileInfo {
-	done := make(map[int]bool, len(complete))
-	for _, i := range complete {
-		done[i] = true
-	}
-	out := make([]swarm.FileInfo, 0, len(complete))
-	for _, f := range videos {
-		if done[f.Index] {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
 // cacheHit is a selection of files from a run record that has already been
 // confirmed replayable: every one of them is in record.Complete and its
 // manifest still points at whole files on disk. Once built, publishing it
@@ -183,12 +171,27 @@ type cacheHit struct {
 	manifests []manifest.Manifest
 }
 
-// loadCacheHit validates that every file in selected is both complete and has
-// a usable manifest, reporting ok=false at the first one that is not - a
-// deleted frame, a missing manifest, an incomplete file - so a caller commits
-// to publishing only once the whole run is confirmed intact (cache.Usable is
-// not weakened here: it is the sole judge of "usable").
-func loadCacheHit(layout output.Layout, record cache.Run, selected []swarm.FileInfo) (cacheHit, bool) {
+// loadCacheHit validates that every file in selected has a manifest that is
+// readable and still backed by frames on disk, reporting ok=false at the first
+// one that is not - so a caller commits to publishing only once the run is
+// confirmed intact. cache.Usable is not weakened here: it remains the sole
+// judge of "usable", and since TOR-124 that judgement is about the disk alone.
+//
+// requireComplete is the difference between this function's two callers, and
+// it is the whole of TOR-124. serveFromCache passes true: somebody asked for
+// twenty frames of a file, and handing them the five a previous run managed
+// would be answering a question they did not put - Run.Complete's own doc
+// argues exactly that, and it is right for that path. ReplayRun passes false:
+// nobody is asking for a frame count there, only to be shown what a recorded
+// run produced, and a file that produced five of twelve produced something.
+// Reopening it used to be refused, so the run this release most improved was
+// the one run nobody could open.
+//
+// Both paths still refuse a file whose manifest is gone, unreadable, or
+// promises frames the disk no longer has.
+func loadCacheHit(layout output.Layout, record cache.Run, selected []swarm.FileInfo,
+	requireComplete bool) (cacheHit, bool) {
+
 	complete := make(map[int]bool, len(record.Complete))
 	for _, i := range record.Complete {
 		complete[i] = true
@@ -196,7 +199,7 @@ func loadCacheHit(layout output.Layout, record cache.Run, selected []swarm.FileI
 
 	manifests := make([]manifest.Manifest, 0, len(selected))
 	for _, file := range selected {
-		if !complete[file.Index] {
+		if requireComplete && !complete[file.Index] {
 			return cacheHit{}, false
 		}
 		m, ok := cache.LoadManifest(layout.FileDir(file.Index, file.Path))
@@ -207,6 +210,33 @@ func loadCacheHit(layout output.Layout, record cache.Run, selected []swarm.FileI
 	}
 
 	return cacheHit{layout: layout, record: record, selected: selected, manifests: manifests}, true
+}
+
+// producedVideos is ReplayRun's stand-in for a live request's cfg.Files, in
+// videos' own order: every file this run has anything to show for, whether or
+// not it came out whole.
+//
+// It replaces a selector that narrowed to Run.Complete (TOR-124). ReplayRun's
+// own contract is "show what this run produced", and Complete answers a
+// narrower question - "which files came out WHOLE" - so reading it there
+// contradicted the sentence above it. A file with five frames of twelve is
+// left in; a file with none is left out, because there is nothing to show and
+// cache.Usable says so.
+//
+// It reads each manifest to decide, where the old one read a list of indices,
+// and that cost is why it is only on this path: reopening is a person clicking
+// once, while serveFromCache runs on every live request and has a cheaper
+// question to answer.
+func producedVideos(layout output.Layout, videos []swarm.FileInfo) []swarm.FileInfo {
+	out := make([]swarm.FileInfo, 0, len(videos))
+	for _, f := range videos {
+		m, ok := cache.LoadManifest(layout.FileDir(f.Index, f.Path))
+		if !ok || !cache.Usable(m) {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // publish replays a validated hit as the exact event sequence a live run
@@ -233,6 +263,29 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 		})
 
 		for _, f := range m.Frames {
+			// A point that produced nothing is republished as the skip it
+			// was, not as a frame with no path (TOR-124). This func's whole
+			// contract is that a replay is the event sequence a live run
+			// produces, and a live run publishes FrameSkipped here - so a
+			// FrameReady with an empty Path was the one place the replay
+			// said something the original run never said. A client acting on
+			// it would try to show a frame that does not exist; the web UI
+			// resolved that empty path against its own page.
+			//
+			// The manifest keeps the CODE but not the free-text reason, which
+			// was never recorded, so the reason is left empty rather than
+			// invented. The code is the part a client matches on
+			// (core.ErrorCode's own doc).
+			if f.Shift == manifest.ShiftFailed || f.Path == "" {
+				bus.Publish(FrameSkipped{
+					File:      m.File.Index,
+					Index:     f.Index,
+					Requested: time.Duration(f.RequestedMS) * time.Millisecond,
+					Code:      ErrorCode(f.Error),
+				})
+				continue
+			}
+
 			actual := time.Duration(0)
 			if f.ActualMS != nil {
 				actual = time.Duration(*f.ActualMS) * time.Millisecond
@@ -261,10 +314,21 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 			sheetPath = ""
 		}
 
+		// Frames is what the file HAS, which since TOR-124 need not be every
+		// point the manifest records: len(m.Frames) counts the gaps too, and
+		// on a holed run that reported a file of twelve frames where five
+		// exist - the same miscount TOR-110 fixed in the page's own summary.
+		produced := 0
+		for _, f := range m.Frames {
+			if f.Shift != manifest.ShiftFailed && f.Path != "" {
+				produced++
+			}
+		}
+
 		bus.Publish(FileDone{
 			File:         m.File.Index,
 			Path:         m.File.Path,
-			Frames:       len(m.Frames),
+			Frames:       produced,
 			ManifestPath: filepath.Join(dir, manifest.Name),
 			SheetPath:    sheetPath,
 		})
