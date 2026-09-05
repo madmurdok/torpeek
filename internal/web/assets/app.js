@@ -1109,10 +1109,21 @@ function frameFigure(frame, fentry) {
   figure.tabIndex = 0;
   figure.className = "thumb";
 
-  const img = document.createElement("img");
-  img.src = frame.url;
-  img.alt = "frame at " + timecode(frame.timeMs);
-  img.loading = "lazy";
+  // A failed point (TOR-118) has no url - nothing was ever captured there,
+  // manifest.Frame.Error says why - so there is no src to give an <img>.
+  // <img src=""> would ask the browser to fetch the page itself; a plain box
+  // the same shape as a thumbnail says "nothing here" without doing that.
+  let img = null;
+  if (frame.url) {
+    img = document.createElement("img");
+    img.src = frame.url;
+    img.alt = "frame at " + timecode(frame.timeMs);
+    img.loading = "lazy";
+  } else {
+    img = document.createElement("div");
+    img.className = "thumb-missing";
+    if (frame.error) img.title = frame.error;
+  }
 
   const caption = document.createElement("figcaption");
   caption.textContent = timecode(frame.timeMs);
@@ -1146,7 +1157,9 @@ function frameFigure(frame, fentry) {
     figure.append(remove);
   }
 
-  const open = () => openLightbox(img.src, caption.textContent);
+  // Nothing to open full-size for a failed point - there is no image, only
+  // the box standing in for one.
+  const open = () => { if (frame.url) openLightbox(img.src, caption.textContent); };
   figure.addEventListener("click", open);
   figure.addEventListener("keydown", (event) => {
     // Only the figure's own keys open it. Enter on the delete button inside
@@ -1210,8 +1223,10 @@ async function deleteFrame(fentry, frame) {
 // half-addressable in one of them and whole in the other.
 function detailFrame(f) {
   return {
-    url: url(f.url), timeMs: f.time_ms, shift: f.shift || "",
-    params: f.params || "", index: f.index,
+    // f.url is empty for a failed point (TOR-118) - nothing to resolve into
+    // a fetchable URL, and url("") would resolve to this very page.
+    url: f.url ? url(f.url) : null, timeMs: f.time_ms, shift: f.shift || "",
+    params: f.params || "", index: f.index, error: f.error || "",
   };
 }
 

@@ -799,6 +799,15 @@ button:disabled { opacity: .5; }
   background: var(--s3); border-radius: .25rem;
   box-shadow: inset 0 0 0 1px var(--rule);
 }
+/* A failed capture point (TOR-118): same box an <img> would take, so the
+   grid stays regular, with nothing drawn inside it. TOR-110 owns what a cell
+   state actually looks like - this is only the minimum that keeps the grid
+   from breaking until that lands. */
+.thumb-missing {
+  width: 100%; aspect-ratio: 16 / 9; display: block;
+  background: var(--s3); border-radius: .25rem;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
 .thumb figcaption { font-family: var(--mono); font-size: .7rem; color: var(--ink-2); letter-spacing: .02em; }
 .thumb .shifted { color: var(--warn); }
 .thumb:focus-visible img { outline: 2px solid var(--accent); outline-offset: 2px; }

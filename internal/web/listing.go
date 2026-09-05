@@ -367,26 +367,56 @@ type FileDetail struct {
 // FrameSet names one result set holding frames for the file.
 type FrameSet struct {
 	Params string `json:"params"`
-	// Count is the plan's frame count from run.json - what was asked for,
-	// which is not always what came out; Frames is what this set actually
-	// has on disk and can serve.
+	// Count is the plan's frame count from run.json - what was asked for.
+	// Frames is how many planned points this set has anything to say about:
+	// a servable frame or, since TOR-118, a failed point recording why there
+	// is none - so the two need not match even on a set nothing went wrong
+	// for, and a set that is not fully captured no longer has to mean a
+	// smaller Frames than Count, only a Frames with fewer URLs in it.
 	Count  int `json:"count"`
 	Frames int `json:"frames"`
 }
 
 // FrameRef is one frame a page can show: when it is from, why it moved if it
-// did, and where to get it.
+// did, and where to get it - or, for a point that produced nothing, why not.
 type FrameRef struct {
 	// TimeMS is where the frame actually came from (manifest ActualMS),
 	// falling back to where it was asked for when the manifest records no
 	// actual - which is also the sort key and the identity used to collapse
-	// the sets' shared edges.
+	// the sets' shared edges. A failed point has no ActualMS, so this is
+	// always RequestedMS for one - where it was planned, since nowhere else
+	// is true.
 	TimeMS int64  `json:"time_ms"`
 	Shift  string `json:"shift,omitempty"`
+	// Error is manifest.Frame.Error, carried through for a point that has no
+	// URL below: the typed reason nothing was captured there.
+	//
+	// It is deliberately not folded into Shift, and that is the whole point
+	// of TOR-118. Shift answers "where did this frame come from" - for a
+	// failed point it is manifest.ShiftFailed, whose serialised value is the
+	// word "unavailable", and it says only THAT the point was lost. Error
+	// says what lost it, and it is the field that separates the two causes
+	// the engine actually reports: "unavailable", no peer offered those
+	// pieces, so a later run will not get them either unless the swarm
+	// changes; and "read_stalled", the pieces were being fetched and the read
+	// timed out, which a later run may well get through. One says do not
+	// bother, the other says try again.
+	//
+	// The trap here is real, because it produced this ticket's own wrong
+	// premise: ShiftFailed's value is the same word as one of Error's codes.
+	// A reader who looks at shift alone sees "unavailable" on every failed
+	// point and concludes the two causes were collapsed into one - they were
+	// not, they are in the field beside it. On a real holed run's manifest
+	// the seven failed points all read shift "unavailable" while Error
+	// separates them five read_stalled to two unavailable, matching the live
+	// event stream exactly. The manifest always kept them apart; this field
+	// is what stops the REST payload from re-merging them on the way out.
+	Error string `json:"error,omitempty"`
 	// URL is a files/{id} handle minted here, the same way an event's frame
 	// URL is (see fileSet.publish): the page can only ever ask for a path
 	// this server named, and a sibling set's frames were never named by any
 	// event in this process - that is precisely why this request exists.
+	// Empty for a failed point: there is nothing to publish.
 	URL string `json:"url"`
 	// Params says which set the frame came from, and Index is its own number
 	// in that set's manifest. Nothing in the UI shows either; together they
@@ -407,20 +437,33 @@ type FrameRef struct {
 
 // fileDetail gathers one file's frames across every set of one torrent.
 //
-// A frame is listed when its own file is still on disk and non-empty. That is
-// deliberately more forgiving than cache.Usable, which refuses a whole
-// manifest if a single frame is missing: this list only decides what to SHOW,
-// never whether a run is servable, and cache.Usable stays the sole judge of
-// the latter. A person who deleted one frame should still see the other
-// nineteen. TOR-70 did not weaken cache.Usable in the end and did not need
-// to: core.DeleteFrame removes the record along with the file, and a
-// manifest that no longer mentions a frame has nothing left to fail on.
+// A frame with a path is listed when its own file is still on disk and
+// non-empty. That is deliberately more forgiving than cache.Usable, which
+// refuses a whole manifest if a single frame is missing: this list only
+// decides what to SHOW, never whether a run is servable, and cache.Usable
+// stays the sole judge of the latter. A person who deleted one frame should
+// still see the other nineteen. TOR-70 did not weaken cache.Usable in the
+// end and did not need to: core.DeleteFrame removes the record along with
+// the file, and a manifest that no longer mentions a frame has nothing left
+// to fail on.
+//
+// A frame with NO path - the engine never produced one - is listed too
+// (TOR-118), with no URL and manifest.Frame.Error carried onto FrameRef.Error
+// so a person reading a finished run learns what a person watching it live
+// already could (wire.go's frame_skipped). That is a different question from
+// the paragraph above: there, the manifest thought the point succeeded and
+// the disk disagrees; here, the manifest itself says the point failed. Only
+// the latter is something the engine reported - the former is an ordinary
+// fact about the local disk (most often a person's own delete) that never
+// was a captured point, so it stays dropped rather than shown as a failure
+// nobody claimed.
 //
 // Reports ok=false when the torrent has no set holding this file at all -
-// an unknown infohash, an index no set lists, or a file whose frames are all
-// gone - which the handler answers as a 404 rather than an empty list: there
-// is no such file to show, which is a different thing from a file with
-// nothing left in it.
+// an unknown infohash, an index no set lists, or a file with nothing to say
+// about any of its planned points - which the handler answers as a 404
+// rather than an empty list: there is no such file to show, which is a
+// different thing from a file whose every point failed but is still
+// accounted for.
 func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 	if s.cfg.OutputRoot == "" || !validInfoHash(infoHash) || index < 0 {
 		return FileDetail{}, false
@@ -457,15 +500,33 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 
 		set := FrameSet{Params: params, Count: run.Plan.Count}
 		for _, f := range m.Frames {
-			if f.Path == "" {
-				continue
-			}
-			if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
-				continue
-			}
 			at := f.RequestedMS
 			if f.ActualMS != nil {
 				at = *f.ActualMS
+			}
+
+			if f.Path == "" {
+				// The engine itself reported this point as failed -
+				// manifest.Frame.Error says why (TOR-118). There is nothing
+				// to stat and nothing to publish, but the reason is real
+				// data a finished run's page should not lose, so it is kept
+				// rather than dropped like the disk-only case below.
+				detail.Frames = append(detail.Frames, FrameRef{
+					TimeMS: at, Shift: string(f.Shift), Error: f.Error,
+					Params: params, Index: f.Index,
+				})
+				set.Frames++
+				continue
+			}
+			if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
+				// The manifest thought this point succeeded and the disk
+				// disagrees - almost always a person's own delete
+				// (TestFileDetailLeavesOutAFrameGoneFromDisk). That is not
+				// something the engine ever reported failing, so unlike the
+				// branch above it stays silently dropped: manifest.Frame.Error
+				// is empty for it, and inventing a reason nobody recorded
+				// would be worse than saying nothing.
+				continue
 			}
 			detail.Frames = append(detail.Frames, FrameRef{
 				TimeMS: at, Shift: string(f.Shift), URL: s.files.publish(f.Path),
@@ -474,6 +535,11 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 			set.Frames++
 		}
 		if set.Frames == 0 {
+			// Nothing in this set - not even a failure - has anything to add
+			// to detail.Frames, so there is nothing here worth naming as a
+			// result set either. A set that is all failed points no longer
+			// hits this (TOR-118): it now has something to show, and is
+			// offered like any other.
 			continue
 		}
 		detail.Path = path
@@ -481,6 +547,10 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 	}
 
 	if len(detail.Frames) == 0 {
+		// Same question one level up: nothing from any set, real or failed,
+		// landed in detail.Frames, so there is no such file to show - not
+		// merely a file with nothing left in it (that case now has failed
+		// points to show instead, and returns true).
 		return FileDetail{}, false
 	}
 
