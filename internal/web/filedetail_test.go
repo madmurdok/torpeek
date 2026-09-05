@@ -183,6 +183,113 @@ func TestFileDetailLeavesOutAFrameGoneFromDisk(t *testing.T) {
 	}
 }
 
+// buildHoledRun is buildCachedRun for a manifest that already has some
+// frames with no path - a failed capture point, per manifest.ShiftFailed.
+// buildCachedRun cannot be reused as-is: it calls writer.WriteFrame for
+// every entry in m.Frames unconditionally, which would hand a failed point a
+// file it never had. Here, only a frame with a non-empty Path gets one
+// written; a failed point is left exactly as the caller set it up.
+func buildHoledRun(t *testing.T, root, infoHash, params string, run cache.Run, m manifest.Manifest) output.Layout {
+	t.Helper()
+
+	layout := output.Layout{Root: root, InfoHash: infoHash, Params: params}
+	writer, err := output.NewWriter(layout)
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
+
+	for i, f := range m.Frames {
+		if f.Path == "" {
+			continue
+		}
+		path, err := writer.WriteFrame(m.File.Index, m.File.Path, f.Index, []byte("jpeg-bytes-"+m.File.Path), "jpg")
+		if err != nil {
+			t.Fatalf("write frame %d: %v", f.Index, err)
+		}
+		m.Frames[i].Path = path
+	}
+
+	if _, err := writer.WriteManifest(m.File.Index, m.File.Path, m); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := cache.SaveRun(layout.RunDir(), run); err != nil {
+		t.Fatalf("save run.json: %v", err)
+	}
+	return layout
+}
+
+// TestFileDetailCarriesTheFailureReasonForAPointThatProducedNothing is
+// TOR-118's acceptance criterion, at the half that was actually broken: the
+// manifest already distinguishes a swarm-could-not-supply point
+// (manifest.ShiftFailed, Error "unavailable") from a read-timeout point
+// (manifest.ShiftFailed, Error "read_stalled") - verified against a real
+// holed run's manifest before this test was written, where a 12-point plan
+// held exactly this split. What this proves is that the distinction survives
+// being read back through GET /runs/{infohash}/files/{index}, and that every
+// planned point reaches the page - not just the one that produced a frame,
+// which is what internal/web/listing.go's fileDetail dropped before TOR-118.
+func TestFileDetailCarriesTheFailureReasonForAPointThatProducedNothing(t *testing.T) {
+	root := t.TempDir()
+
+	actual0 := int64(43700)
+	m := manifest.Manifest{
+		Version: manifest.Version,
+		File:    manifest.File{Index: 6, Path: "Sintel/sintel.mp4", Bytes: 1 << 20, Container: "matroska"},
+		Video:   manifest.Video{Codec: "h264", Width: 640, Height: 360},
+		Frames: []manifest.Frame{
+			{Index: 0, RequestedMS: 43700, ActualMS: &actual0, Path: "placeholder", Width: 640, Height: 360},
+			{Index: 1, RequestedMS: 82646, Shift: manifest.ShiftFailed, Error: "unavailable"},
+			{Index: 2, RequestedMS: 112105, Shift: manifest.ShiftFailed, Error: "read_stalled"},
+		},
+	}
+
+	run := cache.Run{
+		Version: cache.Version, Tool: "test", CreatedAt: time.Now(),
+		InfoHash: detailHash, Name: "Sintel",
+		Plan:     cache.Plan{Count: 3, Start: 0.05, End: 0.95, Profile: "min-traffic", Format: "jpeg"},
+		Videos:   []cache.File{{Index: 6, Path: "Sintel/sintel.mp4", Bytes: 1 << 20}},
+		Selected: []int{6}, Complete: []int{6},
+	}
+	buildHoledRun(t, root, detailHash, "cccc3333", run, m)
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	fake := &fakeRun{}
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	detail, status := getFileDetail(t, ts.URL, detailHash, "6")
+	if status != http.StatusOK {
+		t.Fatalf("status %d, want 200", status)
+	}
+	if len(detail.Frames) != 3 {
+		t.Fatalf("frames = %d, want 3 - all three planned points, not just the one that has a URL: %+v",
+			len(detail.Frames), detail.Frames)
+	}
+
+	byIndex := map[int]FrameRef{}
+	for _, f := range detail.Frames {
+		byIndex[f.Index] = f
+	}
+
+	if got := byIndex[0]; got.URL == "" || got.Error != "" {
+		t.Errorf("frame 0 (succeeded) = %+v, want a URL and no error", got)
+	}
+
+	unavailable := byIndex[1]
+	if unavailable.URL != "" || unavailable.Error != "unavailable" || unavailable.TimeMS != 82646 {
+		t.Errorf("frame 1 (swarm could not supply it) = %+v, want no URL, error \"unavailable\", time_ms 82646", unavailable)
+	}
+
+	stalled := byIndex[2]
+	if stalled.URL != "" || stalled.Error != "read_stalled" || stalled.TimeMS != 112105 {
+		t.Errorf("frame 2 (read timed out) = %+v, want no URL, error \"read_stalled\", time_ms 112105", stalled)
+	}
+
+	if unavailable.Error == stalled.Error {
+		t.Fatal("the two failure causes collapsed into the same value - the exact bug TOR-118 found")
+	}
+}
+
 // TestFileDetailIsNotFoundForWhatDoesNotExist covers the three ways a
 // request can name nothing, including the one that matters for safety: the
 // infohash is the only string a request puts into a path here (everywhere
