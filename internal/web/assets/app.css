@@ -816,6 +816,44 @@ button:disabled { opacity: .5; }
    grid stays regular, with nothing drawn inside it. TOR-110 owns what a cell
    state actually looks like - this is only the minimum that keeps the grid
    from breaking until that lands. */
+/* THE PIECE STRIP (TOR-111). How much of the file the run actually ordered,
+   as a picture rather than a sentence - the sparseness is the product's whole
+   argument and it was being expressed as a number.
+
+   The accent carries it, not a semantic colour: pieces the run ordered are
+   not a warning or a fault, they are the thing the tool did. The untouched
+   remainder is a surface, so the eye reads marks on a ground rather than two
+   competing colours.
+
+   Each block is a vertical fill rather than a flag, and that is what makes
+   aggregation honest: at one piece per block --fill is 0 or 1 and the strip
+   is a map, and above that it is the fraction of that block's pieces the run
+   ordered, so a coarse strip is a density profile instead of a lie about
+   individual pieces. The caption says which it is. */
+.reach { margin: .2rem 0 .8rem; }
+.reach-strip {
+  display: flex;
+  gap: 1px;
+  height: 1.5rem;
+  border-radius: .2rem;
+  overflow: hidden;
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.reach-block {
+  flex: 1 1 0;
+  min-width: 1px;
+  /* to top: an ordered piece grows from the floor, so a partly-ordered block
+     reads as a column and a full one as a solid mark. */
+  background: linear-gradient(to top,
+    var(--accent) calc(var(--fill, 0) * 100%),
+    var(--s3) 0);
+}
+.reach-note {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--ink-3); margin-top: .3rem;
+}
+
 /* THE GRID'S FOUR STATES (TOR-110). A cell is one capture point, and the
    states are spent unevenly on purpose.
 

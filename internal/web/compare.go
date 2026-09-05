@@ -105,6 +105,11 @@ type resultSet struct {
 	DurationMS    int64
 	Width, Height int
 	Frames        []FrameRef
+	// Reach is how much of this file the run ordered (TOR-111), nil when the
+	// record has nothing to say. Computed here because this is where the run
+	// record, the manifest's piece length and the file's own offset are all
+	// already in hand.
+	Reach *Reach
 }
 
 // loadResultSet reads one set's frames for one file, or reports ok=false when
@@ -133,6 +138,9 @@ func (s *Server) loadResultSet(infoHash, params string, index int) (resultSet, b
 		Params: params, Path: path, Name: run.Name, Count: run.Plan.Count,
 		DurationMS: m.File.DurationMS,
 		Width:      m.Video.Width, Height: m.Video.Height,
+	}
+	if file, ok := videoEntry(run, index); ok {
+		set.Reach = reachOf(run.Claimed, file, m.Torrent.PieceLength)
 	}
 	for _, f := range m.Frames {
 		at := f.RequestedMS

@@ -337,3 +337,115 @@ func TestValidInfoHashRefusesAnythingButADigest(t *testing.T) {
 		}
 	}
 }
+
+// TOR-111: a run's torrent-wide piece claims, turned into one file's stretch.
+
+func TestReachOfClipsAClaimToTheFilesOwnPieces(t *testing.T) {
+	const piece = 256 << 10
+
+	// A file starting 10 pieces in and spanning 20 of them.
+	file := cache.File{Index: 1, Path: "b.mkv", Offset: 10 * piece, Bytes: 20 * piece}
+
+	got := reachOf([][2]int{
+		{0, 5},   // entirely before this file - another file, or the metadata
+		{8, 12},  // straddles the start: only 10..11 belong here
+		{15, 18}, // wholly inside
+		{28, 34}, // straddles the end: only 28..29 belong here
+		{40, 44}, // entirely after
+	}, file, piece)
+
+	if got == nil {
+		t.Fatal("reachOf returned nil for a file with claims in it")
+	}
+	if got.FirstPiece != 10 || got.Pieces != 20 || got.PieceBytes != piece {
+		t.Errorf("geometry = first %d, pieces %d, bytes %d; want 10, 20, %d",
+			got.FirstPiece, got.Pieces, got.PieceBytes, piece)
+	}
+
+	// Offsets from FirstPiece, not absolute indices: the drawing's origin is
+	// the file, not the torrent.
+	want := [][2]int{{0, 2}, {5, 8}, {18, 20}}
+	if len(got.Claimed) != len(want) {
+		t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+	}
+	for i := range want {
+		if got.Claimed[i] != want[i] {
+			t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+		}
+	}
+	if got.ClaimedPieces != 7 {
+		t.Errorf("claimed_pieces = %d, want 7 - and it must equal the ranges' own sum",
+			got.ClaimedPieces)
+	}
+
+	sum := 0
+	for _, r := range got.Claimed {
+		sum += r[1] - r[0]
+	}
+	if sum != got.ClaimedPieces {
+		t.Errorf("the ranges cover %d pieces but claimed_pieces says %d", sum, got.ClaimedPieces)
+	}
+}
+
+// TestReachOfSaysNothingRatherThanZero is the distinction TOR-119 already had
+// to make on disk and this inherits: a record with no claims recorded cannot
+// say the run touched nothing, and a strip drawn from it would assert exactly
+// that.
+func TestReachOfSaysNothingRatherThanZero(t *testing.T) {
+	const piece = 256 << 10
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 10 * piece}
+
+	for _, tc := range []struct {
+		name    string
+		claimed [][2]int
+		file    cache.File
+		piece   int64
+	}{
+		{"a record written before claims were kept", nil, file, piece},
+		{"a manifest with no piece length", [][2]int{{0, 4}}, file, 0},
+		{"a file of no length", [][2]int{{0, 4}}, cache.File{Index: 0, Path: "a.mkv"}, piece},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reachOf(tc.claimed, tc.file, tc.piece); got != nil {
+				t.Errorf("reachOf = %+v, want nil - there is nothing to draw from", got)
+			}
+		})
+	}
+}
+
+// TestReachOfReportsAFileTheRunNeverTouched keeps that case distinct from the
+// one above: here the record DOES say what was claimed, and the answer is that
+// none of it was this file. A strip of untouched blocks is the truthful
+// drawing, so it comes back with a geometry and no ranges.
+func TestReachOfReportsAFileTheRunNeverTouched(t *testing.T) {
+	const piece = 256 << 10
+	file := cache.File{Index: 2, Path: "c.mkv", Offset: 100 * piece, Bytes: 5 * piece}
+
+	got := reachOf([][2]int{{0, 4}, {10, 20}}, file, piece)
+	if got == nil {
+		t.Fatal("reachOf = nil; the record said what was claimed, so the answer is zero, not silence")
+	}
+	if got.Pieces != 5 || len(got.Claimed) != 0 || got.ClaimedPieces != 0 {
+		t.Errorf("reach = %+v, want 5 pieces and none of them claimed", got)
+	}
+}
+
+// TestReachOfHandlesAFileEndingMidPiece is the off-by-one this arithmetic
+// invites: a file's last byte usually sits inside a piece it shares with the
+// next file, and that piece belongs to both.
+func TestReachOfHandlesAFileEndingMidPiece(t *testing.T) {
+	const piece = 256 << 10
+	// Starts at the very start of piece 0 and ends one byte into piece 3.
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 3*piece + 1}
+
+	got := reachOf([][2]int{{0, 8}}, file, piece)
+	if got == nil {
+		t.Fatal("reachOf returned nil")
+	}
+	if got.Pieces != 4 {
+		t.Errorf("pieces = %d, want 4 - the file's last byte is in piece 3", got.Pieces)
+	}
+	if got.ClaimedPieces != 4 {
+		t.Errorf("claimed_pieces = %d, want 4 - the claim covers the whole file", got.ClaimedPieces)
+	}
+}

@@ -374,6 +374,82 @@ type FrameSet struct {
 	// smaller Frames than Count, only a Frames with fewer URLs in it.
 	Count  int `json:"count"`
 	Frames int `json:"frames"`
+	// Reach is how much of this file's own stretch of the torrent the run
+	// that wrote this set actually ordered (TOR-111). It hangs off the SET
+	// rather than off the file because a claim belongs to a run: two sets of
+	// one file are two runs that reached differently.
+	//
+	// Absent, not empty, for a run recorded before the claims were kept
+	// (TOR-119 added them without bumping cache.Version, so older records
+	// stay readable and simply have nothing to say here). A strip drawn from
+	// an absent reach would assert that a run touched nothing.
+	Reach *Reach `json:"reach,omitempty"`
+}
+
+// Reach is one file's slice of what a run ordered from the swarm: where the
+// file starts in the torrent's pieces, how many pieces it spans, and which of
+// those the run claimed.
+//
+// 44 of 270 pieces is the argument of the whole product and we could only say
+// it as a sentence. This is the shape a picture of it needs, and every field
+// comes off disk rather than from a new measurement: the claims from
+// run.json's own record, the piece length from the manifest, the file's offset
+// and length from the run record.
+//
+// Claimed is in pieces counted FROM FirstPiece, half-open, ascending and
+// non-touching - the same shape swarm.ClaimedRanges produces, clipped to this
+// file. Offsets rather than absolute indices so a drawing does not have to
+// subtract, and because the interesting axis is the file, not the torrent: a
+// run over one file of a six-file torrent claims pieces in the thousands and
+// none of that is where the picture wants its origin.
+type Reach struct {
+	FirstPiece int   `json:"first_piece"`
+	Pieces     int   `json:"pieces"`
+	PieceBytes int64 `json:"piece_bytes"`
+	// ClaimedPieces is the total, so a reader has the number without summing
+	// the ranges - and so the two can be checked against each other.
+	ClaimedPieces int      `json:"claimed_pieces"`
+	Claimed       [][2]int `json:"claimed"`
+}
+
+// reachOf turns a run's torrent-wide piece claims into one file's stretch.
+//
+// Reports nil rather than a zeroed Reach whenever it cannot answer: no claims
+// recorded (a pre-TOR-119 record), no piece length (a manifest old enough not
+// to carry one), or a file whose length is zero. Each of those is "nothing to
+// say", which a drawing must render as nothing rather than as a run that
+// touched none of the file.
+func reachOf(claimed [][2]int, file cache.File, pieceBytes int64) *Reach {
+	if len(claimed) == 0 || pieceBytes <= 0 || file.Bytes <= 0 {
+		return nil
+	}
+
+	first := int(file.Offset / pieceBytes)
+	last := int((file.Offset + file.Bytes - 1) / pieceBytes)
+	out := &Reach{FirstPiece: first, Pieces: last - first + 1, PieceBytes: pieceBytes}
+
+	for _, r := range claimed {
+		begin, end := r[0], r[1]
+		if begin < first {
+			begin = first
+		}
+		if end > last+1 {
+			end = last + 1
+		}
+		if end <= begin {
+			// A claim entirely outside this file - another file of the same
+			// torrent, or the metadata pieces at the front.
+			continue
+		}
+		out.Claimed = append(out.Claimed, [2]int{begin - first, end - first})
+		out.ClaimedPieces += end - begin
+	}
+
+	// A run whose claims all fall outside this file reached none of it, which
+	// is an answer rather than a silence: it is returned with no ranges, and a
+	// strip of untouched blocks is the truthful drawing of it. Only the cases
+	// above, where nothing was recorded to reason from, are nil.
+	return out
 }
 
 // FrameRef is one frame a page can show: when it is from, why it moved if it
@@ -494,6 +570,7 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 		detail.Path = set.Path
 		detail.Sets = append(detail.Sets, FrameSet{
 			Params: set.Params, Count: set.Count, Frames: len(set.Frames),
+			Reach: set.Reach,
 		})
 	}
 
@@ -526,12 +603,23 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 
 // videoPath finds one video file's path in a run record.
 func videoPath(run cache.Run, index int) (string, bool) {
+	v, ok := videoEntry(run, index)
+	if !ok {
+		return "", false
+	}
+	return v.Path, true
+}
+
+// videoEntry is videoPath when the caller needs more than the path - the
+// file's own offset and length, which is what turns a run's piece claims into
+// a stretch of THIS file (TOR-111).
+func videoEntry(run cache.Run, index int) (cache.File, bool) {
 	for _, v := range run.Videos {
 		if v.Index == index {
-			return v.Path, true
+			return v, true
 		}
 	}
-	return "", false
+	return cache.File{}, false
 }
 
 // validInfoHash gates one of the two places a request's own string reaches

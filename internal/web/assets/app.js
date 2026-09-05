@@ -918,6 +918,13 @@ function fileBlock(entry, index) {
         '<button type="button" class="file-compare">Compare…</button>' +
       "</p>" +
       '<p class="file-progress" hidden></p>' +
+      // The picture of the product (TOR-111): how little of the file the run
+      // actually ordered. Above the grid because the grid is what those
+      // pieces bought.
+      '<figure class="reach" hidden>' +
+        '<div class="reach-strip" role="img"></div>' +
+        '<figcaption class="reach-note"></figcaption>' +
+      "</figure>" +
       '<div class="grid"></div>' +
     "</div>";
   entry.filesEl.append(article);
@@ -937,6 +944,9 @@ function fileBlock(entry, index) {
     regenGo: article.querySelector(".file-regen-go"),
     compareGo: article.querySelector(".file-compare"),
     progress: article.querySelector(".file-progress"),
+    reach: article.querySelector(".reach"),
+    reachStrip: article.querySelector(".reach-strip"),
+    reachNote: article.querySelector(".reach-note"),
     grid: article.querySelector(".grid"),
     expanded: false,
     metaExpanded: false,
@@ -1163,6 +1173,122 @@ function addFrame(entry, ev) {
 function renderFrames(fentry) {
   fentry.grid.replaceChildren(...gridCells(fentry).map((cell) => frameFigure(cell, fentry)));
 }
+
+// renderReach draws how much of the file a run actually ordered from the
+// swarm (TOR-111): a strip of blocks along the file with the claimed stretches
+// marked. 44 of 270 pieces is the argument of the whole product and we could
+// only state it as a sentence.
+//
+// WHICH SET. A claim belongs to a run, so the strip is one set's, not the
+// merged grid's - and the set drawn is the one with the most capture points,
+// which is the set the grid is mostly showing. Stated in the caption rather
+// than left for the reader to wonder about.
+//
+// WHAT IS NOT DRAWN, and this is a deliberate refusal. The ticket asks for the
+// capture points marked above the strip. They are not, because the strip's
+// axis is BYTES and a capture point is a TIME, and mapping one to the other
+// needs an assumption of constant bitrate that no container owes us - a tick
+// placed that way would be a guess drawn to look like a measurement. It is
+// also unnecessary: each claimed stretch IS a capture point's footprint in
+// pieces, which is the same fact without the invention.
+function renderReach(fentry, sets) {
+  const el = fentry.reach;
+  if (!el) return;
+
+  // Absent is not zero. A run recorded before the claims were kept has
+  // nothing to say here (TOR-119 added them without bumping cache.Version),
+  // and a strip of untouched blocks would assert that it touched nothing.
+  const withReach = (sets || []).filter((s) => s.reach && s.reach.pieces > 0);
+  if (withReach.length === 0) {
+    el.hidden = true;
+    return;
+  }
+  withReach.sort((a, b) => (b.count || 0) - (a.count || 0));
+  const set = withReach[0];
+  const reach = set.reach;
+
+  // How many blocks the strip holds: one per piece until there are more
+  // pieces than blocks worth drawing, then one block per several pieces.
+  //
+  // Derived from the piece count alone, deliberately, not from the measured
+  // width. A width-derived count would have to be redrawn on every resize and
+  // every drag of the panel divider, and worse, the caption's "each block is N
+  // pieces" would be true only until the window moved. Blocks stretch instead,
+  // so the aggregation is a fact about the torrent rather than about the
+  // viewport.
+  const blocks = Math.min(reach.pieces, MAX_BLOCKS);
+  const per = reach.pieces / blocks;
+
+  // Claimed pieces as a flat lookup, so each block can ask how many of its
+  // own were ordered without walking every range.
+  const claimed = new Uint8Array(reach.pieces);
+  for (const [begin, end] of reach.claimed || []) {
+    for (let i = Math.max(0, begin); i < Math.min(reach.pieces, end); i++) claimed[i] = 1;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (let b = 0; b < blocks; b++) {
+    const from = Math.floor(b * per);
+    const to = Math.max(from + 1, Math.floor((b + 1) * per));
+    let hit = 0;
+    for (let i = from; i < to && i < reach.pieces; i++) hit += claimed[i];
+    const span = Math.min(to, reach.pieces) - from;
+
+    const block = document.createElement("span");
+    block.className = "reach-block";
+    // A fraction rather than a flag, which is what makes aggregation honest:
+    // at one piece per block it is 0 or 1 and the strip is a map, and above
+    // that it is a density and the caption says so.
+    //
+    // With a floor, because the honest fraction can be unreadable: 4 claimed
+    // pieces of a 104-piece block is 0.038, which paints about one pixel and
+    // leaves a reader unable to see WHERE the run reached - the one thing the
+    // strip exists to show. So presence is drawn legibly and density is
+    // carried by the height above that floor. Nothing is invented: a block
+    // with no claimed piece stays empty, and the caption states the block
+    // size so a reader knows a mark means "some of these 104".
+    const fraction = span > 0 ? hit / span : 0;
+    const fill = fraction === 0 ? 0 : REACH_FLOOR + (1 - REACH_FLOOR) * fraction;
+    block.style.setProperty("--fill", fill.toFixed(3));
+    frag.append(block);
+  }
+  fentry.reachStrip.replaceChildren(frag);
+
+  // "(0%)" for a run that ordered forty-four pieces of ten thousand would be
+  // a rounding that contradicts the number beside it. Under half a percent is
+  // reported as under one, which is both true and the product's whole point.
+  const pct = (100 * reach.claimed_pieces) / reach.pieces;
+  const pctText = reach.claimed_pieces === 0 ? "0%"
+    : pct < 0.5 ? "<1%"
+    : pct < 10 ? pct.toFixed(1) + "%"
+    : pct.toFixed(0) + "%";
+  const parts = [
+    reach.claimed_pieces + " of " + reach.pieces + " pieces ordered (" + pctText + ")",
+    bytesLabel(reach.claimed_pieces * reach.piece_bytes) + " of " +
+      bytesLabel(reach.pieces * reach.piece_bytes),
+  ];
+  // The aggregation is stated, never silently faked: a block standing for
+  // several pieces is shaded by how many of them were ordered.
+  if (per > 1) parts.push("each block is " + Math.round(per) + " pieces");
+  if (withReach.length > 1) parts.push("set " + set.params.slice(0, 8));
+
+  fentry.reachNote.textContent = parts.join(" · ");
+  fentry.reachStrip.setAttribute("aria-label",
+    "Pieces of this file the run ordered: " + reach.claimed_pieces + " of " + reach.pieces);
+  el.hidden = false;
+}
+
+// MAX_BLOCKS is where drawing one block per piece stops being readable and
+// aggregating starts. At the pane's usual width this leaves each block a few
+// pixels across; a 10,000-piece remux would otherwise ask for a block a
+// fortieth of a pixel wide, which is the "lie about individual blocks" the
+// ticket names.
+const MAX_BLOCKS = 96;
+
+// REACH_FLOOR is how much of a block is painted when any of its pieces were
+// ordered, before density is added on top. Enough to be seen at the strip's
+// height; small enough that a full block still reads as clearly fuller.
+const REACH_FLOOR = 0.22;
 
 // gridCells is the grid as a list of cells, each carrying the state it should
 // be drawn in. There are two ways to build it and which one applies is the
@@ -1453,6 +1579,7 @@ async function loadFileDetail(entry, fentry, index) {
     fentry.skipped.clear();
     renderFrames(fentry);
     updateFileSummary(fentry);
+    renderReach(fentry, detail.sets);
   } catch (err) {
     logFor(entry, "could not read file " + index + "'s frames: " + (err.message || err));
   }
