@@ -392,18 +392,25 @@ type FrameRef struct {
 	// URL below: the typed reason nothing was captured there.
 	//
 	// It is deliberately not folded into Shift, and that is the whole point
-	// of TOR-118. Shift answers "why did the frame I have come from
-	// somewhere other than where I asked" - it presumes a frame exists.
-	// Error answers "why is there no frame at all" - a different question
-	// that can be true when Shift has nothing to say (Shift is empty for
-	// every failed point; see manifest.ShiftFailed's own doc). The two can
-	// even read the same word for different reasons: manifest's
-	// ShiftUnavailable ("shifted") means a nearby point stood in because the
-	// exact one was not held, while an Error of "unavailable" means no peer
-	// held anything usable and nothing stood in. Reading Shift alone cannot
-	// tell those apart, which is exactly the bug TOR-118 found - the
-	// manifest already kept them separate, and this field is what stops the
-	// REST payload from re-merging them on the way out.
+	// of TOR-118. Shift answers "where did this frame come from" - for a
+	// failed point it is manifest.ShiftFailed, whose serialised value is the
+	// word "unavailable", and it says only THAT the point was lost. Error
+	// says what lost it, and it is the field that separates the two causes
+	// the engine actually reports: "unavailable", no peer offered those
+	// pieces, so a later run will not get them either unless the swarm
+	// changes; and "read_stalled", the pieces were being fetched and the read
+	// timed out, which a later run may well get through. One says do not
+	// bother, the other says try again.
+	//
+	// The trap here is real, because it produced this ticket's own wrong
+	// premise: ShiftFailed's value is the same word as one of Error's codes.
+	// A reader who looks at shift alone sees "unavailable" on every failed
+	// point and concludes the two causes were collapsed into one - they were
+	// not, they are in the field beside it. On a real holed run's manifest
+	// the seven failed points all read shift "unavailable" while Error
+	// separates them five read_stalled to two unavailable, matching the live
+	// event stream exactly. The manifest always kept them apart; this field
+	// is what stops the REST payload from re-merging them on the way out.
 	Error string `json:"error,omitempty"`
 	// URL is a files/{id} handle minted here, the same way an event's frame
 	// URL is (see fileSet.publish): the page can only ever ask for a path
