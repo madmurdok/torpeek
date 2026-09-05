@@ -661,12 +661,27 @@ button:disabled { opacity: .5; }
   width: 12px;
   height: 12px;
   pointer-events: none;
-  border-color: var(--accent);
   filter: var(--stroke-glow);
   opacity: .8;
 }
-.run-detail::before { top: .35rem; left: .35rem; border-top: 2px solid; border-left: 2px solid; }
-.run-detail::after { bottom: .35rem; right: .35rem; border-bottom: 2px solid; border-right: 2px solid; }
+/* The colour goes in the shorthands, and that is the fix rather than the
+   style. `border-color: var(--accent)` on the rule above was silently
+   overridden: `border-top: 2px solid` is a SHORTHAND, so it resets
+   border-top-color to its initial value of currentColor, and it comes later at
+   equal specificity. So these have been painting in --ink since TOR-113 while
+   the comment beside them claimed the accent - every screenshot of them was
+   the wrong colour and nobody could see it from reading the declaration that
+   was meant to set it. */
+.run-detail::before {
+  top: .35rem; left: .35rem;
+  border-top: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+}
+.run-detail::after {
+  bottom: .35rem; right: .35rem;
+  border-bottom: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+}
 
 .run-detail-header { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .run-detail-title { overflow-wrap: anywhere; }
