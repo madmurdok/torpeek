@@ -306,12 +306,26 @@ h3 {
    is pasted, never read, so the field does not need to be wide - plus the
    drop target for a .torrent file.
 
-   TOR-137: it stays first in source order, above the torrent table, which is
-   what keeps it visually pinned above the table's own scroll area below -
-   scrolling inside .run-table-wrap (a bounded box, see there) never touches
-   this section, so there is nothing to coordinate with position: sticky and
-   no risk of colliding with the table header's own sticky row. */
-.intake { margin: 0 0 1.5rem; }
+   PINNED TO THE VIEWPORT, not merely placed above the table (TOR-137). Source
+   order alone was not enough and the difference is measurable: the document
+   is what scrolls here, so with a torrent open and its grid below, scrolling
+   carried the intake's top from 20px to -543px and off the screen entirely.
+   "зафиксировано всегда сверху" means a person can paste a magnet without first
+   scrolling back up past a screenful of frames.
+   
+   It needs its own opaque ground: a sticky element with a transparent
+   background lets whatever scrolls beneath show through it, which on a grid
+   of thumbnails is unreadable. The padding compensates for .main's own top
+   padding, which the element now slides over. */
+.intake {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: 0 0 1.5rem;
+  padding: 1.25rem 0 .8rem;
+  margin-top: -1.25rem;
+  background: var(--bg);
+}
 
 /* TOR-137: the torrent table's new home, between the pinned intake above and
    the detail pane below. */
@@ -409,13 +423,14 @@ button:disabled { opacity: .5; }
    wrap is what scrolls - the table itself just grows - and the header row
    stays put (position: sticky) so the sort controls are never scrolled away.
 
-   TOR-137: bounded by max-height rather than by flex (the old aside got its
-   scroll area from a flex-column ancestor stretched to viewport height,
-   which .runs no longer is - it sits in the normal document flow of .main,
-   next to a detail pane that can grow arbitrarily tall). 22rem matches
-   .log's own bounded scroll area below, the one other place this file scrolls
-   a list inside a fixed box. */
-.run-table-wrap { max-height: 22rem; overflow: auto; }
+   TOR-137 first bounded this to 22rem so it would scroll inside a fixed box.
+   That is removed deliberately: the table is about to grow rows that expand
+   into the whole detail panel (TOR-138), and a panel of frames inside a
+   352-pixel scroll window is not what an accordion is for. So the table grows
+   and the PAGE scrolls, with the intake pinned above it - which is also why
+   the header row's sticky top is offset rather than zero, so it comes to rest
+   under the intake instead of behind it. */
+.run-table-wrap { overflow-x: auto; }
 .run-list-empty { font-size: .82rem; opacity: .6; margin: 0; }
 
 .run-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
@@ -423,7 +438,18 @@ button:disabled { opacity: .5; }
 
 .run-table thead th {
   position: sticky;
+  /* Sticky within the wrap, which since TOR-137's cap was removed has no
+     height to scroll inside - so today the header travels with the page and
+     tucks under the pinned intake rather than coming to rest below it.
+     Measured rather than guessed: the intake is 130px tall, not the 5rem a
+     first attempt at an offset assumed, and an offset in rem would be wrong
+     again the moment the hint line wraps.
+     
+     Left as it is on purpose. Nine columns (TOR-139) will force a decision
+     about the table's own scrolling, and where this header comes to rest is
+     the same decision - making it up now would be a number to unpick then. */
   top: 0;
+  z-index: 2;
   background: var(--s1);
   font-family: var(--mono);
   font-size: .66rem;
