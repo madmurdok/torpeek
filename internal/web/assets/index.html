@@ -16,25 +16,13 @@
       <h1>torpeek</h1>
       <span id="status" class="status">connecting</span>
     </header>
-    <h2 class="runs-panel-title">Torrents</h2>
-    <div class="run-table-wrap">
-      <table id="run-table" class="run-table">
-        <thead>
-          <tr>
-            <th scope="col" data-sort="name" tabindex="0" role="button" aria-sort="none">Name</th>
-            <th scope="col" data-sort="when" tabindex="0" role="button" aria-sort="descending">Added</th>
-            <th scope="col" data-sort="status" tabindex="0" role="button" aria-sort="none">Status</th>
-            <th scope="col" class="run-actions-header" aria-hidden="true"></th>
-          </tr>
-        </thead>
-        <tbody id="run-list"></tbody>
-      </table>
-    </div>
-    <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
+    <!-- Deliberately empty for now (TOR-137): the torrent list moved to the
+         right pane below. Kept, not removed, on the chance a later ticket
+         wants this space again. -->
   </aside>
 
   <div id="resizer" class="resizer" role="separator" aria-orientation="vertical"
-       aria-label="Resize the torrent panel" tabindex="0"></div>
+       aria-label="Resize the left panel" tabindex="0"></div>
 
   <div class="main">
     <section id="intake" class="intake">
@@ -63,8 +51,26 @@
       <p id="error" class="error" hidden></p>
     </section>
 
+    <section id="runs" class="runs">
+      <h2 class="runs-title">Torrents</h2>
+      <div class="run-table-wrap">
+        <table id="run-table" class="run-table">
+          <thead>
+            <tr>
+              <th scope="col" data-sort="name" tabindex="0" role="button" aria-sort="none">Name</th>
+              <th scope="col" data-sort="when" tabindex="0" role="button" aria-sort="descending">Added</th>
+              <th scope="col" data-sort="status" tabindex="0" role="button" aria-sort="none">Status</th>
+              <th scope="col" class="run-actions-header" aria-hidden="true"></th>
+            </tr>
+          </thead>
+          <tbody id="run-list"></tbody>
+        </table>
+      </div>
+      <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
+    </section>
+
     <section id="detail" class="detail">
-      <p id="detail-empty" class="detail-empty">Select a torrent on the left to see its files and frames.</p>
+      <p id="detail-empty" class="detail-empty">Select a torrent above to see its files and frames.</p>
     </section>
   </div>
 </div>

@@ -425,9 +425,9 @@ for (const th of el.sortHeaders) {
 
 // ---------------------------------------------------------------------------
 // Run entries: one per torrent, live or on disk. Each owns its own row in the
-// left panel and its own container on the right, built once and updated in
-// place - selecting a different torrent never rebuilds anything, it only
-// shows and hides what is already there.
+// torrent table and its own container in the detail pane, built once and
+// updated in place - selecting a different torrent never rebuilds anything,
+// it only shows and hides what is already there.
 
 function newRunEntry(id) {
   const row = document.createElement("tr");
