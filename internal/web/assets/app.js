@@ -1274,7 +1274,13 @@ function frameFigure(frame, fentry) {
   // A pending or failed cell shows where the point WAS PLANNED - nowhere else
   // is true for it - and a captured one shows where the frame came from.
   caption.textContent = timecode(frame.timeMs);
-  if (frame.shift) {
+  // Only a cell that actually HAS a frame says why it moved. A failed point's
+  // manifest shift is ShiftFailed, whose serialised value is the word
+  // "unavailable" - so printing it here put "unavailable" in the caption of a
+  // cell whose interior said "read_stalled", two words about one cell and the
+  // louder one wrong. Nothing moved: there is no frame. The state carries
+  // that, and the code inside the cell carries the reason.
+  if (frame.state === "shifted" && frame.shift) {
     caption.append(" ");
     const note = document.createElement("span");
     note.className = "shifted";
