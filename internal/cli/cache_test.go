@@ -53,7 +53,7 @@ func TestParseSizeRejectsGarbage(t *testing.T) {
 }
 
 // TestCacheMaxSizeFlowsIntoConfig is -cache-max-size's CLI-to-core wiring,
-// the same shape as TestPortFlagsFlowIntoConfig for -torrent-port.
+// the same shape as TestPortFlagsFlowIntoConfig for -torrent-ports.
 func TestCacheMaxSizeFlowsIntoConfig(t *testing.T) {
 	opts, err := parse([]string{
 		"-data", t.TempDir(),

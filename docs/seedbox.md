@@ -15,9 +15,20 @@ Nothing below needs privileges. What you end up with is one static binary in
 - **A Linux amd64 release archive.** `make archives` builds it; it holds
   `torpeek`, `ffmpeg`, `ffprobe` and the licence material. The bundled ffmpeg
   is a glibc build, so a musl distro (Alpine) will run `torpeek` but not it.
-- **Three ports from your allocated range.** The web UI, BitTorrent, and the
-  internal HTTP bridge. The bridge listens on loopback only, but it is a
-  listening port all the same — take it from the range like the others.
+- **At least three ports from your allocated range, and more if you want
+  concurrency.** One for the web UI, one for the internal HTTP bridge (it
+  listens on loopback only, but it is a listening port all the same — take it
+  from the range like the others), and one or more for BitTorrent.
+
+  How many BitTorrent ports is a real decision, not a formality. A port
+  belongs to a client, not to a torrent: every public torrent shares one
+  client and therefore one port, however many of them are running, but a
+  private torrent needs a client of its own with DHT off, and so a port of
+  its own. **The number of BitTorrent ports you give torpeek is the number of
+  private torrents that can fetch at once.** One is enough if you only ever
+  look at one thing at a time; `51000-51004` gives you five. Run out and the
+  next private torrent is refused, with a message naming the range — never
+  quietly put on a port outside it.
 - **Your nginx `proxy.d` directory**, usually `~/.apps/nginx/proxy.d/`. The UI
   is served under a subdirectory, e.g. `https://user.host.usbx.me/torpeek`.
 
@@ -131,10 +142,13 @@ the token.
 - **`-parallel 2`, not the desktop default of 4.** A shared slot's IO is a
   neighbour's IO, and these hosts recommend one to three active downloads.
   §4.1 makes this a setting rather than a constant for exactly this reason.
-- **`-torrent-port` is set explicitly.** The torrent library would otherwise
+- **`-torrent-ports` is set explicitly.** The torrent library would otherwise
   take an OS-assigned port, which is the allocation rule broken most easily
   and least visibly — nothing fails, you are simply using a port that is not
-  yours.
+  yours. Leave `TORPEEK_TORRENT_PORTS` empty in the env file and the unit
+  refuses to start rather than falling back to that — the loud half of the
+  same rule. Widen the range here to fetch more than one private torrent at
+  a time.
 - **`-web-host 127.0.0.1`.** nginx is on this same host; the UI never needs
   to be reachable directly.
 - **`-cache-max-size`.** The output tree grows only from runs, and the disk it

@@ -27,6 +27,13 @@ const (
 	// CodePrivacyUnresolvable: a magnet with no trackers, where fetching
 	// metadata would mean using DHT before knowing whether that is allowed.
 	CodePrivacyUnresolvable ErrorCode = "privacy_unresolvable"
+	// CodeNoPortAvailable: every BitTorrent port the operator allocated is
+	// held by another client, so this torrent cannot have one of its own.
+	// Distinct from CodeInternal because it is not a fault: it is the
+	// hosting environment's limit showing through (REQUIREMENTS.md 4.1), and
+	// what a person does about it - allocate more ports, or wait for a
+	// private torrent to finish - is nothing like what they do about a bug.
+	CodeNoPortAvailable ErrorCode = "no_port_available"
 	// CodeNoVideo: the torrent holds nothing worth taking frames from.
 	CodeNoVideo ErrorCode = "no_video_files"
 	// CodeNoFileMatch: the file selection named something the torrent does
@@ -103,6 +110,8 @@ func CodeOf(err error) ErrorCode {
 		return CodeNoMetadata
 	case errors.Is(err, swarm.ErrPrivacyUnresolvable):
 		return CodePrivacyUnresolvable
+	case errors.Is(err, swarm.ErrNoPortAvailable):
+		return CodeNoPortAvailable
 	case errors.Is(err, swarm.ErrNoFileMatch):
 		return CodeNoFileMatch
 	case errors.Is(err, probe.ErrNoIndex):

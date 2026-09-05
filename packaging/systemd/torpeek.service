@@ -31,9 +31,12 @@ EnvironmentFile=%h/.config/torpeek/env
 # -web-token: pinned, so a restart does not invalidate the URL people have.
 #   Left unset, torpeek generates one at startup precisely because a
 #   -base-path makes it reachable beyond loopback.
-# -torrent-port and -bridge-port: both inside the allocated range. The
-#   BitTorrent port would otherwise be OS-assigned, which is the rule broken
-#   most easily and least visibly.
+# -torrent-ports and -bridge-port: all inside the allocated range. The
+#   BitTorrent ports would otherwise be OS-assigned, which is the rule broken
+#   most easily and least visibly. -torrent-ports takes one port, a range
+#   (51000-51004) or a list, and its size is how many private torrents can
+#   fetch at once - a client is what owns a port, the public ones share one
+#   client, and a private torrent needs one to itself.
 # -parallel: 2, not the desktop default. A shared slot's IO is a neighbour's
 #   IO (REQUIREMENTS 4.1).
 # -cache-max-size: the output tree grows only from runs, and the disk it
@@ -47,7 +50,10 @@ EnvironmentFile=%h/.config/torpeek/env
 # unset $BARE expands to NO argument at all, which silently shifts the flag
 # after it onto the wrong value. ${BRACED} expands to one empty argument, and
 # every flag here treats empty as "not set" (checked, for -cache-max-size and
-# -watch-dir).
+# -watch-dir) - except -torrent-ports, which treats an empty value as a
+# startup error on purpose. "Not set" there would mean an OS-assigned port
+# outside the allocation, and a service that quietly breaks the one rule this
+# host cares about is worse than one that refuses to start.
 ExecStart=%h/bin/torpeek \
 	-web \
 	-headless \
@@ -55,7 +61,7 @@ ExecStart=%h/bin/torpeek \
 	-web-port ${TORPEEK_WEB_PORT} \
 	-base-path ${TORPEEK_BASE_PATH} \
 	-web-token ${TORPEEK_WEB_TOKEN} \
-	-torrent-port ${TORPEEK_TORRENT_PORT} \
+	-torrent-ports ${TORPEEK_TORRENT_PORTS} \
 	-bridge-port ${TORPEEK_BRIDGE_PORT} \
 	-parallel 2 \
 	-out %h/torpeek-out \

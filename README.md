@@ -188,7 +188,7 @@ make clean-ffmpeg # third_party/ffmpeg/ - about 750 MB, and a ~220 MB download t
 | `-file` | all of them | which video files to process: torrent index or path pattern, comma-separated |
 | `-list` | `false` | list the torrent's video files and exit, without taking frames |
 | `-parallel` | `4` | video files to work on at once |
-| `-torrent-port` | an OS-assigned port | BitTorrent listen port - also pins DHT and uTP, which share it; set this on a host with a fixed allocated range |
+| `-torrent-ports` | an OS-assigned port | BitTorrent listen ports: one (`51413`), a range (`51000-51004`), a list, or a mixture. Each client takes one, and it also pins that client's DHT and uTP. Set this on a host with a fixed allocated range - and note that the size of the set bounds how many private torrents can fetch at once, since each needs a client, and so a port, of its own |
 | `-bridge-port` | an OS-assigned port | loopback port for the internal HTTP bridge; set this on a host with a fixed allocated range |
 | `-web` | `false` | serve the web UI and open it in a browser instead of running on the command line |
 | `-web-host` | `127.0.0.1` | bind address for the web UI - loopback behind a reverse proxy is the documented setup |

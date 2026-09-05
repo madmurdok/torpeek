@@ -183,6 +183,12 @@ func TestCodeOfClassifiesPipelineErrors(t *testing.T) {
 		{name: "deadline", err: context.DeadlineExceeded, want: CodeCancelled},
 		{name: "no metadata", err: fmt.Errorf("open: %w", swarm.ErrNoMetadata), want: CodeNoMetadata},
 		{name: "privacy", err: swarm.ErrPrivacyUnresolvable, want: CodePrivacyUnresolvable},
+		// An exhausted port allocation is the hosting environment's limit
+		// showing through, not a fault: it has to reach a client as its own
+		// code, or the UI would show "internal error" for something whose
+		// answer is "allocate more ports, or wait for a private torrent to
+		// finish" (REQUIREMENTS.md 4.1).
+		{name: "no port", err: fmt.Errorf("open: %w", swarm.ErrNoPortAvailable), want: CodeNoPortAvailable},
 		{name: "no index", err: fmt.Errorf("inspect: %w", probe.ErrNoIndex), want: CodeUnprobeable},
 		{name: "stalled read", err: &bridge.StallError{Off: 1 << 20, Length: 4 << 20}, want: CodeReadStalled},
 		// The pair that TOR-45 is about: ffprobe's verdict on a file it never

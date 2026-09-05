@@ -53,7 +53,6 @@ type Options struct {
 	MaxBytes    int64
 	MaxTime     time.Duration
 	Parallelism int
-	Port        int
 	BridgePort  int
 	WebHost     string
 	WebPort     int
@@ -70,6 +69,20 @@ type Options struct {
 	Version     bool
 	List        bool
 	Files       []string
+
+	// TorrentPorts is -torrent-ports as typed, parsed by config() with
+	// swarm.ParsePortSet rather than here, the same way CacheMaxSize is.
+	//
+	// It records whether the flag appeared at all, because "absent" and
+	// "present but empty" are different answers here and must not collapse
+	// into one. Absent means nobody configured ports, so the OS chooses -
+	// the local default. Empty means somebody tried to configure them and
+	// supplied nothing, which on a managed host is how a systemd unit with
+	// an unset ${TORPEEK_TORRENT_PORTS} would otherwise slide silently onto
+	// a random port outside the allocated range (REQUIREMENTS.md 4.1). That
+	// is a usage error, and the old int-valued -torrent-port gave the same
+	// answer for the same reason - "" was never a number either.
+	TorrentPorts optionalString
 
 	// CacheMaxSize is -cache-max-size as typed, parsed by config() with
 	// parseSize rather than here: a bad value must be a usage error the same
@@ -197,7 +210,7 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.Int64Var(&opts.MaxBytes, "max-bytes", 0, "traffic ceiling for the run (default: scaled to the file count)")
 	fs.DurationVar(&opts.MaxTime, "max-time", 0, "time ceiling for the run (default: 10m)")
 	fs.IntVar(&opts.Parallelism, "parallel", core.DefaultParallelism, "video files to work on at once")
-	fs.IntVar(&opts.Port, "torrent-port", 0, "BitTorrent listen port - also pins DHT and uTP, which share it (default: an OS-assigned port; required where a port range is allocated)")
+	fs.Var(&opts.TorrentPorts, "torrent-ports", "BitTorrent listen ports, as one port, an inclusive range, a comma-separated list, or any mixture: 51413, 51000-51004, 51000-51002,51010. Each client binds one of them, and also pins its DHT and uTP to it (default: an OS-assigned port). Set it where a port range is allocated and going outside it is forbidden - and take the size seriously: every public torrent shares one client and one port, but a private torrent needs a client of its own, so this is what bounds how many private torrents can fetch at once (section 4.1)")
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge (default: an OS-assigned port; required where a port range is allocated)")
 	fs.StringVar(&opts.WebHost, "web-host", "", "bind address for the web UI (default: "+web.DefaultHost+"; a reverse proxy on the same host is the documented way to expose it, section 3.3)")
 	fs.IntVar(&opts.WebPort, "web-port", 0, fmt.Sprintf("port for the web UI (default: %d)", web.DefaultPort))
@@ -273,9 +286,18 @@ func (o *Options) config() (core.Config, error) {
 
 	cfg.Sequential = o.Sequential
 
+	ports, err := o.portSet()
+	if err != nil {
+		return core.Config{}, err
+	}
+
 	cfg.Swarm.Upload = o.Upload
 	cfg.Swarm.DHT = o.DHT
-	cfg.Swarm.ListenPort = o.Port
+	// One pool for the whole process, built here rather than per run: a run
+	// borrows a port from it and hands it back, and two runs must never be
+	// handed the same one. cfg is copied per run (see cli/web.go's runner),
+	// and a pointer is what survives that copy as one shared thing.
+	cfg.Swarm.Ports = swarm.NewPortPool(ports)
 	cfg.Swarm.Peers = o.Peers
 
 	if o.BridgePort > 0 {
@@ -292,6 +314,46 @@ func (o *Options) config() (core.Config, error) {
 	cfg.CacheCeiling = ceiling
 
 	return cfg, nil
+}
+
+// portSet turns -torrent-ports into the set of ports this process may bind.
+//
+// The flag being absent is the unmanaged set: nothing was allocated, so every
+// client asks the OS for a port and nothing bounds how many there can be.
+// That is the local and test case, and it stays a distinct state rather than
+// a set that happens to be empty - swarm.PortSet.Managed is what tells a
+// managed host from a laptop.
+func (o *Options) portSet() (swarm.PortSet, error) {
+	if !o.TorrentPorts.given {
+		return swarm.PortSet{}, nil
+	}
+
+	set, err := swarm.ParsePortSet(o.TorrentPorts.value)
+	if err != nil {
+		return swarm.PortSet{}, fmt.Errorf("-torrent-ports: %w", err)
+	}
+	return set, nil
+}
+
+// optionalString is a string flag that remembers whether it was given at all.
+// flag.StringVar cannot: a default of "" and an explicit "" arrive as the
+// same value, and for -torrent-ports those two mean opposite things (see
+// Options.TorrentPorts).
+type optionalString struct {
+	value string
+	given bool
+}
+
+func (s *optionalString) String() string {
+	if s == nil {
+		return ""
+	}
+	return s.value
+}
+
+func (s *optionalString) Set(v string) error {
+	s.value, s.given = v, true
+	return nil
 }
 
 // splitList reads a comma-separated flag value, dropping blanks so a trailing

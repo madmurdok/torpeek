@@ -11,8 +11,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	alog "github.com/anacrolix/log"
@@ -36,15 +41,38 @@ type Config struct {
 	// private flag overrides this to off, whatever the value here.
 	DHT bool
 
-	// ListenPort is the BitTorrent port. anacrolix binds TCP, uTP and (when
-	// DHT is on) the DHT server to this same port - pinning it pins all
-	// three, which is what section 4.1's "no port outside the allocated
-	// range" actually requires. Zero lets the OS choose one port for all of
-	// them, which is fine locally but not on a managed host with a fixed
-	// range, so callers there must set it. A pinned port already taken is a
-	// startup error, not silently retried on a different one - anacrolix
-	// only falls back to another port when ListenPort is zero.
+	// ListenPort is the BitTorrent port for this one client. anacrolix binds
+	// TCP, uTP and (when DHT is on) the DHT server to this same port -
+	// pinning it pins all three, which is what section 4.1's "no port
+	// outside the allocated range" actually requires. Zero lets the OS choose
+	// one port for all of them, which is fine locally but not on a managed
+	// host with a fixed range, so callers there must set it. A pinned port
+	// already taken is a startup error, not silently retried on a different
+	// one - anacrolix only falls back to another port when ListenPort is
+	// zero.
+	//
+	// Set this when the caller has already decided which port this client
+	// gets. A caller running several clients sets Ports instead and leaves
+	// this at zero; setting both is an error rather than a precedence rule,
+	// because there is no reading of "here is a port, and also here is where
+	// to get one" that is not somebody's mistake.
 	ListenPort int
+
+	// Ports, when set, is where this client's ListenPort comes from: Open
+	// leases one port for the client's whole life and Close hands it back.
+	//
+	// It exists because a client is the unit that owns a port - DHT and PEX
+	// are client-wide switches, so a private torrent cannot share a client
+	// with a public one, and every extra client is another port out of the
+	// allocation. One pool shared across a process is what keeps two clients
+	// from asking for the same port, and what makes running out of ports a
+	// stated refusal (ErrNoPortAvailable) instead of a silent fall back to an
+	// OS-assigned port outside the allocated range.
+	//
+	// Nil means the caller is managing the port itself through ListenPort,
+	// which is every single-client caller and every test that pins or
+	// ignores the port.
+	Ports *PortPool
 
 	// MetadataTimeout bounds the wait for metadata.
 	MetadataTimeout time.Duration
@@ -104,9 +132,35 @@ type Session struct {
 	// shipped build - while a bare `go test` has cgo on and gets sqlite,
 	// which shares the file and never warns. Build with CGO_ENABLED=0 (make
 	// check) to see any of it.
-	store   storage.ClientImplCloser
+	store storage.ClientImplCloser
+	// lease is this session's claim on a port out of Config.Ports, held for
+	// the client's whole life and handed back by Close. Nil when the caller
+	// pinned ListenPort itself, or configured no pool at all.
+	lease   *PortLease
 	dhtOn   bool
 	blindly bool // DHT was used before the private flag could be checked
+}
+
+// leasePort settles which port this config's client binds, taking one out of
+// the pool when there is one.
+//
+// Returning the lease separately from the port is what lets Open hold a
+// single lease across the restart it may have to do: the port is decided
+// once, and the two clients that briefly follow each other onto it are the
+// same claim, not two.
+func (c Config) leasePort() (*PortLease, int, error) {
+	if c.Ports == nil {
+		return nil, c.ListenPort, nil
+	}
+	if c.ListenPort != 0 {
+		return nil, 0, fmt.Errorf("swarm: ListenPort %d and Ports are both set; a client takes its port from one or the other", c.ListenPort)
+	}
+
+	lease, err := c.Ports.Acquire()
+	if err != nil {
+		return nil, 0, err
+	}
+	return lease, lease.Port(), nil
 }
 
 // Open starts a session and adds the source, returning the torrent once its
@@ -122,6 +176,31 @@ func Open(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, erro
 		return nil, nil, route.err
 	}
 
+	// One lease for the whole of Open, including the restart below. Leasing
+	// per client instead would mean the restart asking a pool that may have
+	// been emptied in the meantime by another torrent, and failing halfway
+	// through a torrent that had already been given a port.
+	lease, port, err := cfg.leasePort()
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.ListenPort = port
+
+	s, t, err := openOnPort(ctx, cfg, src, route)
+	if err != nil {
+		lease.Release()
+		return nil, nil, err
+	}
+
+	// The surviving session owns the lease, so its Close is what hands the
+	// port back. Sessions Open discards along the way never hold it.
+	s.lease = lease
+	return s, t, nil
+}
+
+// openOnPort is Open's body once the port is settled: cfg.ListenPort is the
+// port every client it starts will bind.
+func openOnPort(ctx context.Context, cfg Config, src Source, route onlineRoute) (*Session, *Torrent, error) {
 	s, err := newSession(cfg, route.dht)
 	if err != nil {
 		return nil, nil, err
@@ -342,7 +421,103 @@ func (s *Session) Close() error {
 		}
 		s.store = nil
 	}
+
+	// Last of all, and only once the socket has actually gone: whoever binds
+	// this port next - Open's own restart, or the next client out of the
+	// pool - must not race the close.
+	waitPortFree(s.cfg.ListenPort)
+	s.lease.Release()
+	s.lease = nil
+
 	return errors.Join(errs...)
+}
+
+// How long Close waits for a pinned port to come free, and how often it looks.
+// The wait is normally a poll or two; the ceiling exists so a port that never
+// frees cannot hang a caller.
+const (
+	portFreeWait = 2 * time.Second
+	portFreePoll = 5 * time.Millisecond
+)
+
+// waitPortFree blocks until nothing is listening on port, or the ceiling is
+// reached. Port 0 - the OS chose it, nobody will ask for it by name - returns
+// at once.
+//
+// This is not belt and braces, it is a documented hole in Client.Close. That
+// method waits (closeGroup.Wait) for the work it queues on torrents and their
+// storage, but the listening sockets are not part of that: client.go registers
+// them as `cl.onClose = append(cl.onClose, func() { go s.Close() })`, a
+// goroutine nothing ever waits on. So Client.Close can return with the port
+// still bound, and the next bind on it - which on a managed host is a
+// certainty rather than a possibility, because the whole point of a pinned
+// range is that the ports come back around - fails with "address already in
+// use" and, since the port is pinned, fails the run rather than sliding onto
+// another port.
+//
+// Timing out is deliberately silent and hands the port back anyway: a port
+// still held after two seconds is something the next bind will report
+// honestly, and dropping it from the set for the life of the process would
+// turn a transient into a permanent loss of capacity.
+func waitPortFree(port int) {
+	if port == 0 {
+		return
+	}
+
+	deadline := time.Now().Add(portFreeWait)
+	for {
+		if portFree(port) {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(portFreePoll)
+	}
+}
+
+// portFree reports whether every socket a client puts on its port is
+// bindable again.
+//
+// Each address family is probed by name rather than through a wildcard
+// "tcp"/"udp" listen, and that is not thoroughness for its own sake: on
+// darwin net.Listen("tcp", ":p") binds v4 only (supportsIPv4map is false
+// there), so a wildcard probe reports a port free while anacrolix's own
+// tcp6 socket is still on it - which is exactly the socket the next client
+// fails to bind, with "subsequent listen: listen tcp6 :p: bind: address
+// already in use". Measured, not reasoned: with the wildcard probe, 40
+// open/close cycles on OS-assigned ports hit that failure.
+//
+// Only EADDRINUSE counts as busy. A host with IPv6 switched off refuses a
+// tcp6 bind for a reason that has nothing to do with this port, and reading
+// that as "still busy" would make every close wait out the full ceiling.
+// Windows reports its own WSAEADDRINUSE, which this does not recognise, so
+// there the wait simply never triggers and Close behaves as it did before.
+func portFree(port int) bool {
+	addr := net.JoinHostPort("", strconv.Itoa(port))
+	for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
+		if portBusy(network, addr) {
+			return false
+		}
+	}
+	return true
+}
+
+func portBusy(network, addr string) bool {
+	var (
+		closer io.Closer
+		err    error
+	)
+	if strings.HasPrefix(network, "udp") {
+		closer, err = net.ListenPacket(network, addr)
+	} else {
+		closer, err = net.Listen(network, addr)
+	}
+	if err != nil {
+		return errors.Is(err, syscall.EADDRINUSE)
+	}
+	closer.Close()
+	return false
 }
 
 // DiscardPieces removes this run's own piece subtree for one torrent, never
