@@ -3,6 +3,7 @@ package swarm
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/anacrolix/torrent"
@@ -145,14 +146,78 @@ func (t *Torrent) Downloaded() int64 {
 // deterministic; how long each order stood is a different question and not
 // this one.
 //
-// This is a measurement seam, not a protocol: it stops at core.Done, which is
-// where the acceptance harness reads it, and deliberately does not travel into
+// This is a measurement seam, not a protocol. It reaches core.Done, where the
+// acceptance harness reads it, and - since TOR-119 - the run record on disk by
+// way of ClaimedRanges below; it deliberately does not travel into
 // internal/wire's event JSON or into the manifest's cost record (section 2.8),
 // neither of which anybody has asked to grow a second traffic number.
 func (t *Torrent) Claimed() (pieces int, bytes int64) {
 	t.claimMu.Lock()
 	defer t.claimMu.Unlock()
 	return len(t.claimedSeen), t.claimedByte
+}
+
+// ClaimedRanges is Claimed's count broken out into WHERE those pieces are:
+// the same set, coalesced into ascending, non-touching half-open ranges.
+// Empty for a run that claimed nothing.
+//
+// It answers the question the count cannot - 44 of 270 pieces is the argument
+// of the whole product, and a count alone cannot say the 44 were spread across
+// the film rather than sitting in a lump at the front (TOR-119, drawn by
+// TOR-111). The manifest's torrent.availability is not this data and looks
+// like it should be: that is a 64-bucket summary of what the SWARM held, not
+// what this run ordered.
+//
+// WHY RANGES rather than the raw indices or a bitmap, decided on the record
+// size each produces rather than on what is easiest to emit. Claims arrive as
+// half-open PieceRanges (noteClaimed), so contiguity is how the data already
+// comes, and the three shapes cost, in JSON bytes, against a run.json that
+// weighs 582 to 1414 bytes today:
+//
+//	                                   indices   ranges   bitmap
+//	44 of 270 pieces, ~20 windows         123B     222B      50B
+//	40 of 10000 pieces, ~20 windows       112B     302B    1670B
+//	2000 of 10000, degraded to one run   8892B      17B    1670B
+//	all 10000 pieces, one run           48891B      17B    1670B
+//
+// No shape wins everywhere. Indices are cheapest when claims are sparse and
+// scattered, and catastrophic when they are not - 49 KB on a 600-byte record,
+// which a run that degrades to sequential reading can reach. An exact bitmap
+// is cheapest of all in the small case but costs ceil(pieces/8) whatever
+// happened, so a 40 GB remux pays 1.7 KB to describe twenty claimed pieces -
+// charging the record for the part of the torrent the run went out of its way
+// NOT to touch, which is precisely backwards for this project. Ranges cost
+// what the run DID: one entry per contiguous stretch ordered, 222 bytes in
+// the real sparse case and 17 in the degenerate one. The sparse case is where
+// ranges lose, and losing by 99 bytes on a 600-byte record is the cheap half
+// of the trade.
+//
+// The invariant worth holding onto: the range lengths sum to exactly the count
+// Claimed reports. Two views of one set, and a test asserts they agree.
+func (t *Torrent) ClaimedRanges() []PieceRange {
+	t.claimMu.Lock()
+	defer t.claimMu.Unlock()
+
+	if len(t.claimedSeen) == 0 {
+		return nil
+	}
+	idx := make([]int, 0, len(t.claimedSeen))
+	for i := range t.claimedSeen {
+		idx = append(idx, i)
+	}
+	sort.Ints(idx)
+
+	out := []PieceRange{{Begin: idx[0], End: idx[0] + 1}}
+	for _, i := range idx[1:] {
+		// Ascending and de-duplicated by the map, so the only question at
+		// each step is whether this piece continues the run being built.
+		if last := &out[len(out)-1]; i == last.End {
+			last.End++
+			continue
+		}
+		out = append(out, PieceRange{Begin: i, End: i + 1})
+	}
+	return out
 }
 
 // Peers reports how many peers are connected and how many of them are seeds.

@@ -343,6 +343,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		DownloadedByte: spent,
 		ClaimedByte:    claimedByte,
 		ClaimedPieces:  claimedPieces,
+		ClaimedRanges:  torrent.ClaimedRanges(),
 		Elapsed:        time.Since(started),
 		TorrentPath:    torrentPath,
 		Warnings:       warnings,
@@ -665,6 +666,10 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 		Videos:   make([]cache.File, 0, len(videos)),
 		Selected: mergeIndices(prior.Selected, indicesOf(selected)),
 		Complete: mergeIndices(prior.Complete, finished),
+		// Not merged with prior, unlike the two above: see the field's own
+		// doc. This is one run's traversal, and a union across reruns would
+		// describe a spread no single run achieved.
+		Claimed: claimedPairs(torrent.ClaimedRanges()),
 	}
 	for _, v := range videos {
 		record.Videos = append(record.Videos, cache.File{
@@ -672,6 +677,22 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 		})
 	}
 	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// claimedPairs flattens swarm's named ranges into the record's pair array.
+// Two shapes for one thing, on purpose: the named fields are what code reads,
+// the pairs are what a few hundred bytes of JSON can afford (cache.Run.Claimed
+// says why). Nil in stays nil out, so a run that claimed nothing writes no
+// field at all rather than an empty array.
+func claimedPairs(ranges []swarm.PieceRange) [][2]int {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([][2]int, 0, len(ranges))
+	for _, r := range ranges {
+		out = append(out, [2]int{r.Begin, r.End})
+	}
+	return out
 }
 
 // saveTorrentFile puts the torrent this run is working on into the run

@@ -91,6 +91,27 @@ type Run struct {
 	// A file with a failed capture point is deliberately absent: a rerun
 	// should try it again rather than serve a gap as a result.
 	Complete []int `json:"complete"`
+	// Claimed is where in the torrent the run that wrote this record actually
+	// reached: ascending half-open [begin, end) piece ranges, the set of
+	// pieces it ordered from the swarm coalesced into stretches (TOR-119,
+	// drawn by TOR-111). Empty or absent when there is nothing to say -
+	// including every record written before this field existed, which reads
+	// back as nil rather than as a claim of zero.
+	//
+	// A pair array rather than a struct per range, and that is a size
+	// decision rather than a style one: [[0,3],[17,19]] against
+	// [{"begin":0,"end":3},...] is a quarter of the bytes on a record that
+	// weighs a few hundred. swarm.Torrent.ClaimedRanges carries the full
+	// argument for ranges over raw indices or a bitmap, costed in JSON bytes
+	// against this file's measured size.
+	//
+	// UNLIKE Selected and Complete above, this does NOT merge across runs
+	// into the same directory. Those two describe what the DIRECTORY holds,
+	// so they accumulate; this describes one traversal of one torrent, and a
+	// union across reruns would report a spread no single run achieved -
+	// exactly the wrong answer for a picture of what one run cost. It follows
+	// Plan, which is likewise simply overwritten by whichever run wrote last.
+	Claimed [][2]int `json:"claimed,omitempty"`
 }
 
 // SelectedCount is how many files this directory's runs have ever asked for -
