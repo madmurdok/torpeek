@@ -245,6 +245,73 @@ function metaTitle(entry) {
   return metaLabel(entry);
 }
 
+// renderRunProgress draws a run's progress as a segmented bar in its row
+// (TOR-123). Segments with gaps rather than a smooth fill, because torpeek
+// deals in discrete captures and a percentage would be a shape borrowed from
+// software that deals in bytes.
+//
+// WHAT IT MEASURES: frames landed out of frames planned, which is the only
+// denominator known from the first moment and the only one that answers "how
+// much is left". Pieces would answer "is it moving" better - a run can sit at
+// 4 of 20 frames while steadily pulling data - but the claimed-piece figures
+// do not travel live: they reach core.Done and the run record, not the
+// progress heartbeat. Choosing them would have meant inventing a measurement
+// to draw, and the bar sits directly beneath the line reading "4/20 frames",
+// which is what keeps a stalled bar legible as a slow frame rather than as a
+// bar measuring the wrong thing. The bytes and peers on the file block's own
+// progress line are what say the run is alive meanwhile.
+//
+// WHERE IT IS: the panel row only, not the detail pane. In the detail the grid
+// is already this graphic - since TOR-110 every planned point has a cell from
+// the first moment and they fill in place - so a bar above it would measure
+// the same thing twice, and the two would disagree for a second at every
+// frame. One graphic per fact.
+//
+// NOT ON A FINISHED RUN, which the criterion asks for: a full bar on a done
+// run tells nobody anything, and an empty one on a failed run reads like a
+// second failure.
+function renderRunProgress(entry) {
+  const el = entry.rowProgress;
+  if (!el) return;
+
+  const total = entry.framesTotal || 0;
+  if (!cancellable(entry.state) || entry.disk || total <= 0) {
+    el.hidden = true;
+    el.replaceChildren();
+    return;
+  }
+
+  const done = Math.max(0, Math.min(total, entry.framesDone || 0));
+  const segments = Math.min(total, MAX_PROGRESS_SEGMENTS);
+  const per = total / segments;
+
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < segments; i++) {
+    // How much of THIS segment's share of the plan is done. At one frame per
+    // segment it is 0 or 1; above the cap a segment stands for several and
+    // fills proportionally, the same way the piece strip aggregates - and the
+    // exact count is in the line above, so nothing is lost by grouping.
+    const from = i * per;
+    const filled = Math.max(0, Math.min(1, (done - from) / per));
+    const seg = document.createElement("span");
+    seg.className = "run-progress-seg";
+    seg.style.setProperty("--fill", filled.toFixed(3));
+    frag.append(seg);
+  }
+  el.replaceChildren(frag);
+  el.hidden = false;
+  el.setAttribute("role", "progressbar");
+  el.setAttribute("aria-valuemin", "0");
+  el.setAttribute("aria-valuemax", String(total));
+  el.setAttribute("aria-valuenow", String(done));
+  el.setAttribute("aria-label", done + " of " + total + " frames captured");
+}
+
+// MAX_PROGRESS_SEGMENTS is where one segment per frame stops fitting in a
+// panel row. A plan of twenty is the common case and draws one each; a plan of
+// two hundred would ask for segments a third of a pixel wide.
+const MAX_PROGRESS_SEGMENTS = 24;
+
 // displayName is what a row's name cell shows, and whether that answer is
 // confirmed or merely offered (TOR-117).
 //
@@ -385,7 +452,12 @@ function newRunEntry(id) {
   badge.className = "run-badge";
   const meta = document.createElement("span");
   meta.className = "run-meta";
-  statusCell.append(badge, meta);
+  // Progress as a graphic (TOR-123), directly under the line that says what
+  // it is counting - the bar is the glance and the text is the number.
+  const bar = document.createElement("span");
+  bar.className = "run-progress";
+  bar.hidden = true;
+  statusCell.append(badge, meta, bar);
 
   const actionsCell = document.createElement("td");
   actionsCell.className = "run-cell-actions";
@@ -477,7 +549,7 @@ function newRunEntry(id) {
     // torrentURL is the files/{id} handle the run's own done event announced
     // for its saved .torrent, empty for a run that has none to offer.
     torrentURL: "",
-    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta,
+    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
     rowWhen: whenCell, rowCancel: cancel,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
@@ -577,6 +649,7 @@ function syncEntry(entry) {
   entry.rowName.classList.toggle("run-name-provisional", shown.provisional);
   entry.rowMeta.textContent = metaLabel(entry);
   entry.rowMeta.title = metaTitle(entry);
+  renderRunProgress(entry);
   entry.rowWhen.textContent = whenLabel(entry.when);
   entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
   entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
@@ -2121,6 +2194,11 @@ function apply(ev) {
         ev.frames_done + " / " + ev.frames_total + " frames · " +
         bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
       entry.progress = ev.frames_done + "/" + ev.frames_total + " frames";
+      // The numbers as numbers, for the bar. The sentence stays because it is
+      // the exact figure and the statement of what is being counted; the bar
+      // cannot be either of those things (TOR-123).
+      entry.framesDone = ev.frames_done;
+      entry.framesTotal = ev.frames_total;
       syncEntry(entry);
       logFor(entry, "progress: " + ev.frames_done + "/" + ev.frames_total +
           ", " + ev.downloaded + " bytes, " + ev.peers + " peers");

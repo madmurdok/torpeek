@@ -727,6 +727,37 @@ button:disabled { opacity: .5; }
    grid stays regular, with nothing drawn inside it. TOR-110 owns what a cell
    state actually looks like - this is only the minimum that keeps the grid
    from breaking until that lands. */
+/* PROGRESS AS A GRAPHIC (TOR-123), in the panel row and nowhere else - in the
+   detail pane the frame grid already is this picture.
+
+   Segments with gaps, not a smooth fill: torpeek captures discrete frames, and
+   a continuous bar is a shape borrowed from software that moves bytes. It sits
+   under the line reading "4/20 frames", which is what makes a bar that has not
+   moved for twenty seconds legible as a slow frame rather than as a bar
+   measuring the wrong thing.
+
+   Deliberately thin and deliberately accent-coloured: it is the one thing in
+   the panel that moves, and it must read as the tool working rather than as a
+   state needing attention - which is why it is not --warn and not --ok. */
+.run-progress {
+  display: flex;
+  gap: 1px;
+  height: .28rem;
+  margin-top: .25rem;
+  border-radius: .1rem;
+  overflow: hidden;
+}
+.run-progress-seg {
+  flex: 1 1 0;
+  min-width: 1px;
+  /* to right rather than to top: a segment standing for several frames fills
+     along the direction the bar reads in, so a part-done segment looks like
+     progress through it and not like a shorter block. */
+  background: linear-gradient(to right,
+    var(--accent) calc(var(--fill, 0) * 100%),
+    var(--s3) 0);
+}
+
 /* THE PIECE STRIP (TOR-111). How much of the file the run actually ordered,
    as a picture rather than a sentence - the sparseness is the product's whole
    argument and it was being expressed as a number.
