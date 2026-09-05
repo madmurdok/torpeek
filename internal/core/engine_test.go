@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1618,4 +1619,138 @@ func TestSequentialFallbackGatesOnTheFlag(t *testing.T) {
 			t.Error("manifest lists no frames")
 		}
 	})
+}
+
+// TestTheRunRecordSaysWhereTheRunReached is TOR-119's acceptance criterion: a
+// finished run's record has to answer where in the file it got to, not only
+// how much it took. Run against the local fixture, then read the record back
+// off disk rather than trusting what was published.
+//
+// It does NOT assert that the ranges have gaps in them, and that is a measured
+// decision rather than a gap in the test. MinTraffic's window is 1 MiB
+// (swarm.MinTraffic), and this fixture's whole file is 669 KB - testsrc caps
+// out near 1.6 MB whatever bitrate is asked for, because libx264 will not
+// spend bits on synthetic content, and 200k, 4000k and 20000k were all
+// measured landing in the same place. Three 1 MiB windows over a 669 KB file
+// necessarily cover all of it, so ONE BLOCK IS THE TRUTHFUL RECORD here, at
+// any piece size: at 256 KiB it reads [[0,3]] and at 16 KiB [[0,41]], both of
+// which are the whole file. Gaps need a source several times the window, which
+// costs an encode this suite should not pay for; that they survive coalescing
+// is proved directly in swarm's own tests, where the geometry can be set
+// rather than encoded.
+func TestTheRunRecordSaysWhereTheRunReached(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 30, "200k")
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var done *Done
+	for _, ev := range collect(t, events) {
+		if d, ok := ev.(Done); ok {
+			done = &d
+		}
+	}
+	if done == nil {
+		t.Fatal("the run produced no Done event")
+	}
+	if done.ClaimedPieces == 0 {
+		t.Fatal("the run claimed no pieces at all, so there is nothing to record")
+	}
+	if len(done.ClaimedRanges) == 0 {
+		t.Fatal("the run claimed pieces but published no ranges for them")
+	}
+
+	// Published: the ranges and the count are two views of one set.
+	sum := 0
+	for _, r := range done.ClaimedRanges {
+		if r.End <= r.Begin {
+			t.Errorf("Done carries an empty or inverted range %+v", r)
+		}
+		sum += r.Len()
+	}
+	if sum != done.ClaimedPieces {
+		t.Errorf("Done's ranges cover %d pieces but ClaimedPieces is %d",
+			sum, done.ClaimedPieces)
+	}
+
+	// Ascending and non-touching, which is what makes them readable as a
+	// picture rather than as a bag.
+	for i := 1; i < len(done.ClaimedRanges); i++ {
+		if done.ClaimedRanges[i].Begin <= done.ClaimedRanges[i-1].End {
+			t.Errorf("ranges %+v and %+v touch or overlap; they should have coalesced",
+				done.ClaimedRanges[i-1], done.ClaimedRanges[i])
+		}
+	}
+
+	// Persisted: the same thing survives the trip through disk. Finding the
+	// record means walking to the params directory, which is where the run
+	// keeps it - the same place cache.LoadRun looks.
+	var recorded cache.Run
+	found := false
+	err = filepath.WalkDir(cfg.OutputRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != cache.Name {
+			return err
+		}
+		if r, ok := cache.LoadRun(filepath.Dir(path)); ok {
+			recorded, found = r, true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the output tree: %v", err)
+	}
+	if !found {
+		t.Fatal("the run wrote no readable run record")
+	}
+
+	if len(recorded.Claimed) != len(done.ClaimedRanges) {
+		t.Fatalf("the record holds %d ranges, Done published %d: %v vs %+v",
+			len(recorded.Claimed), len(done.ClaimedRanges), recorded.Claimed, done.ClaimedRanges)
+	}
+	for i, r := range done.ClaimedRanges {
+		if recorded.Claimed[i] != [2]int{r.Begin, r.End} {
+			t.Errorf("range %d on disk is %v, published as %+v", i, recorded.Claimed[i], r)
+		}
+	}
+
+	// The record has to answer the question in its own right, without Done
+	// beside it: how many pieces, and where they start and stop.
+	onDisk := 0
+	for _, r := range recorded.Claimed {
+		if r[1] <= r[0] {
+			t.Errorf("the record holds an empty or inverted range %v", r)
+		}
+		onDisk += r[1] - r[0]
+	}
+	if onDisk != done.ClaimedPieces {
+		t.Errorf("the record accounts for %d pieces, the run claimed %d", onDisk, done.ClaimedPieces)
+	}
+	t.Logf("claimed %d pieces in %d ranges: %v",
+		done.ClaimedPieces, len(recorded.Claimed), recorded.Claimed)
+}
+
+// TestClaimedPairsKeepsNothingAsNothing: a run that ordered nothing must write
+// no field rather than an empty array, so absent and zero stay different
+// answers on disk.
+func TestClaimedPairsKeepsNothingAsNothing(t *testing.T) {
+	if got := claimedPairs(nil); got != nil {
+		t.Errorf("claimedPairs(nil) = %v, want nil", got)
+	}
+	if got := claimedPairs([]swarm.PieceRange{}); got != nil {
+		t.Errorf("claimedPairs(empty) = %v, want nil", got)
+	}
+	got := claimedPairs([]swarm.PieceRange{{Begin: 0, End: 2}, {Begin: 17, End: 19}})
+	want := [][2]int{{0, 2}, {17, 19}}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("claimedPairs = %v, want %v", got, want)
+	}
 }

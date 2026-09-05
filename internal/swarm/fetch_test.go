@@ -437,3 +437,117 @@ func TestClaimedCountsEachPieceOnce(t *testing.T) {
 		t.Errorf("a hundred repeat claims moved the figure to %d pieces / %d bytes", pieces, bytes)
 	}
 }
+
+// TestClaimedRangesSaysWhereNotOnlyHowMany is TOR-119's own case: the count
+// cannot distinguish 44 pieces spread across a film from 44 sitting in a lump
+// at the front, and that distinction is the argument of the product.
+func TestClaimedRangesSaysWhereNotOnlyHowMany(t *testing.T) {
+	const pieceLength = 256 << 10
+	newTor := func() *Torrent {
+		return &Torrent{
+			files:       []FileInfo{{Index: 0, Path: "movie.mkv", Length: 20 * pieceLength}},
+			pieceLength: pieceLength,
+			numPieces:   20,
+			length:      20 * pieceLength,
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		claims []PieceRange
+		want   []PieceRange
+	}{
+		{"nothing claimed says nothing rather than zero", nil, nil},
+		{"one claim is one range", []PieceRange{{3, 5}}, []PieceRange{{3, 5}}},
+		{
+			"two claims that touch are one range, because the pieces are contiguous",
+			[]PieceRange{{3, 5}, {5, 7}}, []PieceRange{{3, 7}},
+		},
+		{
+			"two claims with a gap stay two ranges - this is the whole point",
+			[]PieceRange{{0, 2}, {10, 12}}, []PieceRange{{0, 2}, {10, 12}},
+		},
+		{
+			"claims arriving out of order come back ascending",
+			[]PieceRange{{10, 12}, {0, 2}, {5, 6}},
+			[]PieceRange{{0, 2}, {5, 6}, {10, 12}},
+		},
+		{
+			"overlapping claims coalesce rather than repeat",
+			[]PieceRange{{2, 6}, {4, 8}}, []PieceRange{{2, 8}},
+		},
+		{
+			"the same claim eighty-two times is still one range",
+			func() []PieceRange {
+				var r []PieceRange
+				for i := 0; i < 82; i++ {
+					r = append(r, PieceRange{7, 9})
+				}
+				return r
+			}(),
+			[]PieceRange{{7, 9}},
+		},
+		{
+			"a sparse sweep across the file, which is what a real run looks like",
+			[]PieceRange{{0, 1}, {4, 5}, {8, 9}, {12, 13}, {16, 17}},
+			[]PieceRange{{0, 1}, {4, 5}, {8, 9}, {12, 13}, {16, 17}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tor := newTor()
+			for _, c := range tc.claims {
+				tor.noteClaimed(c)
+			}
+
+			got := tor.ClaimedRanges()
+			if len(got) != len(tc.want) {
+				t.Fatalf("ClaimedRanges() = %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("ClaimedRanges() = %+v, want %+v", got, tc.want)
+				}
+			}
+
+			// The invariant that ties the new view to the old one: they are
+			// two readings of one set, so they cannot disagree about its size.
+			pieces, _ := tor.Claimed()
+			sum := 0
+			for _, r := range got {
+				sum += r.Len()
+			}
+			if sum != pieces {
+				t.Errorf("the ranges cover %d pieces but Claimed() counts %d - "+
+					"two views of one set have drifted apart", sum, pieces)
+			}
+		})
+	}
+}
+
+// TestClaimedRangesCoalesceALongSequentialSweep is the case that decided the
+// shape. A run that degrades to sequential reading claims a long contiguous
+// stretch, which as raw indices would be tens of kilobytes on a record that
+// weighs a few hundred bytes, and as ranges is one entry.
+func TestClaimedRangesCoalesceALongSequentialSweep(t *testing.T) {
+	const pieceLength = 256 << 10
+	tor := &Torrent{
+		files:       []FileInfo{{Index: 0, Path: "remux.mkv", Length: 2000 * pieceLength}},
+		pieceLength: pieceLength,
+		numPieces:   2000,
+		length:      2000 * pieceLength,
+	}
+
+	// Claimed a window at a time, the way a reader walking forward does.
+	for begin := 0; begin < 2000; begin += 4 {
+		tor.noteClaimed(PieceRange{begin, begin + 4})
+	}
+
+	got := tor.ClaimedRanges()
+	if len(got) != 1 || got[0] != (PieceRange{0, 2000}) {
+		t.Fatalf("ClaimedRanges() = %+v (%d entries), want one range covering the file",
+			got, len(got))
+	}
+	if pieces, _ := tor.Claimed(); pieces != 2000 {
+		t.Errorf("Claimed() counts %d pieces, want 2000", pieces)
+	}
+}

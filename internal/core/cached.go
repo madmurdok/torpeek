@@ -290,6 +290,7 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 		DownloadedByte: 0,
 		ClaimedByte:    0,
 		ClaimedPieces:  0,
+		ClaimedRanges:  nil,
 		Elapsed:        time.Since(started),
 		Reason:         StopCompleted,
 		TorrentPath:    torrentPath,
