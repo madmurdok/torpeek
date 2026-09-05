@@ -51,6 +51,14 @@
       <p id="error" class="error" hidden></p>
     </section>
 
+    <!-- The torrent table, and since TOR-138 the whole of the detail too: a
+         row expands and its own detail renders in a second row directly
+         beneath it, rather than in one shared pane below the table. There is
+         no #detail element any more, and no empty-state paragraph under the
+         table either - a closed row shows nothing, which needs no sentence to
+         explain it, and the one genuinely empty state (no torrents at all)
+         already has #run-list-empty. app.js builds both rows per entry, so
+         the tbody below stays empty here. -->
     <section id="runs" class="runs">
       <h2 class="runs-title">Torrents</h2>
       <div class="run-table-wrap">
@@ -67,10 +75,6 @@
         </table>
       </div>
       <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
-    </section>
-
-    <section id="detail" class="detail">
-      <p id="detail-empty" class="detail-empty">Select a torrent above to see its files and frames.</p>
     </section>
   </div>
 </div>

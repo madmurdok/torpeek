@@ -35,8 +35,6 @@ const el = {
   runList: document.getElementById("run-list"),
   runListEmpty: document.getElementById("run-list-empty"),
   sortHeaders: document.querySelectorAll("#run-table thead [data-sort]"),
-  detail: document.getElementById("detail"),
-  detailEmpty: document.getElementById("detail-empty"),
   log: document.getElementById("log"),
   lightbox: document.getElementById("lightbox"),
   lightboxImg: document.getElementById("lightbox-img"),
@@ -64,8 +62,18 @@ const el = {
 // minted an id for it), by a synthetic "disk:<infohash>:<params>" key until
 // it is reopened. Nothing is ever destroyed wholesale any more: a second
 // torrent must not erase the first, and a finished one must stay clickable
-// for as long as the page remembers it. state.selected is the one entry
-// shown on the right.
+// for as long as the page remembers it.
+//
+// There is no state.selected any more (TOR-138). Selection was the singleton
+// detail pane's own idea - one entry shown on the right, everything else
+// hidden - and the accordion has no single slot to be the one thing in. Which
+// rows are open is now a per-entry flag (entry.expanded, changed only by
+// setRunExpanded), exactly as a file's own accordion has carried its state on
+// its fentry since TOR-63. Keeping it on the object rather than in a set of
+// ids also removes a whole class of bug for free: claimReopenedRun swaps an
+// entry's KEY when a disk row is reopened under a fresh run id, and the old
+// code had to remember to move state.selected across with it.
+//
 // sort is the table's current order: key names the column (a <th data-sort>
 // value), dir is "asc" or "desc". The default - date, newest first - is what
 // the panel already showed before it became a table (TOR-62).
@@ -75,7 +83,7 @@ const el = {
 // and failing, so the page has to be told before it draws one. False until
 // loadDefaults answers, which is the safe way round - a button that appears a
 // moment late is better than one that is there and cannot work.
-const state = { runs: new Map(), selected: null, watch: false, sort: { key: "when", dir: "desc" } };
+const state = { runs: new Map(), watch: false, sort: { key: "when", dir: "desc" } };
 
 function url(path) {
   const u = new URL(path, document.baseURI);
@@ -383,9 +391,15 @@ function compareEntries(a, b) {
 // (name, status, when) changes, so the table always reflects the active
 // sort - including under the default "when" sort, where a status change
 // never touches when, so re-running this never moves that row.
+//
+// TWO rows per entry since TOR-138: the torrent's own line and, directly
+// under it, the row its detail renders in. They move together, in that order,
+// which is the whole of what keeps a detail attached to the torrent it
+// belongs to under every sort - append() takes both at once, so there is no
+// window in which a re-sort has moved one and not the other.
 function reorderRuns() {
   const rows = Array.from(state.runs.values()).sort(compareEntries);
-  for (const entry of rows) el.runList.append(entry.rowEl);
+  for (const entry of rows) el.runList.append(entry.rowEl, entry.detailRowEl);
 }
 
 function updateSortIndicators() {
@@ -424,10 +438,31 @@ for (const th of el.sortHeaders) {
 }
 
 // ---------------------------------------------------------------------------
-// Run entries: one per torrent, live or on disk. Each owns its own row in the
-// torrent table and its own container in the detail pane, built once and
-// updated in place - selecting a different torrent never rebuilds anything,
-// it only shows and hides what is already there.
+// Run entries: one per torrent, live or on disk. Each owns TWO adjacent rows
+// in the torrent table - its own line, and the row its detail renders in
+// directly beneath it (TOR-138) - both built once and updated in place.
+// Opening or closing a torrent never rebuilds anything; it only shows and
+// hides what is already there, exactly as showing one of several detail panes
+// used to.
+//
+// WHY A SECOND <tr> RATHER THAN SOMETHING INSIDE THE FIRST. A detail nested in
+// a data cell would inherit that cell's own click target, and a click anywhere
+// in the detail - a picker checkbox, a thumbnail - would bubble to the row's
+// handler and collapse the thing being used. A sibling row cannot: the row's
+// listener is on the row, and the detail is not in it. It also keeps the
+// table's own column widths the only thing deciding the columns, and it stays
+// valid markup, which a <div> between two <tr>s would not be.
+
+// detailSeq only exists to give each detail container a unique id, which the
+// row's toggle needs for aria-controls: a disclosure control has to name the
+// region it opens, and there are now as many regions as there are torrents.
+let detailSeq = 0;
+
+// RUN_TABLE_COLUMNS is how far the detail row has to span, read off the
+// header rather than written as 4. TOR-139 is about to add columns, and a
+// literal here would go wrong silently - a short colspan leaves an empty cell
+// at the end of the detail row and narrows the detail by a column.
+const RUN_TABLE_COLUMNS = document.querySelectorAll("#run-table thead th").length || 1;
 
 function newRunEntry(id) {
   const row = document.createElement("tr");
@@ -438,9 +473,14 @@ function newRunEntry(id) {
   const main = document.createElement("button");
   main.type = "button";
   main.className = "run-row-main";
+  // The same disclosure triangle a file block wears one level down, for the
+  // same reason: an accordion that gives no sign it opens is a table.
+  const icon = document.createElement("span");
+  icon.className = "run-toggle-icon";
+  icon.setAttribute("aria-hidden", "true");
   const name = document.createElement("span");
   name.className = "run-name";
-  main.append(name);
+  main.append(icon, name);
   nameCell.append(main);
 
   const whenCell = document.createElement("td");
@@ -470,12 +510,31 @@ function newRunEntry(id) {
   actionsCell.append(cancel);
 
   row.append(nameCell, whenCell, statusCell, actionsCell);
-  el.runList.append(row);
+
+  // The detail's own row, and the ONE thing collapse touches: its `hidden`
+  // attribute, nothing else. Same rule the file and metadata accordions
+  // already follow - no rule in app.css sets `display` on .run-detail-row, so
+  // the UA's own [hidden] rule is never beaten by a class selector at equal
+  // specificity. That trap has already cost this codebase twice (see
+  // .drop-overlay[hidden] and the corner-bracket gate in app.css), and the
+  // gate itself is gone now: there is no .detail-empty to gate on any more,
+  // because a torrent that is not open simply has no detail on screen.
+  const detailRow = document.createElement("tr");
+  detailRow.className = "run-detail-row";
+  detailRow.hidden = true;
+  const detailCell = document.createElement("td");
+  detailCell.className = "run-detail-cell";
+  detailCell.colSpan = RUN_TABLE_COLUMNS;
+  detailRow.append(detailCell);
+
+  el.runList.append(row, detailRow);
   el.runListEmpty.hidden = true;
 
   const detailEl = document.createElement("div");
   detailEl.className = "run-detail";
-  detailEl.hidden = true;
+  detailEl.id = "run-detail-" + (++detailSeq);
+  main.setAttribute("aria-expanded", "false");
+  main.setAttribute("aria-controls", detailEl.id);
   detailEl.innerHTML =
     '<header class="run-detail-header">' +
       '<span class="run-badge"></span>' +
@@ -512,7 +571,7 @@ function newRunEntry(id) {
       '</p>' +
     '</section>' +
     '<section class="files"></section>';
-  el.detail.append(detailEl);
+  detailCell.append(detailEl);
 
   const entry = {
     id, disk: false, infohash: "", params: "",
@@ -549,8 +608,15 @@ function newRunEntry(id) {
     // torrentURL is the files/{id} handle the run's own done event announced
     // for its saved .torrent, empty for a run that has none to offer.
     torrentURL: "",
+    // Whether this torrent's detail is on screen (TOR-138). Changed only
+    // inside setRunExpanded, which is the same discipline setFileExpanded and
+    // setMetaExpanded keep one and two levels down: no event that arrives for
+    // this run may open or close it, so a person's click cannot be undone
+    // from under them by a frame landing.
+    expanded: false,
     rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
-    rowWhen: whenCell, rowCancel: cancel,
+    rowWhen: whenCell, rowCancel: cancel, rowToggle: main,
+    detailRowEl: detailRow,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
     detailTitle: detailEl.querySelector(".run-detail-title"),
@@ -572,12 +638,17 @@ function newRunEntry(id) {
   };
 
   // One listener on the row, not the name button alone: a click anywhere in
-  // the row selects it (a table row is a natural click target), and a
+  // the row toggles it (a table row is a natural click target), and a
   // keyboard activation of the name button still reaches it too, since a
   // button's click event bubbles the same way a mouse click does. The cancel
   // button stops its own click from bubbling here, so a cancel never also
-  // selects the row it sits in.
-  row.addEventListener("click", () => selectOrReopen(entry));
+  // opens the row it sits in.
+  //
+  // The detail's row carries no listener at all, which is the reason it is a
+  // separate <tr>: everything inside a detail - a picker checkbox, a
+  // thumbnail, Compare - is outside this row, so using the detail cannot
+  // close it.
+  row.addEventListener("click", () => toggleRun(entry));
   cancel.addEventListener("click", (event) => {
     event.stopPropagation();
     cancelRun(entry.id);
@@ -669,15 +740,92 @@ function syncEntry(entry) {
   entry.pickerEl.hidden = !(entry.state === "needs-action" && entry.videos.length > 0);
 }
 
-function selectRun(id) {
-  if (state.selected === id) return;
-  const previous = state.runs.get(state.selected);
-  if (previous) previous.rowEl.classList.remove("selected");
-  state.selected = id;
-  const entry = state.runs.get(id);
-  el.detailEmpty.hidden = !!entry;
-  for (const e of state.runs.values()) e.detailEl.hidden = e !== entry;
-  if (entry) entry.rowEl.classList.add("selected");
+// ---------------------------------------------------------------------------
+// THE ACCORDION (TOR-138). A torrent's detail lives in its own row, and this
+// is the only function that may put one on screen or take it off.
+//
+// SEVERAL ROWS MAY BE OPEN AT ONCE, and that is the decision the ticket asks
+// for rather than a side effect of how this is written. Three reasons, in the
+// order they matter:
+//
+//   1. Closing one to open another would DESTROY WORK IN PROGRESS. A live run
+//      streaming frames into its grid is the case this whole release is
+//      about; a person who opens a second torrent to see what it is would
+//      lose sight of the first one mid-run, and get it back scrolled to the
+//      top with its file accordions as they were left only by luck.
+//   2. This codebase has already made this decision twice, one and two levels
+//      down, and written down why: a file's accordion and its metadata
+//      accordion both change state ONLY from their own toggle, precisely so a
+//      person's click "can neither be collapsed out from under them nor have
+//      the expansion stolen back to file zero" (fileBlock). Auto-closing a
+//      sibling here would be the same theft, at the level above.
+//   3. It costs nothing that the old shape was not already paying. Every
+//      entry's detail DOM has always existed and has always been updated
+//      whether or not it was on screen - addFrame and renderFrames never
+//      checked - so N open details is N grids laid out, not N grids kept up
+//      to date. The thumbnails are loading="lazy", so an open row scrolled
+//      off screen fetches nothing.
+//
+// What it costs, said plainly: two expanded live runs are two grids doing
+// layout on every frame_ready, and a page with every row open is as tall as
+// its contents. Both are the person's own choice, made one click at a time,
+// and reversible with the same click.
+function setRunExpanded(entry, expanded) {
+  entry.expanded = expanded;
+  // The row's `hidden` attribute and nothing else - no rule in app.css sets
+  // display on .run-detail-row, so the UA rule wins uncontested.
+  entry.detailRowEl.hidden = !expanded;
+  entry.rowEl.dataset.expanded = String(expanded);
+  entry.rowToggle.setAttribute("aria-expanded", String(expanded));
+}
+
+// toggleRun is what clicking a row does. A live or already-live-again entry
+// just opens and closes. A disk-only entry has nothing to show until it is
+// replayed (TOR-55): opening it asks the server to read it back from disk
+// under a fresh id, and that id's own run_state/file/frame events - arriving
+// over the socket this page already holds open - fill the same container in,
+// moments later.
+//
+// Closing a row mid-reopen does not cancel the reopen, and should not: the
+// server is already replaying, the events will land in this entry's detail
+// either way, and re-opening the row shows what arrived meanwhile. That is
+// exactly the property a collapsed file block already has.
+function toggleRun(entry) {
+  if (!entry.disk) {
+    setRunExpanded(entry, !entry.expanded);
+    return;
+  }
+  if (entry.expanded) {
+    setRunExpanded(entry, false);
+    return;
+  }
+  setRunExpanded(entry, true);
+  if (entry.reopening) return;
+  reopenRun(entry);
+}
+
+function reopenRun(entry) {
+  entry.reopening = true;
+  entry.state = "replaying";
+  syncEntry(entry);
+
+  post("runs/reopen", { infohash: entry.infohash, params: entry.params })
+    .then((info) => {
+      // No re-open of the row afterwards, unlike the code this replaced: the
+      // expansion is a flag on the entry, and claimReopenedRun keeps the
+      // entry, so swapping its key cannot lose it.
+      claimReopenedRun(entry, info.id);
+    })
+    .catch((err) => {
+      entry.reopening = false;
+      entry.state = "failed";
+      // A results tree that was moved or copied since it was captured cannot
+      // be replayed - its manifest still points at the old, absolute paths
+      // (TOR-60) - and this is where that surfaces: a reopen that fails.
+      entry.error = String(err.message || err);
+      syncEntry(entry);
+      logFor(entry, "reopen failed: " + entry.error);
+    });
 }
 
 // claimReopenedRun trades a disk entry's synthetic key for the real run id
@@ -694,13 +842,11 @@ function selectRun(id) {
 // entry.id already equal to newId and does nothing.
 function claimReopenedRun(entry, newId) {
   if (entry.id !== newId) {
-    const oldKey = entry.id;
-    state.runs.delete(oldKey);
+    state.runs.delete(entry.id);
     entry.id = newId;
     entry.disk = false;
     entry.reopening = false;
     state.runs.set(entry.id, entry);
-    if (state.selected === oldKey) state.selected = entry.id;
     syncEntry(entry);
   }
 }
@@ -727,41 +873,6 @@ function resolveIncomingRun(id, infohash) {
   }
 
   return ensureRun(id);
-}
-
-// selectOrReopen is what clicking a row does. A live or already-live-again
-// entry just needs showing - its files and frames, if any exist yet, are
-// already sitting in its own container. A disk-only entry has nothing to
-// show until it is replayed (TOR-55): reopening asks the server to read it
-// back from disk under a fresh id, and that id's own run_state/file/frame
-// events - arriving over the socket this page already holds open - fill the
-// same container in, moments later.
-function selectOrReopen(entry) {
-  if (!entry.disk) {
-    selectRun(entry.id);
-    return;
-  }
-  if (entry.reopening) return;
-  entry.reopening = true;
-  entry.state = "replaying";
-  syncEntry(entry);
-  selectRun(entry.id);
-
-  post("runs/reopen", { infohash: entry.infohash, params: entry.params })
-    .then((info) => {
-      claimReopenedRun(entry, info.id);
-      selectRun(entry.id);
-    })
-    .catch((err) => {
-      entry.reopening = false;
-      entry.state = "failed";
-      // A results tree that was moved or copied since it was captured cannot
-      // be replayed - its manifest still points at the old, absolute paths
-      // (TOR-60) - and this is where that surfaces: a reopen that fails.
-      entry.error = String(err.message || err);
-      syncEntry(entry);
-      logFor(entry, "reopen failed: " + entry.error);
-    });
 }
 
 async function cancelRun(id) {
@@ -2406,9 +2517,16 @@ async function uploadTorrent(file) {
 }
 
 // began is what every successful start has in common: the torrent gets a row
-// straight away, from the id the POST already answered with, and it becomes
-// the one shown on the right - "Take frames" should show something happening
-// immediately, not leave a person staring at whatever was on screen before.
+// straight away, from the id the POST already answered with, and that row
+// opens - "Take frames" should show something happening immediately, not
+// leave a person staring at whatever was on screen before.
+//
+// It OPENS the new row rather than making it the only open one (TOR-138).
+// Nothing already on screen is taken away: queueing a second torrent behind
+// the first is the intake's own advertised trick, and a page that closed the
+// running one to show a queued one would undo it. Opening is also the one
+// place the accordion moves without a click, and it is the right one - a
+// torrent that was just asked for is a torrent somebody wants to watch.
 function began(info) {
   // The answer to the POST is this run's FIRST state, never an update to one.
   //
@@ -2429,7 +2547,7 @@ function began(info) {
   entry.disk = false;
   if (!known) entry.state = info.state;
   syncEntry(entry);
-  selectRun(info.id);
+  setRunExpanded(entry, true);
 }
 
 el.form.addEventListener("submit", async (event) => {
