@@ -263,6 +263,16 @@ write_notices() {
 	licence=$(field "$platform" license)
 	licence_file=$(field "$platform" license_file)
 
+	# The font figures come out of the lock rather than being retyped here, so
+	# a refetch that changes the subsets cannot leave the notices stating a
+	# size the archive does not have. internal/web's tests hold the lock
+	# itself honest against the files on disk.
+	fonts_files=$(sed -n 's/^total_files *= *//p' "$root/third_party/fonts.lock")
+	fonts_bytes=$(sed -n 's/^total_bytes *= *//p' "$root/third_party/fonts.lock")
+	if [ -z "$fonts_files" ] || [ -z "$fonts_bytes" ]; then
+		die "third_party/fonts.lock: no total_files/total_bytes to put in the notices"
+	fi
+
 	# Four paragraphs differ per platform, and each of them would be a lie on
 	# the other one: which text is the licence, what the build has configured
 	# in, what that obliges the person holding the archive to do, and whether
@@ -406,6 +416,36 @@ that source on a physical medium or by equivalent means, for no more than the
 cost of performing the distribution. Open an issue at
 https://github.com/madmurdok/torpeek to ask.
 
+## IBM Plex (the typeface the web UI is drawn in)
+
+**Licence: SIL Open Font License 1.1.** Full text in
+\`licenses/fonts/OFL.txt\`. Copyright 2017 IBM Corp.
+
+There is no font file in this folder to look at: the faces are compiled into
+the \`torpeek\` executable, because the web UI has to render the same on a
+seedbox behind a proxy with no route to a font CDN as it does on a desktop.
+Compiling them in is still distributing them, so the notice and the licence
+travel here.
+
+**They are subsets, and they are renamed for that reason.** Only Latin, Latin
+Extended and Cyrillic are included, which deletes glyphs, which makes each file
+a Modified Version under the OFL. IBM Plex is released \`with Reserved Font
+Name "Plex"\`, and OFL clause 3 forbids a Modified Version from presenting a
+reserved name to users - so the stylesheet calls them **Torpeek Sans** and
+**Torpeek Mono**. The typeface is IBM Plex; the new name is the licence being
+obeyed, not authorship being claimed.
+
+A filename in a script outside those three - Japanese, Arabic, anything else -
+is rendered by the machine's own fonts, per glyph, through the fallback stack
+the stylesheet declares. Nothing is lost; only the shape changes.
+
+| | |
+|---|---|
+| upstream | https://github.com/IBM/plex |
+| obtained via | Google Fonts (\`fonts.googleapis.com/css2\`), woff2 subsets |
+| files | ${fonts_files} woff2 files, ${fonts_bytes} bytes total |
+| per-file sha256 | \`third_party/fonts.lock\` in the torpeek source tree |
+
 ## torpeek
 
 $aggregation_para
@@ -470,7 +510,7 @@ for platform in $platforms; do
 	name="torpeek-$version-$platform"
 	stage="$dist/$name"
 	rm -rf "$stage"
-	mkdir -p "$stage/licenses/ffmpeg"
+	mkdir -p "$stage/licenses/ffmpeg" "$stage/licenses/fonts"
 
 	cp "$binary" "$stage/torpeek$exe"
 	cp "$ffmpeg_src" "$stage/ffmpeg$exe"
@@ -486,6 +526,13 @@ for platform in $platforms; do
 		"$root/packaging/licenses/ffmpeg/COPYING.GPLv3" \
 		"$root/packaging/licenses/ffmpeg/LICENSE.md" \
 		"$stage/licenses/ffmpeg/"
+
+	# The typeface the UI is drawn in, subsets of IBM Plex, compiled into the
+	# binary rather than sitting in the folder as files (TOR-120). It is
+	# invisible in the listing above, which is exactly why its licence has to
+	# be here: OFL 1.1 requires the notice and the text to travel with the
+	# font, and "inside an executable" is still distribution.
+	cp "$root/packaging/licenses/fonts/OFL.txt" "$stage/licenses/fonts/"
 
 	# torpeek's own licence, at the archive root rather than under licenses/,
 	# which is for what the archive carries on somebody else's behalf. A

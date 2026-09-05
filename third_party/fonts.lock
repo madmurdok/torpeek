@@ -1,0 +1,127 @@
+# Where the embedded typeface comes from.
+#
+# One stanza per woff2 file in internal/web/assets/fonts, which is the project's
+# first binary asset in git (TOR-120). The repository had avoided one until now
+# on purpose - TOR-101 went out of its way to render its CI fixtures on the
+# runner rather than commit an image - so this file is the argument for the
+# exception, and the record that makes it checkable: every file's sha256, the
+# exact URL it was fetched from, and the unicode-range the CSS declares for it.
+#
+# WHY EMBED AT ALL. torpeek's promise is a folder that needs no network beyond
+# the torrent, and the UI also runs headless on a seedbox behind somebody's
+# reverse proxy. A face linked from fonts.googleapis.com fails there silently
+# and differently on every machine, so the design would be a suggestion rather
+# than a fact. 140532 bytes (137.2 KB) buys it outright, against the
+# ~110 MiB of ffmpeg the archives already carry - four thousandths of the
+# download.
+#
+# THE LICENCE IS WHY THE FAMILY IS RENAMED, and this is the part that is easy to
+# get wrong. IBM Plex is SIL OFL 1.1, which permits bundling; but its copyright
+# line reads `with Reserved Font Name "Plex"`, and OFL clause 3 forbids a
+# Modified Version from using a Reserved Font Name as the primary name presented
+# to users. A subset is a Modified Version - it deletes glyphs - and every file
+# here is a subset. So the CSS presents these as "Torpeek Sans" and "Torpeek
+# Mono". IBM's copyright notice and the full licence text travel in
+# packaging/licenses/fonts/OFL.txt and into every archive; see docs/licensing.md.
+#
+# WHY THE TWO FAMILIES ARE FETCHED DIFFERENTLY. Google serves IBM Plex Sans as a
+# variable font covering 400-700 in one file per subset, and IBM Plex Mono only
+# as static instances. So the CSS the UI actually needs - 400 for body, 500 for
+# names, 700 for headings in the sans; 400 and 600 in the mono - costs
+# 89.4 KB for the sans as one axis against 159.0 KB for the same four
+# weights as statics, while the mono pays per weight either way. That is the one
+# place a variable font is the smaller answer rather than the fashionable one,
+# and it is why the mono was cut from the four weights the CSS asked for to two:
+# the only 700 uses were the submit button and the state badges, both small,
+# uppercase and letter-spaced, where 600 and 700 differ by a hair.
+#
+# TO REFETCH: the URLs below are Google Fonts asset URLs and are stable per
+# revision, not forever. If one 404s, request the same family and weight from
+# fonts.googleapis.com/css2 with a modern browser User-Agent (without one it
+# answers with a different, non-woff2 form) and take the URL for the same
+# subset. Verify the sha256 before committing a replacement: a different hash
+# means a different cut of the font, which is a design change, not a refresh.
+
+total_bytes = 140532
+total_files = 9
+[plex-sans-var-cyrillic.woff2]
+family        = Plex Sans
+css_family    = Torpeek Sans
+weight        = 400
+subset        = cyrillic
+bytes         = 25408
+sha256        = 5bac72520e0a9a5669e08b15fa1e15be6f4da74aa0b2d4315a97c11e1465120a
+source        = https://fonts.gstatic.com/s/ibmplexsans/v23/zYXzKVElMYYaJe8bpLHnCwDKr932-G7dytD-Dmu1syxaKYbSB4ZhRNU.woff2
+unicode_range = U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116
+[plex-sans-var-latin-ext.woff2]
+family        = Plex Sans
+css_family    = Torpeek Sans
+weight        = 400
+subset        = latin-ext
+bytes         = 25868
+sha256        = ae1d854fefa1167a79071f1afe01d4d51b60c5840c1be36dd74bd5fe7375b405
+source        = https://fonts.gstatic.com/s/ibmplexsans/v23/zYXzKVElMYYaJe8bpLHnCwDKr932-G7dytD-Dmu1syxQKYbSB4ZhRNU.woff2
+unicode_range = U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF
+[plex-sans-var-latin.woff2]
+family        = Plex Sans
+css_family    = Torpeek Sans
+weight        = 400
+subset        = latin
+bytes         = 40240
+sha256        = 056e4e2459f57a0033c8c9c844ff19d6e42ac8602027803d4345823bcc939818
+source        = https://fonts.gstatic.com/s/ibmplexsans/v23/zYXzKVElMYYaJe8bpLHnCwDKr932-G7dytD-Dmu1syxeKYbSB4Zh.woff2
+unicode_range = U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
+[plex-mono-400-cyrillic.woff2]
+family        = Plex Mono
+css_family    = Torpeek Mono
+weight        = 400
+subset        = cyrillic
+bytes         = 5476
+sha256        = 7b59d6bf7f8b8408ac28f27d01dca9a890abeae77045d343b1d8ccb089a92e54
+source        = https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1isq131nj-otFQ.woff2
+unicode_range = U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116
+[plex-mono-400-latin-ext.woff2]
+family        = Plex Mono
+css_family    = Torpeek Mono
+weight        = 400
+subset        = latin-ext
+bytes         = 8860
+sha256        = f1050dc5317b43434c0aeda599d4624c774ffc162e87a8cf204b949b6a85816d
+source        = https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1iEq131nj-otFQ.woff2
+unicode_range = U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF
+[plex-mono-400-latin.woff2]
+family        = Plex Mono
+css_family    = Torpeek Mono
+weight        = 400
+subset        = latin
+bytes         = 10052
+sha256        = c36f509c0a8f9f85f29cb44bc8701d8a9e0b14c499e77a884f789ead7093a7ac
+source        = https://fonts.gstatic.com/s/ibmplexmono/v20/-F63fjptAgt5VM-kVkqdyU8n1i8q131nj-o.woff2
+unicode_range = U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD
+[plex-mono-600-cyrillic.woff2]
+family        = Plex Mono
+css_family    = Torpeek Mono
+weight        = 600
+subset        = cyrillic
+bytes         = 5548
+sha256        = b814a03d7e57b0626a906f76911b9361d173a1aabc5544c40f72d6a35a1e4940
+source        = https://fonts.gstatic.com/s/ibmplexmono/v20/-F6qfjptAgt5VM-kVkqdyU8n3vAOwlRFgsAXHNlYzg.woff2
+unicode_range = U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116
+[plex-mono-600-latin-ext.woff2]
+family        = Plex Mono
+css_family    = Torpeek Mono
+weight        = 600
+subset        = latin-ext
+bytes         = 8960
+sha256        = 1b6b18fd0fd240bc6d5850f4df621484722d4b5d3650ebdd1e3a8bbd81c75854
+source        = https://fonts.gstatic.com/s/ibmplexmono/v20/-F6qfjptAgt5VM-kVkqdyU8n3vAOwl5FgsAXHNlYzg.woff2
+unicode_range = U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF
+[plex-mono-600-latin.woff2]
+family        = Plex Mono
+css_family    = Torpeek Mono
+weight        = 600
+subset        = latin
+bytes         = 10120
+sha256        = ad4580d8cb4b5f627c2d18457656732f7f7b070f7837fbc380e08054157e6f6c
+source        = https://fonts.gstatic.com/s/ibmplexmono/v20/-F6qfjptAgt5VM-kVkqdyU8n3vAOwlBFgsAXHNk.woff2
+unicode_range = U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD

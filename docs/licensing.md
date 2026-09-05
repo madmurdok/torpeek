@@ -717,6 +717,60 @@ there is stricter - it refuses an arm64 Mach-O with no valid signature outright
 `first-run.command` travels in both macOS archives because the remedy does not
 depend on the answer.
 
+## The typeface: OFL, and why the family had to be renamed
+
+The web UI is drawn in subsets of **IBM Plex**, compiled into the binary
+(TOR-120). This is the project's first binary asset in git, and the second
+third-party licence in the archives, so it gets its own record here rather than
+a line in the ffmpeg tables.
+
+**Why it is bundled at all.** The alternative was a `<link>` to
+fonts.googleapis.com, and there is a specific machine on which that fails:
+torpeek's own headless mode, serving the UI from a seedbox behind somebody's
+reverse proxy. There the request either never resolves or is blocked, silently,
+and the design becomes a suggestion that renders differently on every host. At
+140532 bytes (137.2 KB) against the ~110 MiB of ffmpeg each archive
+already carries - four thousandths of the download - buying certainty outright
+was not a close call.
+
+**Licence: SIL Open Font License 1.1**, Copyright 2017 IBM Corp. Text in
+`packaging/licenses/fonts/OFL.txt`, copied into every archive as
+`licenses/fonts/OFL.txt` beside the ffmpeg ones. The OFL permits bundling and
+selling; what it requires is that the copyright notice and the licence travel
+with the font. Compiling a font into an executable is still distributing it, so
+they travel.
+
+**The rename is an obligation, not a branding exercise**, and it is the part
+that would have been easy to get wrong by not reading the licence header.
+IBM Plex is released `with Reserved Font Name "Plex"`. OFL clause 3:
+
+> No Modified Version of the Font Software may use the Reserved Font Name(s)
+> unless explicit written permission is granted... This restriction only
+> applies to the primary font name as presented to the users.
+
+And clause-wise a subset **is** a Modified Version - the definition covers any
+derivative made by "deleting... any of the components of the Original
+Version", which is precisely what subsetting to three scripts does. All 9
+files here are subsets. So the stylesheet presents them as **Torpeek Sans** and
+**Torpeek Mono**, and every notice says plainly that the typeface is IBM Plex.
+Keeping the name would have been the licence violation; changing it without
+saying whose work it is would have been the other one.
+
+**What is included, and what deliberately is not.** Latin, Latin Extended and
+Cyrillic. Not because those are the only scripts that matter, but because the
+UI renders torrent *names*, which are arbitrary text in arbitrary scripts, and
+no font ships every script. The stylesheet declares a real fallback stack, so a
+Japanese or Arabic filename is composed per glyph by the machine's own fonts
+and renders correctly - verified in a browser rather than assumed, with
+`漫画.1080p.mkv`, `فيلم.mkv` and `Синтел.2048.mkv` in the run list and no tofu
+in any of them. Chasing full coverage would cost megabytes to prevent nothing.
+
+**Provenance** is `third_party/fonts.lock`: per-file sha256, the Google Fonts
+URL each came from, and the `unicode-range` the CSS declares for it. A
+different hash means a different cut of the font, which is a design change
+rather than a refresh, and the tests in `internal/web` fail if the lock and the
+files disagree.
+
 ## Size
 
 Section 4 estimates ~80 MB per platform. The measured figure for the chosen
@@ -748,6 +802,11 @@ libbluray, libzvbi, aribb24, libopenmpt, libgme, SRT, RIST, ZeroMQ, LV2,
 OpenAL, Vulkan with libplacebo, chromaprint, libvmaf, zimg, and the AMF, QSV
 and NVENC hardware paths - and torpeek asks for none of it beyond five
 decoders and two image encoders.
+
+The embedded typeface adds 140532 bytes (137.2 KB) to the `torpeek`
+column and nothing to the others. It does not appear as a row because it is
+inside the executable, which is also why its licence has to be in
+`licenses/fonts/` rather than inferable from the folder listing.
 
 Two ways down, if the size is judged unacceptable:
 
