@@ -1,6 +1,8 @@
 package wire
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -161,5 +163,82 @@ func TestNoRunLeavesTheKeyOut(t *testing.T) {
 	m := Event("", core.Done{Reason: core.StopCompleted})
 	if _, ok := m["run"]; ok {
 		t.Errorf("event rendered with no run still carries %v", m)
+	}
+}
+
+// TestFileStartedCarriesThePlanItself is TOR-110's half of the wire: the page
+// lays the whole grid out before the first piece is fetched, which it can only
+// do if it knows where every capture point WILL be, not just how many there
+// are. A count reserves nothing, because a reserved cell has to say what it is
+// reserved for.
+func TestFileStartedCarriesThePlanItself(t *testing.T) {
+	ev := core.FileStarted{
+		File: 0,
+		Path: "movie.mkv",
+		Media: probe.MediaInfo{
+			Duration: 30 * time.Minute,
+			Video:    probe.VideoStream{Codec: "h264", Width: 1920, Height: 1080},
+		},
+		Plan: []time.Duration{
+			90 * time.Second,
+			5*time.Minute + 30*time.Second,
+			27 * time.Minute,
+		},
+	}
+
+	got := Event("", ev)
+
+	if got["planned"] != 3 {
+		t.Errorf("planned = %v, want 3 - the count stays, a log line wants it", got["planned"])
+	}
+
+	plan, ok := got["plan"].([]int64)
+	if !ok {
+		t.Fatalf("plan is %T, want []int64", got["plan"])
+	}
+	want := []int64{90_000, 330_000, 1_620_000}
+	if len(plan) != len(want) {
+		t.Fatalf("plan = %v, want %v", plan, want)
+	}
+	for i := range want {
+		if plan[i] != want[i] {
+			t.Fatalf("plan = %v, want %v (milliseconds, the unit every other "+
+				"timestamp on this stream uses)", plan, want)
+		}
+	}
+
+	// The plan is the points BEFORE any shifting (core.FileStarted.Plan's own
+	// doc), which is what lets a cell keep its identity when the frame that
+	// fills it comes from a neighbour: frame_ready's index says which point it
+	// belongs to, not its timecode.
+	if plan[0] != ev.Plan[0].Milliseconds() {
+		t.Errorf("plan[0] = %d, want the event's own first point %d",
+			plan[0], ev.Plan[0].Milliseconds())
+	}
+}
+
+// TestFileStartedWithNoPlanSendsAnEmptyArray keeps the page from having to ask
+// whether the field is there before iterating it. A null and an empty list are
+// the same fact to a person and two different things to a for-of loop.
+func TestFileStartedWithNoPlanSendsAnEmptyArray(t *testing.T) {
+	got := Event("", core.FileStarted{File: 0, Path: "movie.mkv"})
+
+	plan, ok := got["plan"].([]int64)
+	if !ok {
+		t.Fatalf("plan is %T, want []int64 even with no plan", got["plan"])
+	}
+	if plan == nil {
+		t.Error("plan is a nil slice; it marshals as null, which a for-of cannot walk")
+	}
+	if len(plan) != 0 {
+		t.Errorf("plan = %v, want empty", plan)
+	}
+
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !bytes.Contains(data, []byte(`"plan":[]`)) {
+		t.Errorf("the encoded event does not carry an empty plan array: %s", data)
 	}
 }

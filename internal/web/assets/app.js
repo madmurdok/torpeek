@@ -928,6 +928,24 @@ function fileBlock(entry, index) {
     // rather than appended to: a set fetched after the fact arrives in no
     // particular order relative to what is already there.
     frames: new Map(),
+    // plan is the capture points this file's run is going to attempt, in
+    // milliseconds, straight off file_started (TOR-110). While it is set the
+    // grid is laid out FROM it - one cell per planned point, at final size,
+    // before any piece is fetched - so the grid stops shoving itself around
+    // for the minute a run spends waiting.
+    //
+    // It is emptied once the file's frames have been read back from disk,
+    // and that hand-off is deliberate rather than tidy-up. A plan describes
+    // one run; the disk holds every result set this torrent has for the
+    // file, and the sets merge by timecode into cells no single plan
+    // accounts for (see frames above). Once nothing is arriving there is
+    // also nothing left to reflow, so the truthful view costs nothing.
+    plan: [],
+    // skipped is what the engine reported as unreachable, by plan index -
+    // frame_skipped's code and reason. Without it a point that failed live
+    // leaves its reserved cell looking like a frame still on its way, which
+    // is the one thing the reserved cell must not do.
+    skipped: new Map(),
     detailLoaded: false,
     width: 0,
     height: 0,
@@ -1041,11 +1059,28 @@ function setMetaExpanded(fentry, expanded) {
 // live (resolution the moment file_started arrives, the frame count on
 // every frame_ready) whether or not the file happens to be expanded right
 // now.
+// updateFileSummary says how many frames the file has, and against what it
+// was trying for when the two differ.
+//
+// It counts frames rather than CELLS, which is a distinction the grid only
+// acquired once a point that produced nothing started being listed at all
+// (TOR-118): fentry.frames holds an entry for every planned point a finished
+// run recorded, failures included, so its plain size would report a holed run
+// of five frames as twelve. A count that is really a plan pretending to be a
+// result is the kind of quiet lie this project keeps finding.
 function updateFileSummary(fentry) {
   const parts = [];
   if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
-  const count = fentry.frames.size;
-  parts.push(count === 1 ? "1 frame" : count + " frames");
+
+  const cells = gridCells(fentry);
+  const captured = cells.filter((cell) => cell.url).length;
+  const planned = fentry.plan.length || cells.length;
+
+  if (planned > captured) {
+    parts.push(captured + " of " + planned + " frames");
+  } else {
+    parts.push(captured === 1 ? "1 frame" : captured + " frames");
+  }
   fentry.summary.textContent = parts.join(" · ");
 }
 
@@ -1056,6 +1091,11 @@ function onFileStarted(entry, ev) {
   fentry.name.textContent = ev.path;
   fentry.width = ev.width;
   fentry.height = ev.height;
+
+  // The whole grid, at final size, before the first piece is fetched.
+  fentry.plan = Array.isArray(ev.plan) ? ev.plan : [];
+  fentry.skipped.clear();
+  renderFrames(fentry);
   updateFileSummary(fentry);
 
   fentry.specs.replaceChildren();
@@ -1093,26 +1133,105 @@ function addFrame(entry, ev) {
   logFor(entry, "frame " + ev.index + " at " + seconds(at) + (ev.shift ? " (" + ev.shift + ")" : ""));
 }
 
-// renderFrames rebuilds the grid from fentry.frames, earliest first.
+// renderFrames rebuilds the grid from what the file is known to have.
 //
 // Rebuilding the whole grid rather than inserting into it keeps one rule -
-// the DOM is the map, ordered by time - instead of two: a live run appends
-// in plan order and would look sorted either way, while a set fetched from
-// disk arrives all at once and interleaves with what is already shown.
+// the DOM is the map - instead of two: a live run appends in plan order and
+// would look sorted either way, while a set fetched from disk arrives all at
+// once and interleaves with what is already shown.
 function renderFrames(fentry) {
-  const ordered = [...fentry.frames.values()].sort((a, b) => a.timeMs - b.timeMs);
-  fentry.grid.replaceChildren(...ordered.map((frame) => frameFigure(frame, fentry)));
+  fentry.grid.replaceChildren(...gridCells(fentry).map((cell) => frameFigure(cell, fentry)));
 }
 
+// gridCells is the grid as a list of cells, each carrying the state it should
+// be drawn in. There are two ways to build it and which one applies is the
+// difference between a run in flight and a run that is over.
+//
+// FROM THE PLAN, while fentry.plan is set. One cell per capture point the
+// engine said it would attempt, in plan order, whether or not anything has
+// arrived for it yet - which is the point: every cell exists at final size
+// before the first piece is fetched, so nothing reflows during the minute a
+// run spends waiting. A frame claims its cell by INDEX rather than by
+// timecode, because a shifted frame lands somewhere other than where it was
+// asked for and still belongs to the point that asked.
+//
+// FROM THE DISK, once the plan has been handed over. Ordered by time and
+// keyed by it, so the result sets merge exactly as fentry.frames does - a
+// view no single plan can describe, and one nothing is arriving into, so it
+// has no reflow to avoid.
+function gridCells(fentry) {
+  if (fentry.plan.length) {
+    const byIndex = new Map();
+    for (const frame of fentry.frames.values()) {
+      if (Number.isInteger(frame.index)) byIndex.set(frame.index, frame);
+    }
+    return fentry.plan.map((plannedMs, index) => {
+      const frame = byIndex.get(index);
+      if (frame) return { ...frame, plannedMs, state: frame.shift ? "shifted" : "exact" };
+
+      const skip = fentry.skipped.get(index);
+      if (skip) {
+        return {
+          state: "failed", timeMs: plannedMs, plannedMs, index,
+          url: null, shift: "", error: skip.code, reason: skip.reason, params: "",
+        };
+      }
+      return {
+        state: "pending", timeMs: plannedMs, plannedMs, index,
+        url: null, shift: "", error: "", params: "",
+      };
+    });
+  }
+
+  return [...fentry.frames.values()]
+    .sort((a, b) => a.timeMs - b.timeMs)
+    .map((frame) => ({ ...frame, state: frameState(frame) }));
+}
+
+// frameState reads a disk-shaped frame's own fields. A point that produced
+// nothing has no URL and carries the engine's reason instead (TOR-118); one
+// that produced a frame somewhere other than where it was asked says so in
+// shift; everything else is exactly what was planned, and gets no marking at
+// all, because most cells are this one and a grid that marks every cell marks
+// none of them.
+function frameState(frame) {
+  if (!frame.url) return "failed";
+  return frame.shift ? "shifted" : "exact";
+}
+
+// What a shift and a failure code mean in words, for the cell's own tooltip.
+// The manifest's vocabulary is short enough to be cryptic - "shifted",
+// "stepped", "read_stalled" - and a person deciding whether to run again
+// needs the difference, not the token.
+const SHIFT_REASON = {
+  shifted: "the exact point was not held by any peer, so a nearby one was taken",
+  stepped: "the frame there was blank, so the neighbouring keyframe was taken",
+};
+const FAILURE_REASON = {
+  unavailable: "no peer offered these pieces - running again will not help unless the swarm changes",
+  read_stalled: "the pieces were being fetched and the read timed out - running again may well get through",
+};
+
+// frameFigure draws one cell in the state gridCells gave it.
+//
+// The states are spent unevenly on purpose. An exact frame gets no marking at
+// all, because most cells are exact and a grid that marks every cell marks
+// none of them - the picture is the content. A shifted frame keeps the plain
+// thumbnail and gains exactly one signal, a warn rule under it, with the
+// reason on inspection. A BORDER is spent on one state only, failure, so that
+// a border in this grid means "nothing was captured here" and nothing else.
+// And a pending cell is deliberately the quietest of the four: it is the
+// normal state of a run that is still working, and it must not read as an
+// error while it waits.
 function frameFigure(frame, fentry) {
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
-  figure.className = "thumb";
+  figure.className = "thumb thumb-" + frame.state;
 
-  // A failed point (TOR-118) has no url - nothing was ever captured there,
-  // manifest.Frame.Error says why - so there is no src to give an <img>.
-  // <img src=""> would ask the browser to fetch the page itself; a plain box
-  // the same shape as a thumbnail says "nothing here" without doing that.
+  // A pending or failed cell has no url - nothing was captured there, or not
+  // yet - so there is no src to give an <img>. <img src=""> would ask the
+  // browser to fetch the page itself; a box the same shape as a thumbnail
+  // says "nothing here" without doing that.
   let img = null;
   if (frame.url) {
     img = document.createElement("img");
@@ -1121,11 +1240,18 @@ function frameFigure(frame, fentry) {
     img.loading = "lazy";
   } else {
     img = document.createElement("div");
-    img.className = "thumb-missing";
-    if (frame.error) img.title = frame.error;
+    img.className = "thumb-box";
+    if (frame.state === "failed") {
+      const code = document.createElement("span");
+      code.className = "thumb-code";
+      code.textContent = frame.error || "no frame";
+      img.append(code);
+    }
   }
 
   const caption = document.createElement("figcaption");
+  // A pending or failed cell shows where the point WAS PLANNED - nowhere else
+  // is true for it - and a captured one shows where the frame came from.
   caption.textContent = timecode(frame.timeMs);
   if (frame.shift) {
     caption.append(" ");
@@ -1135,14 +1261,18 @@ function frameFigure(frame, fentry) {
     caption.append(note);
   }
 
+  // The explanation lives on the figure rather than on the image, so it is
+  // reachable on a cell that has no image.
+  figure.title = cellTitle(frame);
+
   figure.append(img, caption);
 
-  // The cross, only for a frame that names the result set it lives in: that
-  // is the other half of its address on disk, and without it there is
-  // nothing a delete could be aimed at (see addFrame). It sits inside the
-  // figure, which is itself clickable, so the click must not also open the
-  // lightbox over the frame it just removed.
-  if (fentry && frame.params) {
+  // The cross, only for a frame that both exists and names the result set it
+  // lives in. The set is the other half of its address on disk (see
+  // addFrame); the existence is the rest - a failed point has no file to
+  // delete, and offering the cross on one would be offering an action that
+  // cannot succeed.
+  if (fentry && frame.params && frame.url) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "thumb-delete";
@@ -1157,7 +1287,7 @@ function frameFigure(frame, fentry) {
     figure.append(remove);
   }
 
-  // Nothing to open full-size for a failed point - there is no image, only
+  // Nothing to open full-size for a cell with no frame in it - there is only
   // the box standing in for one.
   const open = () => { if (frame.url) openLightbox(img.src, caption.textContent); };
   figure.addEventListener("click", open);
@@ -1173,6 +1303,28 @@ function frameFigure(frame, fentry) {
   });
 
   return figure;
+}
+
+// cellTitle is what the cell says on inspection: the state in words, and for
+// anything other than an exact frame, why.
+function cellTitle(frame) {
+  const planned = Number.isFinite(frame.plannedMs) ? timecode(frame.plannedMs) : "";
+  switch (frame.state) {
+    case "pending":
+      return "planned for " + timecode(frame.timeMs) + " - not captured yet";
+    case "failed": {
+      const why = FAILURE_REASON[frame.error];
+      return "no frame at " + timecode(frame.timeMs) + (frame.error ? " - " + frame.error : "") +
+        (why ? ": " + why : "") + (frame.reason ? " (" + frame.reason + ")" : "");
+    }
+    case "shifted": {
+      const why = SHIFT_REASON[frame.shift];
+      const asked = planned && planned !== timecode(frame.timeMs) ? "asked for " + planned + ", " : "";
+      return asked + "taken at " + timecode(frame.timeMs) + (why ? " - " + why : "");
+    }
+    default:
+      return "frame at " + timecode(frame.timeMs);
+  }
 }
 
 // deleteFrame removes one frame from disk - its manifest record and its file
@@ -1265,6 +1417,13 @@ async function loadFileDetail(entry, fentry, index) {
       fentry.frames.set(frame.time_ms, detailFrame(frame));
     }
     fentry.detailLoaded = true;
+    // The plan has done its job and now stands in the way of the truth: it
+    // describes one run, while this response spans every result set the
+    // torrent holds for the file, merged by timecode into cells no single
+    // plan accounts for (TOR-110). Nothing is arriving any more either, so
+    // there is no reflow left for the reserved cells to prevent.
+    fentry.plan = [];
+    fentry.skipped.clear();
     renderFrames(fentry);
     updateFileSummary(fentry);
   } catch (err) {
@@ -1451,9 +1610,17 @@ function apply(ev) {
       addFrame(entry, ev);
       break;
 
-    case "frame_skipped":
+    case "frame_skipped": {
+      // Mark the cell this point had reserved, rather than only saying so in
+      // the log: a reserved cell that never fills is indistinguishable from
+      // one still waiting, and a person watching cannot tell a slow read
+      // from a dead one (TOR-110).
+      const fentry = fileBlock(entry, ev.file);
+      fentry.skipped.set(ev.index, { code: ev.code || "", reason: ev.reason || "" });
+      renderFrames(fentry);
       logFor(entry, "frame " + ev.index + " skipped: " + ev.code + " " + ev.reason);
       break;
+    }
 
     case "progress": {
       const fentry = fileBlock(entry, ev.file);

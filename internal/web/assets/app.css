@@ -803,11 +803,61 @@ button:disabled { opacity: .5; }
    grid stays regular, with nothing drawn inside it. TOR-110 owns what a cell
    state actually looks like - this is only the minimum that keeps the grid
    from breaking until that lands. */
-.thumb-missing {
-  width: 100%; aspect-ratio: 16 / 9; display: block;
-  background: var(--s3); border-radius: .25rem;
+/* THE GRID'S FOUR STATES (TOR-110). A cell is one capture point, and the
+   states are spent unevenly on purpose.
+
+   EXACT gets nothing at all. It has no rule here, and that is the design:
+   most cells are exact, the picture is the content, and a grid that marks
+   every cell marks none of them.
+
+   PENDING is the quietest of the four. It is the normal state of a run that
+   is still working - a run is mostly waiting - so it must not read as
+   something wrong. A surface and the same hairline every thumbnail has, and
+   no animation: the progress line above already says the run is alive, and a
+   grid of twenty pulsing boxes would say it twenty times.
+
+   SHIFTED keeps the plain thumbnail and gains exactly ONE signal, a warn foot
+   under the image, echoed by the word already in its caption. The frame is
+   real and worth looking at; it just came from a neighbour.
+
+   FAILED is the only state that gets a BORDER, and that is what makes a
+   border mean something in this grid: nothing was captured here. It is also
+   the only one that puts text inside the cell, because the reason is the
+   whole content when the picture is missing. */
+
+/* The box that stands in for an image on a cell that has none. Same geometry
+   as .thumb img so the grid cannot tell them apart by size. */
+.thumb-box {
+  width: 100%; aspect-ratio: 16 / 9;
+  display: grid; place-content: center;
+  border-radius: .25rem;
+  box-sizing: border-box;
+}
+.thumb-pending .thumb-box {
+  background: var(--s2);
   box-shadow: inset 0 0 0 1px var(--rule);
 }
+.thumb-pending figcaption { color: var(--ink-3); }
+
+.thumb-failed .thumb-box {
+  background: var(--bad-dim);
+  border: 1px dashed var(--bad);
+}
+.thumb-code {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--bad); text-align: center; padding: 0 .4rem;
+  overflow-wrap: anywhere;
+}
+.thumb-failed figcaption { color: var(--ink-3); }
+
+/* The hairline every frame carries (see .thumb img) plus a foot, so the mark
+   is added to the cell rather than replacing what is already true of it. */
+.thumb-shifted img {
+  box-shadow: inset 0 0 0 1px var(--rule), inset 0 -3px 0 var(--warn);
+}
+
+/* A cell with nothing in it is not a link to anywhere. */
+.thumb-pending, .thumb-failed { cursor: default; }
 .thumb figcaption { font-family: var(--mono); font-size: .7rem; color: var(--ink-2); letter-spacing: .02em; }
 .thumb .shifted { color: var(--warn); }
 .thumb:focus-visible img { outline: 2px solid var(--accent); outline-offset: 2px; }
