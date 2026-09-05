@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
@@ -393,15 +394,21 @@ func TestReplayServesAHoledRun(t *testing.T) {
 
 // TestACacheHitStillRefusesAHoledRun is the other half of TOR-124 and the
 // regression that would matter most. Reopening asks "show me what this run
-// produced"; a live request asks for a specific number of frames of a
-// specific file, and answering it off disk with five of the twelve somebody
-// asked for would be answering a question they did not put. Run.Complete's
-// own doc argues exactly that, and it stays true on this path.
+// produced"; a live request asks for a specific number of frames of a specific
+// file, and answering it off disk with five of the twelve somebody asked for
+// would be answering a question they did not put. Run.Complete's own doc argues
+// exactly that, and it stays true on this path.
+//
+// It goes through serveFromCache rather than calling loadCacheHit with a
+// literal true, and that is deliberate: the first version of this test called
+// the helper directly, so flipping serveFromCache's own argument to false left
+// it green. A test of a flag's behaviour is not a test that the caller passes
+// it.
 func TestACacheHitStillRefusesAHoledRun(t *testing.T) {
 	const infoHash = "4e1827ec34783a07358081c635a4e0beab1c11df"
 	root := t.TempDir()
 
-	cfg := DefaultConfig("ignored.torrent", root, t.TempDir())
+	cfg := DefaultConfig("magnet:?xt=urn:btih:"+infoHash, root, t.TempDir())
 	cfg.Plan = frames.Plan{Count: 12, Start: 0.05, End: 0.95}
 	params := ParamsKey(cfg)
 
@@ -416,29 +423,37 @@ func TestACacheHitStillRefusesAHoledRun(t *testing.T) {
 	// having: the two paths read the same directory and must answer
 	// differently.
 	replayed := collect(t, NewEngine(ffmpeg.Tools{}).Replay(root, infoHash, params))
-	servedByReplay := false
+	served := false
 	for _, ev := range replayed {
 		if _, ok := ev.(FileStarted); ok {
-			servedByReplay = true
+			served = true
 		}
 	}
-	if !servedByReplay {
+	if !served {
 		t.Fatal("the fixture is not reopenable, so this test cannot show the difference")
 	}
 
-	layout := output.Layout{Root: root, InfoHash: infoHash, Params: params}
-	record, ok := cache.LoadRun(layout.RunDir())
-	if !ok {
-		t.Fatal("the fixture wrote no readable record")
+	src, err := swarm.ParseSource(cfg.Source)
+	if err != nil {
+		t.Fatalf("parse the source: %v", err)
 	}
-	selected := []swarm.FileInfo{{Index: 0, Path: "movie.mkv", Length: 1 << 20}}
 
-	if _, ok := loadCacheHit(layout, record, selected, true); ok {
+	bus := NewBus(DefaultBuffer)
+	events, stop := bus.Subscribe()
+	defer stop()
+	drained := make(chan struct{})
+	go func() {
+		for range events {
+		}
+		close(drained)
+	}()
+
+	hit := NewEngine(ffmpeg.Tools{}).serveFromCache(cfg, src, bus, time.Now())
+	bus.Close()
+	<-drained
+
+	if hit {
 		t.Error("a live request was answered off disk with a holed result; it must go " +
 			"to the swarm and try the missing points again")
-	}
-	if _, ok := loadCacheHit(layout, record, selected, false); !ok {
-		t.Error("reopening the same directory was refused, so the two paths are not " +
-			"actually distinguished")
 	}
 }
