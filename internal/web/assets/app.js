@@ -230,6 +230,40 @@ function metaTitle(entry) {
   return metaLabel(entry);
 }
 
+// displayName is what a row's name cell shows, and whether that answer is
+// confirmed or merely offered (TOR-117).
+//
+// entry.name is never invented - GET /runs and the run's own events only
+// ever set it from what the torrent's own metadata, or a finished run's own
+// disk record, actually said. entry.provisionalName is the one exception: a
+// magnet's own dn= parameter, which anybody can put anything into, so a row
+// showing it must stay visibly distinct from one showing a confirmed name
+// (syncEntry marks it) rather than let a person mistake a guess for a
+// verified answer. Falling all the way through to the raw source (a magnet
+// URI, unreadable as it is) or the id is the same last resort this always
+// had - now reached only when nothing has offered even a dn=, which after
+// this ticket is the one case truly left with nothing to say.
+function displayName(entry) {
+  if (entry.name) return { text: entry.name, provisional: false };
+  if (entry.provisionalName) return { text: entry.provisionalName, provisional: true };
+  return { text: entry.source || shortId(entry.id), provisional: false };
+}
+
+// noteConfirmedName logs the moment a provisional name (a magnet's own dn=)
+// is superseded by the torrent's own confirmed metadata - only when the two
+// actually disagree, and only the first time a confirmed name arrives for
+// this run (the entry.name guard). A dn= is never authoritative: anyone can
+// put anything after it, and the metadata a session actually fetches can
+// disagree with it. So the transition off a provisional name must not be a
+// silent swap - a person who has been reading "Sintel" deserves to see the
+// record say so explicitly if the torrent's own metadata turns out to name
+// it something else, rather than watch the row's text change with nothing
+// to explain why.
+function noteConfirmedName(entry, confirmed) {
+  if (entry.name || !entry.provisionalName || entry.provisionalName === confirmed) return;
+  logFor(entry, "name confirmed as \"" + confirmed + "\" (the magnet link said \"" + entry.provisionalName + "\")");
+}
+
 function whenLabel(ms) {
   if (!ms) return "";
   const d = new Date(ms);
@@ -244,7 +278,7 @@ function whenLabel(ms) {
 
 function sortValue(entry, key) {
   switch (key) {
-    case "name": return (entry.name || entry.source || shortId(entry.id)).toLowerCase();
+    case "name": return displayName(entry).text.toLowerCase();
     case "status": return badgeLabel(entry).toLowerCase();
     case "when":
     default: return entry.when || 0;
@@ -395,7 +429,13 @@ function newRunEntry(id) {
 
   const entry = {
     id, disk: false, infohash: "", params: "",
-    state: "", source: "", name: "", error: "", progress: "",
+    state: "", source: "", name: "",
+    // provisionalName is a magnet's own dn=, offered only while name is
+    // still empty (TOR-117) - see displayName for how the two are chosen
+    // between, and noteConfirmedName for how the switch off this one is
+    // announced rather than left silent.
+    provisionalName: "",
+    error: "", progress: "",
     files: 0, complete: 0, selected: 0,
     // partial is GET /runs' own "partial" field (RunSummary.Partial in
     // listing.go, TOR-80) - false here for the same reason files/complete/
@@ -510,8 +550,16 @@ function syncEntry(entry) {
   // The cell truncates, so the whole name has to be reachable some other way
   // than by widening the panel - a tooltip costs nothing and answers "which
   // Sintel is this" without moving the divider.
-  entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
-  entry.rowName.title = entry.rowName.textContent;
+  const shown = displayName(entry);
+  entry.rowName.textContent = shown.text;
+  entry.rowName.title = shown.provisional
+    ? shown.text + " — from the magnet link, not yet confirmed by the torrent's own metadata"
+    : shown.text;
+  // run-name-provisional is the visible marker TOR-117 requires: a dn=-
+  // derived name must never read the same as a confirmed one. The rule this
+  // toggles styles by lives beside the row cells it is scoped next to in
+  // app.css, not duplicated here.
+  entry.rowName.classList.toggle("run-name-provisional", shown.provisional);
   entry.rowMeta.textContent = metaLabel(entry);
   entry.rowMeta.title = metaTitle(entry);
   entry.rowWhen.textContent = whenLabel(entry.when);
@@ -521,7 +569,8 @@ function syncEntry(entry) {
 
   entry.detailBadge.textContent = badgeLabel(entry);
   entry.detailBadge.dataset.state = badgeState(entry);
-  entry.detailTitle.textContent = entry.name || entry.source || shortId(entry.id);
+  entry.detailTitle.textContent = shown.text;
+  entry.detailTitle.classList.toggle("run-name-provisional", shown.provisional);
   entry.detailCancel.hidden = entry.disk || !cancellable(entry.state);
   entry.detailError.hidden = !entry.error;
   entry.detailError.textContent = entry.error || "";
@@ -1314,6 +1363,16 @@ function apply(ev) {
     entry.state = ev.state;
     if (ev.source) entry.source = ev.source;
     if (ev.infohash) entry.infohash = ev.infohash;
+    // TOR-117: run_state carries whichever of the two the server has -
+    // never both (see runStateFieldsLocked). This is what a page that was
+    // already open sees during the exact gap the ticket is about: accepted,
+    // nothing confirmed yet, a magnet's dn= is all there is.
+    if (ev.name) {
+      noteConfirmedName(entry, ev.name);
+      entry.name = ev.name;
+    } else if (ev.provisional_name) {
+      entry.provisionalName = ev.provisional_name;
+    }
     entry.error = ev.error || "";
     // ev.partial rides on exactly one run_state a run ever publishes: the one
     // sent after this run's own record was written to disk (server.go's
@@ -1340,6 +1399,7 @@ function apply(ev) {
 
   switch (ev.type) {
     case "metadata_ready":
+      noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
       entry.torrentSummary.hidden = false;
       // videos is the list itself, not a count: TOR-66 replaced the bare
@@ -1357,6 +1417,7 @@ function apply(ev) {
       // running. The torrent's name and file list arrive here, and the
       // run_state that follows this record is what actually shows the
       // picker (syncEntry).
+      noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
       if (ev.infohash) entry.infohash = ev.infohash;
       entry.torrentSummary.hidden = false;
@@ -1543,6 +1604,10 @@ async function loadRuns() {
     entry.params = row.params || entry.params;
     entry.source = row.source || entry.source;
     entry.name = row.name || entry.name;
+    // TOR-117: GET /runs carries the two the same way run_state does - never
+    // both for one row (see RunSummary.ProvisionalName) - so there is
+    // nothing to reconcile here beyond copying whichever arrived.
+    entry.provisionalName = row.provisional_name || entry.provisionalName;
     entry.files = row.files || 0;
     entry.complete = row.complete || 0;
     entry.selected = row.selected || 0;

@@ -92,6 +92,24 @@ func newTestServerWith(t *testing.T, cfg Config, runner Runner, replayer Replaye
 	return srv, ts
 }
 
+// newTestServerWithConfigAndLister is newTestServerWithConfig plus a Lister,
+// for a test that needs both a non-default Config (OutputRoot, most often)
+// and a metadata pass - TOR-117's needs-action row is the one live state
+// whose own Name comes from entry.contents rather than a disk record or a
+// magnet's dn=, and proving that needs a server with somewhere to also write
+// disk records.
+func newTestServerWithConfigAndLister(t *testing.T, cfg Config, runner Runner, lister Lister) (*Server, *httptest.Server) {
+	t.Helper()
+
+	srv := newServer(context.Background(), cfg, runner, nil, nil, lister)
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(func() {
+		ts.Close()
+		srv.Close()
+	})
+	return srv, ts
+}
+
 // newTestServerWithLister is newTestServer plus a Lister, for the tests that
 // park a torrent waiting for a file selection (TOR-67). Every other helper
 // here passes a nil lister, which is the no-parking path - so these are the

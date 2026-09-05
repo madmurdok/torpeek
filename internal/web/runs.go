@@ -92,6 +92,17 @@ type RunInfo struct {
 	// It is what ties a live run to the record it leaves on disk, which is
 	// keyed by infohash and a hash of the plan (output.Layout), not by ID.
 	InfoHash string
+	// Name is the torrent's own name, confirmed by this run's metadata -
+	// either the metadata pass a needs-action or single-file run paid for
+	// (listThenRun, entry.contents) or the core.MetadataReady a run that
+	// skipped listing gets from the engine directly (pump) - never guessed.
+	// Empty until one of those has actually happened: a queued run, and a
+	// running run still waiting on its own metadata, have nothing confirmed
+	// to report here yet (TOR-117). RunSummary.ProvisionalName is what a
+	// listing offers meanwhile, for a magnet whose source names it, and this
+	// field is deliberately not it - a caller that wants the honest "do we
+	// actually know" answer reads this one.
+	Name string
 	// Err is the failure this run ended on, in the form a client shows.
 	Err       string
 	QueuedAt  time.Time
@@ -131,6 +142,14 @@ type runEntry struct {
 	// been open since yesterday sends. It is a handful of names and lengths;
 	// no payload, no session, nothing that has to be closed.
 	contents *core.Contents
+	// name is the torrent's own confirmed name, set the moment it is learned
+	// - by listThenRun from contents.Name, or by pump from a core.MetadataReady
+	// a run that skipped listing gets straight from the engine (TOR-117).
+	// Kept as its own field rather than always read out of contents because
+	// the second path never populates contents at all (needsListingLocked
+	// is false for it) - info() and runStateFieldsLocked need one place to
+	// read regardless of which of the two happened.
+	name string
 	// listed records that the metadata pass has already happened for this
 	// entry, so a torrent that parks and is then decided goes straight to
 	// its run instead of paying for the same listing a second time. Distinct
@@ -149,6 +168,7 @@ type runEntry struct {
 func (e *runEntry) info() RunInfo {
 	out := RunInfo{
 		ID: e.id, State: e.state, Source: e.source, InfoHash: e.infoHash,
+		Name:     e.name,
 		QueuedAt: e.queuedAt, StartedAt: e.startedAt, EndedAt: e.endedAt,
 	}
 	if e.err != nil {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/output"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // RunSummary is one row of GET /runs: enough for a panel to show a run and
@@ -29,9 +30,32 @@ type RunSummary struct {
 	// actually needs ("is the result whole") without one.
 	State string `json:"state,omitempty"`
 
-	Source   string `json:"source,omitempty"`
-	Name     string `json:"name,omitempty"`
-	InfoHash string `json:"infohash,omitempty"`
+	Source string `json:"source,omitempty"`
+	// Name is the torrent's own confirmed name - a disk record's, or a live
+	// entry's own metadata pass (RunInfo.Name, TOR-117) - never a guess.
+	// Empty for exactly the states that have not learned it yet: queued,
+	// and running before its own metadata has arrived.
+	Name string `json:"name,omitempty"`
+	// ProvisionalName is a display name read off a magnet's own dn=
+	// parameter (TOR-117, swarm.MagnetDisplayName), offered only when there
+	// is nothing more trustworthy yet - set here exactly when Name is empty,
+	// never alongside it, so a client need not choose between the two
+	// itself. It exists for the row a person watches longest in the worst
+	// case: a magnet whose metadata is slow, or a torrent with no peers,
+	// sits with nothing confirmed for as long as
+	// swarm.Config.MetadataTimeout allows, and the row said nothing at all
+	// for that whole stretch before this.
+	//
+	// It is NOT confirmed. A magnet's dn= is whatever the person who made
+	// the link typed, not anything the torrent's own metadata has agreed
+	// to - the two can disagree, and Name is what wins once it arrives. A
+	// client must keep this visibly distinct from Name (app.js's rowName
+	// rendering marks it, and logs the correction if the confirmed name
+	// turns out to differ) rather than let it silently pass for verified. A
+	// .torrent source never has one - MagnetDisplayName only ever answers
+	// for a magnet - so this stays empty for one exactly as it always has.
+	ProvisionalName string `json:"provisional_name,omitempty"`
+	InfoHash        string `json:"infohash,omitempty"`
 	// Params is the run's parameters directory name (core.ParamsKey) - the
 	// other half of where it lives on disk, alongside InfoHash. Present
 	// whenever this row has a disk record behind it, whether disk-only or
@@ -165,7 +189,7 @@ func (s *Server) listRuns() []RunSummary {
 	for _, info := range live {
 		row := RunSummary{
 			ID: info.ID, State: string(info.State), Source: info.Source,
-			InfoHash: info.InfoHash, Err: info.Err, When: liveWhen(info),
+			Name: info.Name, InfoHash: info.InfoHash, Err: info.Err, When: liveWhen(info),
 		}
 		if info.State.final() && info.InfoHash != "" {
 			if idxs := byHash[info.InfoHash]; len(idxs) == 1 {
@@ -176,6 +200,15 @@ func (s *Server) listRuns() []RunSummary {
 					row.Source = d.Source
 				}
 				consumed[idxs[0]] = true
+			}
+		}
+		// TOR-117: whatever is left with nothing confirmed - queued, or
+		// running before its own metadata has arrived - gets a magnet's own
+		// dn= instead, visibly marked provisional rather than passed off as
+		// the row's real Name (see RunSummary.ProvisionalName).
+		if row.Name == "" {
+			if dn, ok := swarm.MagnetDisplayName(row.Source); ok {
+				row.ProvisionalName = dn
 			}
 		}
 		out = append(out, row)
