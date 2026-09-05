@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/wire"
 )
 
@@ -409,6 +410,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /defaults", s.authGuard(s.handleDefaults))
 	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("GET /runs/{infohash}/files/{index}", s.authGuard(s.handleFileDetail))
+	mux.HandleFunc("GET /compare", s.authGuard(s.handleCompare))
+	mux.HandleFunc("GET /compare/sets", s.authGuard(s.handleCompareSets))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
@@ -710,6 +713,11 @@ func (s *Server) listThenRun(ctx context.Context, cancel context.CancelFunc, ent
 		// The same tie metadata_ready makes for a live run: the infohash is
 		// what joins this entry to the record its run will leave on disk.
 		entry.infoHash = contents.InfoHash
+		// entry.name is what info() and runStateFieldsLocked read (TOR-117);
+		// set here rather than left to be read out of contents.Name later
+		// because pump's own MetadataReady case (the other path to a
+		// confirmed name) has no contents to read it from either.
+		entry.name = contents.Name
 	}
 
 	// Which of the three happens, and the state the entry moves to, are
@@ -1244,9 +1252,13 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 		switch e := ev.(type) {
 		case core.MetadataReady:
 			// The one thing that ties this run to the record it will leave on
-			// disk, which is keyed by infohash rather than by run id.
+			// disk, which is keyed by infohash rather than by run id. A run
+			// that skipped listing (needsListingLocked was false - files
+			// already named) never sets entry.contents, so this is the only
+			// place such a run's entry.name is ever learned (TOR-117).
 			s.mu.Lock()
 			entry.infoHash = e.InfoHash
+			entry.name = e.Name
 			s.mu.Unlock()
 		case core.Failed:
 			// A run-scoped failure (File < 0) ends the run; a file-scoped one
@@ -1438,6 +1450,23 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 	}
 	if entry.err != nil {
 		m["error"] = entry.err.Error()
+	}
+	// TOR-117: the state a person watches longest in the worst case - queued
+	// or running, before any metadata has arrived - is also the one this
+	// message announces earliest, at accept time, well before metadata_ready
+	// or needs_action would have anything to say. entry.name wins once it is
+	// known (the same confirmed value info() and listing.go's merge read);
+	// until then a magnet's own dn=, if it has one, is offered as
+	// provisional_name instead - never both, so a client need not choose
+	// between them (see RunSummary.ProvisionalName for why it must stay
+	// visibly provisional rather than pass for a confirmed name).
+	switch {
+	case entry.name != "":
+		m["name"] = entry.name
+	default:
+		if dn, ok := swarm.MagnetDisplayName(entry.source); ok {
+			m["provisional_name"] = dn
+		}
 	}
 	return m
 }

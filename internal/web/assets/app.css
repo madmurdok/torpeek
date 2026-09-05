@@ -1,17 +1,238 @@
-:root { color-scheme: light dark; --panel-width: 17rem; }
+/* THE TYPEFACE, EMBEDDED (TOR-120).
+   Subsets of IBM Plex, Copyright 2017 IBM Corp., SIL Open Font License 1.1.
+   Full licence text: packaging/licenses/fonts/OFL.txt, and in every release
+   archive under licenses/fonts/. Provenance and hashes: third_party/fonts.lock.
+
+   Presented here as "Torpeek Sans" and "Torpeek Mono" because IBM Plex is
+   released `with Reserved Font Name "Plex"`, and OFL clause 3 forbids a
+   Modified Version from using a reserved name as the primary name shown to
+   users. Every file below is a subset, and a subset deletes glyphs, so every
+   file below is a Modified Version. The rename is the licence being obeyed, not
+   a disguise - the typeface is IBM Plex and the notices say so.
+
+   Loaded by relative URL from the binary's own embedded filesystem, never from
+   fonts.googleapis.com: the UI runs headless on a seedbox behind somebody's
+   proxy, where an external face fails silently and differently per machine.
+
+   Latin, Latin Extended and Cyrillic only. That is a deliberate stopping point,
+   not full coverage: prose and labels are English, but the UI also renders
+   torrent names, which are arbitrary text in arbitrary scripts. A name in a
+   script not covered here falls through the stack in --sans/--mono to the
+   system face, per glyph, and renders - it does not go tofu. Covering every
+   script would cost megabytes to prevent nothing.
+
+   The sans is one variable file per subset spanning 400-700; the mono is two
+   static weights, because Google publishes no variable cut of Plex Mono. See
+   third_party/fonts.lock for why that asymmetry is the smaller answer. */
+
+@font-face {
+  font-family: "Torpeek Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/plex-sans-var-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Torpeek Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/plex-sans-var-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Torpeek Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/plex-sans-var-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/plex-mono-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/plex-mono-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/plex-mono-400-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/plex-mono-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/plex-mono-600-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/plex-mono-600-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+:root {
+  /* The design system, introduced by TOR-113. Before this the file carried
+     twenty colour literals at their points of use, no custom properties, no
+     theme handling and no font-family at all - so the UI rendered in
+     whatever the browser defaulted to, over system chrome, with green
+     accents. Everything visual now comes from here.
+
+     The palette is variant B++ from the TOR-112 survey, chosen by the user
+     after four rounds of narrowing. Its defining property is the LADDER:
+     four surface values a panel can sit at, so depth is legible without
+     borders. Measured, the steps are 1.070 / 1.092 / 1.129 - wider than the
+     two doses it beat. If the ground is ever taken lower, do NOT take --s1
+     with it, or a panel stops separating from the page.
+
+     Single theme on purpose. B++ is dark, and there was no theme handling
+     here to preserve; the light case is a second design rather than an
+     inversion, and it is TOR-114. */
+
+  /* ONE THEME, and it is a choice rather than an omission (TOR-126). torpeek
+     is drawn dark, so it is drawn dark on a machine set to light too: nothing
+     here reads prefers-color-scheme and nothing stamps an attribute. A second
+     theme shipped briefly (TOR-114) and was removed for a reason worth
+     keeping written down - because it followed the OS, the design the project
+     actually chose was invisible to anyone whose system was set to light,
+     which is most people, and there was no toggle to reach it with.
+
+     What that commitment obliges: every colour on the page comes from a token
+     declared right here, and body paints its own background rather than
+     letting the host's ground show through. A single-theme page that inherits
+     anything is a page that breaks on somebody else's default.
+     TestEveryColourComesFromAToken holds the first half of that. */
+  color-scheme: dark;
+
+  /* Set by app.js when the divider is dragged - a layout token, not a
+     visual one, and the only custom property that existed before TOR-113. */
+  --panel-width: 17rem;
+
+  /* The comparison stage's shape, set by app.js once per comparison from the
+     first arm's own resolution (TOR-109) and never touched again while it is
+     open. A layout token like the one above, and for the same kind of reason
+     the divider's width is one: the stage's box must be decided BEFORE either
+     frame loads and must not move afterwards, so it cannot be derived from
+     whichever image happens to have arrived.
+
+     A bare NUMBER rather than a w/h pair, which aspect-ratio accepts either
+     way, because the stage also has to bound its own height (a portrait or
+     4:3 source is taller than the viewport at full width) and only a number
+     can be multiplied inside a calc(). */
+  --compare-aspect: 1.7778;
+
+  /* four surfaces */
+  --bg:  #03070B;
+  --s1:  #091218;
+  --s2:  #101C24;
+  --s3:  #18272F;
+  /* a lift for rows under the pointer: below --s2 so hovering a row inside
+     a panel does not make it look like a panel of its own */
+  --hover: #16232B;
+
+  /* three levels of ink */
+  --ink:   #DCEFF3;
+  --ink-2: #8CA6AF;
+  --ink-3: #5C757E;
+
+  --rule: #1A2F38;
+
+  /* One accent, and it means "this is live or this is where you are" -
+     nothing decorative wears it. */
+  --accent:     #22E0E8;
+  --accent-dim: #093A40;
+
+  /* The semantic three, kept deliberately apart from the accent AND from
+     each other. Before TOR-113 one green did duty as both the accent and
+     "done", which is why a finished run and a focus ring were the same
+     colour. */
+  --ok:       #3BE38F;
+  --ok-dim:   #0C2A1D;
+  --warn:     #FFC24D;
+  --warn-dim: #33260C;
+  --bad:      #FF7A45;
+  --bad-dim:  #331408;
+
+  --scrim:        rgba(0, 0, 0, .66);
+  --scrim-strong: rgba(0, 0, 0, .82);
+
+  /* TWO glow tokens, and the difference is not cosmetic. box-shadow follows
+     an element's BOX, so on something that paints strokes rather than a box
+     - a corner bracket drawn from two borders - it paints a glowing
+     rectangle, visible wherever two grounds differ. drop-shadow follows the
+     painted pixels. Use --glow on a bordered chip or a filled bar; use
+     --stroke-glow on anything whose shape is not its box. */
+  --glow:        0 0 10px rgba(34, 224, 232, .55);
+  --stroke-glow: drop-shadow(0 0 4px rgba(34, 224, 232, .7));
+
+  /* No webfont, and that is a decision rather than an omission: torpeek is
+     one folder that needs no network beyond the torrent, and it also runs
+     headless on a seedbox behind somebody's proxy. A typeface fetched from
+     fonts.googleapis.com would be the one part of the interface that fails
+     there, silently and differently on every machine. Embedding woff2 in
+     the binary is the way to a guaranteed face and would be the project's
+     first binary asset - a decision worth taking on its own. */
+  --sans: "Torpeek Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Every figure this tool shows is meant to be compared down a column:
+     timecodes, byte counts, bits per pixel, infohashes. Monospace is
+     functional here, not a costume. */
+  --mono: "Torpeek Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --track: .14em;
+}
+
+
+
 
 body {
   margin: 0;
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  font: 14px/1.5 var(--sans);
+  background: var(--bg);
+  color: var(--ink);
 }
 
 h1 { font-size: 1.4rem; margin: 0; }
 h2 { font-size: 1rem; margin: 0; }
-h3 { font-size: .8rem; margin: .6rem 0 .2rem; opacity: .7; text-transform: uppercase; letter-spacing: .04em; }
+h3 {
+  font-size: .72rem;
+  margin: .6rem 0 .2rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+}
 
-.status { font-size: .8rem; opacity: .7; }
-.status[data-state="live"] { color: #1a7f37; opacity: 1; }
-.status[data-state="lost"] { color: #b35900; opacity: 1; }
+.status { font-family: var(--mono); font-size: .74rem; color: var(--ink-3); letter-spacing: .04em; }
+.status[data-state="live"] { color: var(--accent); opacity: 1; }
+.status[data-state="lost"] { color: var(--warn); opacity: 1; }
 
 /* The whole page: a full-height left panel (the torpeek title, then every
    torrent) and a draggable divider next to a right column that starts with
@@ -36,14 +257,26 @@ h3 { font-size: .8rem; margin: .6rem 0 .2rem; opacity: .7; text-transform: upper
   min-width: 0;
   box-sizing: border-box;
   padding: 1.25rem 1rem;
-  border-right: 1px solid #8884;
+  /* The panel sits one rung up from the page, which is what the ladder is
+     for - depth without a border doing the work (TOR-113). The rule stays
+     because the divider is draggable and needs an edge to grab. */
+  background: var(--s1);
+  border-right: 1px solid var(--rule);
   display: flex;
   flex-direction: column;
 }
-.runs-panel-title { font-size: .8rem; opacity: .6; text-transform: uppercase; letter-spacing: .04em; margin: 1.1rem 0 .5rem; }
+.runs-panel-title {
+  font-size: .72rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  margin: 1.1rem 0 .5rem;
+}
 
 @media (max-width: 52rem) {
-  .runs-panel { flex: 0 0 auto; border-right: none; border-bottom: 1px solid #8884; }
+  .runs-panel { flex: 0 0 auto; border-right: none; border-bottom: 1px solid var(--rule); }
 }
 
 /* The draggable divider. Only present above the stacking breakpoint - there
@@ -54,7 +287,7 @@ h3 { font-size: .8rem; margin: .6rem 0 .2rem; opacity: .7; text-transform: upper
   background: transparent;
   touch-action: none;
 }
-.resizer:hover, .resizer:focus-visible, .resizer.dragging { background: #1a7f3733; }
+.resizer:hover, .resizer:focus-visible, .resizer.dragging { background: var(--accent-dim); }
 .resizer:focus-visible { outline: none; }
 
 @media (max-width: 52rem) {
@@ -90,12 +323,23 @@ form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
   align-items: center;
   gap: .75rem;
   flex-wrap: wrap;
-  border: 1px dashed #8888;
+  border: 1px dashed var(--rule);
   border-radius: .5rem;
   padding: .45rem .75rem;
 }
 
-#source { flex: 1 1 14rem; min-width: 8rem; padding: .45rem .6rem; font: inherit; border: 1px solid #8886; border-radius: .35rem; }
+#source {
+  flex: 1 1 14rem;
+  min-width: 8rem;
+  padding: .45rem .6rem;
+  font-family: var(--mono);
+  font-size: .82rem;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--s1);
+  color: var(--ink);
+}
+#source::placeholder { color: var(--ink-3); }
 
 .browse { font-size: .85rem; opacity: .8; cursor: pointer; white-space: nowrap; }
 .browse .link { text-decoration: underline; }
@@ -108,16 +352,39 @@ form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
 input[type="number"] {
   width: 4.5rem;
   padding: .45rem .6rem;
-  font: inherit;
-  border: 1px solid #8886;
-  border-radius: .35rem;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  background: var(--s1);
+  color: var(--ink);
 }
 
-select, button { padding: .45rem .7rem; font: inherit; border-radius: .35rem; }
+select, button {
+  padding: .45rem .7rem;
+  font: inherit;
+  border-radius: 0;
+  background: var(--s2);
+  color: var(--ink);
+  border: 1px solid var(--rule);
+}
+/* Take frames is the one filled control on the page: it is the thing that
+   spends traffic, and it should look like it. */
+button[type="submit"] {
+  font-family: var(--mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .5; }
 
-.hint { font-size: .78rem; opacity: .6; margin: .6rem 0 0; }
-.error { color: #b3261e; }
+.hint { font-size: .78rem; color: var(--ink-3); margin: .6rem 0 0; }
+.error { color: var(--bad); }
 
 .torrent-summary { opacity: .85; font-weight: 500; }
 
@@ -134,26 +401,27 @@ button:disabled { opacity: .5; }
 .run-table thead th {
   position: sticky;
   top: 0;
-  background: canvas;
-  font-size: .68rem;
+  background: var(--s1);
+  font-family: var(--mono);
+  font-size: .66rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: .03em;
-  opacity: .65;
+  letter-spacing: var(--track);
+  color: var(--ink-3);
   white-space: nowrap;
-  border-bottom: 1px solid #8884;
+  border-bottom: 1px solid var(--rule);
   cursor: pointer;
   user-select: none;
 }
 .run-table thead th.run-actions-header { cursor: default; }
-.run-table thead th:focus-visible { outline: 2px solid #1a7f37; outline-offset: -2px; }
+.run-table thead th:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .run-table thead th[aria-sort]::after { display: inline-block; width: .9em; text-align: center; }
 .run-table thead th[aria-sort="ascending"]::after { content: "▲"; }
 .run-table thead th[aria-sort="descending"]::after { content: "▼"; }
 
-.run-row { border-bottom: 1px solid #8882; }
-.run-row:hover { background: #8881; }
-.run-row.selected { background: #1a7f3714; box-shadow: inset 3px 0 0 #1a7f37; }
+.run-row { border-bottom: 1px solid var(--rule); }
+.run-row:hover { background: var(--hover); }
+.run-row.selected { background: var(--accent-dim); box-shadow: inset 3px 0 0 var(--accent); }
 
 /* A name is cut off, not shredded. `max-width: 0` with `width: 100%` is what
    makes a table cell shrinkable enough for an ellipsis to happen at all - a
@@ -183,10 +451,25 @@ button:disabled { opacity: .5; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.run-meta { display: block; font-size: .7rem; opacity: .65; overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
+.run-meta { display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: -.01em; color: var(--ink-3); overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
 
-.run-cell-when { white-space: nowrap; opacity: .75; font-size: .78rem; }
+/* TOR-117: a name read off a magnet's own dn= is not confirmed - anyone can
+   put anything after it - so it must never look like one. Italic plus the
+   same muted ink .run-meta already uses is the smallest difference that
+   still reads as "not settled yet"; the title attribute (app.js) carries the
+   rest of the explanation. Shared by .run-name and .run-detail-title, the
+   only two places a name is shown. */
+.run-name-provisional { font-style: italic; color: var(--ink-3); }
+
+.run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .run-cell-status { white-space: nowrap; }
+/* Deliberately NOT nowrap-with-a-max-width, which is what this was first and
+   why TOR-121 exists: a cell that will not shrink has to take its width from
+   somewhere, and .run-cell-name's `max-width: 0` trick means the somewhere is
+   always the torrent's name. The label is short instead (metaLabel in
+   app.js), so there is nothing to constrain. An error message is the one
+   long thing that still lands here, and it is allowed to wrap. */
+.run-cell-status .run-meta { max-width: 11rem; }
 
 .run-cell-actions { width: 1.6rem; text-align: right; }
 .run-cancel {
@@ -199,38 +482,65 @@ button:disabled { opacity: .5; }
   padding: .3rem .4rem;
   border-radius: .3rem;
 }
-.run-cancel:hover { opacity: 1; background: #8882; }
+.run-cancel:hover { opacity: 1; background: var(--hover); }
 
 .run-badge {
   display: inline-block;
-  font-size: .68rem;
+  font-family: var(--mono);
+  font-size: .64rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: .03em;
-  padding: .1rem .4rem;
-  border-radius: 1rem;
-  background: #8883;
+  letter-spacing: var(--track);
+  padding: .12rem .45rem;
+  border-radius: 0;
+  background: var(--s3);
+  color: var(--ink-2);
 }
-.run-badge[data-state="running"] { background: #1a7f3722; color: #1a7f37; }
-.run-badge[data-state="replaying"] { background: #1a7f3722; color: #1a7f37; }
-.run-badge[data-state="queued"] { background: #b3590022; color: #b35900; }
-.run-badge[data-state="done"] { background: #1a7f3722; color: #1a7f37; }
-.run-badge[data-state="failed"] { background: #b3261e22; color: #b3261e; }
+.run-badge[data-state="running"] { background: var(--accent-dim); color: var(--accent); }
+.run-badge[data-state="replaying"] { background: var(--accent-dim); color: var(--accent); }
+.run-badge[data-state="queued"] { background: var(--warn-dim); color: var(--warn); }
+.run-badge[data-state="done"] { background: var(--ok-dim); color: var(--ok); }
+.run-badge[data-state="failed"] { background: var(--bad-dim); color: var(--bad); }
 /* Partial is a finished run that did not finish everything it was asked for,
    so it borrows the amber the queue and the need for a decision already use
    rather than done's green (TOR-72). */
-.run-badge[data-state="partial"] { background: #b3590022; color: #b35900; }
-.run-badge[data-state="needs-action"] { background: #b3590022; color: #b35900; font-weight: 600; }
-.run-badge[data-state="cancelled"] { background: #8884; opacity: .8; }
-.run-badge[data-state="disk"] { background: #8883; }
+.run-badge[data-state="partial"] { background: var(--warn-dim); color: var(--warn); }
+.run-badge[data-state="needs-action"] { background: var(--warn-dim); color: var(--warn); font-weight: 600; }
+.run-badge[data-state="cancelled"] { background: var(--s3); color: var(--ink-3); }
+.run-badge[data-state="disk"] { background: var(--s3); color: var(--ink-2); }
 
-.detail { min-width: 0; }
+/* Corner brackets instead of a closed border - a border costing four short
+   strokes rather than a rectangle, which is how the HUD vocabulary and
+   "space instead of borders" turn out to agree (TOR-112).
+   The glow is a FILTER, not a box-shadow: box-shadow follows the element's
+   box, so on an L drawn from two borders it paints a glowing rectangle. */
+.detail { min-width: 0; position: relative; padding-top: .35rem; }
+.detail::before, .detail::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+  border-color: var(--accent);
+  filter: var(--stroke-glow);
+  opacity: .8;
+}
+.detail::before { top: 0; left: -6px; border-top: 2px solid; border-left: 2px solid; }
+.detail::after { bottom: 0; right: -6px; border-bottom: 2px solid; border-right: 2px solid; }
+/* Gating this took two tries and the second one is the point. `:empty` never
+   fires: the pane always holds .detail-empty. But .detail-empty is never
+   removed either - app.js toggles its `hidden` attribute - so gating on the
+   element alone hid the brackets forever, which looked like it worked. The
+   gate is the attribute, which is the same [hidden] trap this file already
+   warns about under .drop-overlay. */
+.detail:has(.detail-empty:not([hidden]))::before,
+.detail:has(.detail-empty:not([hidden]))::after { display: none; }
 .detail-empty { opacity: .6; margin-top: .5rem; }
 
 .run-detail-header { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .run-detail-title { overflow-wrap: anywhere; }
 .run-detail-cancel { margin-left: auto; }
-.run-detail-error { color: #b3261e; }
+.run-detail-error { color: var(--bad); }
 
 /* The run's own .torrent (TOR-73), under the summary line it belongs to.
    The link is styled as a button rather than as text: it and the send button
@@ -240,12 +550,12 @@ button:disabled { opacity: .5; }
 .torrent-save {
   padding: .45rem .7rem;
   font-size: .85rem;
-  border: 1px solid #8886;
+  border: 1px solid var(--rule);
   border-radius: .35rem;
   color: inherit;
   text-decoration: none;
 }
-.torrent-save:hover { background: #8882; }
+.torrent-save:hover { background: var(--hover); }
 .torrent-send { font-size: .85rem; }
 /* What happened to the last send, in the one place a person is already
    looking. It is the only confirmation there can be: nothing here can watch a
@@ -256,7 +566,7 @@ button:disabled { opacity: .5; }
    downloaded beyond the metadata, and nothing will be until someone ticks a
    box here. It sits between the torrent's summary line and its (still
    empty) file list. */
-.picker { margin-top: .8rem; border: 1px solid #b3590055; border-radius: .4rem; padding: .6rem .7rem; }
+.picker { margin-top: .8rem; border: 1px solid var(--warn); border-radius: .4rem; padding: .6rem .7rem; }
 
 .picker-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .5rem; }
 .picker-title { font-weight: 500; margin-right: auto; }
@@ -271,21 +581,27 @@ button:disabled { opacity: .5; }
   border-radius: .3rem;
   cursor: pointer;
 }
-.picker-file:hover { background: #8882; }
+.picker-file:hover { background: var(--hover); }
 .picker-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.picker-size { flex: 0 0 auto; font-size: .8rem; opacity: .65; }
+.picker-size { flex: 0 0 auto; font-family: var(--mono); font-size: .76rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
 .picker-foot { display: flex; align-items: center; gap: .6rem; margin: .6rem 0 0; }
 /* The cost of pressing the button, shown before it is spent: frames are per
    file, so this is the number that surprises people (TOR-50). */
-.picker-cost { font-size: .82rem; opacity: .75; }
+.picker-cost {
+  font-family: var(--mono);
+  font-size: .82rem;
+  color: var(--accent);
+  text-shadow: var(--glow);
+  font-variant-numeric: tabular-nums;
+}
 
 /* One block per torrent file: its summary panel, its progress, its grid -
    collapsed to a single clickable row by default (TOR-63), except the first
    file of the torrent, which opens expanded. */
 .files { display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem; }
 
-.file { border-top: 1px solid #8884; padding-top: .5rem; }
+.file { border-top: 1px solid var(--rule); padding-top: .5rem; }
 
 .file-title { margin: 0; font-size: 1rem; }
 
@@ -310,8 +626,8 @@ button:disabled { opacity: .5; }
   text-align: left;
   cursor: pointer;
 }
-.file-toggle:hover { background: #8882; }
-.file-toggle:focus-visible { outline: 2px solid #1a7f37; outline-offset: -2px; }
+.file-toggle:hover { background: var(--hover); }
+.file-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .file-toggle-icon {
   flex: 0 0 auto;
@@ -323,7 +639,7 @@ button:disabled { opacity: .5; }
 
 .file-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
 
-.file-summary { flex: 0 0 auto; font-size: .78rem; opacity: .65; }
+.file-summary { flex: 0 0 auto; font-family: var(--mono); font-size: .74rem; color: var(--ink-3); }
 
 .file-body { padding: .5rem .35rem 0; }
 
@@ -356,8 +672,8 @@ button:disabled { opacity: .5; }
   text-align: left;
   cursor: pointer;
 }
-.meta-toggle:hover { background: #8882; }
-.meta-toggle:focus-visible { outline: 2px solid #1a7f37; outline-offset: -2px; }
+.meta-toggle:hover { background: var(--hover); }
+.meta-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .meta-toggle-icon {
   flex: 0 0 auto;
@@ -375,19 +691,21 @@ button:disabled { opacity: .5; }
   column-gap: .6rem;
   row-gap: .1rem;
   margin: .5rem 0;
-  font-size: .85rem;
+  font-family: var(--mono);
+  font-size: .8rem;
+  font-variant-numeric: tabular-nums;
 }
-.specs dt { opacity: .6; }
-.specs dd { margin: 0; }
+.specs dt { color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; font-size: .7rem; }
+.specs dd { margin: 0; color: var(--ink); }
 
 .tracks { display: flex; gap: 2rem; flex-wrap: wrap; }
-.track-group ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; }
+.track-group ul { margin: 0; padding-left: 1.1rem; font-family: var(--mono); font-size: .8rem; color: var(--ink-2); }
 .track-group li { margin: .1rem 0; }
 
 .file-links { font-size: .8rem; display: flex; gap: 1rem; }
 .file-links a { color: inherit; }
 
-.file-progress { font-size: .8rem; opacity: .75; margin: .5rem 0; }
+.file-progress { font-family: var(--mono); font-size: .78rem; color: var(--ink-2); margin: .5rem 0; font-variant-numeric: tabular-nums; }
 
 .file-regen { display: flex; align-items: center; gap: .5rem; margin: .5rem 0 0; }
 .file-regen-label { display: flex; align-items: center; gap: .4rem; font-size: .8rem; opacity: .75; }
@@ -400,10 +718,142 @@ button:disabled { opacity: .5; }
   gap: .6rem;
 }
 .thumb { margin: 0; cursor: pointer; position: relative; }
-.thumb img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block; background: #0002; border-radius: .25rem; }
-.thumb figcaption { font-size: .72rem; opacity: .75; }
-.thumb .shifted { color: #b35900; }
-.thumb:focus-visible img { outline: 2px solid #1a7f37; outline-offset: 2px; }
+.thumb img {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  background: var(--s3); border-radius: .25rem;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+/* A failed capture point (TOR-118): same box an <img> would take, so the
+   grid stays regular, with nothing drawn inside it. TOR-110 owns what a cell
+   state actually looks like - this is only the minimum that keeps the grid
+   from breaking until that lands. */
+/* PROGRESS AS A GRAPHIC (TOR-123), in the panel row and nowhere else - in the
+   detail pane the frame grid already is this picture.
+
+   Segments with gaps, not a smooth fill: torpeek captures discrete frames, and
+   a continuous bar is a shape borrowed from software that moves bytes. It sits
+   under the line reading "4/20 frames", which is what makes a bar that has not
+   moved for twenty seconds legible as a slow frame rather than as a bar
+   measuring the wrong thing.
+
+   Deliberately thin and deliberately accent-coloured: it is the one thing in
+   the panel that moves, and it must read as the tool working rather than as a
+   state needing attention - which is why it is not --warn and not --ok. */
+.run-progress {
+  display: flex;
+  gap: 1px;
+  height: .28rem;
+  margin-top: .25rem;
+  border-radius: .1rem;
+  overflow: hidden;
+}
+.run-progress-seg {
+  flex: 1 1 0;
+  min-width: 1px;
+  /* to right rather than to top: a segment standing for several frames fills
+     along the direction the bar reads in, so a part-done segment looks like
+     progress through it and not like a shorter block. */
+  background: linear-gradient(to right,
+    var(--accent) calc(var(--fill, 0) * 100%),
+    var(--s3) 0);
+}
+
+/* THE PIECE STRIP (TOR-111). How much of the file the run actually ordered,
+   as a picture rather than a sentence - the sparseness is the product's whole
+   argument and it was being expressed as a number.
+
+   The accent carries it, not a semantic colour: pieces the run ordered are
+   not a warning or a fault, they are the thing the tool did. The untouched
+   remainder is a surface, so the eye reads marks on a ground rather than two
+   competing colours.
+
+   Each block is a vertical fill rather than a flag, and that is what makes
+   aggregation honest: at one piece per block --fill is 0 or 1 and the strip
+   is a map, and above that it is the fraction of that block's pieces the run
+   ordered, so a coarse strip is a density profile instead of a lie about
+   individual pieces. The caption says which it is. */
+.reach { margin: .2rem 0 .8rem; }
+.reach-strip {
+  display: flex;
+  gap: 1px;
+  height: 1.5rem;
+  border-radius: .2rem;
+  overflow: hidden;
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.reach-block {
+  flex: 1 1 0;
+  min-width: 1px;
+  /* to top: an ordered piece grows from the floor, so a partly-ordered block
+     reads as a column and a full one as a solid mark. */
+  background: linear-gradient(to top,
+    var(--accent) calc(var(--fill, 0) * 100%),
+    var(--s3) 0);
+}
+.reach-note {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--ink-3); margin-top: .3rem;
+}
+
+/* THE GRID'S FOUR STATES (TOR-110). A cell is one capture point, and the
+   states are spent unevenly on purpose.
+
+   EXACT gets nothing at all. It has no rule here, and that is the design:
+   most cells are exact, the picture is the content, and a grid that marks
+   every cell marks none of them.
+
+   PENDING is the quietest of the four. It is the normal state of a run that
+   is still working - a run is mostly waiting - so it must not read as
+   something wrong. A surface and the same hairline every thumbnail has, and
+   no animation: the progress line above already says the run is alive, and a
+   grid of twenty pulsing boxes would say it twenty times.
+
+   SHIFTED keeps the plain thumbnail and gains exactly ONE signal, a warn foot
+   under the image, echoed by the word already in its caption. The frame is
+   real and worth looking at; it just came from a neighbour.
+
+   FAILED is the only state that gets a BORDER, and that is what makes a
+   border mean something in this grid: nothing was captured here. It is also
+   the only one that puts text inside the cell, because the reason is the
+   whole content when the picture is missing. */
+
+/* The box that stands in for an image on a cell that has none. Same geometry
+   as .thumb img so the grid cannot tell them apart by size. */
+.thumb-box {
+  width: 100%; aspect-ratio: 16 / 9;
+  display: grid; place-content: center;
+  border-radius: .25rem;
+  box-sizing: border-box;
+}
+.thumb-pending .thumb-box {
+  background: var(--s2);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.thumb-pending figcaption { color: var(--ink-3); }
+
+.thumb-failed .thumb-box {
+  background: var(--bad-dim);
+  border: 1px dashed var(--bad);
+}
+.thumb-code {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--bad); text-align: center; padding: 0 .4rem;
+  overflow-wrap: anywhere;
+}
+.thumb-failed figcaption { color: var(--ink-3); }
+
+/* The hairline every frame carries (see .thumb img) plus a foot, so the mark
+   is added to the cell rather than replacing what is already true of it. */
+.thumb-shifted img {
+  box-shadow: inset 0 0 0 1px var(--rule), inset 0 -3px 0 var(--warn);
+}
+
+/* A cell with nothing in it is not a link to anywhere. */
+.thumb-pending, .thumb-failed { cursor: default; }
+.thumb figcaption { font-family: var(--mono); font-size: .7rem; color: var(--ink-2); letter-spacing: .02em; }
+.thumb .shifted { color: var(--warn); }
+.thumb:focus-visible img { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* The delete cross. It stays out of the way until the thumbnail is hovered
    or something inside it has focus - a grid of twenty frames each wearing a
@@ -418,8 +868,8 @@ button:disabled { opacity: .5; }
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: #000a;
-  color: #fff;
+  background: var(--scrim);
+  color: var(--ink);
   font-size: .95rem;
   line-height: 1;
   cursor: pointer;
@@ -429,8 +879,8 @@ button:disabled { opacity: .5; }
 .thumb:hover .thumb-delete,
 .thumb:focus-within .thumb-delete,
 .thumb-delete:focus-visible { opacity: 1; }
-.thumb-delete:hover { background: #b3261e; }
-.thumb-delete:focus-visible { outline: 2px solid #fff; outline-offset: 1px; }
+.thumb-delete:hover { background: var(--bad); }
+.thumb-delete:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 
 /* Full-size view. */
 .lightbox {
@@ -439,23 +889,258 @@ button:disabled { opacity: .5; }
   padding: 1rem;
   max-width: 92vw;
   max-height: 92vh;
-  background: canvas;
-  color: canvastext;
+  background: var(--s1);
+  color: var(--ink);
 }
-.lightbox::backdrop { background: #000c; }
+.lightbox::backdrop { background: var(--scrim-strong); }
 .lightbox img { display: block; max-width: 88vw; max-height: 80vh; margin: 0 auto; }
+/* The scrim above does the work, but a hair of separation keeps the control
+   off the picture's very corner, which is where a frame is most often blown
+   out. */
+.lightbox { padding-top: 1.6rem; }
 .lightbox-caption { text-align: center; font-size: .85rem; opacity: .8; margin: .5rem 0 0; }
+/* Over arbitrary picture content, so it carries its own ground: no single
+   colour is legible against every frame, and this one sat as near-white on
+   the bright top edge of a snow shot with almost no contrast at all
+   (TOR-122). It was already invisible for anyone on a dark system before
+   TOR-113; committing the UI to one dark theme made it invisible for
+   everybody.
+   Deliberately the same object as .thumb-delete above - both are controls
+   laid over a frame, and they should read as one idea rather than two. */
 .lightbox-close {
   position: absolute;
   top: .4rem;
   right: .5rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-content: center;
   border: none;
-  background: none;
-  font-size: 1.3rem;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: var(--ink);
+  font-size: 1.15rem;
   line-height: 1;
   cursor: pointer;
-  padding: .2rem .5rem;
+  padding: 0;
 }
+.lightbox-close:hover { background: var(--bad); }
+.lightbox-close:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* COMPARING TWO RUNS BY FLIPPING (TOR-109).
+   The design survey's finding is the whole of this block: the same frame, in
+   the same screen position, one keypress apart, makes a difference visible
+   that a side-by-side grid hides - the eye compares against its own
+   afterimage rather than across a gap. Every rule here exists to keep that
+   true, so the constraint is stricter than it looks: NOTHING may change size
+   when the arm changes.
+
+   A <dialog> is centred by the UA, so a height that changes re-centres the
+   whole thing and slides the picture under the eye - which is why the width
+   is pinned, the stage's shape is a token app.js sets ONCE per comparison,
+   the two shots are stacked on one rectangle and swapped by visibility
+   alone, and every line of text below the picture is one line, nowrap,
+   whatever it says. */
+.compare {
+  border: none;
+  border-radius: .5rem;
+  padding: 1.6rem 1rem 1rem;
+  /* Pinned rather than shrink-to-fit: a dialog that sizes to its content is
+     a dialog whose content can move the picture. */
+  width: min(92vw, 68rem);
+  max-width: 92vw;
+  max-height: 92vh;
+  box-sizing: border-box;
+  background: var(--s1);
+  color: var(--ink);
+}
+.compare::backdrop { background: var(--scrim-strong); }
+
+.compare-head {
+  display: flex;
+  gap: .75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: .6rem;
+}
+
+/* One arm's chip and its picker. The chip carries the number key that selects
+   this arm, and it is what says which arm is on screen. */
+.compare-arm {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+/* WHICH ARM IS LIVE is the only thing a flip changes, and it is marked with
+   the accent - not with a border, and not with --bad or --warn.
+   The reasoning is the design system's own (see :root): the single accent
+   means "this is live or this is where you are", which is exactly what an arm
+   being on screen is. Nothing has gone wrong when you flip, so the semantic
+   pair would be a lie; and a border is spent, in the grid next door, on one
+   thing only - "nothing was captured here" - which this is not. A border here
+   would also be a marking drawn ON the picture's edge, changing under the eye
+   at the very moment the eye is trying to hold an afterimage. */
+.compare-key {
+  flex: 0 0 auto;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: grid;
+  place-content: center;
+  border-radius: .3rem;
+  background: var(--s3);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.compare-arm[data-live="true"] .compare-key {
+  background: var(--accent-dim);
+  color: var(--accent);
+  box-shadow: var(--glow);
+}
+
+.compare-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: .8rem;
+}
+
+/* THE STAGE. One rectangle, decided before anything loads, holding both arms
+   at once. --compare-aspect is set by app.js from the first arm's own
+   resolution, so two encodes of the same film fill it exactly and one that
+   was cropped differently letterboxes inside it rather than resizing it. */
+.compare-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--compare-aspect);
+  /* The height ceiling is spent as WIDTH, not as a squashed box: capping
+     height alone while the width stays 100% would break the aspect ratio and
+     letterbox the picture inside a box the wrong shape. So the same ceiling
+     is expressed as the widest box that fits in it - which is why the token
+     above is a number. */
+  max-width: calc(68vh * var(--compare-aspect));
+  margin: 0 auto;
+  background: var(--s3);
+  border-radius: .25rem;
+  overflow: hidden;
+  cursor: pointer;
+}
+.compare-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Both shots occupy the identical box and are swapped by VISIBILITY, never by
+   display or by moving one over the other: display:none would take the hidden
+   arm out of layout and let the browser drop its decoded pixels, and the
+   whole feature is one keypress being instant. */
+.compare-shot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  visibility: hidden;
+}
+.compare-stage[data-live="a"] .compare-shot[data-arm="a"],
+.compare-stage[data-live="b"] .compare-shot[data-arm="b"] { visibility: visible; }
+
+/* A position whose live arm captured nothing. Deliberately the same idiom as
+   .thumb-failed's box in the grid above - a dashed --bad rule over --bad-dim,
+   with the engine's own code inside it - because it means the same thing
+   there and here, and this is one of the two states the semantic bad colour
+   is spent on in this UI. It fills the same rectangle the picture would have,
+   so flipping onto a hole holds position exactly as flipping onto a frame
+   does. */
+.compare-gap {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-content: center;
+  box-sizing: border-box;
+  background: var(--bad-dim);
+  border: 1px dashed var(--bad);
+  border-radius: .25rem;
+}
+.compare-stage[data-gap="true"] .compare-gap { display: grid; }
+.compare-gap-code {
+  font-family: var(--mono);
+  /* Larger than the grid's .thumb-code, which says the same thing in a cell
+     a fifth of the width: the reason is the entire content of the picture
+     when there is no picture, and at stage size .68rem is lost in it. */
+  font-size: 1rem;
+  letter-spacing: .02em;
+  color: var(--bad);
+  text-align: center;
+  padding: 0 .8rem;
+  overflow-wrap: anywhere;
+}
+
+/* Everything below the picture is one line, always: a wrap here would change
+   the dialog's height, and a dialog that changes height re-centres. */
+.compare-bar {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .6rem 0 0;
+  height: 1.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.compare-step, .compare-flip {
+  flex: 0 0 auto;
+  padding: .15rem .6rem;
+  border: 1px solid var(--rule);
+  border-radius: .35rem;
+  background: var(--s2);
+  color: var(--ink);
+  font: inherit;
+  font-size: .8rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.compare-step { font-family: var(--mono); }
+.compare-step:hover, .compare-flip:hover { background: var(--hover); }
+.compare-step:focus-visible, .compare-flip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.compare-step:disabled, .compare-flip:disabled { opacity: .4; cursor: default; }
+
+.compare-place {
+  flex: 0 0 auto;
+  min-width: 4.5rem;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: .78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+/* The two timecodes, and the live one wears the accent - the same "where you
+   are" the chip above does, said again where the eye already is. Tabular
+   figures so the line does not twitch as the numbers change. */
+.compare-times {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: .76rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+.compare-times .compare-live { color: var(--accent); }
+
+.compare-note, .compare-keys {
+  margin: .35rem 0 0;
+  height: 1.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: .76rem;
+  color: var(--ink-3);
+}
+.compare-keys { font-family: var(--mono); font-size: .72rem; opacity: .8; }
 
 /* Drag-and-drop feedback, shown while a file is dragged over the page. */
 .drop-overlay {
@@ -464,8 +1149,8 @@ button:disabled { opacity: .5; }
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #1a7f3722;
-  border: .4rem dashed #1a7f37;
+  background: var(--accent-dim);
+  border: .4rem dashed var(--accent);
   z-index: 10;
   pointer-events: none;
 }
@@ -473,8 +1158,8 @@ button:disabled { opacity: .5; }
    specificity, which would leave this shown at page load. */
 .drop-overlay[hidden] { display: none; }
 .drop-overlay p {
-  background: canvas;
-  color: canvastext;
+  background: var(--s1);
+  color: var(--ink);
   padding: .75rem 1.25rem;
   border-radius: .5rem;
   font-size: 1.1rem;
@@ -490,8 +1175,10 @@ button:disabled { opacity: .5; }
   max-height: 22rem;
   overflow: auto;
   padding: .6rem;
-  background: #0000000d;
-  font-size: .78rem;
+  background: var(--s2);
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-2);
   white-space: pre-wrap;
   margin-top: .5rem;
 }

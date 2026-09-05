@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -493,5 +494,205 @@ func copyTree(t *testing.T, from, to string) {
 		return os.WriteFile(target, data, 0o600)
 	}); err != nil {
 		t.Fatalf("copy %s to %s: %v", from, to, err)
+	}
+}
+
+// TOR-119's record: where the run reached, not only how much it took.
+
+func TestSaveRunRoundTripsClaimed(t *testing.T) {
+	dir := t.TempDir()
+	want := [][2]int{{0, 2}, {17, 19}, {265, 270}}
+	if err := SaveRun(dir, Run{Version: Version, Claimed: want}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("LoadRun missed a record it had just written")
+	}
+	if len(got.Claimed) != len(want) {
+		t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+	}
+	for i := range want {
+		if got.Claimed[i] != want[i] {
+			t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+		}
+	}
+}
+
+// TestRunRecordsClaimedAsPairsNotObjects pins the ON-DISK shape, because the
+// shape is the decision: a pair array is a quarter of the bytes of a struct
+// per range, on a record that weighs a few hundred. A future refactor to named
+// fields would be a silent multiplication of every run record.
+func TestRunRecordsClaimedAsPairsNotObjects(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveRun(dir, Run{Version: Version, Claimed: [][2]int{{0, 2}, {17, 19}}}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, Name))
+	if err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	text := string(data)
+
+	if !strings.Contains(text, `"claimed"`) {
+		t.Errorf("the record does not carry a claimed field:\n%s", text)
+	}
+	// The exact indentation is the marshaller's business; what matters is the
+	// numbers sitting as bare numbers under the key. Checked on the claimed
+	// VALUE and not on the whole file: Plan has its own "end" key, so a
+	// file-wide search for object syntax reports the wrong field.
+	compact := strings.Join(strings.Fields(text), "")
+	if !strings.Contains(compact, `"claimed":[[0,2],[17,19]]`) {
+		t.Errorf("claimed is not the compact pair array, which is a quarter of the "+
+			"bytes of a struct per range; got, whitespace removed:\n%s", compact)
+	}
+}
+
+// TestAClaimlessRunWritesNoClaimedFieldAtAll keeps a run that ordered nothing
+// from asserting that it ordered zero pieces. Absent and empty are different
+// answers, and only one of them is honest for a run served from cache.
+func TestAClaimlessRunWritesNoClaimedFieldAtAll(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveRun(dir, Run{Version: Version}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, Name))
+	if err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	if strings.Contains(string(data), "claimed") {
+		t.Errorf("a run with no claims still wrote a claimed field:\n%s", data)
+	}
+
+	got, _ := LoadRun(dir)
+	if got.Claimed != nil {
+		t.Errorf("claimed read back as %v, want nil", got.Claimed)
+	}
+}
+
+// TestAnOlderRecordReadsBackWithNoClaim is the TOR-52 trap for this field.
+// Claimed was added WITHOUT bumping Version, so every record already on disk
+// stays a hit and simply has nothing to say about where its run reached -
+// which is the truth. Bumping would have turned all of them into misses.
+func TestAnOlderRecordReadsBackWithNoClaim(t *testing.T) {
+	if strings.Contains(run080Shape, "claimed") {
+		t.Fatal("the 0.8.0 fixture has grown a claimed field; it must stay the captured record")
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, Name), []byte(run080Shape), 0o600); err != nil {
+		t.Fatalf("write the 0.8.0 record: %v", err)
+	}
+
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("a record written before Claimed existed became a miss - the field was " +
+			"added without bumping Version precisely so this could not happen")
+	}
+	if got.Claimed != nil {
+		t.Errorf("an older record claims to have reached %v; it cannot know", got.Claimed)
+	}
+	if got.InfoHash == "" || got.Plan.Count == 0 {
+		t.Errorf("adding Claimed cost the older record its other fields: %+v", got)
+	}
+}
+
+// TOR-124: Usable asks about the disk, and only about the disk.
+
+// usableFixture writes n frames into dir and returns a manifest describing
+// them, with the indices in failed recorded the way the engine records a point
+// that produced nothing - no path, ShiftFailed, a code in Error.
+func usableFixture(t *testing.T, dir string, n int, failed ...int) manifest.Manifest {
+	t.Helper()
+
+	out := map[int]bool{}
+	for _, i := range failed {
+		out[i] = true
+	}
+
+	frames := make([]manifest.Frame, n)
+	for i := range frames {
+		ms := int64(i * 1000)
+		frames[i] = manifest.Frame{Index: i, RequestedMS: ms, ActualMS: &ms, Width: 640, Height: 360}
+		if out[i] {
+			frames[i].Shift = manifest.ShiftFailed
+			frames[i].Error = "read_stalled"
+			continue
+		}
+		path := filepath.Join(dir, "frame-"+strconv.Itoa(i)+".jpg")
+		if err := os.WriteFile(path, []byte{0xFF, 0xD8, byte(i)}, 0o600); err != nil {
+			t.Fatalf("write frame %d: %v", i, err)
+		}
+		frames[i].Path = path
+	}
+	return manifest.Manifest{Version: manifest.Version, Frames: frames}
+}
+
+func TestUsableAcceptsARunWithUnreachableCapturePoints(t *testing.T) {
+	dir := t.TempDir()
+	m := usableFixture(t, dir, 12, 5, 6, 7, 8, 9, 10, 11)
+
+	if !Usable(m) {
+		t.Error("a manifest with five frames on disk and seven points the engine could " +
+			"not reach was refused. Those seven have no file to have lost, so they say " +
+			"nothing about the disk - and refusing on them is what made a holed run " +
+			"impossible to reopen (TOR-124)")
+	}
+}
+
+func TestUsableStillRefusesAFrameGoneFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	m := usableFixture(t, dir, 4)
+
+	if !Usable(m) {
+		t.Fatal("the fixture is not usable to begin with")
+	}
+	if err := os.Remove(m.Frames[2].Path); err != nil {
+		t.Fatalf("remove a frame: %v", err)
+	}
+	if Usable(m) {
+		t.Error("a manifest promising a frame the disk no longer has was accepted; " +
+			"that is the one question this function exists to answer")
+	}
+}
+
+func TestUsableRefusesAManifestWithNoFrameOnDiskAtAll(t *testing.T) {
+	dir := t.TempDir()
+
+	// Every point failed: the run produced nothing, so there is nothing to
+	// show - a floor, not a completeness test.
+	all := usableFixture(t, dir, 3, 0, 1, 2)
+	if Usable(all) {
+		t.Error("a manifest whose every point failed was accepted; one frame of twelve " +
+			"is a partial result, none of twelve is not a result")
+	}
+
+	if Usable(manifest.Manifest{Version: manifest.Version}) {
+		t.Error("a manifest with no frames at all was accepted")
+	}
+}
+
+// TestUsableJudgesTheDiskNotTheRecord states the split in one place: the same
+// manifest is usable or not purely on whether its frames are there, and the
+// failed points are constant across both arms.
+func TestUsableJudgesTheDiskNotTheRecord(t *testing.T) {
+	dir := t.TempDir()
+	m := usableFixture(t, dir, 6, 4, 5)
+
+	if !Usable(m) {
+		t.Fatal("four frames on disk, two unreachable points: want usable")
+	}
+	for _, f := range m.Frames {
+		if f.Path == "" {
+			continue
+		}
+		if err := os.Remove(f.Path); err != nil {
+			t.Fatalf("remove %s: %v", f.Path, err)
+		}
+	}
+	if Usable(m) {
+		t.Error("the same manifest with its frames deleted is still usable; the " +
+			"judgement is not reading the disk")
 	}
 }

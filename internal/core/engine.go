@@ -343,6 +343,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		DownloadedByte: spent,
 		ClaimedByte:    claimedByte,
 		ClaimedPieces:  claimedPieces,
+		ClaimedRanges:  torrent.ClaimedRanges(),
 		Elapsed:        time.Since(started),
 		TorrentPath:    torrentPath,
 		Warnings:       warnings,
@@ -377,6 +378,26 @@ type fileDeps struct {
 	writer    *output.Writer
 	tracker   *BudgetTracker
 	bus       *Bus
+
+	// toneMap is the colour conversion decided for this one file, once its
+	// stream has been inspected. It lives here rather than on the extractor
+	// because two callers need it: the extractor, which applies it, and the
+	// manifest, which reports it.
+	toneMap frames.ToneMap
+}
+
+// ToneMapOf decides what to do about a video stream's colour. The one place
+// that translates ffprobe's vocabulary into the extractor's, so the CLI's
+// summary line and the manifest cannot disagree with the frames on what was
+// done to them.
+func ToneMapOf(v probe.VideoStream) frames.ToneMap {
+	return frames.ToneMapFor(frames.ColorTags{
+		Transfer:           v.ColorTransfer,
+		Primaries:          v.ColorPrimaries,
+		Matrix:             v.ColorSpace,
+		Range:              v.ColorRange,
+		DolbyVisionProfile: v.DolbyVisionProfile,
+	})
 }
 
 func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, file swarm.FileInfo) (produced int, complete bool, err error) {
@@ -431,6 +452,13 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			return 0, false, err
 		}
 	}
+
+	// Decided once per file, from the stream ffprobe just described, and held
+	// on this call's own copy of deps: one extractor serves every file of a
+	// run in parallel, so the conversion travels with the file rather than
+	// being set on the shared one (TOR-108).
+	deps.toneMap = ToneMapOf(info.Video)
+	deps.extractor = deps.extractor.WithToneMap(deps.toneMap)
 
 	deps.bus.Publish(FileStarted{
 		File:  file.Index,
@@ -665,6 +693,10 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 		Videos:   make([]cache.File, 0, len(videos)),
 		Selected: mergeIndices(prior.Selected, indicesOf(selected)),
 		Complete: mergeIndices(prior.Complete, finished),
+		// Not merged with prior, unlike the two above: see the field's own
+		// doc. This is one run's traversal, and a union across reruns would
+		// describe a spread no single run achieved.
+		Claimed: claimedPairs(torrent.ClaimedRanges()),
 	}
 	for _, v := range videos {
 		record.Videos = append(record.Videos, cache.File{
@@ -672,6 +704,22 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 		})
 	}
 	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// claimedPairs flattens swarm's named ranges into the record's pair array.
+// Two shapes for one thing, on purpose: the named fields are what code reads,
+// the pairs are what a few hundred bytes of JSON can afford (cache.Run.Claimed
+// says why). Nil in stays nil out, so a run that claimed nothing writes no
+// field at all rather than an empty array.
+func claimedPairs(ranges []swarm.PieceRange) [][2]int {
+	if len(ranges) == 0 {
+		return nil
+	}
+	out := make([][2]int, 0, len(ranges))
+	for _, r := range ranges {
+		out = append(out, [2]int{r.Begin, r.End})
+	}
+	return out
 }
 
 // saveTorrentFile puts the torrent this run is working on into the run
@@ -788,6 +836,16 @@ func reusableFrames(prior manifest.Manifest, points []time.Duration) map[int]man
 // to a precision that changes minute by minute anyway.
 const availabilityBuckets = 64
 
+// toneMappedTo names what the frames were converted to, for the manifest.
+// Empty when nothing was converted, which covers both an SDR source and a
+// high dynamic range one nothing in the release can render faithfully.
+func toneMappedTo(t frames.ToneMap) string {
+	if !t.Applies() {
+		return ""
+	}
+	return "bt709"
+}
+
 // writeManifest records what happened to one file, next to its frames.
 //
 // The cost it carries is the run's, not the file's: the budget is shared
@@ -832,6 +890,13 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 			FPS:          info.Video.FPS,
 			BitRate:      info.Video.BitRate,
 			BitsPerPixel: info.Video.BitsPerPixel(),
+
+			DynamicRange:       deps.toneMap.Source,
+			ToneMappedTo:       toneMappedTo(deps.toneMap),
+			ColorTransfer:      info.Video.ColorTransfer,
+			ColorPrimaries:     info.Video.ColorPrimaries,
+			ColorSpace:         info.Video.ColorSpace,
+			DolbyVisionProfile: info.Video.DolbyVisionProfile,
 		},
 		Audio:     make([]manifest.Audio, 0, len(info.Audio)),
 		Subtitles: make([]manifest.Subtitle, 0, len(info.Subtitles)),

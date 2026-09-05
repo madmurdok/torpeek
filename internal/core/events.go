@@ -133,6 +133,17 @@ type Done struct {
 	ClaimedByte   int64
 	ClaimedPieces int
 
+	// ClaimedRanges is where those pieces are: the same set ClaimedPieces
+	// counts, coalesced into ascending half-open ranges, so a client can say
+	// the 44 were spread across the film rather than bunched at the front.
+	// The range lengths sum to ClaimedPieces exactly - two views of one set.
+	//
+	// Nil for a run served from cache, which claimed nothing because it went
+	// nowhere. Unlike the two figures above this one does reach disk, in the
+	// run record (cache.Run.Claimed); swarm.Torrent.ClaimedRanges carries the
+	// argument for the shape, costed against the record it produces.
+	ClaimedRanges []swarm.PieceRange
+
 	// TorrentPath is where the run kept its own .torrent, so a client can
 	// offer it without knowing anything about the output layout - the same
 	// service FileDone's ManifestPath and SheetPath do for one video file.

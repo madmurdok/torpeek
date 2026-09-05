@@ -91,6 +91,27 @@ type Run struct {
 	// A file with a failed capture point is deliberately absent: a rerun
 	// should try it again rather than serve a gap as a result.
 	Complete []int `json:"complete"`
+	// Claimed is where in the torrent the run that wrote this record actually
+	// reached: ascending half-open [begin, end) piece ranges, the set of
+	// pieces it ordered from the swarm coalesced into stretches (TOR-119,
+	// drawn by TOR-111). Empty or absent when there is nothing to say -
+	// including every record written before this field existed, which reads
+	// back as nil rather than as a claim of zero.
+	//
+	// A pair array rather than a struct per range, and that is a size
+	// decision rather than a style one: [[0,3],[17,19]] against
+	// [{"begin":0,"end":3},...] is a quarter of the bytes on a record that
+	// weighs a few hundred. swarm.Torrent.ClaimedRanges carries the full
+	// argument for ranges over raw indices or a bitmap, costed in JSON bytes
+	// against this file's measured size.
+	//
+	// UNLIKE Selected and Complete above, this does NOT merge across runs
+	// into the same directory. Those two describe what the DIRECTORY holds,
+	// so they accumulate; this describes one traversal of one torrent, and a
+	// union across reruns would report a spread no single run achieved -
+	// exactly the wrong answer for a picture of what one run cost. It follows
+	// Plan, which is likewise simply overwritten by whichever run wrote last.
+	Claimed [][2]int `json:"claimed,omitempty"`
 }
 
 // SelectedCount is how many files this directory's runs have ever asked for -
@@ -221,20 +242,36 @@ func onDisk(path string) bool {
 // resolved against the directory the record was read from - so it is asking
 // whether the frames of THIS results tree are there, not whether the tree the
 // run originally wrote still exists somewhere.
+//
+// IT ASKS ONE QUESTION, and until TOR-124 it asked two. It used to refuse any
+// manifest holding a ShiftFailed frame, which is not a fact about the disk at
+// all: a point the engine reported as producing nothing has no file to have
+// lost, so there is nothing there for this function to check. Bundling the two
+// meant one manifest with one unreachable capture point was indistinguishable
+// from a results directory somebody had emptied - and the consequence was that
+// a run with a single gap could never be reopened, which is what TOR-124 came
+// from. Whether a run came out WHOLE is a different question, and Run.Complete
+// is the field that answers it; the two gates now ask one thing each.
+//
+// A manifest with no frame on disk is still refused, whether it never had one
+// or lost the lot: it describes nothing that can be shown, so there is nothing
+// to serve from it either way. That is the floor, and it is deliberately a
+// floor rather than a completeness test - one frame of twelve is a partial
+// result a person can look at, none of twelve is not a result.
 func Usable(m manifest.Manifest) bool {
-	if len(m.Frames) == 0 {
-		return false
-	}
+	served := 0
 	for _, f := range m.Frames {
-		if f.Shift == manifest.ShiftFailed {
-			return false
-		}
-		if f.Path == "" {
-			return false
+		if f.Shift == manifest.ShiftFailed || f.Path == "" {
+			// The engine itself recorded that this point produced nothing
+			// (manifest.ShiftFailed's own doc: "Path is empty and Error says
+			// why"). There is no file to look for, so this says nothing about
+			// whether the results are still on disk.
+			continue
 		}
 		if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
 			return false
 		}
+		served++
 	}
-	return true
+	return served > 0
 }

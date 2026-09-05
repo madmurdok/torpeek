@@ -65,12 +65,54 @@ is either an encoder torpeek does not use or a filter it does not call:
 - **libx264 and libx265 are encoders.** torpeek only ever *decodes* H.264 and
   HEVC; libavcodec's own `h264` and `hevc` decoders are native and LGPL.
 - **The GPL filters** (`vf_blackframe`, `vf_cropdetect`, `vf_hqdn3d` and the
-  rest listed in `licenses/ffmpeg/LICENSE.md`) are unreachable from torpeek,
-  which passes no `-vf`, no `-filter_complex` and no `-lavfi` at all. Blank
-  frame detection is done in Go, in `internal/frames/blank.go`, not by an
-  ffmpeg filter.
+  rest listed in `licenses/ffmpeg/LICENSE.md`) are unreachable from torpeek.
+  Since TOR-108 torpeek does pass `-vf`, so this is no longer true by
+  construction and has to be checked against the two filters it names - see
+  "The one filter chain torpeek passes" below. Blank frame detection is still
+  done in Go, in `internal/frames/blank.go`, not by an ffmpeg filter.
 - **The only encoders torpeek asks for are `mjpeg` and `png`** (see
   `internal/frames/extract.go`), both native and LGPL.
+
+### The one filter chain torpeek passes
+
+Until TOR-108 this section could say torpeek passed no `-vf`, no
+`-filter_complex` and no `-lavfi` at all, and be done. It now passes one `-vf`,
+and only for a high dynamic range source: an HDR10 or HLG stream decoded
+without conversion produces a flat grey frame that reads as our bug rather than
+as the file's dynamic range. The chain is built in `internal/frames/hdr.go`, and
+it uses exactly three filters:
+
+| filter | source file | licence | needs |
+|---|---|---|---|
+| `zscale` | `libavfilter/vf_zscale.c` | LGPL v2.1 or later | `--enable-libzimg` |
+| `tonemap` | `libavfilter/vf_tonemap.c` | LGPL v2.1 or later | nothing external |
+| `format` | `libavfilter/vf_format.c` | LGPL v2.1 or later | nothing external |
+
+None of the three appears in FFmpeg's GPL-only file list in `LICENSE.md` at the
+commit our lock pins, and each carries an LGPL v2.1-or-later header there.
+libzimg is not in that document's GPL-libraries list either; BtbN's `-lgpl`
+build configures `--enable-libzimg` while `scripts/fetch-ffmpeg.sh` verifies
+that the same binary's configure line carries no `--enable-gpl`.
+
+**All four bundled builds have all three filters**, which is the part that had
+to be checked rather than assumed, because Linux/Windows and macOS are
+different builds and a chain that existed in one and not the other would be a
+per-platform difference in what a frame looks like - the class of problem
+TOR-93 exists to avoid:
+
+| platform | how it was confirmed |
+|---|---|
+| linux-amd64 | `ffmpeg -filters` run out of `third_party/ffmpeg/linux-amd64` inside a clean `debian:12-slim` container: `zscale`, `tonemap`, `format`, `colorspace` and `setparams` present; `blackframe`, `cropdetect`, `hqdn3d` and `eq` absent, which is the LGPL configuration showing through |
+| darwin-amd64 | the same command run natively; the same five present. The four GPL filters *are* present here, because this is the GPL build - which is another way of seeing that the two platforms really do carry different ffmpegs, and the reason the three filters torpeek uses had to be checked on both rather than on one |
+| windows-amd64 | **not run by hand** - nothing on an Intel Mac can execute a PE binary. It is the same BtbN build from the same release tag as linux-amd64, and the configure line embedded in `ffmpeg.exe` carries the flags that matter (`--enable-libzimg`, `--enable-version3`, no `--enable-gpl`). `archivecheck` now asserts the three filters on whatever OS it runs on, so `.github/workflows/archives.yml` answers this for real on the next dispatch |
+| darwin-arm64 | **not run by hand**, for the same reason - an Intel Mac cannot execute an arm64 Mach-O. Same builder and build definition as darwin-amd64, and covered by the same `archivecheck` assertion |
+
+**`libplacebo` is deliberately not used.** It is in the LGPL Linux and Windows
+builds (`--enable-libplacebo`) and *not* in the GPL macOS ones, so a chain built
+on it would tone map differently on macOS than on the other two - or fail there
+outright. That asymmetry also settles Dolby Vision: applying a profile 5
+stream's RPU needs libplacebo, so torpeek cannot render one faithfully on every
+platform and does not try. It names the profile in the manifest instead.
 
 That was checked by running the LGPL `ffmpeg` and `ffprobe` out of the
 assembled linux-amd64 archive, against real files, rather than by reading
@@ -717,6 +759,60 @@ there is stricter - it refuses an arm64 Mach-O with no valid signature outright
 `first-run.command` travels in both macOS archives because the remedy does not
 depend on the answer.
 
+## The typeface: OFL, and why the family had to be renamed
+
+The web UI is drawn in subsets of **IBM Plex**, compiled into the binary
+(TOR-120). This is the project's first binary asset in git, and the second
+third-party licence in the archives, so it gets its own record here rather than
+a line in the ffmpeg tables.
+
+**Why it is bundled at all.** The alternative was a `<link>` to
+fonts.googleapis.com, and there is a specific machine on which that fails:
+torpeek's own headless mode, serving the UI from a seedbox behind somebody's
+reverse proxy. There the request either never resolves or is blocked, silently,
+and the design becomes a suggestion that renders differently on every host. At
+140532 bytes (137.2 KB) against the ~110 MiB of ffmpeg each archive
+already carries - four thousandths of the download - buying certainty outright
+was not a close call.
+
+**Licence: SIL Open Font License 1.1**, Copyright 2017 IBM Corp. Text in
+`packaging/licenses/fonts/OFL.txt`, copied into every archive as
+`licenses/fonts/OFL.txt` beside the ffmpeg ones. The OFL permits bundling and
+selling; what it requires is that the copyright notice and the licence travel
+with the font. Compiling a font into an executable is still distributing it, so
+they travel.
+
+**The rename is an obligation, not a branding exercise**, and it is the part
+that would have been easy to get wrong by not reading the licence header.
+IBM Plex is released `with Reserved Font Name "Plex"`. OFL clause 3:
+
+> No Modified Version of the Font Software may use the Reserved Font Name(s)
+> unless explicit written permission is granted... This restriction only
+> applies to the primary font name as presented to the users.
+
+And clause-wise a subset **is** a Modified Version - the definition covers any
+derivative made by "deleting... any of the components of the Original
+Version", which is precisely what subsetting to three scripts does. All 9
+files here are subsets. So the stylesheet presents them as **Torpeek Sans** and
+**Torpeek Mono**, and every notice says plainly that the typeface is IBM Plex.
+Keeping the name would have been the licence violation; changing it without
+saying whose work it is would have been the other one.
+
+**What is included, and what deliberately is not.** Latin, Latin Extended and
+Cyrillic. Not because those are the only scripts that matter, but because the
+UI renders torrent *names*, which are arbitrary text in arbitrary scripts, and
+no font ships every script. The stylesheet declares a real fallback stack, so a
+Japanese or Arabic filename is composed per glyph by the machine's own fonts
+and renders correctly - verified in a browser rather than assumed, with
+`漫画.1080p.mkv`, `فيلم.mkv` and `Синтел.2048.mkv` in the run list and no tofu
+in any of them. Chasing full coverage would cost megabytes to prevent nothing.
+
+**Provenance** is `third_party/fonts.lock`: per-file sha256, the Google Fonts
+URL each came from, and the `unicode-range` the CSS declares for it. A
+different hash means a different cut of the font, which is a design change
+rather than a refresh, and the tests in `internal/web` fail if the lock and the
+files disagree.
+
 ## Size
 
 Section 4 estimates ~80 MB per platform. The measured figure for the chosen
@@ -748,6 +844,11 @@ libbluray, libzvbi, aribb24, libopenmpt, libgme, SRT, RIST, ZeroMQ, LV2,
 OpenAL, Vulkan with libplacebo, chromaprint, libvmaf, zimg, and the AMF, QSV
 and NVENC hardware paths - and torpeek asks for none of it beyond five
 decoders and two image encoders.
+
+The embedded typeface adds 140532 bytes (137.2 KB) to the `torpeek`
+column and nothing to the others. It does not appear as a row because it is
+inside the executable, which is also why its licence has to be in
+`licenses/fonts/` rather than inferable from the folder listing.
 
 Two ways down, if the size is judged unacceptable:
 

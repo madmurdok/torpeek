@@ -183,6 +183,113 @@ func TestFileDetailLeavesOutAFrameGoneFromDisk(t *testing.T) {
 	}
 }
 
+// buildHoledRun is buildCachedRun for a manifest that already has some
+// frames with no path - a failed capture point, per manifest.ShiftFailed.
+// buildCachedRun cannot be reused as-is: it calls writer.WriteFrame for
+// every entry in m.Frames unconditionally, which would hand a failed point a
+// file it never had. Here, only a frame with a non-empty Path gets one
+// written; a failed point is left exactly as the caller set it up.
+func buildHoledRun(t *testing.T, root, infoHash, params string, run cache.Run, m manifest.Manifest) output.Layout {
+	t.Helper()
+
+	layout := output.Layout{Root: root, InfoHash: infoHash, Params: params}
+	writer, err := output.NewWriter(layout)
+	if err != nil {
+		t.Fatalf("new writer: %v", err)
+	}
+
+	for i, f := range m.Frames {
+		if f.Path == "" {
+			continue
+		}
+		path, err := writer.WriteFrame(m.File.Index, m.File.Path, f.Index, []byte("jpeg-bytes-"+m.File.Path), "jpg")
+		if err != nil {
+			t.Fatalf("write frame %d: %v", f.Index, err)
+		}
+		m.Frames[i].Path = path
+	}
+
+	if _, err := writer.WriteManifest(m.File.Index, m.File.Path, m); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := cache.SaveRun(layout.RunDir(), run); err != nil {
+		t.Fatalf("save run.json: %v", err)
+	}
+	return layout
+}
+
+// TestFileDetailCarriesTheFailureReasonForAPointThatProducedNothing is
+// TOR-118's acceptance criterion, at the half that was actually broken: the
+// manifest already distinguishes a swarm-could-not-supply point
+// (manifest.ShiftFailed, Error "unavailable") from a read-timeout point
+// (manifest.ShiftFailed, Error "read_stalled") - verified against a real
+// holed run's manifest before this test was written, where a 12-point plan
+// held exactly this split. What this proves is that the distinction survives
+// being read back through GET /runs/{infohash}/files/{index}, and that every
+// planned point reaches the page - not just the one that produced a frame,
+// which is what internal/web/listing.go's fileDetail dropped before TOR-118.
+func TestFileDetailCarriesTheFailureReasonForAPointThatProducedNothing(t *testing.T) {
+	root := t.TempDir()
+
+	actual0 := int64(43700)
+	m := manifest.Manifest{
+		Version: manifest.Version,
+		File:    manifest.File{Index: 6, Path: "Sintel/sintel.mp4", Bytes: 1 << 20, Container: "matroska"},
+		Video:   manifest.Video{Codec: "h264", Width: 640, Height: 360},
+		Frames: []manifest.Frame{
+			{Index: 0, RequestedMS: 43700, ActualMS: &actual0, Path: "placeholder", Width: 640, Height: 360},
+			{Index: 1, RequestedMS: 82646, Shift: manifest.ShiftFailed, Error: "unavailable"},
+			{Index: 2, RequestedMS: 112105, Shift: manifest.ShiftFailed, Error: "read_stalled"},
+		},
+	}
+
+	run := cache.Run{
+		Version: cache.Version, Tool: "test", CreatedAt: time.Now(),
+		InfoHash: detailHash, Name: "Sintel",
+		Plan:     cache.Plan{Count: 3, Start: 0.05, End: 0.95, Profile: "min-traffic", Format: "jpeg"},
+		Videos:   []cache.File{{Index: 6, Path: "Sintel/sintel.mp4", Bytes: 1 << 20}},
+		Selected: []int{6}, Complete: []int{6},
+	}
+	buildHoledRun(t, root, detailHash, "cccc3333", run, m)
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	fake := &fakeRun{}
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	detail, status := getFileDetail(t, ts.URL, detailHash, "6")
+	if status != http.StatusOK {
+		t.Fatalf("status %d, want 200", status)
+	}
+	if len(detail.Frames) != 3 {
+		t.Fatalf("frames = %d, want 3 - all three planned points, not just the one that has a URL: %+v",
+			len(detail.Frames), detail.Frames)
+	}
+
+	byIndex := map[int]FrameRef{}
+	for _, f := range detail.Frames {
+		byIndex[f.Index] = f
+	}
+
+	if got := byIndex[0]; got.URL == "" || got.Error != "" {
+		t.Errorf("frame 0 (succeeded) = %+v, want a URL and no error", got)
+	}
+
+	unavailable := byIndex[1]
+	if unavailable.URL != "" || unavailable.Error != "unavailable" || unavailable.TimeMS != 82646 {
+		t.Errorf("frame 1 (swarm could not supply it) = %+v, want no URL, error \"unavailable\", time_ms 82646", unavailable)
+	}
+
+	stalled := byIndex[2]
+	if stalled.URL != "" || stalled.Error != "read_stalled" || stalled.TimeMS != 112105 {
+		t.Errorf("frame 2 (read timed out) = %+v, want no URL, error \"read_stalled\", time_ms 112105", stalled)
+	}
+
+	if unavailable.Error == stalled.Error {
+		t.Fatal("the two failure causes collapsed into the same value - the exact bug TOR-118 found")
+	}
+}
+
 // TestFileDetailIsNotFoundForWhatDoesNotExist covers the three ways a
 // request can name nothing, including the one that matters for safety: the
 // infohash is the only string a request puts into a path here (everywhere
@@ -228,5 +335,117 @@ func TestValidInfoHashRefusesAnythingButADigest(t *testing.T) {
 		if validInfoHash(bad) {
 			t.Errorf("%q was accepted as an infohash", bad)
 		}
+	}
+}
+
+// TOR-111: a run's torrent-wide piece claims, turned into one file's stretch.
+
+func TestReachOfClipsAClaimToTheFilesOwnPieces(t *testing.T) {
+	const piece = 256 << 10
+
+	// A file starting 10 pieces in and spanning 20 of them.
+	file := cache.File{Index: 1, Path: "b.mkv", Offset: 10 * piece, Bytes: 20 * piece}
+
+	got := reachOf([][2]int{
+		{0, 5},   // entirely before this file - another file, or the metadata
+		{8, 12},  // straddles the start: only 10..11 belong here
+		{15, 18}, // wholly inside
+		{28, 34}, // straddles the end: only 28..29 belong here
+		{40, 44}, // entirely after
+	}, file, piece)
+
+	if got == nil {
+		t.Fatal("reachOf returned nil for a file with claims in it")
+	}
+	if got.FirstPiece != 10 || got.Pieces != 20 || got.PieceBytes != piece {
+		t.Errorf("geometry = first %d, pieces %d, bytes %d; want 10, 20, %d",
+			got.FirstPiece, got.Pieces, got.PieceBytes, piece)
+	}
+
+	// Offsets from FirstPiece, not absolute indices: the drawing's origin is
+	// the file, not the torrent.
+	want := [][2]int{{0, 2}, {5, 8}, {18, 20}}
+	if len(got.Claimed) != len(want) {
+		t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+	}
+	for i := range want {
+		if got.Claimed[i] != want[i] {
+			t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+		}
+	}
+	if got.ClaimedPieces != 7 {
+		t.Errorf("claimed_pieces = %d, want 7 - and it must equal the ranges' own sum",
+			got.ClaimedPieces)
+	}
+
+	sum := 0
+	for _, r := range got.Claimed {
+		sum += r[1] - r[0]
+	}
+	if sum != got.ClaimedPieces {
+		t.Errorf("the ranges cover %d pieces but claimed_pieces says %d", sum, got.ClaimedPieces)
+	}
+}
+
+// TestReachOfSaysNothingRatherThanZero is the distinction TOR-119 already had
+// to make on disk and this inherits: a record with no claims recorded cannot
+// say the run touched nothing, and a strip drawn from it would assert exactly
+// that.
+func TestReachOfSaysNothingRatherThanZero(t *testing.T) {
+	const piece = 256 << 10
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 10 * piece}
+
+	for _, tc := range []struct {
+		name    string
+		claimed [][2]int
+		file    cache.File
+		piece   int64
+	}{
+		{"a record written before claims were kept", nil, file, piece},
+		{"a manifest with no piece length", [][2]int{{0, 4}}, file, 0},
+		{"a file of no length", [][2]int{{0, 4}}, cache.File{Index: 0, Path: "a.mkv"}, piece},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reachOf(tc.claimed, tc.file, tc.piece); got != nil {
+				t.Errorf("reachOf = %+v, want nil - there is nothing to draw from", got)
+			}
+		})
+	}
+}
+
+// TestReachOfReportsAFileTheRunNeverTouched keeps that case distinct from the
+// one above: here the record DOES say what was claimed, and the answer is that
+// none of it was this file. A strip of untouched blocks is the truthful
+// drawing, so it comes back with a geometry and no ranges.
+func TestReachOfReportsAFileTheRunNeverTouched(t *testing.T) {
+	const piece = 256 << 10
+	file := cache.File{Index: 2, Path: "c.mkv", Offset: 100 * piece, Bytes: 5 * piece}
+
+	got := reachOf([][2]int{{0, 4}, {10, 20}}, file, piece)
+	if got == nil {
+		t.Fatal("reachOf = nil; the record said what was claimed, so the answer is zero, not silence")
+	}
+	if got.Pieces != 5 || len(got.Claimed) != 0 || got.ClaimedPieces != 0 {
+		t.Errorf("reach = %+v, want 5 pieces and none of them claimed", got)
+	}
+}
+
+// TestReachOfHandlesAFileEndingMidPiece is the off-by-one this arithmetic
+// invites: a file's last byte usually sits inside a piece it shares with the
+// next file, and that piece belongs to both.
+func TestReachOfHandlesAFileEndingMidPiece(t *testing.T) {
+	const piece = 256 << 10
+	// Starts at the very start of piece 0 and ends one byte into piece 3.
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 3*piece + 1}
+
+	got := reachOf([][2]int{{0, 8}}, file, piece)
+	if got == nil {
+		t.Fatal("reachOf returned nil")
+	}
+	if got.Pieces != 4 {
+		t.Errorf("pieces = %d, want 4 - the file's last byte is in piece 3", got.Pieces)
+	}
+	if got.ClaimedPieces != 4 {
+		t.Errorf("claimed_pieces = %d, want 4 - the claim covers the whole file", got.ClaimedPieces)
 	}
 }

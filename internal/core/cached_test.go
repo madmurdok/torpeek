@@ -3,11 +3,14 @@ package core
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/output"
+	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
 // buildCachedRun writes a run.json and one manifest.json per file directly to
@@ -210,7 +213,13 @@ func TestReplayMissesWhenAFrameIsGone(t *testing.T) {
 // produced. A file the original run held but never finished (in Videos, not
 // in Complete, no manifest at all) must be silently absent rather than
 // turning the whole reopen into a miss.
-func TestReplaySelectsOnlyCompletedFiles(t *testing.T) {
+// TestReplayLeavesOutAFileWithNothingOnDisk was TestReplaySelectsOnlyCompletedFiles
+// until TOR-124, and the rename is the point rather than tidying: the rule it
+// guards is no longer "only files record.Complete names" but "only files that
+// have something to show". This fixture's second file satisfies neither - it
+// has no manifest on disk at all - so the assertions are unchanged and the
+// name now says which rule they test.
+func TestReplayLeavesOutAFileWithNothingOnDisk(t *testing.T) {
 	const (
 		infoHash = "2222222222222222222222222222222222dead"
 		params   = "deadbeef"
@@ -260,5 +269,191 @@ func TestReplaySelectsOnlyCompletedFiles(t *testing.T) {
 	}
 	if done == nil || done.Files != 1 {
 		t.Errorf("done = %+v, want exactly 1 file", done)
+	}
+}
+
+// holedManifest is a manifest the way a run that could not reach every piece
+// writes one: some points with a frame, some recorded as having produced
+// nothing and why. It is the shape TOR-118 found the manifest already had and
+// TOR-124 made reopenable.
+func holedManifest(index int, path string, points int, failed map[int]string) manifest.Manifest {
+	m := fileManifest(index, path, points)
+	for i := range m.Frames {
+		code, isFailed := failed[i]
+		if !isFailed {
+			continue
+		}
+		// Exactly what engine.go writes for a point it gave up on: no path, no
+		// actual, ShiftFailed, and the code in Error.
+		m.Frames[i].Path = ""
+		m.Frames[i].ActualMS = nil
+		m.Frames[i].Shift = manifest.ShiftFailed
+		m.Frames[i].Error = code
+		m.Frames[i].Width = 0
+		m.Frames[i].Height = 0
+	}
+	return m
+}
+
+// TestReplayServesAHoledRun is TOR-124's acceptance criterion. A run with
+// unreachable capture points was refused outright - "has no complete file" -
+// so the run this release most improved was the one nobody could open. It now
+// replays what it produced, with the gaps published as the skips they were.
+func TestReplayServesAHoledRun(t *testing.T) {
+	const (
+		infoHash = "4e1827ec34783a07358081c635a4e0beab1c11df"
+		params   = "af97f78c"
+	)
+	root := t.TempDir()
+
+	// Five frames of twelve, and the two causes the manifest keeps apart -
+	// the split a real holed run on disk actually has.
+	failed := map[int]string{
+		5: "unavailable", 6: "unavailable",
+		7: "read_stalled", 8: "read_stalled", 9: "read_stalled",
+		10: "read_stalled", 11: "read_stalled",
+	}
+	m := holedManifest(0, "movie.mkv", 12, failed)
+	buildCachedRun(t, root, infoHash, params, cache.Run{
+		Version: cache.Version, InfoHash: infoHash, Name: "001",
+		Videos: []cache.File{{Index: 0, Path: "movie.mkv", Bytes: 1 << 20}},
+		// Deliberately EMPTY: the file never came out whole, which is exactly
+		// what Complete records, and exactly what used to refuse the reopen.
+		Complete: nil,
+	}, map[int]manifest.Manifest{0: m})
+
+	engine := NewEngine(ffmpeg.Tools{})
+	events := collect(t, engine.Replay(root, infoHash, params))
+
+	var (
+		started  *FileStarted
+		ready    []FrameReady
+		skipped  []FrameSkipped
+		fileDone *FileDone
+		done     *Done
+	)
+	for _, ev := range events {
+		switch e := ev.(type) {
+		case FileStarted:
+			started = &e
+		case FrameReady:
+			ready = append(ready, e)
+		case FrameSkipped:
+			skipped = append(skipped, e)
+		case FileDone:
+			fileDone = &e
+		case Failed:
+			t.Fatalf("a run with five frames on disk was refused: %s: %v", e.Code, e.Err)
+		case Done:
+			done = &e
+		}
+	}
+
+	if started == nil {
+		t.Fatal("no file_started: the holed file was not offered at all")
+	}
+	if len(started.Plan) != 12 {
+		t.Errorf("the plan carries %d points, want all 12 - the page reserves a cell "+
+			"per point from this (TOR-110)", len(started.Plan))
+	}
+
+	if len(ready) != 5 {
+		t.Errorf("%d frames published, want 5", len(ready))
+	}
+	for _, r := range ready {
+		if r.Path == "" {
+			t.Errorf("frame %d was published with no path; a point that produced "+
+				"nothing must be a skip, not a frame", r.Index)
+		}
+	}
+
+	if len(skipped) != 7 {
+		t.Fatalf("%d skips published, want 7", len(skipped))
+	}
+	codes := map[ErrorCode]int{}
+	for _, sk := range skipped {
+		codes[sk.Code]++
+		if want := failed[sk.Index]; string(sk.Code) != want {
+			t.Errorf("point %d was skipped with code %q, want %q from the manifest",
+				sk.Index, sk.Code, want)
+		}
+	}
+	if codes[CodeUnavailable] != 2 || codes[CodeReadStalled] != 5 {
+		t.Errorf("codes = %v, want 2 unavailable and 5 read_stalled - the two causes "+
+			"kept apart, which is the whole reason TOR-118 exists", codes)
+	}
+
+	if fileDone == nil || fileDone.Frames != 5 {
+		t.Errorf("file_done = %+v, want Frames 5 - what the file HAS, not how many "+
+			"points it recorded", fileDone)
+	}
+	if done == nil || done.Frames != 5 {
+		t.Errorf("done = %+v, want Frames 5", done)
+	}
+}
+
+// TestACacheHitStillRefusesAHoledRun is the other half of TOR-124 and the
+// regression that would matter most. Reopening asks "show me what this run
+// produced"; a live request asks for a specific number of frames of a specific
+// file, and answering it off disk with five of the twelve somebody asked for
+// would be answering a question they did not put. Run.Complete's own doc argues
+// exactly that, and it stays true on this path.
+//
+// It goes through serveFromCache rather than calling loadCacheHit with a
+// literal true, and that is deliberate: the first version of this test called
+// the helper directly, so flipping serveFromCache's own argument to false left
+// it green. A test of a flag's behaviour is not a test that the caller passes
+// it.
+func TestACacheHitStillRefusesAHoledRun(t *testing.T) {
+	const infoHash = "4e1827ec34783a07358081c635a4e0beab1c11df"
+	root := t.TempDir()
+
+	cfg := DefaultConfig("magnet:?xt=urn:btih:"+infoHash, root, t.TempDir())
+	cfg.Plan = frames.Plan{Count: 12, Start: 0.05, End: 0.95}
+	params := ParamsKey(cfg)
+
+	m := holedManifest(0, "movie.mkv", 12, map[int]string{5: "unavailable", 6: "read_stalled"})
+	buildCachedRun(t, root, infoHash, params, cache.Run{
+		Version: cache.Version, InfoHash: infoHash, Name: "001",
+		Videos:   []cache.File{{Index: 0, Path: "movie.mkv", Bytes: 1 << 20}},
+		Complete: nil,
+	}, map[int]manifest.Manifest{0: m})
+
+	// The record IS reopenable now, which is what makes this test worth
+	// having: the two paths read the same directory and must answer
+	// differently.
+	replayed := collect(t, NewEngine(ffmpeg.Tools{}).Replay(root, infoHash, params))
+	served := false
+	for _, ev := range replayed {
+		if _, ok := ev.(FileStarted); ok {
+			served = true
+		}
+	}
+	if !served {
+		t.Fatal("the fixture is not reopenable, so this test cannot show the difference")
+	}
+
+	src, err := swarm.ParseSource(cfg.Source)
+	if err != nil {
+		t.Fatalf("parse the source: %v", err)
+	}
+
+	bus := NewBus(DefaultBuffer)
+	events, stop := bus.Subscribe()
+	defer stop()
+	drained := make(chan struct{})
+	go func() {
+		for range events {
+		}
+		close(drained)
+	}()
+
+	hit := NewEngine(ffmpeg.Tools{}).serveFromCache(cfg, src, bus, time.Now())
+	bus.Close()
+	<-drained
+
+	if hit {
+		t.Error("a live request was answered off disk with a holed result; it must go " +
+			"to the swarm and try the missing points again")
 	}
 }

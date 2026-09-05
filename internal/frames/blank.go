@@ -32,6 +32,28 @@ import (
 // either. This is the discriminator REQUIREMENTS.md 2.3 asks for: mean
 // brightness alone would flag the dark scene along with the black one (see
 // docs/results/0.1.0-acceptance.md), spread tells them apart.
+//
+// High dynamic range was measured against this line while TOR-108 was being
+// fixed, because a badly handled HDR frame is flatter than a handled one and
+// the worry was that it could be rejected here for being "blank" when the
+// real cause was colour. It does not happen, on any source that could be
+// built - but the margin is worth writing down, because it is the one place
+// where the two tickets touch:
+//
+//	                                            untreated   tone mapped
+//	an ordinary HDR10 frame                        23.2         54.4
+//	an ordinary HLG frame                          49.6         63.0
+//	a dark HDR10 scene graded to ~5 cd/m^2         22.5         21.9
+//	the same scene graded to ~1 cd/m^2              8.6          6.2
+//	(the dark-but-real SDR control, for scale)     21.5           -
+//
+// Two things follow. Tone mapping moves an ordinary HDR frame strongly away
+// from the threshold, which is the expected direction. It moves a genuinely
+// dark HDR scene slightly *towards* it - correctly, since a scene mastered
+// under a couple of cd/m^2 really is nearly black - and that last row sits at
+// 1.2x the threshold where the SDR control sits at 4.3x. Nothing crossed, so
+// no capture point was stepped for the wrong reason either before or after;
+// a scene darker still would be judged blank, and would deserve to be.
 const blankSpreadThreshold = 5.0
 
 // blankGrid is how many samples are taken per axis when judging a frame.

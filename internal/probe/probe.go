@@ -113,6 +113,27 @@ type VideoStream struct {
 	Height  int
 	FPS     float64
 	BitRate int64
+
+	// ColorTransfer, ColorPrimaries and ColorSpace are the stream's colour
+	// tags as ffprobe spells them - "smpte2084", "arib-std-b67", "bt2020",
+	// "bt2020nc" and the rest - and ColorRange is "tv" or "pc". They are
+	// carried verbatim rather than mapped onto an enum here because the
+	// decision they feed is itself a set of ffmpeg filter arguments
+	// (frames.ToneMapFor), and a round trip through our own vocabulary would
+	// only add a place for the two spellings to drift apart.
+	//
+	// An empty string means the stream stated nothing, which is a different
+	// thing from stating a default: a file with no transfer is left alone.
+	ColorTransfer  string
+	ColorPrimaries string
+	ColorSpace     string
+	ColorRange     string
+
+	// DolbyVisionProfile is dv_profile from the stream's Dolby Vision
+	// configuration record, and 0 when it carries none. Profiles 4 and 5 have
+	// an IPT-PQ-c2 base layer that no bundled build can render faithfully, so
+	// this is what keeps the HDR10 tone map off data it would mangle.
+	DolbyVisionProfile int
 }
 
 // BitsPerPixel is the cheap tell for an over-compressed rip or an upscale: the
@@ -163,7 +184,24 @@ func (p *Prober) Inspect(ctx context.Context, url string) (MediaInfo, error) {
 	if err != nil {
 		return MediaInfo{}, fmt.Errorf("inspect: %w", err)
 	}
+	return parseInspect(out)
+}
 
+// dolbyVisionSideData is what ffprobe calls the Dolby Vision configuration
+// record in a stream's side_data_list. Matched on the name because that is
+// all the JSON gives: the record is otherwise indistinguishable from any
+// other side data entry.
+const dolbyVisionSideData = "DOVI configuration record"
+
+// parseInspect turns one ffprobe -show_format -show_streams document into a
+// MediaInfo.
+//
+// Split out of Inspect so it can be tested against output captured from a
+// real ffprobe run rather than only against files this project can render.
+// That matters for exactly one field: a Dolby Vision configuration record
+// cannot be produced by any encoder in the bundled builds, so the branch that
+// reads dv_profile would otherwise be code nothing ever executes.
+func parseInspect(out []byte) (MediaInfo, error) {
 	var raw struct {
 		Format struct {
 			FormatName string `json:"format_name"`
@@ -181,7 +219,18 @@ func (p *Prober) Inspect(ctx context.Context, url string) (MediaInfo, error) {
 			AvgFrameRate string `json:"avg_frame_rate"`
 			BitRate      string `json:"bit_rate"`
 			Channels     int    `json:"channels"`
-			Disposition  struct {
+
+			ColorRange     string `json:"color_range"`
+			ColorSpace     string `json:"color_space"`
+			ColorTransfer  string `json:"color_transfer"`
+			ColorPrimaries string `json:"color_primaries"`
+
+			SideData []struct {
+				Type      string `json:"side_data_type"`
+				DVProfile int    `json:"dv_profile"`
+			} `json:"side_data_list"`
+
+			Disposition struct {
 				Default int `json:"default"`
 				Forced  int `json:"forced"`
 			} `json:"disposition"`
@@ -224,6 +273,17 @@ func (p *Prober) Inspect(ctx context.Context, url string) (MediaInfo, error) {
 				Height:  s.Height,
 				FPS:     parseRational(s.AvgFrameRate),
 				BitRate: parseInt(s.BitRate),
+
+				ColorTransfer:  s.ColorTransfer,
+				ColorPrimaries: s.ColorPrimaries,
+				ColorSpace:     s.ColorSpace,
+				ColorRange:     s.ColorRange,
+			}
+			for _, sd := range s.SideData {
+				if strings.EqualFold(sd.Type, dolbyVisionSideData) {
+					info.Video.DolbyVisionProfile = sd.DVProfile
+					break
+				}
 			}
 		case "audio":
 			info.Audio = append(info.Audio, AudioStream{

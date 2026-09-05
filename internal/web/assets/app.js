@@ -42,6 +42,21 @@ const el = {
   lightboxImg: document.getElementById("lightbox-img"),
   lightboxCaption: document.getElementById("lightbox-caption"),
   lightboxClose: document.getElementById("lightbox-close"),
+  compare: document.getElementById("compare"),
+  compareClose: document.getElementById("compare-close"),
+  compareA: document.getElementById("compare-a"),
+  compareB: document.getElementById("compare-b"),
+  compareStage: document.getElementById("compare-stage"),
+  compareShotA: document.getElementById("compare-shot-a"),
+  compareShotB: document.getElementById("compare-shot-b"),
+  compareGap: document.getElementById("compare-gap"),
+  compareGapCode: document.getElementById("compare-gap-code"),
+  comparePrev: document.getElementById("compare-prev"),
+  compareNext: document.getElementById("compare-next"),
+  compareFlip: document.getElementById("compare-flip"),
+  comparePlace: document.getElementById("compare-place"),
+  compareTimes: document.getElementById("compare-times"),
+  compareNote: document.getElementById("compare-note"),
 };
 
 // Every torrent this page knows about lives here, keyed by run id - or, for a
@@ -209,11 +224,126 @@ function badgeLabel(entry) {
   }
 }
 
+// What the row says under its badge. The panel is the one genuinely tight
+// surface in the layout, so this is deliberately terse: a finished run's
+// counts are a bare ratio rather than a sentence, because "1 / 1 file(s)
+// complete" was long enough to push the whole table wider than the panel and
+// collapse the torrent's name to an ellipsis (TOR-121). The ratio still says
+// what the badge cannot - PARTIAL tells you a run is incomplete, 3/6 tells
+// you how incomplete - and metaTitle below keeps the full sentence for the
+// tooltip, so nothing is actually lost.
 function metaLabel(entry) {
   if (entry.progress) return entry.progress;
-  if (entry.disk) return entry.complete + " / " + entry.selected + " file(s) complete";
+  if (entry.disk) return entry.complete + "/" + entry.selected;
   if (entry.error) return entry.error;
   return "";
+}
+
+// The long form, on hover, for the row whose label was shortened.
+function metaTitle(entry) {
+  if (entry.disk) return entry.complete + " of " + entry.selected + " file(s) complete";
+  return metaLabel(entry);
+}
+
+// renderRunProgress draws a run's progress as a segmented bar in its row
+// (TOR-123). Segments with gaps rather than a smooth fill, because torpeek
+// deals in discrete captures and a percentage would be a shape borrowed from
+// software that deals in bytes.
+//
+// WHAT IT MEASURES: frames landed out of frames planned, which is the only
+// denominator known from the first moment and the only one that answers "how
+// much is left". Pieces would answer "is it moving" better - a run can sit at
+// 4 of 20 frames while steadily pulling data - but the claimed-piece figures
+// do not travel live: they reach core.Done and the run record, not the
+// progress heartbeat. Choosing them would have meant inventing a measurement
+// to draw, and the bar sits directly beneath the line reading "4/20 frames",
+// which is what keeps a stalled bar legible as a slow frame rather than as a
+// bar measuring the wrong thing. The bytes and peers on the file block's own
+// progress line are what say the run is alive meanwhile.
+//
+// WHERE IT IS: the panel row only, not the detail pane. In the detail the grid
+// is already this graphic - since TOR-110 every planned point has a cell from
+// the first moment and they fill in place - so a bar above it would measure
+// the same thing twice, and the two would disagree for a second at every
+// frame. One graphic per fact.
+//
+// NOT ON A FINISHED RUN, which the criterion asks for: a full bar on a done
+// run tells nobody anything, and an empty one on a failed run reads like a
+// second failure.
+function renderRunProgress(entry) {
+  const el = entry.rowProgress;
+  if (!el) return;
+
+  const total = entry.framesTotal || 0;
+  if (!cancellable(entry.state) || entry.disk || total <= 0) {
+    el.hidden = true;
+    el.replaceChildren();
+    return;
+  }
+
+  const done = Math.max(0, Math.min(total, entry.framesDone || 0));
+  const segments = Math.min(total, MAX_PROGRESS_SEGMENTS);
+  const per = total / segments;
+
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < segments; i++) {
+    // How much of THIS segment's share of the plan is done. At one frame per
+    // segment it is 0 or 1; above the cap a segment stands for several and
+    // fills proportionally, the same way the piece strip aggregates - and the
+    // exact count is in the line above, so nothing is lost by grouping.
+    const from = i * per;
+    const filled = Math.max(0, Math.min(1, (done - from) / per));
+    const seg = document.createElement("span");
+    seg.className = "run-progress-seg";
+    seg.style.setProperty("--fill", filled.toFixed(3));
+    frag.append(seg);
+  }
+  el.replaceChildren(frag);
+  el.hidden = false;
+  el.setAttribute("role", "progressbar");
+  el.setAttribute("aria-valuemin", "0");
+  el.setAttribute("aria-valuemax", String(total));
+  el.setAttribute("aria-valuenow", String(done));
+  el.setAttribute("aria-label", done + " of " + total + " frames captured");
+}
+
+// MAX_PROGRESS_SEGMENTS is where one segment per frame stops fitting in a
+// panel row. A plan of twenty is the common case and draws one each; a plan of
+// two hundred would ask for segments a third of a pixel wide.
+const MAX_PROGRESS_SEGMENTS = 24;
+
+// displayName is what a row's name cell shows, and whether that answer is
+// confirmed or merely offered (TOR-117).
+//
+// entry.name is never invented - GET /runs and the run's own events only
+// ever set it from what the torrent's own metadata, or a finished run's own
+// disk record, actually said. entry.provisionalName is the one exception: a
+// magnet's own dn= parameter, which anybody can put anything into, so a row
+// showing it must stay visibly distinct from one showing a confirmed name
+// (syncEntry marks it) rather than let a person mistake a guess for a
+// verified answer. Falling all the way through to the raw source (a magnet
+// URI, unreadable as it is) or the id is the same last resort this always
+// had - now reached only when nothing has offered even a dn=, which after
+// this ticket is the one case truly left with nothing to say.
+function displayName(entry) {
+  if (entry.name) return { text: entry.name, provisional: false };
+  if (entry.provisionalName) return { text: entry.provisionalName, provisional: true };
+  return { text: entry.source || shortId(entry.id), provisional: false };
+}
+
+// noteConfirmedName logs the moment a provisional name (a magnet's own dn=)
+// is superseded by the torrent's own confirmed metadata - only when the two
+// actually disagree, and only the first time a confirmed name arrives for
+// this run (the entry.name guard). A dn= is never authoritative: anyone can
+// put anything after it, and the metadata a session actually fetches can
+// disagree with it. So the transition off a provisional name must not be a
+// silent swap - a person who has been reading "Sintel" deserves to see the
+// record say so explicitly if the torrent's own metadata turns out to name
+// it something else, rather than watch the row's text change with nothing
+// to explain why.
+function noteConfirmedName(entry, confirmed) {
+  if (entry.name || !entry.provisionalName || entry.provisionalName === confirmed) return;
+  logFor(entry, "name confirmed as \"" + confirmed + "\" (the magnet link said \"" + entry.provisionalName + "\")");
 }
 
 function whenLabel(ms) {
@@ -230,7 +360,7 @@ function whenLabel(ms) {
 
 function sortValue(entry, key) {
   switch (key) {
-    case "name": return (entry.name || entry.source || shortId(entry.id)).toLowerCase();
+    case "name": return displayName(entry).text.toLowerCase();
     case "status": return badgeLabel(entry).toLowerCase();
     case "when":
     default: return entry.when || 0;
@@ -322,7 +452,12 @@ function newRunEntry(id) {
   badge.className = "run-badge";
   const meta = document.createElement("span");
   meta.className = "run-meta";
-  statusCell.append(badge, meta);
+  // Progress as a graphic (TOR-123), directly under the line that says what
+  // it is counting - the bar is the glance and the text is the number.
+  const bar = document.createElement("span");
+  bar.className = "run-progress";
+  bar.hidden = true;
+  statusCell.append(badge, meta, bar);
 
   const actionsCell = document.createElement("td");
   actionsCell.className = "run-cell-actions";
@@ -381,7 +516,13 @@ function newRunEntry(id) {
 
   const entry = {
     id, disk: false, infohash: "", params: "",
-    state: "", source: "", name: "", error: "", progress: "",
+    state: "", source: "", name: "",
+    // provisionalName is a magnet's own dn=, offered only while name is
+    // still empty (TOR-117) - see displayName for how the two are chosen
+    // between, and noteConfirmedName for how the switch off this one is
+    // announced rather than left silent.
+    provisionalName: "",
+    error: "", progress: "",
     files: 0, complete: 0, selected: 0,
     // partial is GET /runs' own "partial" field (RunSummary.Partial in
     // listing.go, TOR-80) - false here for the same reason files/complete/
@@ -408,7 +549,7 @@ function newRunEntry(id) {
     // torrentURL is the files/{id} handle the run's own done event announced
     // for its saved .torrent, empty for a run that has none to offer.
     torrentURL: "",
-    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta,
+    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
     rowWhen: whenCell, rowCancel: cancel,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
@@ -496,9 +637,19 @@ function syncEntry(entry) {
   // The cell truncates, so the whole name has to be reachable some other way
   // than by widening the panel - a tooltip costs nothing and answers "which
   // Sintel is this" without moving the divider.
-  entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
-  entry.rowName.title = entry.rowName.textContent;
+  const shown = displayName(entry);
+  entry.rowName.textContent = shown.text;
+  entry.rowName.title = shown.provisional
+    ? shown.text + " — from the magnet link, not yet confirmed by the torrent's own metadata"
+    : shown.text;
+  // run-name-provisional is the visible marker TOR-117 requires: a dn=-
+  // derived name must never read the same as a confirmed one. The rule this
+  // toggles styles by lives beside the row cells it is scoped next to in
+  // app.css, not duplicated here.
+  entry.rowName.classList.toggle("run-name-provisional", shown.provisional);
   entry.rowMeta.textContent = metaLabel(entry);
+  entry.rowMeta.title = metaTitle(entry);
+  renderRunProgress(entry);
   entry.rowWhen.textContent = whenLabel(entry.when);
   entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
   entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
@@ -506,7 +657,8 @@ function syncEntry(entry) {
 
   entry.detailBadge.textContent = badgeLabel(entry);
   entry.detailBadge.dataset.state = badgeState(entry);
-  entry.detailTitle.textContent = entry.name || entry.source || shortId(entry.id);
+  entry.detailTitle.textContent = shown.text;
+  entry.detailTitle.classList.toggle("run-name-provisional", shown.provisional);
   entry.detailCancel.hidden = entry.disk || !cancellable(entry.state);
   entry.detailError.hidden = !entry.error;
   entry.detailError.textContent = entry.error || "";
@@ -833,8 +985,19 @@ function fileBlock(entry, index) {
           ' aria-label="Frames for this file">' +
         "</label>" +
         '<button type="button" class="file-regen-go">Regenerate</button>' +
+        // Compare sits beside Regenerate because it is the same thought one
+        // step later: Regenerate is how a second result set comes to exist,
+        // and this is what a second set is FOR (TOR-109).
+        '<button type="button" class="file-compare">Compare…</button>' +
       "</p>" +
       '<p class="file-progress" hidden></p>' +
+      // The picture of the product (TOR-111): how little of the file the run
+      // actually ordered. Above the grid because the grid is what those
+      // pieces bought.
+      '<figure class="reach" hidden>' +
+        '<div class="reach-strip" role="img"></div>' +
+        '<figcaption class="reach-note"></figcaption>' +
+      "</figure>" +
       '<div class="grid"></div>' +
     "</div>";
   entry.filesEl.append(article);
@@ -852,7 +1015,11 @@ function fileBlock(entry, index) {
     links: article.querySelector(".file-links"),
     regenCount: article.querySelector(".file-regen-count"),
     regenGo: article.querySelector(".file-regen-go"),
+    compareGo: article.querySelector(".file-compare"),
     progress: article.querySelector(".file-progress"),
+    reach: article.querySelector(".reach"),
+    reachStrip: article.querySelector(".reach-strip"),
+    reachNote: article.querySelector(".reach-note"),
     grid: article.querySelector(".grid"),
     expanded: false,
     metaExpanded: false,
@@ -864,6 +1031,24 @@ function fileBlock(entry, index) {
     // rather than appended to: a set fetched after the fact arrives in no
     // particular order relative to what is already there.
     frames: new Map(),
+    // plan is the capture points this file's run is going to attempt, in
+    // milliseconds, straight off file_started (TOR-110). While it is set the
+    // grid is laid out FROM it - one cell per planned point, at final size,
+    // before any piece is fetched - so the grid stops shoving itself around
+    // for the minute a run spends waiting.
+    //
+    // It is emptied once the file's frames have been read back from disk,
+    // and that hand-off is deliberate rather than tidy-up. A plan describes
+    // one run; the disk holds every result set this torrent has for the
+    // file, and the sets merge by timecode into cells no single plan
+    // accounts for (see frames above). Once nothing is arriving there is
+    // also nothing left to reflow, so the truthful view costs nothing.
+    plan: [],
+    // skipped is what the engine reported as unreachable, by plan index -
+    // frame_skipped's code and reason. Without it a point that failed live
+    // leaves its reserved cell looking like a frame still on its way, which
+    // is the one thing the reserved cell must not do.
+    skipped: new Map(),
     detailLoaded: false,
     width: 0,
     height: 0,
@@ -879,6 +1064,7 @@ function fileBlock(entry, index) {
 
   fentry.regenCount.value = el.count.value;
   fentry.regenGo.addEventListener("click", () => regenerate(entry, index, fentry));
+  fentry.compareGo.addEventListener("click", () => openCompare(entry.infohash, index));
 
   fentry.toggle.addEventListener("click", () => {
     const expanded = !fentry.expanded;
@@ -977,11 +1163,28 @@ function setMetaExpanded(fentry, expanded) {
 // live (resolution the moment file_started arrives, the frame count on
 // every frame_ready) whether or not the file happens to be expanded right
 // now.
+// updateFileSummary says how many frames the file has, and against what it
+// was trying for when the two differ.
+//
+// It counts frames rather than CELLS, which is a distinction the grid only
+// acquired once a point that produced nothing started being listed at all
+// (TOR-118): fentry.frames holds an entry for every planned point a finished
+// run recorded, failures included, so its plain size would report a holed run
+// of five frames as twelve. A count that is really a plan pretending to be a
+// result is the kind of quiet lie this project keeps finding.
 function updateFileSummary(fentry) {
   const parts = [];
   if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
-  const count = fentry.frames.size;
-  parts.push(count === 1 ? "1 frame" : count + " frames");
+
+  const cells = gridCells(fentry);
+  const captured = cells.filter((cell) => cell.url).length;
+  const planned = fentry.plan.length || cells.length;
+
+  if (planned > captured) {
+    parts.push(captured + " of " + planned + " frames");
+  } else {
+    parts.push(captured === 1 ? "1 frame" : captured + " frames");
+  }
   fentry.summary.textContent = parts.join(" · ");
 }
 
@@ -992,6 +1195,11 @@ function onFileStarted(entry, ev) {
   fentry.name.textContent = ev.path;
   fentry.width = ev.width;
   fentry.height = ev.height;
+
+  // The whole grid, at final size, before the first piece is fetched.
+  fentry.plan = Array.isArray(ev.plan) ? ev.plan : [];
+  fentry.skipped.clear();
+  renderFrames(fentry);
   updateFileSummary(fentry);
 
   fentry.specs.replaceChildren();
@@ -1029,30 +1237,249 @@ function addFrame(entry, ev) {
   logFor(entry, "frame " + ev.index + " at " + seconds(at) + (ev.shift ? " (" + ev.shift + ")" : ""));
 }
 
-// renderFrames rebuilds the grid from fentry.frames, earliest first.
+// renderFrames rebuilds the grid from what the file is known to have.
 //
 // Rebuilding the whole grid rather than inserting into it keeps one rule -
-// the DOM is the map, ordered by time - instead of two: a live run appends
-// in plan order and would look sorted either way, while a set fetched from
-// disk arrives all at once and interleaves with what is already shown.
+// the DOM is the map - instead of two: a live run appends in plan order and
+// would look sorted either way, while a set fetched from disk arrives all at
+// once and interleaves with what is already shown.
 function renderFrames(fentry) {
-  const ordered = [...fentry.frames.values()].sort((a, b) => a.timeMs - b.timeMs);
-  fentry.grid.replaceChildren(...ordered.map((frame) => frameFigure(frame, fentry)));
+  fentry.grid.replaceChildren(...gridCells(fentry).map((cell) => frameFigure(cell, fentry)));
 }
 
+// renderReach draws how much of the file a run actually ordered from the
+// swarm (TOR-111): a strip of blocks along the file with the claimed stretches
+// marked. 44 of 270 pieces is the argument of the whole product and we could
+// only state it as a sentence.
+//
+// WHICH SET. A claim belongs to a run, so the strip is one set's, not the
+// merged grid's - and the set drawn is the one with the most capture points,
+// which is the set the grid is mostly showing. Stated in the caption rather
+// than left for the reader to wonder about.
+//
+// WHAT IS NOT DRAWN, and this is a deliberate refusal. The ticket asks for the
+// capture points marked above the strip. They are not, because the strip's
+// axis is BYTES and a capture point is a TIME, and mapping one to the other
+// needs an assumption of constant bitrate that no container owes us - a tick
+// placed that way would be a guess drawn to look like a measurement. It is
+// also unnecessary: each claimed stretch IS a capture point's footprint in
+// pieces, which is the same fact without the invention.
+function renderReach(fentry, sets) {
+  const el = fentry.reach;
+  if (!el) return;
+
+  // Absent is not zero. A run recorded before the claims were kept has
+  // nothing to say here (TOR-119 added them without bumping cache.Version),
+  // and a strip of untouched blocks would assert that it touched nothing.
+  const withReach = (sets || []).filter((s) => s.reach && s.reach.pieces > 0);
+  if (withReach.length === 0) {
+    el.hidden = true;
+    return;
+  }
+  withReach.sort((a, b) => (b.count || 0) - (a.count || 0));
+  const set = withReach[0];
+  const reach = set.reach;
+
+  // How many blocks the strip holds: one per piece until there are more
+  // pieces than blocks worth drawing, then one block per several pieces.
+  //
+  // Derived from the piece count alone, deliberately, not from the measured
+  // width. A width-derived count would have to be redrawn on every resize and
+  // every drag of the panel divider, and worse, the caption's "each block is N
+  // pieces" would be true only until the window moved. Blocks stretch instead,
+  // so the aggregation is a fact about the torrent rather than about the
+  // viewport.
+  const blocks = Math.min(reach.pieces, MAX_BLOCKS);
+  const per = reach.pieces / blocks;
+
+  // Claimed pieces as a flat lookup, so each block can ask how many of its
+  // own were ordered without walking every range.
+  const claimed = new Uint8Array(reach.pieces);
+  for (const [begin, end] of reach.claimed || []) {
+    for (let i = Math.max(0, begin); i < Math.min(reach.pieces, end); i++) claimed[i] = 1;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (let b = 0; b < blocks; b++) {
+    const from = Math.floor(b * per);
+    const to = Math.max(from + 1, Math.floor((b + 1) * per));
+    let hit = 0;
+    for (let i = from; i < to && i < reach.pieces; i++) hit += claimed[i];
+    const span = Math.min(to, reach.pieces) - from;
+
+    const block = document.createElement("span");
+    block.className = "reach-block";
+    // A fraction rather than a flag, which is what makes aggregation honest:
+    // at one piece per block it is 0 or 1 and the strip is a map, and above
+    // that it is a density and the caption says so.
+    //
+    // With a floor, because the honest fraction can be unreadable: 4 claimed
+    // pieces of a 104-piece block is 0.038, which paints about one pixel and
+    // leaves a reader unable to see WHERE the run reached - the one thing the
+    // strip exists to show. So presence is drawn legibly and density is
+    // carried by the height above that floor. Nothing is invented: a block
+    // with no claimed piece stays empty, and the caption states the block
+    // size so a reader knows a mark means "some of these 104".
+    const fraction = span > 0 ? hit / span : 0;
+    const fill = fraction === 0 ? 0 : REACH_FLOOR + (1 - REACH_FLOOR) * fraction;
+    block.style.setProperty("--fill", fill.toFixed(3));
+    frag.append(block);
+  }
+  fentry.reachStrip.replaceChildren(frag);
+
+  // "(0%)" for a run that ordered forty-four pieces of ten thousand would be
+  // a rounding that contradicts the number beside it. Under half a percent is
+  // reported as under one, which is both true and the product's whole point.
+  const pct = (100 * reach.claimed_pieces) / reach.pieces;
+  const pctText = reach.claimed_pieces === 0 ? "0%"
+    : pct < 0.5 ? "<1%"
+    : pct < 10 ? pct.toFixed(1) + "%"
+    : pct.toFixed(0) + "%";
+  const parts = [
+    reach.claimed_pieces + " of " + reach.pieces + " pieces ordered (" + pctText + ")",
+    bytesLabel(reach.claimed_pieces * reach.piece_bytes) + " of " +
+      bytesLabel(reach.pieces * reach.piece_bytes),
+  ];
+  // The aggregation is stated, never silently faked: a block standing for
+  // several pieces is shaded by how many of them were ordered.
+  if (per > 1) parts.push("each block is " + Math.round(per) + " pieces");
+  if (withReach.length > 1) parts.push("set " + set.params.slice(0, 8));
+
+  fentry.reachNote.textContent = parts.join(" · ");
+  fentry.reachStrip.setAttribute("aria-label",
+    "Pieces of this file the run ordered: " + reach.claimed_pieces + " of " + reach.pieces);
+  el.hidden = false;
+}
+
+// MAX_BLOCKS is where drawing one block per piece stops being readable and
+// aggregating starts. At the pane's usual width this leaves each block a few
+// pixels across; a 10,000-piece remux would otherwise ask for a block a
+// fortieth of a pixel wide, which is the "lie about individual blocks" the
+// ticket names.
+const MAX_BLOCKS = 96;
+
+// REACH_FLOOR is how much of a block is painted when any of its pieces were
+// ordered, before density is added on top. Enough to be seen at the strip's
+// height; small enough that a full block still reads as clearly fuller.
+const REACH_FLOOR = 0.22;
+
+// gridCells is the grid as a list of cells, each carrying the state it should
+// be drawn in. There are two ways to build it and which one applies is the
+// difference between a run in flight and a run that is over.
+//
+// FROM THE PLAN, while fentry.plan is set. One cell per capture point the
+// engine said it would attempt, in plan order, whether or not anything has
+// arrived for it yet - which is the point: every cell exists at final size
+// before the first piece is fetched, so nothing reflows during the minute a
+// run spends waiting. A frame claims its cell by INDEX rather than by
+// timecode, because a shifted frame lands somewhere other than where it was
+// asked for and still belongs to the point that asked.
+//
+// FROM THE DISK, once the plan has been handed over. Ordered by time and
+// keyed by it, so the result sets merge exactly as fentry.frames does - a
+// view no single plan can describe, and one nothing is arriving into, so it
+// has no reflow to avoid.
+function gridCells(fentry) {
+  if (fentry.plan.length) {
+    const byIndex = new Map();
+    for (const frame of fentry.frames.values()) {
+      if (Number.isInteger(frame.index)) byIndex.set(frame.index, frame);
+    }
+    return fentry.plan.map((plannedMs, index) => {
+      const frame = byIndex.get(index);
+      if (frame) return { ...frame, plannedMs, state: frame.shift ? "shifted" : "exact" };
+
+      const skip = fentry.skipped.get(index);
+      if (skip) {
+        return {
+          state: "failed", timeMs: plannedMs, plannedMs, index,
+          url: null, shift: "", error: skip.code, reason: skip.reason, params: "",
+        };
+      }
+      return {
+        state: "pending", timeMs: plannedMs, plannedMs, index,
+        url: null, shift: "", error: "", params: "",
+      };
+    });
+  }
+
+  return [...fentry.frames.values()]
+    .sort((a, b) => a.timeMs - b.timeMs)
+    .map((frame) => ({ ...frame, state: frameState(frame) }));
+}
+
+// frameState reads a disk-shaped frame's own fields. A point that produced
+// nothing has no URL and carries the engine's reason instead (TOR-118); one
+// that produced a frame somewhere other than where it was asked says so in
+// shift; everything else is exactly what was planned, and gets no marking at
+// all, because most cells are this one and a grid that marks every cell marks
+// none of them.
+function frameState(frame) {
+  if (!frame.url) return "failed";
+  return frame.shift ? "shifted" : "exact";
+}
+
+// What a shift and a failure code mean in words, for the cell's own tooltip.
+// The manifest's vocabulary is short enough to be cryptic - "shifted",
+// "stepped", "read_stalled" - and a person deciding whether to run again
+// needs the difference, not the token.
+const SHIFT_REASON = {
+  shifted: "the exact point was not held by any peer, so a nearby one was taken",
+  stepped: "the frame there was blank, so the neighbouring keyframe was taken",
+};
+const FAILURE_REASON = {
+  unavailable: "no peer offered these pieces - running again will not help unless the swarm changes",
+  read_stalled: "the pieces were being fetched and the read timed out - running again may well get through",
+};
+
+// frameFigure draws one cell in the state gridCells gave it.
+//
+// The states are spent unevenly on purpose. An exact frame gets no marking at
+// all, because most cells are exact and a grid that marks every cell marks
+// none of them - the picture is the content. A shifted frame keeps the plain
+// thumbnail and gains exactly one signal, a warn rule under it, with the
+// reason on inspection. A BORDER is spent on one state only, failure, so that
+// a border in this grid means "nothing was captured here" and nothing else.
+// And a pending cell is deliberately the quietest of the four: it is the
+// normal state of a run that is still working, and it must not read as an
+// error while it waits.
 function frameFigure(frame, fentry) {
   const figure = document.createElement("figure");
   figure.tabIndex = 0;
-  figure.className = "thumb";
+  figure.className = "thumb thumb-" + frame.state;
 
-  const img = document.createElement("img");
-  img.src = frame.url;
-  img.alt = "frame at " + timecode(frame.timeMs);
-  img.loading = "lazy";
+  // A pending or failed cell has no url - nothing was captured there, or not
+  // yet - so there is no src to give an <img>. <img src=""> would ask the
+  // browser to fetch the page itself; a box the same shape as a thumbnail
+  // says "nothing here" without doing that.
+  let img = null;
+  if (frame.url) {
+    img = document.createElement("img");
+    img.src = frame.url;
+    img.alt = "frame at " + timecode(frame.timeMs);
+    img.loading = "lazy";
+  } else {
+    img = document.createElement("div");
+    img.className = "thumb-box";
+    if (frame.state === "failed") {
+      const code = document.createElement("span");
+      code.className = "thumb-code";
+      code.textContent = frame.error || "no frame";
+      img.append(code);
+    }
+  }
 
   const caption = document.createElement("figcaption");
+  // A pending or failed cell shows where the point WAS PLANNED - nowhere else
+  // is true for it - and a captured one shows where the frame came from.
   caption.textContent = timecode(frame.timeMs);
-  if (frame.shift) {
+  // Only a cell that actually HAS a frame says why it moved. A failed point's
+  // manifest shift is ShiftFailed, whose serialised value is the word
+  // "unavailable" - so printing it here put "unavailable" in the caption of a
+  // cell whose interior said "read_stalled", two words about one cell and the
+  // louder one wrong. Nothing moved: there is no frame. The state carries
+  // that, and the code inside the cell carries the reason.
+  if (frame.state === "shifted" && frame.shift) {
     caption.append(" ");
     const note = document.createElement("span");
     note.className = "shifted";
@@ -1060,14 +1487,18 @@ function frameFigure(frame, fentry) {
     caption.append(note);
   }
 
+  // The explanation lives on the figure rather than on the image, so it is
+  // reachable on a cell that has no image.
+  figure.title = cellTitle(frame);
+
   figure.append(img, caption);
 
-  // The cross, only for a frame that names the result set it lives in: that
-  // is the other half of its address on disk, and without it there is
-  // nothing a delete could be aimed at (see addFrame). It sits inside the
-  // figure, which is itself clickable, so the click must not also open the
-  // lightbox over the frame it just removed.
-  if (fentry && frame.params) {
+  // The cross, only for a frame that both exists and names the result set it
+  // lives in. The set is the other half of its address on disk (see
+  // addFrame); the existence is the rest - a failed point has no file to
+  // delete, and offering the cross on one would be offering an action that
+  // cannot succeed.
+  if (fentry && frame.params && frame.url) {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "thumb-delete";
@@ -1082,7 +1513,9 @@ function frameFigure(frame, fentry) {
     figure.append(remove);
   }
 
-  const open = () => openLightbox(img.src, caption.textContent);
+  // Nothing to open full-size for a cell with no frame in it - there is only
+  // the box standing in for one.
+  const open = () => { if (frame.url) openLightbox(img.src, caption.textContent); };
   figure.addEventListener("click", open);
   figure.addEventListener("keydown", (event) => {
     // Only the figure's own keys open it. Enter on the delete button inside
@@ -1096,6 +1529,28 @@ function frameFigure(frame, fentry) {
   });
 
   return figure;
+}
+
+// cellTitle is what the cell says on inspection: the state in words, and for
+// anything other than an exact frame, why.
+function cellTitle(frame) {
+  const planned = Number.isFinite(frame.plannedMs) ? timecode(frame.plannedMs) : "";
+  switch (frame.state) {
+    case "pending":
+      return "planned for " + timecode(frame.timeMs) + " - not captured yet";
+    case "failed": {
+      const why = FAILURE_REASON[frame.error];
+      return "no frame at " + timecode(frame.timeMs) + (frame.error ? " - " + frame.error : "") +
+        (why ? ": " + why : "") + (frame.reason ? " (" + frame.reason + ")" : "");
+    }
+    case "shifted": {
+      const why = SHIFT_REASON[frame.shift];
+      const asked = planned && planned !== timecode(frame.timeMs) ? "asked for " + planned + ", " : "";
+      return asked + "taken at " + timecode(frame.timeMs) + (why ? " - " + why : "");
+    }
+    default:
+      return "frame at " + timecode(frame.timeMs);
+  }
 }
 
 // deleteFrame removes one frame from disk - its manifest record and its file
@@ -1146,8 +1601,10 @@ async function deleteFrame(fentry, frame) {
 // half-addressable in one of them and whole in the other.
 function detailFrame(f) {
   return {
-    url: url(f.url), timeMs: f.time_ms, shift: f.shift || "",
-    params: f.params || "", index: f.index,
+    // f.url is empty for a failed point (TOR-118) - nothing to resolve into
+    // a fetchable URL, and url("") would resolve to this very page.
+    url: f.url ? url(f.url) : null, timeMs: f.time_ms, shift: f.shift || "",
+    params: f.params || "", index: f.index, error: f.error || "",
   };
 }
 
@@ -1186,8 +1643,16 @@ async function loadFileDetail(entry, fentry, index) {
       fentry.frames.set(frame.time_ms, detailFrame(frame));
     }
     fentry.detailLoaded = true;
+    // The plan has done its job and now stands in the way of the truth: it
+    // describes one run, while this response spans every result set the
+    // torrent holds for the file, merged by timecode into cells no single
+    // plan accounts for (TOR-110). Nothing is arriving any more either, so
+    // there is no reflow left for the reserved cells to prevent.
+    fentry.plan = [];
+    fentry.skipped.clear();
     renderFrames(fentry);
     updateFileSummary(fentry);
+    renderReach(fentry, detail.sets);
   } catch (err) {
     logFor(entry, "could not read file " + index + "'s frames: " + (err.message || err));
   }
@@ -1204,6 +1669,344 @@ el.lightbox.addEventListener("click", (event) => {
   // A click that lands on the dialog element itself, rather than anything
   // inside it, is a click on the backdrop.
   if (event.target === el.lightbox) el.lightbox.close();
+});
+
+// ---------------------------------------------------------------------------
+// COMPARING TWO RUNS BY FLIPPING (TOR-109).
+//
+// FLIPPING BEATS TILING, and that is the whole design rather than a
+// preference: the same frame, in the same screen position, one keypress
+// apart, makes a difference visible that a side-by-side grid hides, because
+// the eye compares against its own afterimage rather than across a gap. So
+// this is not two grids next to each other, and everything below exists to
+// keep one promise - THE PICTURE DOES NOT MOVE.
+//
+// What that costs, concretely:
+//   - the stage's shape is decided from the arms' own resolution before
+//     either frame loads (app.css's --compare-aspect), never from whichever
+//     image happened to arrive first;
+//   - both arms' frames are given a src at the same moment, so a flip is a
+//     visibility toggle over already-decoded pixels rather than a fetch;
+//   - a src is only ever re-assigned when it actually changes, so flipping
+//     back and forth never re-decodes anything;
+//   - nothing above the picture, and nothing sized, changes on a flip. The
+//     dialog is centred by the browser, so a single wrapped line below the
+//     stage would re-centre the dialog and slide the picture.
+//
+// The server does the pairing (internal/web/compare.go). That is not
+// plumbing: "the same frame" across two encodes of one film means the nearest
+// capture point BY FRACTION OF DURATION, the durations live in the manifests,
+// and a page deriving that itself would be a second place the rule is
+// written.
+
+const compare = {
+  // sets is every result set on disk, from GET /compare/sets - the picker's
+  // options, refreshed each time the dialog opens so a run that finished in
+  // the meantime is offered.
+  sets: [],
+  // a and b are the two arms' addresses ("infohash:params:index"), built by
+  // the server and never spelled here.
+  a: "", b: "",
+  // data is the comparison itself; at is which position is on screen, and
+  // live which arm. Those last two are the entire flipbook's state.
+  data: null,
+  at: 0,
+  live: "a",
+};
+
+// compareSetLabel is how one result set reads in the picker. The params key
+// is included in full and last: two sets of the same file of the same torrent
+// differ in nothing a person can see except their frame counts, and two runs
+// at the SAME count (a different profile, say) do not differ in that either -
+// the key is the only thing that always tells them apart.
+function compareSetLabel(set) {
+  const parts = [set.name || shortId(set.infohash), basename(set.path)];
+  parts.push(set.frames === set.points
+    ? set.points + " frames"
+    : set.frames + " of " + set.points + " frames");
+  if (set.duration_ms) parts.push(timecode(set.duration_ms));
+  parts.push(set.params);
+  return parts.join(" · ");
+}
+
+function fillComparePickers() {
+  for (const picker of [el.compareA, el.compareB]) {
+    picker.replaceChildren(...compare.sets.map((set) => {
+      const option = document.createElement("option");
+      option.value = set.addr;
+      option.textContent = compareSetLabel(set);
+      return option;
+    }));
+    picker.disabled = compare.sets.length === 0;
+  }
+}
+
+// chooseArms picks what the dialog opens on, given the file it was opened
+// from. The two result sets of THAT file come first when there are two -
+// which is the pairing a person pressing Compare on a file they just
+// regenerated is asking for - and otherwise it falls back to that file
+// against whatever else is on disk, which is the cross-torrent case. Both are
+// only a default: the two pickers are then free.
+function chooseArms(infohash, index) {
+  const mine = compare.sets.filter((set) => set.infohash === infohash && set.index === index);
+  const first = mine[0] || compare.sets[0];
+  if (!first) return ["", ""];
+  const second = mine[1] || compare.sets.find((set) => set.addr !== first.addr);
+  return [first.addr, second ? second.addr : ""];
+}
+
+async function openCompare(infohash, index) {
+  try {
+    const response = await fetch(url("compare/sets"));
+    if (!response.ok) throw new Error(response.statusText);
+    compare.sets = (await response.json()).sets || [];
+  } catch (err) {
+    compare.sets = [];
+    log("could not read what there is to compare: " + (err.message || err));
+  }
+
+  fillComparePickers();
+  const [a, b] = chooseArms(infohash, index);
+  compare.a = a;
+  compare.b = b;
+  el.compareA.value = a;
+  el.compareB.value = b;
+
+  if (!el.compare.open) el.compare.showModal();
+  // Focused straight away, so the keys work without a person having to find
+  // something to click first - the feature is one keypress.
+  el.compareStage.focus();
+  await loadComparison();
+}
+
+async function loadComparison() {
+  compare.data = null;
+  compare.at = 0;
+  compare.live = "a";
+
+  if (!compare.a || !compare.b) {
+    renderComparison("There is only one result set on disk so far - " +
+      "regenerate a file at a different frame count, or capture another torrent, " +
+      "and there will be something to flip against.");
+    return;
+  }
+  if (compare.a === compare.b) {
+    renderComparison("Both pickers name the same result set; pick a different one for the second.");
+    return;
+  }
+
+  const target = url("compare");
+  target.searchParams.set("a", compare.a);
+  target.searchParams.set("b", compare.b);
+  try {
+    const response = await fetch(target);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || response.statusText);
+    compare.data = body.comparison || null;
+  } catch (err) {
+    renderComparison(String(err.message || err));
+    return;
+  }
+  renderComparison("");
+}
+
+// comparisonNote is what the pairing left out, said out loud rather than
+// silently dropped. A set of 8 flipped against a set of 20 has twelve points
+// that are simply not in the flipbook - pairing them with whatever happened
+// to be nearest would put a difference on screen that the film caused rather
+// than the encode - and a person who counted twenty frames in the grid needs
+// to be told that, not left to wonder where they went.
+function comparisonNote(data) {
+  if (!data.positions || data.positions.length === 0) {
+    return "These two sets share no capture point near enough to pair, so there is " +
+      "nothing here that is the same moment of the same film.";
+  }
+  const parts = [];
+  const orphans = [];
+  if (data.a.unpaired) orphans.push(data.a.unpaired + " of set 1's " + data.a.points);
+  if (data.b.unpaired) orphans.push(data.b.unpaired + " of set 2's " + data.b.points);
+  if (orphans.length) {
+    parts.push(orphans.join(" and ") + " capture points have no partner in the other set, " +
+      "so they are not positions here");
+  }
+  if (data.basis === "time") {
+    parts.push("paired by timecode rather than by fraction of duration: one of these files " +
+      "never said how long it is");
+  }
+  return parts.join(" · ");
+}
+
+// aspectOf is the stage's shape, taken from an arm's own resolution. It is
+// set once per comparison and never per position: every frame of one encode
+// has the same resolution, and a stage that re-shaped itself as the pictures
+// arrived would move the picture, which is the one thing this must not do.
+function aspectOf(arm) {
+  // A bare number, not "w / h": app.css also multiplies this inside a calc()
+  // to bound the stage's height without breaking its shape, and only a number
+  // can be multiplied. aspect-ratio takes either form.
+  return arm && arm.width > 0 && arm.height > 0 ? String(arm.width / arm.height) : "";
+}
+
+function renderComparison(message) {
+  const data = compare.data;
+  el.compareNote.textContent = message || (data ? comparisonNote(data) : "");
+  el.compareNote.title = el.compareNote.textContent;
+
+  const positions = (data && data.positions) || [];
+  el.compareStage.style.setProperty("--compare-aspect",
+    (data && (aspectOf(data.a) || aspectOf(data.b))) || "1.7778");
+
+  if (positions.length === 0) {
+    el.compareShotA.removeAttribute("src");
+    el.compareShotB.removeAttribute("src");
+    el.compareStage.dataset.live = "a";
+    el.compareStage.dataset.gap = "false";
+    el.comparePlace.textContent = "0 / 0";
+    el.compareTimes.replaceChildren();
+    el.comparePrev.disabled = true;
+    el.compareNext.disabled = true;
+    el.compareFlip.disabled = true;
+    markLiveArm();
+    return;
+  }
+
+  el.comparePrev.disabled = false;
+  el.compareNext.disabled = false;
+  el.compareFlip.disabled = false;
+  renderComparePosition();
+}
+
+// setCompareShot gives one arm its picture. Both arms are set for every
+// position, whichever is live, so the flip that follows is a visibility
+// toggle over pixels the browser has already decoded.
+function setCompareShot(img, frame, label) {
+  if (!frame.url) {
+    // Nothing was captured here. An empty src would ask the browser to fetch
+    // this very page, so the attribute goes away entirely and .compare-gap
+    // says what happened instead.
+    img.removeAttribute("src");
+    img.alt = "";
+    return;
+  }
+  const href = String(url(frame.url));
+  if (img.getAttribute("src") !== href) img.src = href;
+  img.alt = label + " at " + timecode(frame.time_ms);
+}
+
+// armTime is one arm's entry in the bar: which set, where its frame came
+// from, and - for a point that produced nothing - the engine's own reason.
+//
+// The shift is shown only for a frame that EXISTS, and that is TOR-118's trap
+// avoided rather than a tidy-up. manifest.ShiftFailed serialises to the word
+// "unavailable", which is also one of the two failure CODES, so a failed
+// point rendered with both reads "01:23 unavailable — no frame" and invites
+// exactly the wrong conclusion: that the shift is the reason. On a point with
+// no frame the shift says only THAT it was lost; frame.error is what says
+// what lost it, and it is the one worth the space.
+function armTime(label, frame, live) {
+  const span = document.createElement("span");
+  if (live) span.className = "compare-live";
+  span.textContent = label + " " + timecode(frame.time_ms) + (frame.url
+    ? (frame.shift ? " " + frame.shift : "")
+    : " — " + (frame.error || "no frame"));
+  return span;
+}
+
+function markLiveArm() {
+  for (const label of el.compare.querySelectorAll(".compare-arm")) {
+    label.dataset.live = String(label.dataset.arm === compare.live);
+  }
+}
+
+function renderComparePosition() {
+  const data = compare.data;
+  const position = data.positions[compare.at];
+
+  setCompareShot(el.compareShotA, position.a, "set 1");
+  setCompareShot(el.compareShotB, position.b, "set 2");
+
+  const shown = compare.live === "a" ? position.a : position.b;
+  el.compareStage.dataset.live = compare.live;
+  el.compareStage.dataset.gap = shown.url ? "false" : "true";
+  el.compareGapCode.textContent = shown.error || "no frame";
+  el.compareStage.title = shown.url
+    ? "set " + (compare.live === "a" ? "1" : "2") + " at " + timecode(shown.time_ms) +
+      " - press to flip to the other set"
+    : "set " + (compare.live === "a" ? "1" : "2") + " captured nothing at " +
+      timecode(shown.time_ms) + (shown.error ? " (" + shown.error + ")" : "");
+
+  el.comparePlace.textContent = (compare.at + 1) + " / " + data.positions.length;
+  el.compareTimes.replaceChildren(
+    armTime("1", position.a, compare.live === "a"),
+    document.createTextNode("  "),
+    armTime("2", position.b, compare.live === "b"),
+  );
+  markLiveArm();
+}
+
+function flipCompare() {
+  showCompareArm(compare.live === "a" ? "b" : "a");
+}
+
+function showCompareArm(arm) {
+  if (!compare.data || !compare.data.positions || compare.data.positions.length === 0) return;
+  compare.live = arm;
+  renderComparePosition();
+}
+
+// stepCompare moves along the film. It wraps rather than stopping at the
+// ends: the flipbook is short - eight positions, twenty at most - and a
+// person walking it with one finger should not have to turn round.
+function stepCompare(delta) {
+  const positions = (compare.data && compare.data.positions) || [];
+  if (positions.length === 0) return;
+  compare.at = (compare.at + delta + positions.length) % positions.length;
+  renderComparePosition();
+}
+
+el.compareA.addEventListener("change", () => {
+  compare.a = el.compareA.value;
+  loadComparison();
+});
+el.compareB.addEventListener("change", () => {
+  compare.b = el.compareB.value;
+  loadComparison();
+});
+
+el.compareStage.addEventListener("click", flipCompare);
+el.compareFlip.addEventListener("click", flipCompare);
+el.comparePrev.addEventListener("click", () => stepCompare(-1));
+el.compareNext.addEventListener("click", () => stepCompare(1));
+el.compareClose.addEventListener("click", () => el.compare.close());
+el.compare.addEventListener("click", (event) => {
+  // A click on the dialog element itself, rather than anything inside it, is
+  // a click on the backdrop - the same rule the lightbox uses.
+  if (event.target === el.compare) el.compare.close();
+});
+
+el.compare.addEventListener("keydown", (event) => {
+  const tag = (event.target.tagName || "").toLowerCase();
+  // Someone using the pickers is choosing a set, not steering the flipbook -
+  // arrow keys belong to the select then.
+  if (tag === "select" || tag === "input" || tag === "textarea") return;
+  // Space on a focused button is that button's own activation; intercepting
+  // it here would flip twice for one press.
+  if (tag === "button" && event.key === " ") return;
+
+  switch (event.key) {
+    case "ArrowLeft": stepCompare(-1); break;
+    case "ArrowRight": stepCompare(1); break;
+    case "ArrowUp":
+    case "ArrowDown":
+    case " ":
+    case "f":
+    case "F": flipCompare(); break;
+    case "1": showCompareArm("a"); break;
+    case "2": showCompareArm("b"); break;
+    // Escape is the dialog's own, and everything else belongs to the page.
+    default: return;
+  }
+  event.preventDefault();
 });
 
 function onFileDone(entry, ev) {
@@ -1299,6 +2102,16 @@ function apply(ev) {
     entry.state = ev.state;
     if (ev.source) entry.source = ev.source;
     if (ev.infohash) entry.infohash = ev.infohash;
+    // TOR-117: run_state carries whichever of the two the server has -
+    // never both (see runStateFieldsLocked). This is what a page that was
+    // already open sees during the exact gap the ticket is about: accepted,
+    // nothing confirmed yet, a magnet's dn= is all there is.
+    if (ev.name) {
+      noteConfirmedName(entry, ev.name);
+      entry.name = ev.name;
+    } else if (ev.provisional_name) {
+      entry.provisionalName = ev.provisional_name;
+    }
     entry.error = ev.error || "";
     // ev.partial rides on exactly one run_state a run ever publishes: the one
     // sent after this run's own record was written to disk (server.go's
@@ -1325,6 +2138,7 @@ function apply(ev) {
 
   switch (ev.type) {
     case "metadata_ready":
+      noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
       entry.torrentSummary.hidden = false;
       // videos is the list itself, not a count: TOR-66 replaced the bare
@@ -1342,6 +2156,7 @@ function apply(ev) {
       // running. The torrent's name and file list arrive here, and the
       // run_state that follows this record is what actually shows the
       // picker (syncEntry).
+      noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
       if (ev.infohash) entry.infohash = ev.infohash;
       entry.torrentSummary.hidden = false;
@@ -1360,9 +2175,17 @@ function apply(ev) {
       addFrame(entry, ev);
       break;
 
-    case "frame_skipped":
+    case "frame_skipped": {
+      // Mark the cell this point had reserved, rather than only saying so in
+      // the log: a reserved cell that never fills is indistinguishable from
+      // one still waiting, and a person watching cannot tell a slow read
+      // from a dead one (TOR-110).
+      const fentry = fileBlock(entry, ev.file);
+      fentry.skipped.set(ev.index, { code: ev.code || "", reason: ev.reason || "" });
+      renderFrames(fentry);
       logFor(entry, "frame " + ev.index + " skipped: " + ev.code + " " + ev.reason);
       break;
+    }
 
     case "progress": {
       const fentry = fileBlock(entry, ev.file);
@@ -1371,6 +2194,11 @@ function apply(ev) {
         ev.frames_done + " / " + ev.frames_total + " frames · " +
         bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
       entry.progress = ev.frames_done + "/" + ev.frames_total + " frames";
+      // The numbers as numbers, for the bar. The sentence stays because it is
+      // the exact figure and the statement of what is being counted; the bar
+      // cannot be either of those things (TOR-123).
+      entry.framesDone = ev.frames_done;
+      entry.framesTotal = ev.frames_total;
       syncEntry(entry);
       logFor(entry, "progress: " + ev.frames_done + "/" + ev.frames_total +
           ", " + ev.downloaded + " bytes, " + ev.peers + " peers");
@@ -1528,6 +2356,10 @@ async function loadRuns() {
     entry.params = row.params || entry.params;
     entry.source = row.source || entry.source;
     entry.name = row.name || entry.name;
+    // TOR-117: GET /runs carries the two the same way run_state does - never
+    // both for one row (see RunSummary.ProvisionalName) - so there is
+    // nothing to reconcile here beyond copying whichever arrived.
+    entry.provisionalName = row.provisional_name || entry.provisionalName;
     entry.files = row.files || 0;
     entry.complete = row.complete || 0;
     entry.selected = row.selected || 0;

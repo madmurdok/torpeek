@@ -11,6 +11,8 @@
 package wire
 
 import (
+	"time"
+
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/probe"
 	"github.com/madmurdok/torpeek/internal/swarm"
@@ -52,6 +54,7 @@ func event(ev core.Event) map[string]any {
 			"selected": e.Selected,
 		}
 	case core.FileStarted:
+		tm := core.ToneMapOf(e.Media.Video)
 		// The summary panel (REQUIREMENTS.md section 3.3) needs more than the
 		// video's own dimensions: audio tracks, subtitles, bitrate. probe
 		// already inspected all of that before this event fired - the gap was
@@ -65,6 +68,27 @@ func event(ev core.Event) map[string]any {
 			"fps": e.Media.Video.FPS, "video_bitrate": e.Media.Video.BitRate,
 			"audio": audioTracks(e.Media.Audio), "subtitles": subtitleTracks(e.Media.Subtitles),
 			"planned": len(e.Plan),
+			// The plan itself, not only its size (TOR-110). A page that knows
+			// where every capture point WILL be can lay the whole grid out
+			// before the first piece is fetched, so it stops shoving itself
+			// around for the minute a run takes - and a run is mostly
+			// waiting, so that is the state a person looks at longest.
+			//
+			// It is the plan BEFORE any shifting (core.FileStarted.Plan's own
+			// doc), which is what makes it usable as an identity: a frame
+			// that lands somewhere else still belongs to the point it was
+			// asked for, and frame_ready's index says which. Sent alongside
+			// `planned` rather than replacing it, because a count is what a
+			// log line wants and a list is what a layout wants.
+			"plan": planMS(e.Plan),
+			// What the source's dynamic range is, and whether the frames were
+			// converted out of it. A consumer reading this stream sees the
+			// same two facts the CLI prints and the manifest records, because
+			// a frame that came out of an HDR source cannot say either for
+			// itself and looks broken without them (TOR-108). Empty and false
+			// for an ordinary SDR file, which is every file this stream used
+			// to carry.
+			"dynamic_range": tm.Source, "tone_mapped": tm.Applies(),
 		}
 	case core.FrameReady:
 		return map[string]any{
@@ -149,6 +173,17 @@ func VideoFiles(files []swarm.FileInfo) []map[string]any {
 }
 
 // audioTracks renders every audio track for the summary panel - the answer to
+// planMS is a capture plan as milliseconds, the unit every other timestamp on
+// this stream already uses. Never nil: a file with no plan sends an empty
+// array rather than a null, so a consumer can iterate it without asking.
+func planMS(plan []time.Duration) []int64 {
+	out := make([]int64, 0, len(plan))
+	for _, at := range plan {
+		out = append(out, at.Milliseconds())
+	}
+	return out
+}
+
 // "is this the dub and the language I wanted" (probe.AudioStream's own doc).
 func audioTracks(tracks []probe.AudioStream) []map[string]any {
 	out := make([]map[string]any, len(tracks))
