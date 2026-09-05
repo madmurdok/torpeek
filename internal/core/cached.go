@@ -212,7 +212,8 @@ func loadCacheHit(layout output.Layout, record cache.Run, selected []swarm.FileI
 // publish replays a validated hit as the exact event sequence a live run
 // produces: MetadataReady, then FileStarted/FrameReady*/FileDone per file,
 // then Done with DownloadedByte 0 - the cost of reading a few files off disk,
-// which is the answer "no network" asks for.
+// which is the answer "no network" asks for. Nothing was claimed either: a
+// rerun that never opened a session ordered no pieces from anybody.
 func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) {
 	bus.Publish(MetadataReady{
 		Name:     h.record.Name,
@@ -283,9 +284,12 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 	bus.Publish(Done{
 		Files:  len(h.manifests),
 		Frames: frames,
-		// Nothing was downloaded, and the elapsed time is the cost of reading
-		// a few files - which is the answer the criterion is asking for.
+		// Nothing was downloaded and nothing was claimed; the elapsed time is
+		// the cost of reading a few files - which is the answer the criterion
+		// is asking for.
 		DownloadedByte: 0,
+		ClaimedByte:    0,
+		ClaimedPieces:  0,
 		Elapsed:        time.Since(started),
 		Reason:         StopCompleted,
 		TorrentPath:    torrentPath,

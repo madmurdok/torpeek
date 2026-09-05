@@ -66,6 +66,46 @@ MiB on this same code earlier the same day. A release whose acceptance run
 happens to land in it will fail criterion 2 with nothing wrong, and the fix
 for that is the ceiling question, not a re-run.
 
+## The 1.0.0 release run, and the prediction it did NOT confirm
+
+Recorded the same way as 0.9.0's, because a spread is only worth measuring if
+every later point is checked against it - including the awkward ones. Run
+2026-09-05 13:32, load 9.83:
+
+| | criterion 2 | criterion 1 |
+| --- | --- | --- |
+| **ordered (the verdict, since TOR-94)** | **44.0 MiB in 44 pieces** | 104.0 MiB in 104 pieces |
+| **arrived (reported beside it)** | **51.7 MiB** | 103.1 MiB |
+| gap | +7.7 MiB, 17.5% over the claim | -0.9 MiB |
+| 0.9.0, arrived | 46.0 | 101.6 |
+
+Two things this run settles and one it refuses to.
+
+**The 44 MiB is real, for the third time and by a third route.** TOR-88 measured
+it with a scratch diagnostic patch, TOR-94 reproduced it with shipped
+instrumentation, and this is a release run: 163 range requests, 44 distinct
+pieces, 44.0 MiB, unchanged. The figure the criterion is now judged on is the
+one part of this measurement that does not move.
+
+**TOR-95's readahead fix did not reduce live arrivals, and this run is the
+evidence against it rather than for it.** Arrivals went from 0.9.0's 46.0 MiB
+to 51.7, in the wrong direction, on a build that no longer rounds the readahead
+up. Section 8 predicted exactly this - it shipped on the semantic argument and
+explicitly did not claim a live win - but it would have been easy to read a
+lower number today as confirmation, so the higher one is worth writing down.
+The live overshoot has another cause and still does.
+
+**What it refuses to settle is the elevated regime.** 51.7 MiB is inside the
+45.5-54.6 normal band, so this run says nothing about whether the 60-118 MiB
+regime is gone. Under the old criterion this run would have passed with 8 MiB
+of margin; under the new one it passes with 16, and that difference is the
+whole point of TOR-94 rather than a rounding of it.
+
+**A negative gap is normal and now has words.** Criterion 1 ordered 104.0 MiB
+and received 103.1: a run can order a piece it does not wait for, and can be
+served from pieces already on disk. The report says so in the row rather than
+leaving a reader to wonder how arrivals can undershoot a claim.
+
 ## 1. The history, read out of the reports rather than the ticket
 
 The ticket names three figures. There are eight, and they do not climb.
@@ -451,11 +491,23 @@ nothing". The live overshoot comes from something else the client asks for
 that our claims do not name, and finding it means instrumenting inside
 anacrolix's request strategy rather than in torpeek.
 
-**It is therefore not on this branch.** Shipping a fetch-window tuning change
-whose measurable benefit is confined to a local fixture, on the strength of an
-afternoon in which the live measurement moved by a factor of two on its own,
-would be tuning to a transient. The diff above is small enough to re-apply
-from this document when it has a ticket and a quiet-swarm A/B of its own.
+**It was therefore not on this branch** - shipping a fetch-window tuning
+change whose measurable benefit is confined to a local fixture, on the
+strength of an afternoon in which the live measurement moved by a factor of
+two on its own, would have been tuning to a transient.
+
+**It shipped in 1.0.0 as TOR-95**, on a different justification than a live
+win: the semantic one. A window is a claim and a readahead is a hint, and
+alignUp was turning the hint into a claim - so the change is a correction
+rather than a tuning, and its local determinism is the evidence, not a
+substitute for a live effect it never claimed. Re-measured then, interleaved,
+by two independent runs: 20.3-20.7 -> 15.8-16.7 MiB at load 40-60, and
+20.3-21.8 -> 17.1-18.6 MiB at load 435-485, every rep of both runs in the same
+direction with no overlap between arms. The second run's higher absolute
+numbers under load are themselves worth noting - this profile was already
+flagged in section 4 as the load-sensitive one, and it means the 4.5 MiB/frame
+ceiling sits closer than a quiet machine suggests. `ReadaheadSize` no longer
+rounds, and `TestReadaheadSizeIsNotRoundedUp` fails if anybody makes it.
 
 ## 9. What was deliberately not done
 
@@ -496,6 +548,16 @@ from this document when it has a ticket and a quiet-swarm A/B of its own.
 3. **Have the acceptance report record what a run claimed, not only what it
    spent.** 44 distinct pieces is deterministic; 60.8 MiB is not. A report
    carrying both would have made this ticket a five-minute read.
+
+   **Done in 1.0.0 as TOR-94**, together with item 5 below, which it turned
+   out to be the same decision. `swarm.Torrent` now counts the distinct
+   pieces any `Claim` covers - `Claim` is the single funnel, and a reader's
+   readahead deliberately does not reach it - and carries the figure out on
+   `core.Done` as far as the acceptance harness, no further. The report
+   prints ordered, arrived and the gap for both criteria. Measured against
+   this document's own trace on the local seeder, the counter independently
+   reproduces the numbers the scratch patch logged: 36 pieces for min-time
+   and 15 for min-traffic, both short by the same 0.3 MiB tail piece.
 4. **Do not run the acceptance suite in a tight loop against the public
    torrent, and say how long the machine had been quiet.** The figure is not
    stationary under that load: it doubled after ~25 back-to-back runs and
@@ -505,3 +567,15 @@ from this document when it has a ticket and a quiet-swarm A/B of its own.
    measures our fetch plan plus whatever the swarm pushes at us; the intent it
    encodes — "the thrifty profile does not pull the film" — is about the plan,
    which is a deterministic 44 MiB.
+
+   **Settled in 1.0.0 as TOR-94**: the criterion is judged on what the run
+   ORDERED, and actual traffic plus the gap are reported beside it rather
+   than folded into it. The 60 MiB ceiling did not move - against a 44 MiB
+   order it is 16 MiB of room for the fetch plan to grow into, and the plan
+   is the part this project controls. Criterion 1 stays on arrivals: its 150
+   MB ceiling sits over a figure inside a 2.7 MiB band for seven releases, so
+   there is nothing there to protect and re-basing it would have cost the
+   release-to-release comparison. REQUIREMENTS.md 8.2 says all of this in the
+   requirement itself, and 2.6 says why a run's traffic BUDGET keeps counting
+   arrivals: a budget protects a link, and bytes on the wire cost the same
+   whoever asked for them.

@@ -37,9 +37,12 @@ type Profile struct {
 // and section 2.5's "more parallel requests" is served by claiming a wider
 // window, which is what gives the library more to ask for at once.
 //
-// The numbers are intents. What reaches the swarm is these rounded up to whole
-// pieces, which is why they read as byte sizes rather than piece counts: the
-// intent is "about this much", and the torrent decides what that means.
+// The numbers are intents, not raised straight to the swarm: Window is a
+// claim and gets rounded up to whole pieces (WindowSize), which is why it
+// reads as a byte size rather than a piece count - "about this much", and the
+// torrent decides what that means. Readahead is only a hint about how far
+// ahead to want data and is passed through as written (ReadaheadSize; TOR-95)
+// - rounding a hint up turns it into a claim nobody made.
 //
 // What a capture point costs is set by how far the two reach past the wanted
 // offset together, not by either alone. Measured on the local seeder, per
@@ -84,9 +87,29 @@ func (p Profile) WindowSize(pieceLength int64) int64 {
 	return alignUp(p.Window, pieceLength)
 }
 
-// ReadaheadSize resolves the readahead intent the same way.
+// ReadaheadSize resolves the readahead intent - and, unlike WindowSize, does
+// NOT round it up to a whole piece (TOR-95).
+//
+// A window is a claim: the swarm is going to be asked for those bytes, so
+// rounding it up to a whole piece costs nothing that was not already being
+// paid. A readahead is only a hint about how far ahead the reader wants to
+// keep prefetching - and alignUp's floor of one whole piece turned every
+// reader into one that prefetches a full piece past its read position, on any
+// torrent whose piece length exceeds the readahead intent (256 KiB on this
+// torrent's 1 MiB pieces, i.e. every read).
+//
+// That manufactured prefetch reaches past what the caller actually asked for,
+// which matters because of what TOR-88 found in internal/bridge: the bridge
+// deliberately claims only the head of each range ffmpeg requests, not the
+// whole range, to avoid ordering an entire file to satisfy a request that
+// reads a few hundred kilobytes of it. A readahead rounded up to a full piece
+// reaches outside that head-only claim - exactly where Window.Release's
+// CancelPieces does not follow it, since Release only cancels the pieces the
+// window itself claimed. So the rounding did not just prefetch more than
+// asked; it prefetched into bytes no claim named and no Release could pull
+// back. Passing the intent through unrounded keeps the hint a hint.
 func (p Profile) ReadaheadSize(pieceLength int64) int64 {
-	return alignUp(p.Readahead, pieceLength)
+	return p.Readahead
 }
 
 func alignUp(intent, pieceLength int64) int64 {
@@ -188,8 +211,62 @@ func (t *Torrent) Claim(file int, off, length int64, p Profile) (*Window, error)
 	for i := pieces.Begin; i < pieces.End; i++ {
 		t.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
 	}
+	t.noteClaimed(pieces)
 
 	return &Window{t: t, pieces: pieces}, nil
+}
+
+// noteClaimed records an order against the run's claimed figure (Claimed, in
+// torrent.go), which is what acceptance criterion 2 is judged on.
+//
+// It sits inside Claim because Claim is the single funnel: every piece torpeek
+// orders in this project is ordered here, by ReadRange below or by
+// internal/bridge's Fetch, which is where everything ffmpeg asks for arrives.
+// Two things deliberately do NOT reach this counter, and they are the whole
+// reason it exists:
+//
+//   - a reader's readahead (Reader, below). That is a hint about how far ahead
+//     to want data, not an order for particular pieces, and since TOR-95 it is
+//     not even rounded up to one. Counting it would fold the manufactured
+//     prefetch back into the figure meant to exclude it.
+//   - anything a peer sends unasked. There is nothing to count at claim time,
+//     which is the point: 1.5-74.5 MiB of it has been measured arriving on
+//     unchanged code, some of it after Release (TOR-88).
+func (t *Torrent) noteClaimed(pieces PieceRange) {
+	t.claimMu.Lock()
+	defer t.claimMu.Unlock()
+
+	if t.claimedSeen == nil {
+		t.claimedSeen = make(map[int]struct{}, pieces.Len())
+	}
+	for i := pieces.Begin; i < pieces.End; i++ {
+		if _, seen := t.claimedSeen[i]; seen {
+			continue
+		}
+		t.claimedSeen[i] = struct{}{}
+		t.claimedByte += t.pieceBytes(i)
+	}
+}
+
+// pieceBytes is what one piece actually weighs: pieceLength for every piece
+// but the torrent's last, which is whatever is left over.
+//
+// Answered from the geometry cached at construction rather than from the
+// client, so the arithmetic stays testable without a swarm - the same reason
+// pieceLength and numPieces are cached at all. The tail matters here and
+// nowhere else: a claim covering the final piece of a torrent whose length is
+// not a whole multiple of the piece length would otherwise report bytes that
+// cannot exist.
+func (t *Torrent) pieceBytes(i int) int64 {
+	if t.pieceLength <= 0 || i < 0 || (t.numPieces > 0 && i >= t.numPieces) {
+		return 0
+	}
+	if t.numPieces > 0 && i == t.numPieces-1 {
+		if tail := t.length - int64(t.numPieces-1)*t.pieceLength; tail > 0 && tail < t.pieceLength {
+			return tail
+		}
+	}
+	return t.pieceLength
 }
 
 // Pieces reports which pieces this window covers.
@@ -197,6 +274,13 @@ func (w *Window) Pieces() PieceRange { return w.pieces }
 
 // Release drops the window's claim. Pieces already downloaded stay on disk and
 // cost nothing to reuse; what stops is asking peers for the rest.
+//
+// It does not touch the run's claimed figure (Claimed, in torrent.go), and
+// must not: that figure is the set of pieces this run ordered at least once,
+// and an order the run placed was placed whether or not it was later
+// withdrawn. Releasing 44 pieces back down to nothing would report a run that
+// asked for nothing - and on the acceptance torrent it would do so 82 times
+// for a single piece.
 func (w *Window) Release() {
 	if w == nil || w.released {
 		return

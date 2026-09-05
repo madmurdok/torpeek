@@ -66,15 +66,24 @@ replays it from disk: no queue slot, no network request.
 
 Release archives now assemble for all four targets: `make archives` builds one
 folder per platform holding torpeek, ffmpeg, ffprobe and their licence
-material. The Linux one has been run end to end on a clean Debian 12 with no
-ffmpeg installed and nothing on `PATH`, and the macOS Intel one the same way on
-macOS itself; the Windows and Apple Silicon ones are assembled and checksummed
-but have not been run on their platforms. **The macOS archives are distributed
+material. **All four are run on a clean machine of their own operating system
+before a release goes out** — out of the unpacked folder, against a seeder on
+loopback, with `PATH` pointing at an empty directory so the bundled ffmpeg is
+the only decoder anything could have used. Windows and Apple Silicon included:
+neither can be executed on the machine this is developed on, which is why
+0.9.0 shipped two archives nobody had ever run. That is a GitHub Actions
+workflow now ([`.github/workflows/archives.yml`](.github/workflows/archives.yml)),
+and it runs a second, identical pass with the bundled binaries deleted and
+requires *that* to fail — a green run that would also be green with no ffmpeg
+in the folder would prove nothing. **The macOS archives are distributed
 under the GPL and the Linux and Windows ones are not** — there is no prebuilt
 LGPL ffmpeg for macOS worth shipping, torpeek's own source is MIT and so is
 free to travel inside a GPL whole, and there was no reason to downgrade the
 other two platforms to match; [docs/licensing.md](docs/licensing.md) has the
-decision and what it obliges. Nothing has been published anywhere yet.
+decision and what it obliges.
+
+**0.9.0 is published**, with an archive per platform:
+[github.com/madmurdok/torpeek/releases](https://github.com/madmurdok/torpeek/releases).
 
 Not built yet: the live TUI. The `min-time` and
 `min-traffic` profiles already differ in readahead and window size, but the
@@ -84,14 +93,21 @@ strategies on top of them are still open. See
 
 ## Requirements
 
-**No archive has been published yet**, so today every route starts by
-compiling. Once one is: an archive needs nothing installed — unpack it and run
-`./torpeek`, with ffmpeg and ffprobe already in the folder (`make archives`
-builds those two; see [docs/licensing.md](docs/licensing.md) for what the
-bundled binaries are, and for why the macOS archive travels under different
-terms than the other two).
+**An archive needs nothing installed** — unpack it and run `./torpeek`, with
+ffmpeg and ffprobe already in the folder. Pick one from
+[the releases page](https://github.com/madmurdok/torpeek/releases):
 
-Compiling needs two things on the machine:
+| archive | before you run it |
+| --- | --- |
+| `linux-amd64` | Needs a **glibc** distribution — Debian, Ubuntu, Fedora, RHEL, Arch. Not Alpine or another musl system: torpeek itself is static and has no libc at all, but the bundled ffmpeg is linked against glibc. There, install ffmpeg from the distribution and delete the two bundled copies; torpeek falls back to `PATH`. |
+| `windows-amd64` | **Unzip the whole folder first.** Explorer will run `torpeek.exe` straight out of the zip preview, and from there it cannot see the `ffmpeg.exe` that is supposed to be beside it. |
+| `darwin-amd64` / `darwin-arm64` | **Run `sh first-run.command` first** — it is in the archive, clears the download flag from the folder and then starts torpeek. macOS quarantines downloaded files and this binary is not signed, so an un-cleared first run is stopped before any of torpeek's own code runs: nothing printed in the terminal, just a process that dies after a few seconds (measured, TOR-97). That is why there is a script rather than a line to remember — clearing the flag afterwards may not help, and then only a freshly unpacked copy starts. |
+
+Check a download against `torpeek-<version>-SHA256SUMS.txt` on the same page.
+[docs/licensing.md](docs/licensing.md) says what the bundled binaries are and
+why the macOS archives travel under different terms than the other two.
+
+Building from source instead needs two things on the machine:
 
 - **Go 1.27 or newer** — the version in `go.mod`. `go version` to check;
   [go.dev/dl](https://go.dev/dl/) to install.
@@ -123,9 +139,12 @@ curl -LO https://archive.org/download/BigBuckBunny_124/BigBuckBunny_124_archive.
 ```
 
 That writes six frames from each of the torrent's three video files — 18 in
-`./frames` — and takes about 130 MB of its 421 MB to do it, in ten seconds on a
-warm swarm. `-mode min-traffic` trades time for a fraction of that. Point it at
-a magnet link the same way.
+`./frames` — out of the 421 MB the torrent holds. Measured on a warm swarm:
+98 MiB in 13 seconds. Treat that as one sample rather than a promise; the same
+run measured 130 MB on an earlier day, and a live swarm's cost varies by more
+than the code does (`docs/tor-88-min-traffic-spread.md` measures how much).
+`-mode min-traffic` trades time for a fraction of it. Point it at a magnet
+link the same way.
 
 Other targets:
 
@@ -134,7 +153,12 @@ make check     # vet + tests (the suite drives real torrents through a local see
 make cross     # dist/{darwin,linux,windows}-*/ - the four binaries, CGO-free
 make ffmpeg    # third_party/ffmpeg/<platform>/ - the bundled ffmpeg, checksums verified
 make archives  # dist/torpeek-<version>-<platform>{,.tar.gz,.zip} - the release archives
+make archive-check ARCHIVE=<unpacked dir> MEDIA=<clip.mkv>
+               # run an unpacked archive with nothing on PATH, both arms (CI does this per OS)
 make fmt
+
+make clean        # bin/ and dist/
+make clean-ffmpeg # third_party/ffmpeg/ - about 750 MB, and a ~220 MB download to undo
 ```
 
 ## Usage
@@ -171,6 +195,10 @@ make fmt
 | `-sequential` | `false` | when a container has no usable index, degrade to sequential capture from the start instead of failing |
 | `-json` | `false` | emit NDJSON events instead of human output |
 | `-version` | `false` | print version and exit |
+| `-cache-max-size` | unset — no eviction at all | size ceiling for the whole `-out` tree; over it, whole cached result sets are removed oldest-first after each run. A number with an optional K/M/G/T suffix, e.g. `20G` |
+| `-cache-list` | `false` | list cached result sets under `-out` with their size and date, and exit. Needs no torrent argument |
+| `-cache-clear` | — | remove one cached result set, named `infohash/params` as `-cache-list` prints it, and exit |
+| `-cache-clear-all` | `false` | remove every cached result set under `-out`, and exit |
 
 Ctrl+C cancels the run rather than killing it: frames already written stay, and
 the summary still prints.
@@ -195,7 +223,7 @@ worth of budget rather than a share of the pack's.
 ```
 
 One binary is both the engine and the UI: the frontend is compiled into it, so
-the folder holds the executable and ffmpeg and nothing else. Paste a magnet
+there is no asset directory to serve and nothing to install beside it. Paste a magnet
 link or drop a `.torrent` onto the page: it receives the same events `-json`
 writes, over a WebSocket, and fills a live grid of frames as they land, next
 to a summary panel of tracks and quality.

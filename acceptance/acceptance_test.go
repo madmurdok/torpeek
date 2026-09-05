@@ -51,16 +51,21 @@ func TestMain(m *testing.M) {
 
 	code := m.Run()
 
-	path := *reportPath
-	if path == "" {
-		path = filepath.Join("..", "docs", "results", version.Version+"-acceptance.md")
-	}
-	if err := report.Write(path); err != nil {
+	release := filepath.Join("..", "docs", "results", version.Version+"-acceptance.md")
+	path, err := report.WriteFor(*reportPath, release)
+	switch {
+	case err != nil && path == "":
+		// A subset ran and nobody said where to put it. Not writing is the
+		// point (TOR-96); the exit code is left alone because the criteria
+		// that did run reported their own verdicts, and a filtered run is a
+		// legitimate thing to do - it is only not a release report.
+		fmt.Fprintf(os.Stderr, "no report written: %v\n", err)
+	case err != nil:
 		fmt.Fprintf(os.Stderr, "writing report: %v\n", err)
 		if code == 0 {
 			code = 1
 		}
-	} else {
+	default:
 		fmt.Fprintf(os.Stderr, "report written to %s\n", path)
 	}
 	os.Exit(code)
@@ -80,12 +85,17 @@ func machineState() string {
 // ---- harness -------------------------------------------------------------
 
 type outcome struct {
-	frames     int
-	files      int
-	downloaded int64
-	elapsed    time.Duration
-	reason     core.StopReason
-	failures   []core.Failed
+	frames int
+	files  int
+	// downloaded is what arrived; claimed is what the run ordered, in bytes
+	// and in distinct pieces. Criterion 2 is judged on the second
+	// (REQUIREMENTS.md section 8, TOR-94) and reports all three.
+	downloaded    int64
+	claimed       int64
+	claimedPieces int
+	elapsed       time.Duration
+	reason        core.StopReason
+	failures      []core.Failed
 	// paths are the frames written, in the order they were reported.
 	paths []string
 	// byFile remembers one frame path per file, which is how a manifest is
@@ -149,14 +159,12 @@ func run(ctx context.Context, t *testing.T, cfg core.Config, stopAfter int) outc
 			got.failures = append(got.failures, e)
 		case core.Done:
 			got.files, got.downloaded = e.Files, e.DownloadedByte
+			got.claimed, got.claimedPieces = e.ClaimedByte, e.ClaimedPieces
 			got.elapsed, got.reason = e.Elapsed, e.Reason
 		}
 	}
 	return got
 }
-
-func mib(n int64) string          { return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20)) }
-func secs(d time.Duration) string { return fmt.Sprintf("%.1fs", d.Seconds()) }
 
 // liveTorrent gets the torrent under test, fetching it if no path was given.
 func liveTorrent(t *testing.T) string {

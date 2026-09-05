@@ -53,6 +53,28 @@ check:
 acceptance:
 	go test -tags acceptance -timeout 60m -v ./acceptance/ $(ARGS)
 
+# Runs an unpacked release archive out of its own folder against a seeder on
+# loopback with nothing on PATH, and then runs it again with the bundled
+# ffmpeg deleted and requires that to fail (TOR-101). Both arms, always: the
+# first on its own cannot tell "the archive works" from "this machine has an
+# ffmpeg somewhere".
+#
+# ARCHIVE is a directory `make archives` produced and something unpacked;
+# MEDIA is one or more H.264 files to seed - render them with a GPL ffmpeg,
+# because the bundled LGPL build on Linux and Windows cannot encode h264 (it
+# only ever has to decode it).
+#
+#   make archives
+#   tar -xzf dist/torpeek-1.0.0-darwin-amd64.tar.gz -C /tmp
+#   make archive-check ARCHIVE=/tmp/torpeek-1.0.0-darwin-amd64 MEDIA=clip.mkv
+#
+# CI does not use this target: Windows runners have no make, so
+# .github/workflows/archives.yml spells the same `go test` out itself.
+.PHONY: archive-check
+archive-check:
+	go test -tags archivecheck -timeout 30m -v ./archivecheck/ \
+		-archive "$(ARCHIVE)" $(foreach m,$(MEDIA),-media "$(m)") $(ARGS)
+
 .PHONY: fmt
 fmt:
 	go fmt ./...
@@ -95,9 +117,15 @@ prune-worktrees:
 # run from a release branch it will happily delete a branch main has never
 # seen. What `-d` does add is refusing a branch a worktree has checked out -
 # the same "an agent still working keeps it" protection prune-worktrees leans
-# on, rather than a keep-list this target would have to be told about. origin
-# carries no feature branches at all, so there is deliberately nothing remote
-# to prune.
+# on, rather than a keep-list this target would have to be told about.
+#
+# It does not touch origin, and that is now a choice rather than a vacuum: it
+# used to be true that origin carried nothing but main and release-*, and
+# TOR-101 ended that - a GitHub Actions workflow cannot be tested without
+# pushing the branch it lives on, so feature branches do reach origin now.
+# Deleting a remote branch is a push, and a push is not something a
+# housekeeping target should do behind anyone's back. `git push origin
+# --delete <branch>` by hand, once its work is in main.
 .PHONY: prune-branches
 prune-branches:
 	@git branch --merged main --format='%(refname:short)' \
@@ -124,3 +152,22 @@ tag:
 .PHONY: clean
 clean:
 	rm -rf bin dist
+
+# Separate from clean, and deliberately so: `clean` is run casually and this
+# costs a download to undo - about 220 MiB of upstream archives, re-fetched and
+# re-verified by scripts/fetch-ffmpeg.sh (TOR-103).
+#
+# What it reclaims is roughly 750 MiB, measured: two static ffmpeg binaries per
+# platform at ~110 MiB each, across four platforms. Nothing here is in git -
+# .gitignore carries /third_party/ffmpeg/ - so this only ever costs time.
+#
+# It used to be 1.1 GiB, because the fetch kept every downloaded archive in a
+# cache nothing ever read again; the fetch now drops each one once its
+# binaries are extracted and verified (TOR-103).
+#
+# Keeping them is what lets `make archives` run with no network at all: the
+# fetch script hashes what is already extracted and skips the download when it
+# matches, which is why the cache under .cache/ can go and these cannot.
+.PHONY: clean-ffmpeg
+clean-ffmpeg:
+	rm -rf third_party/ffmpeg

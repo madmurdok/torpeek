@@ -112,6 +112,27 @@ type Done struct {
 	DownloadedByte int64
 	Elapsed        time.Duration
 
+	// ClaimedByte and ClaimedPieces are what the run ORDERED from the swarm -
+	// the total size of the distinct pieces some Claim covered, and how many
+	// there were. DownloadedByte above is what arrived, whoever asked for it.
+	//
+	// The two are not the same number and the gap between them is the
+	// interesting one: on the acceptance torrent min-traffic claims a
+	// deterministic 44 pieces every run while what arrives has been measured
+	// from 45.5 to 118.6 MiB on byte-identical code, so a verdict taken on
+	// arrivals is a verdict the swarm casts (docs/tor-88-min-traffic-spread.md,
+	// TOR-94). Acceptance criterion 2 is judged on the claimed figure and
+	// reports the other two beside it.
+	//
+	// A measurement seam, not a protocol. It stops here, where the acceptance
+	// harness reads it: internal/wire's event JSON, the CLI summary and the
+	// manifest's cost record (REQUIREMENTS.md 2.8) all still carry the one
+	// traffic number a person spending bandwidth asked for, and a client is
+	// free to ignore these two. Both are zero for a run served from cache,
+	// which claimed nothing because it went nowhere.
+	ClaimedByte   int64
+	ClaimedPieces int
+
 	// TorrentPath is where the run kept its own .torrent, so a client can
 	// offer it without knowing anything about the output layout - the same
 	// service FileDone's ManifestPath and SheetPath do for one video file.

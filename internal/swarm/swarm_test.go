@@ -371,11 +371,12 @@ func TestSelectRefusesASpecThatMatchesNothing(t *testing.T) {
 	}
 }
 
-// TestProfileGeometryRoundsToWholePieces: an intent in bytes becomes a claim in
-// pieces, because pieces are what the swarm trades in. The floor matters most -
-// a window under one piece was measured at 62.7s against 3.4s, since the
-// decoder keeps returning for the rest of a piece already on its way.
-func TestProfileGeometryRoundsToWholePieces(t *testing.T) {
+// TestWindowSizeRoundsToWholePieces: a window is a claim, so an intent in
+// bytes becomes a claim in whole pieces, because pieces are what the swarm
+// trades in. The floor matters most - a window under one piece was measured
+// at 62.7s against 3.4s, since the decoder keeps returning for the rest of a
+// piece already on its way.
+func TestWindowSizeRoundsToWholePieces(t *testing.T) {
 	const mib = 1 << 20
 
 	for _, c := range []struct {
@@ -392,12 +393,50 @@ func TestProfileGeometryRoundsToWholePieces(t *testing.T) {
 		{"an unknown piece length leaves the intent", 3 * mib, 0, 3 * mib},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			p := Profile{Window: c.intent, Readahead: c.intent}
+			p := Profile{Window: c.intent}
 			if got := p.WindowSize(c.pieceLength); got != c.want {
 				t.Errorf("WindowSize(%d) = %d, want %d", c.pieceLength, got, c.want)
 			}
-			if got := p.ReadaheadSize(c.pieceLength); got != c.want {
-				t.Errorf("ReadaheadSize(%d) = %d, want %d", c.pieceLength, got, c.want)
+		})
+	}
+}
+
+// TestReadaheadSizeIsNotRoundedUp pins TOR-95's distinction: a window is a
+// claim, so rounding it up to a whole piece costs nothing that was not
+// already being paid, but a readahead is only a hint about how far ahead to
+// prefetch, and rounding a hint up turns it into a claim nobody made.
+//
+// Before this fix, ReadaheadSize floored MinTraffic's 256 KiB readahead to a
+// full 1 MiB piece via the same alignUp a window goes through, so every
+// reader prefetched a whole piece past its read position. Because
+// internal/bridge deliberately claims only the head of each range ffmpeg
+// asks for (see torrentContent.Fetch), that manufactured prefetch reached
+// past the claim - exactly where Window.Release's CancelPieces cannot follow
+// it, since Release only cancels the pieces its own window claimed. Measured
+// on a local seeder with 1 MiB pieces: 15 MiB of distinct claimed pieces
+// downloaded 20.7-20.9 MiB with the floor applied, and a bit-stable 15.8 MiB
+// once ReadaheadSize stopped rounding.
+//
+// If ReadaheadSize is ever made to round up again - say, by delegating to
+// alignUp the way WindowSize does - this test must fail.
+func TestReadaheadSizeIsNotRoundedUp(t *testing.T) {
+	const mib = 1 << 20
+
+	for _, c := range []struct {
+		name        string
+		intent      int64
+		pieceLength int64
+	}{
+		{"MinTraffic's own numbers: 256 KiB readahead, 1 MiB pieces", 256 << 10, 1 * mib},
+		{"far under a piece stays far under", 64 << 10, 4 * mib},
+		{"between pieces stays unrounded", 3 * mib, 2 * mib},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			p := Profile{Readahead: c.intent}
+			if got := p.ReadaheadSize(c.pieceLength); got != c.intent {
+				t.Errorf("ReadaheadSize(%d) with pieceLength %d = %d, want the unrounded intent %d; "+
+					"a readahead is a hint, not a claim, and must not go through alignUp",
+					c.intent, c.pieceLength, got, c.intent)
 			}
 		})
 	}
