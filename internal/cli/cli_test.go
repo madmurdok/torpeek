@@ -70,13 +70,15 @@ func TestParseCollectsPeers(t *testing.T) {
 	}
 }
 
-// TestPortFlagsFlowIntoConfig is the CLI half of TOR-28's plumbing: a pinned
-// -torrent-port and -bridge-port must land, unaltered, in the config the
-// engine actually runs with.
+// TestPortFlagsFlowIntoConfig is the CLI half of TOR-28's plumbing, now that
+// the BitTorrent side is a set rather than a port: -torrent-ports and
+// -bridge-port must land, unaltered, in the config the engine actually runs
+// with. One port is still expressible, because a single-client deployment is
+// still a deployment.
 func TestPortFlagsFlowIntoConfig(t *testing.T) {
 	opts, err := parse([]string{
 		"-data", t.TempDir(),
-		"-torrent-port", "51413",
+		"-torrent-ports", "51413",
 		"-bridge-port", "51500",
 		"magnet:?xt=urn:btih:abc",
 	}, &bytes.Buffer{})
@@ -89,17 +91,54 @@ func TestPortFlagsFlowIntoConfig(t *testing.T) {
 		t.Fatalf("config: %v", err)
 	}
 
-	if cfg.Swarm.ListenPort != 51413 {
-		t.Errorf("Swarm.ListenPort = %d, want 51413", cfg.Swarm.ListenPort)
+	if cfg.Swarm.Ports == nil {
+		t.Fatal("Swarm.Ports is nil, so nothing hands the run a port at all")
+	}
+	if !cfg.Swarm.Ports.Managed() {
+		t.Error("Swarm.Ports is not managed, so a configured allocation reads as the local case")
+	}
+	if got, want := cfg.Swarm.Ports.Set().String(), "51413"; got != want {
+		t.Errorf("Swarm.Ports holds %q, want %q", got, want)
 	}
 	if want := "127.0.0.1:51500"; cfg.Bridge.Addr != want {
 		t.Errorf("Bridge.Addr = %q, want %q", cfg.Bridge.Addr, want)
 	}
 }
 
-// TestPortFlagsDefaultToZero: with nothing pinned, the config carries zero
-// through rather than a hardcoded port - the OS picks, which REQUIREMENTS.md
-// section 4.1 requires callers on a managed host to override.
+// TestTorrentPortsAcceptsARange is the shape REQUIREMENTS.md 4.1 actually
+// describes - a range allocated by the platform - and the size that comes out
+// of it is the number of private torrents that can fetch at once, so it is
+// checked rather than assumed.
+func TestTorrentPortsAcceptsARange(t *testing.T) {
+	opts, err := parse([]string{
+		"-data", t.TempDir(),
+		"-torrent-ports", "51000-51004",
+		"magnet:?xt=urn:btih:abc",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	cfg, err := opts.config()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	if cfg.Swarm.Ports == nil {
+		t.Fatal("Swarm.Ports is nil")
+	}
+	if got, want := cfg.Swarm.Ports.Size(), 5; got != want {
+		t.Errorf("the run may use %d ports, want %d", got, want)
+	}
+	if got, want := cfg.Swarm.Ports.Set().String(), "51000-51004"; got != want {
+		t.Errorf("Swarm.Ports holds %q, want %q", got, want)
+	}
+}
+
+// TestPortFlagsDefaultToZero: with nothing configured, the run gets a pool
+// that lets the OS choose every client's port and bounds nothing - the local
+// case - and it stays distinguishable from a managed host, which
+// REQUIREMENTS.md 4.1 requires to configure a range instead.
 func TestPortFlagsDefaultToZero(t *testing.T) {
 	opts, err := parse([]string{
 		"-data", t.TempDir(),
@@ -114,11 +153,63 @@ func TestPortFlagsDefaultToZero(t *testing.T) {
 		t.Fatalf("config: %v", err)
 	}
 
+	if cfg.Swarm.Ports == nil {
+		t.Fatal("Swarm.Ports is nil, so a run has nowhere to get a port from")
+	}
+	if cfg.Swarm.Ports.Managed() {
+		t.Errorf("Swarm.Ports reports a managed allocation of %s with nothing configured", cfg.Swarm.Ports.Set())
+	}
 	if cfg.Swarm.ListenPort != 0 {
 		t.Errorf("Swarm.ListenPort = %d, want 0 (OS-assigned)", cfg.Swarm.ListenPort)
 	}
 	if want := "127.0.0.1:0"; cfg.Bridge.Addr != want {
 		t.Errorf("Bridge.Addr = %q, want %q (bridge.DefaultConfig: an OS-assigned loopback port)", cfg.Bridge.Addr, want)
+	}
+}
+
+// TestEmptyTorrentPortsIsAUsageError: "the flag is absent" and "the flag is
+// present and empty" must not be the same answer. The systemd unit writes
+// -torrent-ports ${TORPEEK_TORRENT_PORTS}, and an unset variable there
+// expands to one empty argument - if that meant "let the OS choose", a
+// managed host would silently bind a port nobody allocated, which is the one
+// thing REQUIREMENTS.md 4.1 forbids outright. The old int-valued flag
+// refused "" for its own reasons; this keeps the same answer on purpose.
+func TestEmptyTorrentPortsIsAUsageError(t *testing.T) {
+	opts, err := parse([]string{
+		"-data", t.TempDir(),
+		"-torrent-ports", "",
+		"magnet:?xt=urn:btih:abc",
+	}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	cfg, err := opts.config()
+	if err == nil {
+		t.Fatalf("an empty -torrent-ports produced a usable config (managed=%v), want a usage error", cfg.Swarm.Ports.Managed())
+	}
+	if !strings.Contains(err.Error(), "-torrent-ports") {
+		t.Errorf("the error does not name the flag, so nobody can tell which one to fix: %v", err)
+	}
+}
+
+// TestBadTorrentPortsIsAUsageError: a mistyped range is a command line to
+// fix, reported the same way -mode and -cache-max-size already are, rather
+// than a run that starts on ports nobody allocated.
+func TestBadTorrentPortsIsAUsageError(t *testing.T) {
+	for _, spec := range []string{"51004-51000", "0", "abc", "51000,51000"} {
+		opts, err := parse([]string{
+			"-data", t.TempDir(),
+			"-torrent-ports", spec,
+			"magnet:?xt=urn:btih:abc",
+		}, &bytes.Buffer{})
+		if err != nil {
+			t.Fatalf("parse %q: %v", spec, err)
+		}
+
+		if _, err := opts.config(); err == nil {
+			t.Errorf("-torrent-ports %q was accepted, want a usage error", spec)
+		}
 	}
 }
 

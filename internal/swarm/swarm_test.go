@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -518,5 +519,275 @@ func TestProfilesDifferInWhatTheyClaim(t *testing.T) {
 	}
 	if !MinTime.Responsive || MinTraffic.Responsive {
 		t.Error("min-time trades verification for latency, min-traffic does not")
+	}
+}
+
+// freePortSet asks the OS for n ports nothing is listening on and returns
+// them as a PortSet, the way an operator would have typed the range their
+// host allocated. All n are held open at once before any is released, so they
+// are guaranteed distinct.
+func freePortSet(t *testing.T, n int) PortSet {
+	t.Helper()
+
+	held := make([]net.Listener, 0, n)
+	spec := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("find free port %d of %d: %v", i+1, n, err)
+		}
+		held = append(held, ln)
+		spec = append(spec, strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
+	}
+	for _, ln := range held {
+		ln.Close()
+	}
+
+	set, err := ParsePortSet(strings.Join(spec, ","))
+	if err != nil {
+		t.Fatalf("parse the set just collected: %v", err)
+	}
+	return set
+}
+
+// TestTwoSessionsTakeTwoPortsFromTheSet is the thing that has to be true
+// before more than one client can exist at all: hand one pool to two
+// sessions and they end up on two different ports, both of them ports the
+// operator actually allocated. Offline, like the pinned-port tests above - a
+// .torrent file needs no network for metadata.
+func TestTwoSessionsTakeTwoPortsFromTheSet(t *testing.T) {
+	set := freePortSet(t, 2)
+	pool := NewPortPool(set)
+
+	open := func() *Session {
+		t.Helper()
+		src, err := ParseSource(writeTorrentFile(t, false, ""))
+		if err != nil {
+			t.Fatalf("parse source: %v", err)
+		}
+		cfg := DefaultConfig(t.TempDir())
+		cfg.DHT = false
+		cfg.MetadataTimeout = 10 * time.Second
+		cfg.Ports = pool
+
+		session, _, err := Open(context.Background(), cfg, src)
+		if err != nil {
+			t.Fatalf("open a session out of the set %s: %v", set, err)
+		}
+		t.Cleanup(func() { session.Close() })
+		return session
+	}
+
+	first, second := open(), open()
+
+	allocated := map[int]bool{}
+	for _, port := range set.Ports() {
+		allocated[port] = true
+	}
+	for i, session := range []*Session{first, second} {
+		if !allocated[session.ListenPort()] {
+			t.Errorf("session %d listens on %d, which is not in the allocated set %s", i+1, session.ListenPort(), set)
+		}
+	}
+	if first.ListenPort() == second.ListenPort() {
+		t.Errorf("both sessions took port %d; two clients cannot share one", first.ListenPort())
+	}
+	if got := pool.Free(); got != 0 {
+		t.Errorf("pool has %d ports free after two of two were taken, want 0", got)
+	}
+}
+
+// TestOpenRefusesWhenTheSetIsTooSmall is the refusal the whole design turns
+// on: a set with fewer ports than clients does not quietly produce a client
+// on some other port, it produces an error saying the allocation ran out.
+// A silent OS-assigned port here would be a port outside the range, which
+// REQUIREMENTS.md 4.1 forbids outright.
+func TestOpenRefusesWhenTheSetIsTooSmall(t *testing.T) {
+	set := freePortSet(t, 1)
+	pool := NewPortPool(set)
+
+	src1, err := ParseSource(writeTorrentFile(t, false, ""))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false
+	cfg.MetadataTimeout = 10 * time.Second
+	cfg.Ports = pool
+
+	first, _, err := Open(context.Background(), cfg, src1)
+	if err != nil {
+		t.Fatalf("first session, taking the only port: %v", err)
+	}
+	defer first.Close()
+
+	src2, err := ParseSource(writeTorrentFile(t, false, ""))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+	cfg2 := cfg
+	cfg2.DataDir = t.TempDir()
+
+	second, _, err := Open(context.Background(), cfg2, src2)
+	if err == nil {
+		port := second.ListenPort()
+		second.Close()
+		t.Fatalf("second session opened on port %d out of a one-port set; the set is %s, so this port is either shared or outside the allocation", port, set)
+	}
+	if !errors.Is(err, ErrNoPortAvailable) {
+		t.Fatalf("refusal is not ErrNoPortAvailable, so no caller can tell an exhausted allocation from a broken one: %v", err)
+	}
+	if !strings.Contains(err.Error(), set.String()) {
+		t.Errorf("refusal does not name the allocated set %s, so it does not say what the limit is: %v", set, err)
+	}
+}
+
+// TestClosingASessionReturnsItsPortToTheSet: a set of one is a set that can
+// still serve any number of torrents one after another. Without this the
+// allocation would shrink with every run until the process was out of ports.
+//
+// The loop runs more times than the bookkeeping strictly needs because
+// rebinding the same pinned port over and over is the shape a one-port
+// allocation actually has. It is not, on its own, what proves Close waits
+// for the socket - see TestClosingASessionFreesItsPortBeforeItReturns for
+// that, which is the test that fails when the wait is taken out.
+func TestClosingASessionReturnsItsPortToTheSet(t *testing.T) {
+	set := freePortSet(t, 1)
+	pool := NewPortPool(set)
+	port := set.Ports()[0]
+
+	const cycles = 12
+	for attempt := 1; attempt <= cycles; attempt++ {
+		src, err := ParseSource(writeTorrentFile(t, false, ""))
+		if err != nil {
+			t.Fatalf("parse source: %v", err)
+		}
+		cfg := DefaultConfig(t.TempDir())
+		cfg.DHT = false
+		cfg.MetadataTimeout = 10 * time.Second
+		cfg.Ports = pool
+
+		session, _, err := Open(context.Background(), cfg, src)
+		if err != nil {
+			t.Fatalf("run %d of %d out of a one-port set: %v", attempt, cycles, err)
+		}
+		if got := session.ListenPort(); got != port {
+			t.Errorf("run %d listens on %d, want the only allocated port %d", attempt, got, port)
+		}
+		if err := session.Close(); err != nil {
+			t.Fatalf("close run %d: %v", attempt, err)
+		}
+		if free := pool.Free(); free != 1 {
+			t.Fatalf("after run %d closed the pool has %d ports free, want 1", attempt, free)
+		}
+	}
+}
+
+// TestUnconfiguredPortsStillLetTheOSChoose is decision three, at the session
+// level: with nothing allocated, several clients coexist on ports the OS
+// picked, and nothing runs out. This is what keeps a laptop and this very
+// test suite from needing a port range - and it stays a different state from
+// the managed one, which PortPool.Managed reports.
+func TestUnconfiguredPortsStillLetTheOSChoose(t *testing.T) {
+	pool := NewPortPool(PortSet{})
+	if pool.Managed() {
+		t.Fatal("an unconfigured pool claims to be managing an allocation")
+	}
+
+	ports := map[int]bool{}
+	for i := 0; i < 3; i++ {
+		src, err := ParseSource(writeTorrentFile(t, false, ""))
+		if err != nil {
+			t.Fatalf("parse source: %v", err)
+		}
+		cfg := DefaultConfig(t.TempDir())
+		cfg.DHT = false
+		cfg.MetadataTimeout = 10 * time.Second
+		cfg.Ports = pool
+
+		session, _, err := Open(context.Background(), cfg, src)
+		if err != nil {
+			t.Fatalf("session %d with nothing configured: %v", i+1, err)
+		}
+		defer session.Close()
+
+		port := session.ListenPort()
+		if port == 0 {
+			t.Fatalf("session %d reports port 0; the OS was supposed to choose a real one", i+1)
+		}
+		if ports[port] {
+			t.Fatalf("session %d also got port %d", i+1, port)
+		}
+		ports[port] = true
+	}
+}
+
+// TestOpenRefusesBothAPinnedPortAndAPool: the two ways of naming a port are
+// alternatives, and a caller that sets both has a bug worth hearing about
+// rather than a precedence rule to learn.
+func TestOpenRefusesBothAPinnedPortAndAPool(t *testing.T) {
+	src, err := ParseSource(writeTorrentFile(t, false, ""))
+	if err != nil {
+		t.Fatalf("parse source: %v", err)
+	}
+
+	set := freePortSet(t, 1)
+	pool := NewPortPool(set)
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false
+	cfg.MetadataTimeout = 10 * time.Second
+	cfg.ListenPort = freePort(t)
+	cfg.Ports = pool
+
+	session, _, err := Open(context.Background(), cfg, src)
+	if err == nil {
+		session.Close()
+		t.Fatal("Open accepted both a pinned ListenPort and a pool")
+	}
+	if pool.Free() != 1 {
+		t.Errorf("the refused Open kept a port: %d free of %d", pool.Free(), pool.Size())
+	}
+}
+
+// TestClosingASessionFreesItsPortBeforeItReturns pins the guarantee a port
+// pool depends on and that anacrolix does not give: once Close returns, the
+// port is bindable, so whoever takes it out of the pool next is not racing
+// the previous client's sockets.
+//
+// Client.Close waits (closeGroup.Wait) only for torrents and their storage.
+// Its listening sockets go through `cl.onClose = append(cl.onClose, func() {
+// go s.Close() })` - a goroutine nothing joins - so the port can still be
+// held when Close returns. Measured on this machine: it was, in 1 of 30
+// cycles, for a few hundred microseconds. Rare enough that reopening in a
+// loop usually gets away with it, which is exactly why the guarantee is
+// asserted directly here instead of being left to a race that mostly does
+// not happen.
+func TestClosingASessionFreesItsPortBeforeItReturns(t *testing.T) {
+	set := freePortSet(t, 1)
+	port := set.Ports()[0]
+
+	const cycles = 30
+	for i := 1; i <= cycles; i++ {
+		src, err := ParseSource(writeTorrentFile(t, false, ""))
+		if err != nil {
+			t.Fatalf("parse source: %v", err)
+		}
+		cfg := DefaultConfig(t.TempDir())
+		cfg.DHT = false
+		cfg.MetadataTimeout = 10 * time.Second
+		cfg.Ports = NewPortPool(set)
+
+		session, _, err := Open(context.Background(), cfg, src)
+		if err != nil {
+			t.Fatalf("cycle %d of %d: %v", i, cycles, err)
+		}
+		if err := session.Close(); err != nil {
+			t.Fatalf("cycle %d of %d, close: %v", i, cycles, err)
+		}
+
+		if !portFree(port) {
+			t.Fatalf("cycle %d of %d: Close returned with port %d still bound, so the next client out of the pool would fail to start", i, cycles, port)
+		}
 	}
 }
