@@ -234,9 +234,11 @@ h3 {
 .status[data-state="live"] { color: var(--accent); opacity: 1; }
 .status[data-state="lost"] { color: var(--warn); opacity: 1; }
 
-/* The whole page: a full-height left panel (the torpeek title, then every
-   torrent) and a draggable divider next to a right column that starts with
-   the one-line intake and holds the selected torrent's detail below it.
+/* The whole page: a full-height left panel (just the torpeek title for now,
+   TOR-137 - kept rather than removed, on the chance a later ticket wants the
+   space) and a draggable divider next to a right column that starts with the
+   one-line intake, pinned above the torrent table, with the selected
+   torrent's detail below both.
    Narrow viewports stack the two instead of squeezing the panel to nothing. */
 .workspace {
   display: flex;
@@ -250,8 +252,12 @@ h3 {
   .workspace { flex-direction: column; min-height: 0; }
 }
 
-.panel-header { display: flex; align-items: baseline; gap: .75rem; }
+.panel-header { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
 
+/* Empty on purpose since TOR-137 - the torrent table moved to the right pane
+   below. Still draggable (the resizer's own PANEL_MIN_WIDTH in app.js keeps
+   it from shrinking to nothing and being lost) so the space stays reachable
+   for whatever a later ticket puts here. */
 .runs-panel {
   flex: 0 0 var(--panel-width, 17rem);
   min-width: 0;
@@ -264,15 +270,6 @@ h3 {
   border-right: 1px solid var(--rule);
   display: flex;
   flex-direction: column;
-}
-.runs-panel-title {
-  font-size: .72rem;
-  font-family: var(--mono);
-  font-weight: 600;
-  color: var(--ink-3);
-  text-transform: uppercase;
-  letter-spacing: var(--track);
-  margin: 1.1rem 0 .5rem;
 }
 
 @media (max-width: 52rem) {
@@ -307,8 +304,27 @@ h3 {
 
 /* Intake: magnet field, mode select and Take frames on one line - a magnet
    is pasted, never read, so the field does not need to be wide - plus the
-   drop target for a .torrent file. */
+   drop target for a .torrent file.
+
+   TOR-137: it stays first in source order, above the torrent table, which is
+   what keeps it visually pinned above the table's own scroll area below -
+   scrolling inside .run-table-wrap (a bounded box, see there) never touches
+   this section, so there is nothing to coordinate with position: sticky and
+   no risk of colliding with the table header's own sticky row. */
 .intake { margin: 0 0 1.5rem; }
+
+/* TOR-137: the torrent table's new home, between the pinned intake above and
+   the detail pane below. */
+.runs { margin: 0 0 1.5rem; }
+.runs-title {
+  font-size: .72rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  margin: 0 0 .5rem;
+}
 
 form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
 
@@ -391,8 +407,15 @@ button:disabled { opacity: .5; }
 /* The torrent list: a sortable table (TOR-62) rather than a stack of cards,
    so a library of any size costs one line per torrent instead of three. The
    wrap is what scrolls - the table itself just grows - and the header row
-   stays put (position: sticky) so the sort controls are never scrolled away. */
-.run-table-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+   stays put (position: sticky) so the sort controls are never scrolled away.
+
+   TOR-137: bounded by max-height rather than by flex (the old aside got its
+   scroll area from a flex-column ancestor stretched to viewport height,
+   which .runs no longer is - it sits in the normal document flow of .main,
+   next to a detail pane that can grow arbitrarily tall). 22rem matches
+   .log's own bounded scroll area below, the one other place this file scrolls
+   a list inside a fixed box. */
+.run-table-wrap { max-height: 22rem; overflow: auto; }
 .run-list-empty { font-size: .82rem; opacity: .6; margin: 0; }
 
 .run-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
