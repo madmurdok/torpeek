@@ -67,6 +67,18 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer, count int) i
 			if bpp := e.Media.Video.BitsPerPixel(); bpp > 0 {
 				fmt.Fprintf(stdout, ", %.3f bits/pixel", bpp)
 			}
+			// Said out loud because the frames cannot say it themselves. A
+			// person previewing an HDR remux who is told nothing has only one
+			// reading of a flat grey frame available, and it is that torpeek
+			// is broken (TOR-108). Where the conversion could not be done,
+			// naming the source is the whole of what we can offer.
+			if tm := core.ToneMapOf(e.Media.Video); tm.Source != "" {
+				if tm.Applies() {
+					fmt.Fprintf(stdout, ", %s tone mapped to SDR", tm.Source)
+				} else {
+					fmt.Fprintf(stdout, ", %s (frames not colour-accurate)", tm.Source)
+				}
+			}
 			fmt.Fprintln(stdout)
 			for _, a := range e.Media.Audio {
 				fmt.Fprintf(stdout, "  audio: %s", describeTrack(a.Language, a.Title, a.Codec))

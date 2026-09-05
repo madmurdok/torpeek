@@ -32,6 +32,14 @@ Some.Movie.2019.1080p/movie.mkv
 - **Answer one question cheaply:** is this the right release — the right cut,
   the right dub, the right quality — before spending hours and gigabytes
   finding out. Twenty frames and a track list are usually the whole answer.
+- **Answer it about an HDR release too.** An HDR10 or HLG source decoded
+  without conversion comes out flat and grey, and the only reading available
+  to whoever is looking is that torpeek is broken rather than that the file is
+  HDR. So frames from one are tone mapped to SDR, and every surface — the
+  terminal line, the manifest, the NDJSON stream — says which dynamic range
+  the source was and whether the frames were converted. Dolby Vision profile
+  5 is the one it names without converting: its base layer is not BT.2020
+  video at all, and nothing torpeek can ship renders it faithfully.
 - **Work over a swarm nobody controls.** Pieces arrive out of order, peers
   hold different parts, some regions are unavailable at all. The tool budgets
   its time and traffic and reports what it could not get, instead of hanging.
@@ -50,12 +58,12 @@ into frames on disk in one command, over one command-line interface.
 Working today: torrent session and metadata over BEP 9, piece window fetching
 with priorities and readahead, a loopback HTTP bridge that gives ffmpeg a
 seekable file, `ffprobe` media inspection and keyframe lookup, capture point
-planning, frame decode at source resolution, atomic writes, a run budget for
-time and traffic, parallel work across a torrent's video files, contact sheet
-assembly, a JSON manifest per file, a result cache that serves a repeat run
-from disk without touching the network, the CLI with NDJSON output, and a web
-UI with its real screens, sitting on the same `core.Engine` library the CLI
-drives.
+planning, frame decode at source resolution, HDR10 and HLG tone mapping to
+SDR, atomic writes, a run budget for time and traffic, parallel work across a
+torrent's video files, contact sheet assembly, a JSON manifest per file, a
+result cache that serves a repeat run from disk without touching the network,
+the CLI with NDJSON output, and a web UI with its real screens, sitting on the
+same `core.Engine` library the CLI drives.
 
 The UI also queues a second torrent instead of refusing it — the client can
 only run one torrent's networking at a time (one BitTorrent port, one

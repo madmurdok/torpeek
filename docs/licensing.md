@@ -65,12 +65,54 @@ is either an encoder torpeek does not use or a filter it does not call:
 - **libx264 and libx265 are encoders.** torpeek only ever *decodes* H.264 and
   HEVC; libavcodec's own `h264` and `hevc` decoders are native and LGPL.
 - **The GPL filters** (`vf_blackframe`, `vf_cropdetect`, `vf_hqdn3d` and the
-  rest listed in `licenses/ffmpeg/LICENSE.md`) are unreachable from torpeek,
-  which passes no `-vf`, no `-filter_complex` and no `-lavfi` at all. Blank
-  frame detection is done in Go, in `internal/frames/blank.go`, not by an
-  ffmpeg filter.
+  rest listed in `licenses/ffmpeg/LICENSE.md`) are unreachable from torpeek.
+  Since TOR-108 torpeek does pass `-vf`, so this is no longer true by
+  construction and has to be checked against the two filters it names - see
+  "The one filter chain torpeek passes" below. Blank frame detection is still
+  done in Go, in `internal/frames/blank.go`, not by an ffmpeg filter.
 - **The only encoders torpeek asks for are `mjpeg` and `png`** (see
   `internal/frames/extract.go`), both native and LGPL.
+
+### The one filter chain torpeek passes
+
+Until TOR-108 this section could say torpeek passed no `-vf`, no
+`-filter_complex` and no `-lavfi` at all, and be done. It now passes one `-vf`,
+and only for a high dynamic range source: an HDR10 or HLG stream decoded
+without conversion produces a flat grey frame that reads as our bug rather than
+as the file's dynamic range. The chain is built in `internal/frames/hdr.go`, and
+it uses exactly three filters:
+
+| filter | source file | licence | needs |
+|---|---|---|---|
+| `zscale` | `libavfilter/vf_zscale.c` | LGPL v2.1 or later | `--enable-libzimg` |
+| `tonemap` | `libavfilter/vf_tonemap.c` | LGPL v2.1 or later | nothing external |
+| `format` | `libavfilter/vf_format.c` | LGPL v2.1 or later | nothing external |
+
+None of the three appears in FFmpeg's GPL-only file list in `LICENSE.md` at the
+commit our lock pins, and each carries an LGPL v2.1-or-later header there.
+libzimg is not in that document's GPL-libraries list either; BtbN's `-lgpl`
+build configures `--enable-libzimg` while `scripts/fetch-ffmpeg.sh` verifies
+that the same binary's configure line carries no `--enable-gpl`.
+
+**All four bundled builds have all three filters**, which is the part that had
+to be checked rather than assumed, because Linux/Windows and macOS are
+different builds and a chain that existed in one and not the other would be a
+per-platform difference in what a frame looks like - the class of problem
+TOR-93 exists to avoid:
+
+| platform | how it was confirmed |
+|---|---|
+| linux-amd64 | `ffmpeg -filters` run out of `third_party/ffmpeg/linux-amd64` inside a clean `debian:12-slim` container: `zscale`, `tonemap`, `format`, `colorspace` and `setparams` present; `blackframe`, `cropdetect`, `hqdn3d` and `eq` absent, which is the LGPL configuration showing through |
+| darwin-amd64 | the same command run natively; the same five present. The four GPL filters *are* present here, because this is the GPL build - which is another way of seeing that the two platforms really do carry different ffmpegs, and the reason the three filters torpeek uses had to be checked on both rather than on one |
+| windows-amd64 | **not run by hand** - nothing on an Intel Mac can execute a PE binary. It is the same BtbN build from the same release tag as linux-amd64, and the configure line embedded in `ffmpeg.exe` carries the flags that matter (`--enable-libzimg`, `--enable-version3`, no `--enable-gpl`). `archivecheck` now asserts the three filters on whatever OS it runs on, so `.github/workflows/archives.yml` answers this for real on the next dispatch |
+| darwin-arm64 | **not run by hand**, for the same reason - an Intel Mac cannot execute an arm64 Mach-O. Same builder and build definition as darwin-amd64, and covered by the same `archivecheck` assertion |
+
+**`libplacebo` is deliberately not used.** It is in the LGPL Linux and Windows
+builds (`--enable-libplacebo`) and *not* in the GPL macOS ones, so a chain built
+on it would tone map differently on macOS than on the other two - or fail there
+outright. That asymmetry also settles Dolby Vision: applying a profile 5
+stream's RPU needs libplacebo, so torpeek cannot render one faithfully on every
+platform and does not try. It names the profile in the manifest instead.
 
 That was checked by running the LGPL `ffmpeg` and `ffprobe` out of the
 assembled linux-amd64 archive, against real files, rather than by reading

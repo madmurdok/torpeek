@@ -54,6 +54,7 @@
 package archivecheck
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,6 +117,27 @@ func TestArchiveRunsWithNothingButItsOwnFFmpeg(t *testing.T) {
 				exeName(tool), runtime.GOOS, runtime.GOARCH, err, out)
 		}
 		t.Logf("bundled %s: %s", exeName(tool), firstLine(string(out)))
+	}
+
+	// The three filters the tone map chain is built from (TOR-108). They are
+	// checked here rather than only in a unit test because Linux and Windows
+	// carry an LGPL ffmpeg and macOS a GPL one, so "the chain runs" is four
+	// separate questions - and two of those four platforms cannot be executed
+	// from the machine this project is developed on at all. A build missing
+	// one of these would turn every HDR frame on that platform into a failed
+	// decode, which is a worse outcome than the grey frame this fix replaced.
+	//
+	// The fixture is SDR, so the run below never exercises the chain; this is
+	// the part that says it could.
+	filters, err := exec.Command(filepath.Join(dir, exeName("ffmpeg")), "-hide_banner", "-filters").Output()
+	if err != nil {
+		t.Fatalf("the bundled ffmpeg cannot list its filters: %v", err)
+	}
+	for _, name := range []string{"zscale", "tonemap", "format"} {
+		if !bytes.Contains(filters, []byte(" "+name+" ")) {
+			t.Errorf("the bundled ffmpeg has no %q filter, so an HDR source cannot be tone mapped on %s/%s",
+				name, runtime.GOOS, runtime.GOARCH)
+		}
 	}
 
 	got := runArchive(t, exe)
