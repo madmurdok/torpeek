@@ -626,18 +626,38 @@ button:disabled { opacity: .5; }
 }
 .lightbox::backdrop { background: var(--scrim-strong); }
 .lightbox img { display: block; max-width: 88vw; max-height: 80vh; margin: 0 auto; }
+/* The scrim above does the work, but a hair of separation keeps the control
+   off the picture's very corner, which is where a frame is most often blown
+   out. */
+.lightbox { padding-top: 1.6rem; }
 .lightbox-caption { text-align: center; font-size: .85rem; opacity: .8; margin: .5rem 0 0; }
+/* Over arbitrary picture content, so it carries its own ground: no single
+   colour is legible against every frame, and this one sat as near-white on
+   the bright top edge of a snow shot with almost no contrast at all
+   (TOR-122). It was already invisible for anyone on a dark system before
+   TOR-113; committing the UI to one dark theme made it invisible for
+   everybody.
+   Deliberately the same object as .thumb-delete above - both are controls
+   laid over a frame, and they should read as one idea rather than two. */
 .lightbox-close {
   position: absolute;
   top: .4rem;
   right: .5rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-content: center;
   border: none;
-  background: none;
-  font-size: 1.3rem;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: var(--ink);
+  font-size: 1.15rem;
   line-height: 1;
   cursor: pointer;
-  padding: .2rem .5rem;
+  padding: 0;
 }
+.lightbox-close:hover { background: var(--bad); }
+.lightbox-close:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
 
 /* Drag-and-drop feedback, shown while a file is dragged over the page. */
 .drop-overlay {
