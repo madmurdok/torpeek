@@ -3,22 +3,26 @@ package web
 import (
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 	"testing"
 )
 
-// The theme has three states, not two, and the middle one is the default: an
-// explicit choice stamps data-theme on the root element, and the "system"
-// setting stamps nothing at all, leaving prefers-color-scheme to decide. So a
-// custom property declared only inside a media query or only inside the
-// attribute selector is missing in one of the three - which is how a page ends
-// up drawing one theme's text on the other theme's ground.
+// torpeek's UI is drawn in one theme, dark, on every machine (TOR-126). A
+// second theme shipped briefly and was removed because it followed
+// prefers-color-scheme, which meant the design the project had actually chosen
+// was invisible to anyone whose system was set to light - and there was no
+// toggle to reach it with.
 //
-// These tests read the stylesheet out of the embedded FS rather than off disk,
+// Committing to one visual world is a legitimate choice rather than an
+// omission, but it obliges two things, and these tests are those two: nothing
+// may vary by the host's preference, and nothing may be inherited from the
+// host either, because a page that inherits anything breaks on somebody
+// else's default.
+//
+// They read the stylesheet out of the embedded FS rather than off disk,
 // because the embedded copy is the one that ships.
 
-var declRe = regexp.MustCompile(`(?m)^\s+(--[a-z0-9-]+):\s*(.+?);`)
+var declRe = regexp.MustCompile(`(?m)^\s+([a-z-]+(?:-[a-z0-9-]+)*):\s*(.+?);`)
 
 // block returns the declarations of the first rule whose text starts at sel,
 // up to that rule's closing brace at column zero.
@@ -37,7 +41,7 @@ func block(t *testing.T, css, sel string) map[string]string {
 		out[m[1]] = m[2]
 	}
 	if len(out) == 0 {
-		t.Fatalf("the %q rule declares no custom properties", sel)
+		t.Fatalf("the %q rule declares nothing this can read", sel)
 	}
 	return out
 }
@@ -51,91 +55,48 @@ func stylesheet(t *testing.T) string {
 	return string(b)
 }
 
-// TestEveryThemeTokenIsDeclaredUnconditionally is the guard against the classic
-// unreadable-page bug: a colour whose only declaration sits behind a media
-// query or an attribute selector.
-func TestEveryThemeTokenIsDeclaredUnconditionally(t *testing.T) {
+// TestThePageCommitsToOneTheme is the first half: the stylesheet must not vary
+// by anything the host decides. A media query or an attribute selector
+// creeping back in would reintroduce exactly the split TOR-126 removed, and it
+// would do so invisibly on this machine if this machine happened to match.
+func TestThePageCommitsToOneTheme(t *testing.T) {
 	css := stylesheet(t)
+
+	// Comments are stripped: the token rule explains in prose why nothing
+	// reads the OS preference, and naming it there is the point.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+
+	for _, conditional := range []string{"prefers-color-scheme", "data-theme", "prefers-contrast"} {
+		if strings.Contains(live, conditional) {
+			t.Errorf("app.css varies by %s. torpeek is drawn dark on every machine; a "+
+				"second theme was removed because following the host hid the design "+
+				"the project chose (TOR-126)", conditional)
+		}
+	}
+
 	base := block(t, css, ":root {")
-
-	for _, sel := range []string{
-		"@media (prefers-color-scheme: light)",
-		`:root[data-theme="light"]`,
-	} {
-		var only []string
-		for name := range block(t, css, sel) {
-			if _, ok := base[name]; !ok {
-				only = append(only, name)
-			}
-		}
-		sort.Strings(only)
-		if len(only) > 0 {
-			t.Errorf("%s declares %v, which the bare :root never does; "+
-				"in the un-stamped state those tokens do not exist", sel, only)
-		}
+	if got := base["color-scheme"]; got != "dark" {
+		t.Errorf("color-scheme is %q, want dark - it is what makes the browser's own "+
+			"form controls and scrollbars match the page", got)
 	}
 }
 
-// TestTheTwoLightArmsCannotDrift ties the two ways of reaching the light theme
-// together. They are the same design - one selected by the OS, one by an
-// explicit stamp - so a value changed in one and not the other is a bug that
-// only shows up for whichever half of the users hits the other selector.
-func TestTheTwoLightArmsCannotDrift(t *testing.T) {
+// TestTheGroundIsPaintedNotInherited is the second half, and it is the one a
+// single-theme page gets wrong. The browser paints its own default behind the
+// document; a body with no background of its own shows that through, so a page
+// committed to dark would come up on a white ground for a reader whose browser
+// defaults light.
+func TestTheGroundIsPaintedNotInherited(t *testing.T) {
 	css := stylesheet(t)
-	media := block(t, css, "@media (prefers-color-scheme: light)")
-	attr := block(t, css, `:root[data-theme="light"]`)
+	body := block(t, css, "body {")
 
-	for name, want := range media {
-		got, ok := attr[name]
-		if !ok {
-			t.Errorf(`%s is set for a light OS but not for data-theme="light"`, name)
-			continue
-		}
-		if got != want {
-			t.Errorf("%s is %q for a light OS but %q for an explicit light stamp", name, want, got)
-		}
+	if got := body["background"]; !strings.HasPrefix(got, "var(--") {
+		t.Errorf("body background is %q, want a token. A single-theme page that lets "+
+			"the host's ground show through is a page that breaks on somebody else's "+
+			"default", got)
 	}
-	for name := range attr {
-		if _, ok := media[name]; !ok {
-			t.Errorf(`%s is set for data-theme="light" but not for a light OS`, name)
-		}
-	}
-}
-
-// TestAnExplicitChoiceBeatsTheOperatingSystem checks the guard that makes the
-// cascade obey a person over their OS. Without :not([data-theme="dark"]) the
-// light media query outranks nothing and simply wins on a light OS, so someone
-// who asked for dark would get light.
-func TestAnExplicitChoiceBeatsTheOperatingSystem(t *testing.T) {
-	css := stylesheet(t)
-	i := strings.Index(css, "@media (prefers-color-scheme: light)")
-	if i < 0 {
-		t.Fatal("app.css has no light media query")
-	}
-	head := css[i:min(i+200, len(css))]
-	if !strings.Contains(head, `:root:not([data-theme="dark"])`) {
-		t.Errorf("the light media query is not guarded by :not([data-theme=\"dark\"]); "+
-			"an explicit dark choice would lose to a light OS.\ngot: %s",
-			strings.SplitN(head, "{", 3)[1])
-	}
-}
-
-// TestTheLightThemeDoesNotGlow records a design decision as a test, because it
-// is the one place the two themes are not the same design with different
-// numbers. Glow reads as light being emitted, which means something only on a
-// dark ground; on white it is a grey smudge around a letterform.
-func TestTheLightThemeDoesNotGlow(t *testing.T) {
-	css := stylesheet(t)
-	for _, sel := range []string{
-		"@media (prefers-color-scheme: light)",
-		`:root[data-theme="light"]`,
-	} {
-		b := block(t, css, sel)
-		for _, name := range []string{"--glow", "--stroke-glow"} {
-			if got := b[name]; got != "none" {
-				t.Errorf("%s sets %s to %q, want none", sel, name, got)
-			}
-		}
+	if got := body["color"]; !strings.HasPrefix(got, "var(--") {
+		t.Errorf("body color is %q, want a token", got)
 	}
 }
 
@@ -145,22 +106,17 @@ func TestTheLightThemeDoesNotGlow(t *testing.T) {
 func TestEveryColourComesFromAToken(t *testing.T) {
 	css := stylesheet(t)
 
-	// Strip the four blocks that are allowed to hold literals - the token
-	// declarations themselves - and comments, then nothing coloured should
-	// remain.
+	// Strip the one block allowed to hold literals - the token declarations
+	// themselves - and comments, then nothing coloured should remain.
+	// Only the token rule may hold a literal, and since TOR-126 there is only
+	// one of it - the two blocks a second theme added are gone.
 	body := css
-	for _, sel := range []string{
-		":root {",
-		"@media (prefers-color-scheme: light)",
-		`:root[data-theme="light"]`,
-	} {
-		i := strings.Index(body, sel)
-		if i < 0 {
-			continue
-		}
-		end := strings.Index(body[i:], "\n}\n")
-		body = body[:i] + body[i+end:]
+	i := strings.Index(body, ":root {")
+	if i < 0 {
+		t.Fatal("app.css declares no :root token rule")
 	}
+	end := strings.Index(body[i:], "\n}\n")
+	body = body[:i] + body[i+end:]
 	body = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(body, "")
 
 	literal := regexp.MustCompile(`#[0-9a-fA-F]{3,8}\b|\brgba?\(|\bhsla?\(`)
@@ -171,7 +127,7 @@ func TestEveryColourComesFromAToken(t *testing.T) {
 		}
 	}
 	if len(found) > 0 {
-		t.Errorf("colour literals outside the token blocks, which no theme can "+
-			"redefine:\n  %s", strings.Join(found, "\n  "))
+		t.Errorf("colour literals outside the :root token rule, where nothing can "+
+			"reach them:\n  %s", strings.Join(found, "\n  "))
 	}
 }

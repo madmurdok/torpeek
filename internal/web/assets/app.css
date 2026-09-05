@@ -116,12 +116,19 @@
      here to preserve; the light case is a second design rather than an
      inversion, and it is TOR-114. */
 
-  /* dark is the design; the light set below redefines these tokens and
-     switches this to light. NO TOGGLE ships: a run lasts ninety seconds and
-     the page is closed, and the UI is also served from a seedbox to a
-     browser that is not the operator's, where "where does the preference
-     live" has no good answer. The attribute selector exists anyway, so
-     adding one later is one line rather than a refactor. */
+  /* ONE THEME, and it is a choice rather than an omission (TOR-126). torpeek
+     is drawn dark, so it is drawn dark on a machine set to light too: nothing
+     here reads prefers-color-scheme and nothing stamps an attribute. A second
+     theme shipped briefly (TOR-114) and was removed for a reason worth
+     keeping written down - because it followed the OS, the design the project
+     actually chose was invisible to anyone whose system was set to light,
+     which is most people, and there was no toggle to reach it with.
+
+     What that commitment obliges: every colour on the page comes from a token
+     declared right here, and body paints its own background rather than
+     letting the host's ground show through. A single-theme page that inherits
+     anything is a page that breaks on somebody else's default.
+     TestEveryColourComesFromAToken holds the first half of that. */
   color-scheme: dark;
 
   /* Set by app.js when the divider is dragged - a layout token, not a
@@ -201,102 +208,6 @@
   --track: .14em;
 }
 
-/* THE SECOND THEME (TOR-114). Designed, not inverted - and there is a measured
-   reason it cannot be inverted: the dark accent #22E0E8 sits at 1.63:1 on
-   white, which is unreadable. Every grey and every semantic colour is
-   re-picked for this ground.
-
-   Dark-first, so the pattern is mirrored from the usual one: the bare :root
-   above carries the complete DARK set, and these two blocks carry light.
-   Three states, not two, and the middle one is what most people actually see:
-     - explicit dark      -> nothing stamped by these blocks, :root wins
-     - nothing stamped    -> the media query decides (the default setting)
-     - explicit light     -> the attribute block wins, even on a dark OS
-   The :not([data-theme="dark"]) guard is what makes an explicit dark choice
-   beat a light OS; without it the media query would overrule the person.
-
-   Every token here is a REDEFINITION of one declared in :root. Nothing is
-   declared only inside these blocks - a colour that exists only behind a
-   media query is invisible in the un-stamped state, which is the classic way
-   a page ends up drawing one theme's text on the other theme's ground.
-
-   The ladder changes direction rather than value: dark SINKS the page and
-   lifts panels barely, light lifts panels to white off a tinted ground. The
-   step is 1.13 here against 1.07 there, because white against light grey
-   separates less to the eye than the numbers suggest.
-
-   And the glow goes away entirely. Glow reads as light being emitted, which
-   only means anything on a dark ground; on white it is a grey smudge around a
-   letterform. Its absence is the one place the two themes are not the same
-   design with different numbers. */
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    color-scheme: light;
-
-    --bg:  #EDF2F3;
-    --s1:  #FFFFFF;
-    --s2:  #F7FAFA;
-    --s3:  #E4EBED;
-    --hover: #E8EFF0;
-
-    --ink:   #08161B;
-    --ink-2: #425A63;
-    --ink-3: #59757F;
-
-    --rule: #CCD9DD;
-
-    --accent:     #06727C;
-    --accent-dim: #DCF0F2;
-
-    --ok:       #1B7048;
-    --ok-dim:   #DFF0E6;
-    --warn:     #8A5806;
-    --warn-dim: #FBEED6;
-    --bad:      #AF3A1B;
-    --bad-dim:  #FBE3DA;
-
-    /* The scrims stay dark in both themes on purpose: they sit over
-       photographs, not over the page, and a frame is a frame whichever
-       theme the chrome is in. */
-    --scrim:        rgba(0, 0, 0, .58);
-    --scrim-strong: rgba(0, 0, 0, .72);
-
-    --glow:        none;
-    --stroke-glow: none;
-  }
-}
-
-:root[data-theme="light"] {
-  color-scheme: light;
-
-  --bg:  #EDF2F3;
-  --s1:  #FFFFFF;
-  --s2:  #F7FAFA;
-  --s3:  #E4EBED;
-  --hover: #E8EFF0;
-
-  --ink:   #08161B;
-  --ink-2: #425A63;
-  --ink-3: #59757F;
-
-  --rule: #CCD9DD;
-
-  --accent:     #06727C;
-  --accent-dim: #DCF0F2;
-
-  --ok:       #1B7048;
-  --ok-dim:   #DFF0E6;
-  --warn:     #8A5806;
-  --warn-dim: #FBEED6;
-  --bad:      #AF3A1B;
-  --bad-dim:  #FBE3DA;
-
-  --scrim:        rgba(0, 0, 0, .58);
-  --scrim-strong: rgba(0, 0, 0, .72);
-
-  --glow:        none;
-  --stroke-glow: none;
-}
 
 
 
