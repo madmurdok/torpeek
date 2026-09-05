@@ -52,6 +52,7 @@ func event(ev core.Event) map[string]any {
 			"selected": e.Selected,
 		}
 	case core.FileStarted:
+		tm := core.ToneMapOf(e.Media.Video)
 		// The summary panel (REQUIREMENTS.md section 3.3) needs more than the
 		// video's own dimensions: audio tracks, subtitles, bitrate. probe
 		// already inspected all of that before this event fired - the gap was
@@ -65,6 +66,14 @@ func event(ev core.Event) map[string]any {
 			"fps": e.Media.Video.FPS, "video_bitrate": e.Media.Video.BitRate,
 			"audio": audioTracks(e.Media.Audio), "subtitles": subtitleTracks(e.Media.Subtitles),
 			"planned": len(e.Plan),
+			// What the source's dynamic range is, and whether the frames were
+			// converted out of it. A consumer reading this stream sees the
+			// same two facts the CLI prints and the manifest records, because
+			// a frame that came out of an HDR source cannot say either for
+			// itself and looks broken without them (TOR-108). Empty and false
+			// for an ordinary SDR file, which is every file this stream used
+			// to carry.
+			"dynamic_range": tm.Source, "tone_mapped": tm.Applies(),
 		}
 	case core.FrameReady:
 		return map[string]any{

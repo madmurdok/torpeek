@@ -377,6 +377,26 @@ type fileDeps struct {
 	writer    *output.Writer
 	tracker   *BudgetTracker
 	bus       *Bus
+
+	// toneMap is the colour conversion decided for this one file, once its
+	// stream has been inspected. It lives here rather than on the extractor
+	// because two callers need it: the extractor, which applies it, and the
+	// manifest, which reports it.
+	toneMap frames.ToneMap
+}
+
+// ToneMapOf decides what to do about a video stream's colour. The one place
+// that translates ffprobe's vocabulary into the extractor's, so the CLI's
+// summary line and the manifest cannot disagree with the frames on what was
+// done to them.
+func ToneMapOf(v probe.VideoStream) frames.ToneMap {
+	return frames.ToneMapFor(frames.ColorTags{
+		Transfer:           v.ColorTransfer,
+		Primaries:          v.ColorPrimaries,
+		Matrix:             v.ColorSpace,
+		Range:              v.ColorRange,
+		DolbyVisionProfile: v.DolbyVisionProfile,
+	})
 }
 
 func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, file swarm.FileInfo) (produced int, complete bool, err error) {
@@ -431,6 +451,13 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			return 0, false, err
 		}
 	}
+
+	// Decided once per file, from the stream ffprobe just described, and held
+	// on this call's own copy of deps: one extractor serves every file of a
+	// run in parallel, so the conversion travels with the file rather than
+	// being set on the shared one (TOR-108).
+	deps.toneMap = ToneMapOf(info.Video)
+	deps.extractor = deps.extractor.WithToneMap(deps.toneMap)
 
 	deps.bus.Publish(FileStarted{
 		File:  file.Index,
@@ -788,6 +815,16 @@ func reusableFrames(prior manifest.Manifest, points []time.Duration) map[int]man
 // to a precision that changes minute by minute anyway.
 const availabilityBuckets = 64
 
+// toneMappedTo names what the frames were converted to, for the manifest.
+// Empty when nothing was converted, which covers both an SDR source and a
+// high dynamic range one nothing in the release can render faithfully.
+func toneMappedTo(t frames.ToneMap) string {
+	if !t.Applies() {
+		return ""
+	}
+	return "bt709"
+}
+
 // writeManifest records what happened to one file, next to its frames.
 //
 // The cost it carries is the run's, not the file's: the budget is shared
@@ -832,6 +869,13 @@ func (e *Engine) writeManifest(deps fileDeps, file swarm.FileInfo,
 			FPS:          info.Video.FPS,
 			BitRate:      info.Video.BitRate,
 			BitsPerPixel: info.Video.BitsPerPixel(),
+
+			DynamicRange:       deps.toneMap.Source,
+			ToneMappedTo:       toneMappedTo(deps.toneMap),
+			ColorTransfer:      info.Video.ColorTransfer,
+			ColorPrimaries:     info.Video.ColorPrimaries,
+			ColorSpace:         info.Video.ColorSpace,
+			DolbyVisionProfile: info.Video.DolbyVisionProfile,
 		},
 		Audio:     make([]manifest.Audio, 0, len(info.Audio)),
 		Subtitles: make([]manifest.Subtitle, 0, len(info.Subtitles)),

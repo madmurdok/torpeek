@@ -53,6 +53,12 @@ type Extractor struct {
 
 	// Retries is how many widened attempts follow a failure.
 	Retries int
+
+	// toneMap is the colour conversion for the file being read, set through
+	// WithToneMap. Unexported and only ever written by that copy, because one
+	// extractor serves every file of a run at once while colour is a property
+	// of a single file.
+	toneMap ToneMap
 }
 
 // NewExtractor returns an extractor with defaults suited to reading over a
@@ -65,6 +71,20 @@ func NewExtractor(tools ffmpeg.Tools) *Extractor {
 		ProbeSize: 5 << 20,
 		Retries:   2,
 	}
+}
+
+// WithToneMap returns a copy of the extractor that converts frames out of the
+// given high dynamic range transfer on the way to an image (TOR-108). The zero
+// ToneMap converts nothing, which is what an SDR file gets and what every file
+// got before this existed.
+//
+// A copy rather than a setter: engine.Engine builds one extractor per run and
+// hands it to every file's goroutine at once, so a field written per file
+// would be a data race and, worse, would sometimes tone map the wrong file.
+func (e *Extractor) WithToneMap(t ToneMap) *Extractor {
+	copied := *e
+	copied.toneMap = t
+	return &copied
 }
 
 // Frame decodes a single image at or after the keyframe preceding at.
@@ -125,8 +145,18 @@ func (e *Extractor) decode(ctx context.Context, url string, at time.Duration, pr
 		args = append(args, "-ss", formatSeconds(at))
 	}
 
+	args = append(args, "-i", url)
+
+	// An HDR source read as if it were SDR comes out flat and grey, which
+	// reads as our bug rather than as the file's dynamic range (TOR-108). The
+	// chain that fixes it is in hdr.go; it is only ever added for a stream
+	// whose colour metadata says it needs one, so an SDR file's command line
+	// and its cost are exactly what they were.
+	if vf := e.toneMap.Filter(e.Format); vf != "" {
+		args = append(args, "-vf", vf)
+	}
+
 	args = append(args,
-		"-i", url,
 		"-frames:v", "1",
 		"-f", "image2pipe",
 	)

@@ -69,6 +69,33 @@ type Video struct {
 	FPS          float64 `json:"fps"`
 	BitRate      int64   `json:"bit_rate"`
 	BitsPerPixel float64 `json:"bits_per_pixel"`
+
+	// DynamicRange names what the source declares itself to be - "hdr10",
+	// "hlg", "dolby-vision-p5" - and is absent for an ordinary SDR file.
+	//
+	// It earns a place next to the quality figures because of what a frame
+	// cannot say for itself. An HDR source rendered without conversion comes
+	// out flat and grey, and the reading available to whoever is looking is
+	// that torpeek is broken rather than that the file is HDR (TOR-108). This
+	// field is where the run says which it was.
+	DynamicRange string `json:"dynamic_range,omitempty"`
+	// ToneMappedTo is what the frames were converted to on the way out,
+	// "bt709" when they were and absent when they were not. Present with
+	// DynamicRange absent never happens; DynamicRange present with this
+	// absent does, and means the source is high dynamic range and the frames
+	// were left as the decoder produced them - the Dolby Vision profiles
+	// whose base layer nothing in the release can render.
+	ToneMappedTo string `json:"tone_mapped_to,omitempty"`
+
+	// ColorTransfer, ColorPrimaries and ColorSpace are the stream's own
+	// colour tags, verbatim from ffprobe, so a surprising DynamicRange can be
+	// traced back to what the container actually said.
+	ColorTransfer  string `json:"color_transfer,omitempty"`
+	ColorPrimaries string `json:"color_primaries,omitempty"`
+	ColorSpace     string `json:"color_space,omitempty"`
+	// DolbyVisionProfile is the profile from the stream's Dolby Vision
+	// configuration record, absent when it carries none.
+	DolbyVisionProfile int `json:"dolby_vision_profile,omitempty"`
 }
 
 // Audio is one audio track - the answer to "is this the dub I wanted".
