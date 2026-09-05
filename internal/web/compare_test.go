@@ -5,11 +5,13 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/manifest"
+	"github.com/madmurdok/torpeek/internal/output"
 )
 
 // otherHash is a SECOND torrent, for the pairing the ticket actually exists
@@ -440,7 +442,11 @@ func TestCompareSetsOffersOnlyWhatCanBeCompared(t *testing.T) {
 		Videos:   []cache.File{{Index: 6, Path: "Sintel/sintel.mp4", Bytes: 1 << 20}},
 		Selected: []int{6},
 	}
-	if err := cache.SaveRun(runDirFor(t, root, detailHash, setDense), empty); err != nil {
+	emptyDir := output.Layout{Root: root, InfoHash: detailHash, Params: setDense}.RunDir()
+	if err := os.MkdirAll(emptyDir, 0o755); err != nil {
+		t.Fatalf("make the empty run's directory: %v", err)
+	}
+	if err := cache.SaveRun(emptyDir, empty); err != nil {
 		t.Fatalf("save the empty run: %v", err)
 	}
 
@@ -479,16 +485,6 @@ func TestCompareSetsOffersOnlyWhatCanBeCompared(t *testing.T) {
 	if _, status := getComparison(t, base, body.Sets[0].Addr, body.Sets[1].Addr); status != http.StatusOK {
 		t.Errorf("comparing the two offered sets: status %d, want 200", status)
 	}
-}
-
-// runDirFor is where one result set's run.json lives, for the one test that
-// writes a run record with nothing under it.
-func runDirFor(t *testing.T, root, infoHash, params string) string {
-	t.Helper()
-
-	dir := fileDirOf(t, root, infoHash, params, 0, "placeholder/placeholder.mkv")
-	// FileDir is <run dir>/<slug>; the run directory is its parent.
-	return dir[:len(dir)-len("/00-placeholder")]
 }
 
 // TestPairNearestIsSymmetric pins the property the mutual rule was chosen for,
