@@ -209,11 +209,25 @@ function badgeLabel(entry) {
   }
 }
 
+// What the row says under its badge. The panel is the one genuinely tight
+// surface in the layout, so this is deliberately terse: a finished run's
+// counts are a bare ratio rather than a sentence, because "1 / 1 file(s)
+// complete" was long enough to push the whole table wider than the panel and
+// collapse the torrent's name to an ellipsis (TOR-121). The ratio still says
+// what the badge cannot - PARTIAL tells you a run is incomplete, 3/6 tells
+// you how incomplete - and metaTitle below keeps the full sentence for the
+// tooltip, so nothing is actually lost.
 function metaLabel(entry) {
   if (entry.progress) return entry.progress;
-  if (entry.disk) return entry.complete + " / " + entry.selected + " file(s) complete";
+  if (entry.disk) return entry.complete + "/" + entry.selected;
   if (entry.error) return entry.error;
   return "";
+}
+
+// The long form, on hover, for the row whose label was shortened.
+function metaTitle(entry) {
+  if (entry.disk) return entry.complete + " of " + entry.selected + " file(s) complete";
+  return metaLabel(entry);
 }
 
 function whenLabel(ms) {
@@ -499,6 +513,7 @@ function syncEntry(entry) {
   entry.rowName.textContent = entry.name || entry.source || shortId(entry.id);
   entry.rowName.title = entry.rowName.textContent;
   entry.rowMeta.textContent = metaLabel(entry);
+  entry.rowMeta.title = metaTitle(entry);
   entry.rowWhen.textContent = whenLabel(entry.when);
   entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
   entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);

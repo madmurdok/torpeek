@@ -327,15 +327,13 @@ button:disabled { opacity: .5; }
 
 .run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .run-cell-status { white-space: nowrap; }
-/* The counts line under a badge is the one place the panel is genuinely
-   tight: three words at 17rem wrap to three lines. Ellipsis rather than
-   wrap - the full figure is in the detail pane a click away. */
-.run-cell-status .run-meta {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 8rem;
-}
+/* Deliberately NOT nowrap-with-a-max-width, which is what this was first and
+   why TOR-121 exists: a cell that will not shrink has to take its width from
+   somewhere, and .run-cell-name's `max-width: 0` trick means the somewhere is
+   always the torrent's name. The label is short instead (metaLabel in
+   app.js), so there is nothing to constrain. An error message is the one
+   long thing that still lands here, and it is allowed to wrap. */
+.run-cell-status .run-meta { max-width: 11rem; }
 
 .run-cell-actions { width: 1.6rem; text-align: right; }
 .run-cancel {
