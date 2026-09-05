@@ -66,6 +66,46 @@ MiB on this same code earlier the same day. A release whose acceptance run
 happens to land in it will fail criterion 2 with nothing wrong, and the fix
 for that is the ceiling question, not a re-run.
 
+## The 1.0.0 release run, and the prediction it did NOT confirm
+
+Recorded the same way as 0.9.0's, because a spread is only worth measuring if
+every later point is checked against it - including the awkward ones. Run
+2026-09-05 13:32, load 9.83:
+
+| | criterion 2 | criterion 1 |
+| --- | --- | --- |
+| **ordered (the verdict, since TOR-94)** | **44.0 MiB in 44 pieces** | 104.0 MiB in 104 pieces |
+| **arrived (reported beside it)** | **51.7 MiB** | 103.1 MiB |
+| gap | +7.7 MiB, 17.5% over the claim | -0.9 MiB |
+| 0.9.0, arrived | 46.0 | 101.6 |
+
+Two things this run settles and one it refuses to.
+
+**The 44 MiB is real, for the third time and by a third route.** TOR-88 measured
+it with a scratch diagnostic patch, TOR-94 reproduced it with shipped
+instrumentation, and this is a release run: 163 range requests, 44 distinct
+pieces, 44.0 MiB, unchanged. The figure the criterion is now judged on is the
+one part of this measurement that does not move.
+
+**TOR-95's readahead fix did not reduce live arrivals, and this run is the
+evidence against it rather than for it.** Arrivals went from 0.9.0's 46.0 MiB
+to 51.7, in the wrong direction, on a build that no longer rounds the readahead
+up. Section 8 predicted exactly this - it shipped on the semantic argument and
+explicitly did not claim a live win - but it would have been easy to read a
+lower number today as confirmation, so the higher one is worth writing down.
+The live overshoot has another cause and still does.
+
+**What it refuses to settle is the elevated regime.** 51.7 MiB is inside the
+45.5-54.6 normal band, so this run says nothing about whether the 60-118 MiB
+regime is gone. Under the old criterion this run would have passed with 8 MiB
+of margin; under the new one it passes with 16, and that difference is the
+whole point of TOR-94 rather than a rounding of it.
+
+**A negative gap is normal and now has words.** Criterion 1 ordered 104.0 MiB
+and received 103.1: a run can order a piece it does not wait for, and can be
+served from pieces already on disk. The report says so in the row rather than
+leaving a reader to wonder how arrivals can undershoot a claim.
+
 ## 1. The history, read out of the reports rather than the ticket
 
 The ticket names three figures. There are eight, and they do not climb.
