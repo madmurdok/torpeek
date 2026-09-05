@@ -128,6 +128,19 @@
      visual one, and the only custom property that existed before TOR-113. */
   --panel-width: 17rem;
 
+  /* The comparison stage's shape, set by app.js once per comparison from the
+     first arm's own resolution (TOR-109) and never touched again while it is
+     open. A layout token like the one above, and for the same kind of reason
+     the divider's width is one: the stage's box must be decided BEFORE either
+     frame loads and must not move afterwards, so it cannot be derived from
+     whichever image happens to have arrived.
+
+     A bare NUMBER rather than a w/h pair, which aspect-ratio accepts either
+     way, because the stage also has to bound its own height (a portrait or
+     4:3 source is taller than the viewport at full width) and only a number
+     can be multiplied inside a calc(). */
+  --compare-aspect: 1.7778;
+
   /* four surfaces */
   --bg:  #03070B;
   --s1:  #091218;
@@ -933,6 +946,221 @@ button:disabled { opacity: .5; }
 }
 .lightbox-close:hover { background: var(--bad); }
 .lightbox-close:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* COMPARING TWO RUNS BY FLIPPING (TOR-109).
+   The design survey's finding is the whole of this block: the same frame, in
+   the same screen position, one keypress apart, makes a difference visible
+   that a side-by-side grid hides - the eye compares against its own
+   afterimage rather than across a gap. Every rule here exists to keep that
+   true, so the constraint is stricter than it looks: NOTHING may change size
+   when the arm changes.
+
+   A <dialog> is centred by the UA, so a height that changes re-centres the
+   whole thing and slides the picture under the eye - which is why the width
+   is pinned, the stage's shape is a token app.js sets ONCE per comparison,
+   the two shots are stacked on one rectangle and swapped by visibility
+   alone, and every line of text below the picture is one line, nowrap,
+   whatever it says. */
+.compare {
+  border: none;
+  border-radius: .5rem;
+  padding: 1.6rem 1rem 1rem;
+  /* Pinned rather than shrink-to-fit: a dialog that sizes to its content is
+     a dialog whose content can move the picture. */
+  width: min(92vw, 68rem);
+  max-width: 92vw;
+  max-height: 92vh;
+  box-sizing: border-box;
+  background: var(--s1);
+  color: var(--ink);
+}
+.compare::backdrop { background: var(--scrim-strong); }
+
+.compare-head {
+  display: flex;
+  gap: .75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: .6rem;
+}
+
+/* One arm's chip and its picker. The chip carries the number key that selects
+   this arm, and it is what says which arm is on screen. */
+.compare-arm {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+  flex: 1 1 18rem;
+  min-width: 0;
+}
+
+/* WHICH ARM IS LIVE is the only thing a flip changes, and it is marked with
+   the accent - not with a border, and not with --bad or --warn.
+   The reasoning is the design system's own (see :root): the single accent
+   means "this is live or this is where you are", which is exactly what an arm
+   being on screen is. Nothing has gone wrong when you flip, so the semantic
+   pair would be a lie; and a border is spent, in the grid next door, on one
+   thing only - "nothing was captured here" - which this is not. A border here
+   would also be a marking drawn ON the picture's edge, changing under the eye
+   at the very moment the eye is trying to hold an afterimage. */
+.compare-key {
+  flex: 0 0 auto;
+  width: 1.4rem;
+  height: 1.4rem;
+  display: grid;
+  place-content: center;
+  border-radius: .3rem;
+  background: var(--s3);
+  color: var(--ink-3);
+  font-family: var(--mono);
+  font-size: .74rem;
+}
+.compare-arm[data-live="true"] .compare-key {
+  background: var(--accent-dim);
+  color: var(--accent);
+  box-shadow: var(--glow);
+}
+
+.compare-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  font: inherit;
+  font-size: .8rem;
+}
+
+/* THE STAGE. One rectangle, decided before anything loads, holding both arms
+   at once. --compare-aspect is set by app.js from the first arm's own
+   resolution, so two encodes of the same film fill it exactly and one that
+   was cropped differently letterboxes inside it rather than resizing it. */
+.compare-stage {
+  position: relative;
+  width: 100%;
+  aspect-ratio: var(--compare-aspect);
+  /* The height ceiling is spent as WIDTH, not as a squashed box: capping
+     height alone while the width stays 100% would break the aspect ratio and
+     letterbox the picture inside a box the wrong shape. So the same ceiling
+     is expressed as the widest box that fits in it - which is why the token
+     above is a number. */
+  max-width: calc(68vh * var(--compare-aspect));
+  margin: 0 auto;
+  background: var(--s3);
+  border-radius: .25rem;
+  overflow: hidden;
+  cursor: pointer;
+}
+.compare-stage:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Both shots occupy the identical box and are swapped by VISIBILITY, never by
+   display or by moving one over the other: display:none would take the hidden
+   arm out of layout and let the browser drop its decoded pixels, and the
+   whole feature is one keypress being instant. */
+.compare-shot {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  visibility: hidden;
+}
+.compare-stage[data-live="a"] .compare-shot[data-arm="a"],
+.compare-stage[data-live="b"] .compare-shot[data-arm="b"] { visibility: visible; }
+
+/* A position whose live arm captured nothing. Deliberately the same idiom as
+   .thumb-failed's box in the grid above - a dashed --bad rule over --bad-dim,
+   with the engine's own code inside it - because it means the same thing
+   there and here, and this is one of the two states the semantic bad colour
+   is spent on in this UI. It fills the same rectangle the picture would have,
+   so flipping onto a hole holds position exactly as flipping onto a frame
+   does. */
+.compare-gap {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-content: center;
+  box-sizing: border-box;
+  background: var(--bad-dim);
+  border: 1px dashed var(--bad);
+  border-radius: .25rem;
+}
+.compare-stage[data-gap="true"] .compare-gap { display: grid; }
+.compare-gap-code {
+  font-family: var(--mono);
+  /* Larger than the grid's .thumb-code, which says the same thing in a cell
+     a fifth of the width: the reason is the entire content of the picture
+     when there is no picture, and at stage size .68rem is lost in it. */
+  font-size: 1rem;
+  letter-spacing: .02em;
+  color: var(--bad);
+  text-align: center;
+  padding: 0 .8rem;
+  overflow-wrap: anywhere;
+}
+
+/* Everything below the picture is one line, always: a wrap here would change
+   the dialog's height, and a dialog that changes height re-centres. */
+.compare-bar {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin: .6rem 0 0;
+  height: 1.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.compare-step, .compare-flip {
+  flex: 0 0 auto;
+  padding: .15rem .6rem;
+  border: 1px solid var(--rule);
+  border-radius: .35rem;
+  background: var(--s2);
+  color: var(--ink);
+  font: inherit;
+  font-size: .8rem;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.compare-step { font-family: var(--mono); }
+.compare-step:hover, .compare-flip:hover { background: var(--hover); }
+.compare-step:focus-visible, .compare-flip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.compare-step:disabled, .compare-flip:disabled { opacity: .4; cursor: default; }
+
+.compare-place {
+  flex: 0 0 auto;
+  min-width: 4.5rem;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: .78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+/* The two timecodes, and the live one wears the accent - the same "where you
+   are" the chip above does, said again where the eye already is. Tabular
+   figures so the line does not twitch as the numbers change. */
+.compare-times {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: .76rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+.compare-times .compare-live { color: var(--accent); }
+
+.compare-note, .compare-keys {
+  margin: .35rem 0 0;
+  height: 1.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: .76rem;
+  color: var(--ink-3);
+}
+.compare-keys { font-family: var(--mono); font-size: .72rem; opacity: .8; }
 
 /* Drag-and-drop feedback, shown while a file is dragged over the page. */
 .drop-overlay {

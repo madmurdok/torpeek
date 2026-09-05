@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
-	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
@@ -479,71 +478,23 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 		if !paramDir.IsDir() {
 			continue
 		}
-		params := paramDir.Name()
-		layout := output.Layout{Root: s.cfg.OutputRoot, InfoHash: infoHash, Params: params}
-
-		run, ok := cache.LoadRun(layout.RunDir())
+		// loadResultSet (compare.go) is where the per-frame rule argued in
+		// this function's own doc comment actually lives, since TOR-109 gave
+		// it a second reader: a comparison wants two NAMED sets where this
+		// wants every set of one torrent, and the question "which frames does
+		// this set have" must have one answer for both. A set it reports
+		// ok=false for is one with nothing to say about any planned point -
+		// not even a failure - so there is nothing here worth naming as a
+		// result set either.
+		set, ok := s.loadResultSet(infoHash, paramDir.Name(), index)
 		if !ok {
 			continue
 		}
-		// The file's own path is what output.FileSlug turns into the
-		// directory name, so the record is what says where to look rather
-		// than this package re-deriving a layout of its own.
-		path, ok := videoPath(run, index)
-		if !ok {
-			continue
-		}
-		m, ok := cache.LoadManifest(layout.FileDir(index, path))
-		if !ok {
-			continue
-		}
-
-		set := FrameSet{Params: params, Count: run.Plan.Count}
-		for _, f := range m.Frames {
-			at := f.RequestedMS
-			if f.ActualMS != nil {
-				at = *f.ActualMS
-			}
-
-			if f.Path == "" {
-				// The engine itself reported this point as failed -
-				// manifest.Frame.Error says why (TOR-118). There is nothing
-				// to stat and nothing to publish, but the reason is real
-				// data a finished run's page should not lose, so it is kept
-				// rather than dropped like the disk-only case below.
-				detail.Frames = append(detail.Frames, FrameRef{
-					TimeMS: at, Shift: string(f.Shift), Error: f.Error,
-					Params: params, Index: f.Index,
-				})
-				set.Frames++
-				continue
-			}
-			if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
-				// The manifest thought this point succeeded and the disk
-				// disagrees - almost always a person's own delete
-				// (TestFileDetailLeavesOutAFrameGoneFromDisk). That is not
-				// something the engine ever reported failing, so unlike the
-				// branch above it stays silently dropped: manifest.Frame.Error
-				// is empty for it, and inventing a reason nobody recorded
-				// would be worse than saying nothing.
-				continue
-			}
-			detail.Frames = append(detail.Frames, FrameRef{
-				TimeMS: at, Shift: string(f.Shift), URL: s.files.publish(f.Path),
-				Params: params, Index: f.Index, Width: f.Width, Height: f.Height,
-			})
-			set.Frames++
-		}
-		if set.Frames == 0 {
-			// Nothing in this set - not even a failure - has anything to add
-			// to detail.Frames, so there is nothing here worth naming as a
-			// result set either. A set that is all failed points no longer
-			// hits this (TOR-118): it now has something to show, and is
-			// offered like any other.
-			continue
-		}
-		detail.Path = path
-		detail.Sets = append(detail.Sets, set)
+		detail.Frames = append(detail.Frames, set.Frames...)
+		detail.Path = set.Path
+		detail.Sets = append(detail.Sets, FrameSet{
+			Params: set.Params, Count: set.Count, Frames: len(set.Frames),
+		})
 	}
 
 	if len(detail.Frames) == 0 {

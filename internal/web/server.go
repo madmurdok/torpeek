@@ -410,6 +410,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /defaults", s.authGuard(s.handleDefaults))
 	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("GET /runs/{infohash}/files/{index}", s.authGuard(s.handleFileDetail))
+	mux.HandleFunc("GET /compare", s.authGuard(s.handleCompare))
+	mux.HandleFunc("GET /compare/sets", s.authGuard(s.handleCompareSets))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
