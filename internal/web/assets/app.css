@@ -460,9 +460,14 @@ button:disabled { opacity: .5; }
      first attempt at an offset assumed, and an offset in rem would be wrong
      again the moment the hint line wraps.
      
-     Left as it is on purpose. Nine columns (TOR-139) will force a decision
-     about the table's own scrolling, and where this header comes to rest is
-     the same decision - making it up now would be a number to unpick then. */
+     Left as it is on purpose, and TOR-139's own decision, now that it has
+     six more columns to make room for, is to leave it exactly here rather
+     than change how the header comes to rest: .run-table-wrap's own
+     overflow-x: auto is already the answer to a table wider than the pane
+     (see that rule's own comment), and the six new cells are the narrowest
+     things in the row (.run-cell-metric) rather than additional prose, so
+     the table only actually needs that escape hatch at widths the panel was
+     already tight at before this ticket. */
   top: 0;
   z-index: 2;
   background: var(--s1);
@@ -565,6 +570,80 @@ button:disabled { opacity: .5; }
    app.js), so there is nothing to constrain. An error message is the one
    long thing that still lands here, and it is allowed to wrap. */
 .run-cell-status .run-meta { max-width: 11rem; }
+
+/* THE SIX LIVE COLUMNS (TOR-139): peers, seeds, both rates, availability and
+   queue position. One shape for all of them - narrow, monospace,
+   tabular-nums, right-aligned - because they are figures meant to be
+   compared straight down a column, the exact reasoning the --mono token's
+   own comment gives for every other number in this file. Right-aligned is
+   new among this table's own cells (name/when/status all read left to
+   right); a column of right-aligned digits lines up on the ones place, which
+   is the one thing that makes a column of numbers scannable at a glance -
+   left-aligned, "8" and "142" line up on nothing.
+
+   The `.run-table td` in the selector is not decoration: `.run-table th,
+   .run-table td` above already sets text-align left at two classes' worth of
+   specificity, and a bare `.run-cell-metric` rule (one class) would lose to
+   it silently, leaving every figure here flush left with nothing to say why. */
+.run-table td.run-cell-metric {
+  width: 3.4rem;
+  white-space: nowrap;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+/* ABSENT IS NOT ZERO (app.js's ABSENT constant, and this ticket's own
+   opening argument). The placeholder em dash reads a step dimmer than the
+   figures themselves - down at --ink-3, the same muted level a provisional
+   name or a disk-only badge already use for "not settled/not live" - so "no
+   reading" cannot be mistaken for a merely small or zero number at a glance,
+   even before anyone reads the digit. */
+.run-table td.run-cell-metric[data-absent="true"] { color: var(--ink-3); }
+
+.run-cell-availability { width: 5.4rem; }
+/* Two lines, the same shape .run-cell-status gives a badge and its .run-meta
+   underneath: the copies-per-piece figure on top, and how many pieces no
+   connected peer holds at all directly under it - both from the one swarm
+   reading (listing.go's Availability), never shown split across two rows'
+   worth of a person's attention. */
+.run-cell-availability-value { display: block; }
+/* nowrap + ellipsis rather than letting this wrap: measured in a real
+   browser, "N of M unavailable" wrapped to three lines at this column's
+   width and made the row taller than every other one - the row height this
+   ticket's own six columns must not disturb was worth more than a few
+   digits, and the full sentence is one hover away (availabilityCellTitle). */
+.run-cell-availability-meta {
+  display: block;
+  margin-top: .05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-cell-queue { width: 2.6rem; }
+
+/* Header cells for the same six columns. Left-aligned like every other
+   header in this table (unlike their own data cells) - .run-table thead th's
+   own rule already sizes and cases the label, so nothing here needs to
+   repeat it; only the width matches its column's data cells, and the unit
+   line (.run-th-unit) gives the availability header its own second line so its
+   figure's unit is legible without a tooltip nobody opens, per this ticket's
+   acceptance criterion. */
+.run-cell-metric-header { width: 3.4rem; }
+.run-cell-availability-header { width: 5.4rem; }
+.run-cell-queue-header { width: 2.6rem; }
+.run-th-label { display: block; }
+.run-th-unit {
+  display: block;
+  font-size: .55rem;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink-3);
+  margin-top: .05rem;
+}
 
 .run-cell-actions { width: 1.6rem; text-align: right; }
 .run-cancel {
