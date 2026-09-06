@@ -430,6 +430,11 @@ function metaTitle(entry, now) {
 // NOT ON A FINISHED RUN, which the criterion asks for: a full bar on a done
 // run tells nobody anything, and an empty one on a failed run reads like a
 // second failure.
+//
+// WHERE entry.framesDone/entry.framesTotal COME FROM is applyFrameProgress,
+// not this function - by the time a redraw is asked for, both are already
+// the most complete reading available (TOR-167). This function only ever
+// turns them into segments; it never reads the wire directly.
 function renderRunProgress(entry) {
   const el = entry.rowProgress;
   if (!el) return;
@@ -471,6 +476,47 @@ function renderRunProgress(entry) {
 // panel row. A plan of twenty is the common case and draws one each; a plan of
 // two hundred would ask for segments a third of a pixel wide.
 const MAX_PROGRESS_SEGMENTS = 24;
+
+// applyFrameProgress sets entry.framesDone/entry.framesTotal - and the
+// "N/M frames" line (entry.progress) that sits above the bar and must never
+// disagree with it - from whichever file (ev.file) just reported something,
+// on file_started, frame_ready, frame_skipped and progress alike (TOR-167).
+//
+// WHY NOT JUST READ core.Progress's OWN frames_done, which is what this used
+// to do: that heartbeat counts only frames THIS RUN captured fresh. A top-up
+// mostly REPLAYS frames an earlier run already wrote to disk (TOR-166's own
+// pricing depends on that reuse being free), and engine.go's processFile
+// publishes a frame_ready for a reused point but no Progress heartbeat for
+// it - only real captures get one. So a top-up whose two still-missing
+// points fall early in the plan can report "1 of 20" from its very first
+// heartbeat and never correct itself: every point after that is a replay,
+// which never heartbeats again, while the file quietly finishes at 20 of 20
+// on disk. The grid beside the bar does not have this gap, because
+// frame_ready fires for a landed point whether it was replayed or freshly
+// captured, and the grid is built from exactly that stream (addFrame).
+//
+// So this reads the same stream the grid already reads - the count of cells
+// with a frame, gridCells' own "cell.url" test, identical to what
+// updateFileSummary already shows under the grid - rather than the sparser
+// heartbeat. That is not a new measurement: it is still "frames landed out
+// of frames planned" (TOR-123's own definition), taken from the signal that
+// never misses a landed frame instead of the one that only speaks when this
+// run did the work itself. wireDone, core.Progress's own frames_done when
+// this call came from a progress event, is folded in with Math.max rather
+// than trusted alone or discarded - it can never be fewer than what the grid
+// has already proven landed, but nothing stops it being the fresher of the
+// two on a heartbeat that arrives between two frame_ready events.
+function applyFrameProgress(entry, file, wireDone) {
+  const fentry = entry.fileEntries.get(file);
+  if (!fentry || !fentry.plan.length) return;
+
+  const landed = gridCells(fentry).filter((cell) => cell.url).length;
+  entry.framesTotal = fentry.plan.length;
+  entry.framesDone = Math.max(landed, wireDone || 0);
+  if (cancellable(entry.state)) {
+    entry.progress = entry.framesDone + "/" + entry.framesTotal + " frames";
+  }
+}
 
 // displayName is what a row's name cell shows, and whether that answer is
 // confirmed or merely offered (TOR-117).
@@ -1318,6 +1364,15 @@ function resetRunContent(entry) {
   // replay's own next progress event happens to overwrite it.
   entry.stall = null;
   entry.runningSince = 0;
+  // Same reasoning as the stall reading just above: entry.fileEntries is
+  // gone (cleared two lines up), so applyFrameProgress has nothing to read
+  // until the replay's own file_started rebuilds it - these three would
+  // otherwise sit at whatever the ended run last reported and let
+  // renderRunProgress draw a bar for a file the page no longer has anything
+  // about, however briefly, before that happens (TOR-167).
+  entry.progress = "";
+  entry.framesDone = 0;
+  entry.framesTotal = 0;
   // The picker goes with everything else this run has shown. It comes back
   // from the replayed needs_action that follows in the same history, so a
   // reconnecting page rebuilds it rather than keeping a stale copy of a list
@@ -3370,10 +3425,22 @@ function apply(ev) {
 
     case "file_started":
       onFileStarted(entry, ev);
+      // The row's bar/line pick up this file's plan the moment it is known
+      // (TOR-167) - not on the first progress heartbeat, which for a top-up
+      // may be seconds away and may already be behind what a moment's worth
+      // of replayed frame_ready events is about to show.
+      applyFrameProgress(entry, ev.file);
+      syncEntry(entry);
       break;
 
     case "frame_ready":
       addFrame(entry, ev);
+      // Every landed frame keeps the row's bar/line current (TOR-167),
+      // whether this point was just captured or replayed off disk - see
+      // applyFrameProgress's own doc for why the heartbeat alone is not
+      // enough for a top-up.
+      applyFrameProgress(entry, ev.file);
+      syncEntry(entry);
       break;
 
     case "frame_skipped": {
@@ -3405,12 +3472,13 @@ function apply(ev) {
         fentry.progress.textContent =
           ev.frames_done + " / " + ev.frames_total + " frames · " +
           bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
-        entry.progress = ev.frames_done + "/" + ev.frames_total + " frames";
-        // The numbers as numbers, for the bar. The sentence stays because it
-        // is the exact figure and the statement of what is being counted;
-        // the bar cannot be either of those things (TOR-123).
-        entry.framesDone = ev.frames_done;
-        entry.framesTotal = ev.frames_total;
+        // The row's own line and bar, which read from the fuller of two
+        // signals rather than this heartbeat alone - see applyFrameProgress's
+        // own doc for why a top-up needs that (TOR-167). ev.frames_done still
+        // goes in, as the floor it always was; it just no longer wins on its
+        // own when the grid has already proven more landed than this one
+        // heartbeat knows about.
+        applyFrameProgress(entry, ev.file, ev.frames_done);
       }
       // TOR-139: the same heartbeat carries this run's current swarm reading
       // - peers, seeds, both rates and the availability figure - under the
