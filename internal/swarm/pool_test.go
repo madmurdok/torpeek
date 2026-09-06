@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
+
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
@@ -471,4 +473,204 @@ func TestPoolKeepsTheTrafficOfEveryTorrentItHasLetGo(t *testing.T) {
 
 	t.Logf("two torrents received %d bytes and were let go; the pool still reports %d",
 		spent, pool.Downloaded())
+}
+
+// TestTheSharedClientRefusesAnythingNotKnownPublic is the enforcement half of
+// TOR-129, and the test the ticket asked for by name: something tries to add
+// a private torrent to the shared pool, and the attempt fails.
+//
+// It calls attachShared directly, which is the only way to ask the question.
+// Pool.Attach routes a private torrent away from the shared client long
+// before it gets here, and TestPrivateTorrentNeverJoinsThePool checks that
+// routing. This checks the thing routing is not: that the door itself is shut,
+// so a caller added later, a reordered branch, or a route that grows a case
+// cannot open it. Criterion 5 used to hold because there was nowhere else for
+// a private torrent to go; it holds now because this returns an error.
+//
+// All three refused shapes matter, and the third is the one that is easy to
+// get wrong: metadata a caller carried in that says private is refused even
+// though the SOURCE it came with settles nothing.
+//
+// The public .torrent at the end is what makes the whole thing able to fail
+// the other way: a door that never opened would pass every assertion above.
+func TestTheSharedClientRefusesAnythingNotKnownPublic(t *testing.T) {
+	public := torrenttest.Build(t, "public.mkv", poolPayloadSize, poolPieceLength)
+	private := torrenttest.BuildPrivate(t, "private.mkv", poolPayloadSize, poolPieceLength)
+
+	privateMI, err := metainfo.LoadFromFile(private.TorrentPath)
+	if err != nil {
+		t.Fatalf("load the private fixture's metainfo: %v", err)
+	}
+
+	pool := NewPool(poolConfig(t))
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	for _, tc := range []struct {
+		name string
+		src  Source
+		mi   *metainfo.MetaInfo
+	}{
+		{name: "a private .torrent", src: poolSource(t, private.TorrentPath)},
+		{name: "a magnet whose metadata has not arrived", src: poolSource(t, public.Magnet(t))},
+		{name: "carried-over metadata that says private", src: poolSource(t, private.Magnet(t)), mi: privateMI},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			att, err := pool.attachShared(ctx, tc.src, "key-"+tc.name, tc.mi, nil, nil)
+			if att != nil {
+				att.Detach()
+			}
+			if !errors.Is(err, ErrSharedClientIsPublicOnly) {
+				t.Fatalf("attachShared returned %v, want ErrSharedClientIsPublicOnly", err)
+			}
+		})
+	}
+
+	if pool.Up() {
+		t.Error("the shared client was started for a torrent that was then refused entry to it")
+	}
+
+	opened, err := pool.attachShared(ctx, poolSource(t, public.TorrentPath), "public", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("a .torrent stating private=false was refused by the shared client: %v", err)
+	}
+	defer opened.Detach()
+
+	if !opened.Pooled() {
+		t.Error("a known-public torrent did not end up in the shared client")
+	}
+	if !pool.Up() {
+		t.Error("the shared client is not up after a torrent joined it")
+	}
+}
+
+// TestThePoolRefusesABlindMagnetThatTurnsOutPrivate is the same guarantee at
+// the pool's own front door, over the one source shape that cannot settle its
+// flag before going online (onlineRoute.blind).
+//
+// The shared client has a DHT genuinely running here, and a public torrent
+// fetching in it, so the convenient wrong answer is available: the magnet
+// could have been handed to that client to fetch its metadata cheaply and
+// moved afterwards. What happens instead is a refusal - and the public
+// torrent alongside it goes on fetching, because this is one torrent's
+// failure and not the client's.
+func TestThePoolRefusesABlindMagnetThatTurnsOutPrivate(t *testing.T) {
+	withOfflineDHT(t)
+
+	public := torrenttest.Build(t, "public.mkv", poolPayloadSize, poolPieceLength)
+	publicSeeder := public.StartSeeder(t)
+	private := torrenttest.BuildPrivate(t, "private.mkv", poolPayloadSize, poolPieceLength)
+	privateSeeder := private.StartSeeder(t)
+
+	cfg := poolConfig(t)
+	cfg.DHT = true // the blind route is refused outright without it
+
+	pool := NewPool(cfg)
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	open, err := pool.Attach(ctx, poolSource(t, public.TorrentPath), publicSeeder)
+	if err != nil {
+		t.Fatalf("attach the public torrent: %v", err)
+	}
+	defer open.Detach()
+
+	if !pool.UsesDHT() {
+		t.Fatal("the shared client has no DHT running, so there is no wrong answer here to avoid")
+	}
+	if !open.UsesDHT() {
+		t.Fatal("the pooled public torrent reports no DHT, so this test proves nothing about staying out of it")
+	}
+
+	att, err := pool.Attach(ctx, poolSource(t, bareMagnet(t, private.TorrentPath)), privateSeeder)
+	if att != nil {
+		att.Detach()
+	}
+	if !errors.Is(err, ErrPrivateOnDHTClient) {
+		t.Fatalf("attaching a trackerless magnet that turned out private returned %v, want ErrPrivateOnDHTClient", err)
+	}
+
+	if !pool.Up() {
+		t.Error("a refused attach took the shared client down")
+	}
+	if got := pool.Attached(); got != 1 {
+		t.Errorf("%d torrents are attached after the refusal, want 1 - a refused attach holds nothing", got)
+	}
+
+	got, err := open.Torrent().ReadRange(ctx, 0, 1<<20, 64<<10, MinTraffic)
+	if err != nil {
+		t.Fatalf("the public torrent stopped fetching after the refusal: %v", err)
+	}
+	if want := public.Payload[1<<20 : 1<<20+64<<10]; !bytes.Equal(got, want) {
+		t.Error("the public torrent read the wrong bytes after the refusal")
+	}
+}
+
+// TestASecondPrivateTorrentNeedsASecondPort is TOR-127's port bound showing
+// through TOR-129's guarantee, which is the only place the two meet.
+//
+// A private torrent needs a client to itself and a client binds a port, so
+// two of them at once need two ports - unlike public torrents, of which any
+// number share the one shared client and its one port. With a single
+// allocated port the second private torrent is refused with
+// ErrNoPortAvailable, and that refusal is the guarantee holding rather than a
+// limitation working around it: the alternative on offer was the shared
+// client, and it is not on offer. A freed port is all it takes.
+func TestASecondPrivateTorrentNeedsASecondPort(t *testing.T) {
+	first := torrenttest.BuildPrivate(t, "one.mkv", poolPayloadSize, poolPieceLength)
+	second := torrenttest.BuildPrivate(t, "two.mkv", poolPayloadSize, poolPieceLength)
+
+	set, _ := oneManagedPort(t)
+	ports := NewPortPool(set)
+
+	cfg := poolConfig(t)
+	cfg.Ports = ports
+
+	pool := NewPool(cfg)
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	a, err := pool.Attach(ctx, poolSource(t, first.TorrentPath))
+	if err != nil {
+		t.Fatalf("attach the first private torrent: %v", err)
+	}
+	defer a.Detach()
+
+	if a.Pooled() {
+		t.Fatal("a private torrent joined the shared client")
+	}
+	if free := ports.Free(); free != 0 {
+		t.Fatalf("%d of 1 allocated port is free while a private torrent is attached, want 0 - "+
+			"without that this test is not about running out of ports", free)
+	}
+
+	if _, err := pool.Attach(ctx, poolSource(t, second.TorrentPath)); !errors.Is(err, ErrNoPortAvailable) {
+		t.Fatalf("a second private torrent on a one-port set returned %v, want ErrNoPortAvailable", err)
+	}
+	if pool.Up() {
+		t.Error("the shared client came up for a private torrent that could not get a port")
+	}
+
+	if err := a.Detach(); err != nil {
+		t.Fatalf("detach the first private torrent: %v", err)
+	}
+	if free := ports.Free(); free != 1 {
+		t.Fatalf("%d of 1 port came back when the private torrent's client closed, want 1", free)
+	}
+
+	b, err := pool.Attach(ctx, poolSource(t, second.TorrentPath))
+	if err != nil {
+		t.Fatalf("the second private torrent, once a port was free: %v", err)
+	}
+	defer b.Detach()
+
+	if b.Pooled() {
+		t.Error("the second private torrent joined the shared client")
+	}
 }

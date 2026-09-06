@@ -779,3 +779,164 @@ func TestClosingASessionFreesItsPortBeforeItReturns(t *testing.T) {
 		}
 	}
 }
+
+// bareMagnet is a magnet for an existing fixture carrying nothing but the
+// infohash: no tr=, so there is no tracker to probe and the private flag
+// cannot be settled before a client with DHT starts. That is the one source
+// shape that reaches onlineRoute.blind, and it is exactly what
+// torrenttest.Fixture.Magnet deliberately does not produce - that helper adds
+// a dead loopback tracker precisely so a test stays off this route.
+func bareMagnet(t *testing.T, torrentPath string) string {
+	t.Helper()
+
+	mi, err := metainfo.LoadFromFile(torrentPath)
+	if err != nil {
+		t.Fatalf("load fixture torrent: %v", err)
+	}
+	return "magnet:?xt=urn:btih:" + mi.HashInfoBytes().HexString()
+}
+
+// TestAPrivateTorrentIsRefusedByTheAddItself is where acceptance criterion 5
+// stops being incidental (TOR-129).
+//
+// The client here is built by hand with DHT on and then offered a private
+// .torrent - a combination routeFor would never produce, and that is the
+// point. While one client held one torrent, "a private torrent's client has
+// no DHT" was a fact about how the client was configured, and nothing had to
+// enforce it. A client shared between torrents means the client's DHT is no
+// longer this torrent's business, so the add is where the guarantee has to
+// live. This test asks the question a wrong caller would: it puts the private
+// torrent in front of the door and checks the door is shut.
+//
+// The public torrent at the end is what stops this passing for the wrong
+// reason - a guard that refused everything would look identical.
+func TestAPrivateTorrentIsRefusedByTheAddItself(t *testing.T) {
+	withOfflineDHT(t)
+
+	private, err := ParseSource(writeTorrentFile(t, true, "http://tracker.invalid/announce"))
+	if err != nil {
+		t.Fatalf("parse the private source: %v", err)
+	}
+	public, err := ParseSource(writeTorrentFile(t, false, "http://tracker.invalid/announce"))
+	if err != nil {
+		t.Fatalf("parse the public source: %v", err)
+	}
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = true
+	cfg.MetadataTimeout = 10 * time.Second
+
+	s, err := newSession(cfg, true)
+	if err != nil {
+		t.Fatalf("start a client with DHT: %v", err)
+	}
+	defer s.Close()
+
+	if !s.UsesDHT() {
+		t.Fatal("no DHT server is running, so refusing a private torrent on this client would prove nothing")
+	}
+
+	if _, err := s.add(context.Background(), private, nil); !errors.Is(err, ErrPrivateOnDHTClient) {
+		t.Fatalf("adding a private torrent to a DHT client returned %v, want ErrPrivateOnDHTClient", err)
+	}
+	if got := len(s.cl.Torrents()); got != 0 {
+		t.Errorf("the client holds %d torrents after the refusal, want 0 - refusing BEFORE the add "+
+			"is what keeps the infohash from being announced at all", got)
+	}
+
+	if _, err := s.add(context.Background(), public, nil); err != nil {
+		t.Fatalf("a public torrent on the same client was refused too: %v", err)
+	}
+	if got := len(s.cl.Torrents()); got != 1 {
+		t.Errorf("the client holds %d torrents after a public add, want 1", got)
+	}
+}
+
+// TestABlindMagnetIsRefusedOnlyWhenItTurnsOutPrivate walks the decision
+// onlineRoute.blind documents, on both arms.
+//
+// A magnet with no trackers has to reach the DHT to fetch the metadata that
+// carries the flag it is being asked about; there is no ordering that avoids
+// it. What is decided is what happens next, and the two arms here are the
+// whole of it: a torrent that turns out public carries on, on the client that
+// is already running; one that turns out private is refused outright, with
+// nothing of it left attached to a client that announces.
+//
+// Both arms are offline - the DHT server has no starting nodes, and the
+// metadata arrives over BEP 9 from a loopback seeder introduced directly.
+func TestABlindMagnetIsRefusedOnlyWhenItTurnsOutPrivate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		private bool
+	}{
+		{name: "public carries on", private: false},
+		{name: "private is refused", private: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withOfflineDHT(t)
+
+			build := torrenttest.Build
+			if tc.private {
+				build = torrenttest.BuildPrivate
+			}
+			fixture := build(t, "movie.mkv", testPayloadSize, testPieceLength)
+			seeder := fixture.StartSeeder(t)
+
+			src, err := ParseSource(bareMagnet(t, fixture.TorrentPath))
+			if err != nil {
+				t.Fatalf("parse the bare magnet: %v", err)
+			}
+			if _, known := src.Privacy(); known {
+				t.Fatal("the magnet settles the flag by itself, so this is not the path under test")
+			}
+
+			cfg := DefaultConfig(t.TempDir())
+			cfg.DHT = true // without it the route is refused outright, before any of this
+			cfg.MetadataTimeout = 30 * time.Second
+			cfg.Peers = []string{seeder}
+
+			if route := routeFor(cfg, src); !route.blind || !route.dht {
+				t.Fatalf("route = %+v, want the blind route: DHT on, flag unread", route)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+
+			session, tor, err := Open(ctx, cfg, src)
+			if session != nil {
+				defer session.Close()
+			}
+
+			if !tc.private {
+				if err != nil {
+					t.Fatalf("open a public bare magnet: %v", err)
+				}
+				if tor.Private() {
+					t.Fatal("the public fixture reports itself private, so this arm tested nothing")
+				}
+				if !session.WentOnlineBlind() {
+					t.Error("the session does not report going online blind, but the magnet had no trackers")
+				}
+				if !session.UsesDHT() {
+					t.Error("no DHT is running, so this arm did not walk the blind route")
+				}
+				return
+			}
+
+			if !errors.Is(err, ErrPrivateOnDHTClient) {
+				t.Fatalf("Open of a private bare magnet returned err=%v (session=%v, torrent=%v), "+
+					"want ErrPrivateOnDHTClient", err, session != nil, tor != nil)
+			}
+
+			// Refused, and nothing of it left staged on the way out.
+			hash, err := src.InfoHash()
+			if err != nil {
+				t.Fatalf("infohash: %v", err)
+			}
+			staged := filepath.Join(cfg.DataDir, hash.HexString())
+			if _, err := os.Stat(staged); !os.IsNotExist(err) {
+				t.Errorf("the refused torrent left %s behind (%v)", staged, err)
+			}
+		})
+	}
+}

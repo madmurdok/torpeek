@@ -3,10 +3,14 @@
 package acceptance
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -268,6 +272,31 @@ func TestCriterion4CancelAndResume(t *testing.T) {
 
 // TestCriterion5PrivateTorrentStaysOffDHT runs against a private torrent built
 // here, because a public one cannot be private by definition.
+//
+// It measures the criterion twice, because the shape of the guarantee changed
+// under it (TOR-129). The first half is what it always was: one private
+// torrent, one client, DHT asked for and refused. That half used to be the
+// whole criterion, and it was true BY CONSTRUCTION - a client held one
+// torrent, swarm.Open decided that client's DHT from that torrent's own flag,
+// and there was nowhere else the torrent could have gone.
+//
+// A client shared between the public torrents of every run took the "nowhere
+// else" away, so the second half puts the private torrent where the mistake
+// would show: attached while public torrents are fetching in that shared
+// client, at the same time, with somewhere else it could have been put.
+//
+// Both halves stay entirely offline - loopback seeders, no live swarm, no
+// traffic that leaves the machine, which is what lets this criterion run
+// without ordering anything from a real network. That is also why the pool
+// here is configured with DHT off: a DHT server that genuinely runs cannot be
+// started in this package without reaching the real one. The arm that pairs a
+// running DHT with a private torrent lives in internal/swarm's own tests,
+// where the client can be handed a DHT server with no starting nodes
+// (TestThePoolRefusesABlindMagnetThatTurnsOutPrivate). What is measured HERE
+// is the part the pool changed and the part no unit test can state as an
+// acceptance fact: where the private torrent ends up when the process is busy
+// with other people's torrents, and what the pool does when the only way to
+// give it a client of its own is a port it has not got.
 func TestCriterion5PrivateTorrentStaysOffDHT(t *testing.T) {
 	tools, err := ffmpeg.Locate()
 	if err != nil {
@@ -322,11 +351,147 @@ func TestCriterion5PrivateTorrentStaysOffDHT(t *testing.T) {
 	}
 	defer session.Close()
 
+	aloneOnDHT := session.UsesDHT()
+
+	// ---- and again, with the process busy -------------------------------
+	//
+	// Two public torrents fetching in a shared client, and the private one
+	// attached alongside them. Everything below is loopback.
+	const (
+		poolPayload = 2 << 20
+		poolPiece   = 256 << 10
+		readOffset  = 1 << 20
+		readLength  = 64 << 10
+	)
+
+	poolCfg := swarm.DefaultConfig(t.TempDir())
+	poolCfg.DHT = false
+	poolCfg.MetadataTimeout = 30 * time.Second
+
+	pool := swarm.NewPool(poolCfg)
+	defer pool.Close()
+
+	type attached struct {
+		att     *swarm.Attachment
+		payload []byte
+	}
+	var busy []attached
+
+	for _, name := range []string{"public-one.mkv", "public-two.mkv"} {
+		fixture := torrenttest.Build(t, name, poolPayload, poolPiece)
+		seeder := fixture.StartSeeder(t)
+
+		publicSrc, err := swarm.ParseSource(fixture.TorrentPath)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		att, err := pool.Attach(ctx, publicSrc, seeder)
+		if err != nil {
+			t.Fatalf("attach %s: %v", name, err)
+		}
+		defer att.Detach()
+
+		if !att.Pooled() {
+			t.Fatalf("%s did not join the shared client, so the private torrent has nothing to stay out of", name)
+		}
+		busy = append(busy, attached{att: att, payload: fixture.Payload})
+	}
+
+	shutFixture := torrenttest.BuildPrivate(t, "private.mkv", poolPayload, poolPiece)
+	shutSeeder := shutFixture.StartSeeder(t)
+
+	shutSrc, err := swarm.ParseSource(shutFixture.TorrentPath)
+	if err != nil {
+		t.Fatalf("parse the private fixture: %v", err)
+	}
+	if flagged, known := shutSrc.Privacy(); !known || !flagged {
+		t.Fatalf("the pooled fixture is not private: flagged=%v known=%v", flagged, known)
+	}
+
+	shut, err := pool.Attach(ctx, shutSrc, shutSeeder)
+	if err != nil {
+		t.Fatalf("attach the private torrent while the pool is busy: %v", err)
+	}
+	defer shut.Detach()
+	busy = append(busy, attached{att: shut, payload: shutFixture.Payload})
+
+	// All three fetch at once. A private torrent kept out of the shared
+	// client is only worth anything if it is still a working run.
+	errs := make([]error, len(busy))
+	var wg sync.WaitGroup
+	for i, a := range busy {
+		wg.Add(1)
+		go func(i int, a attached) {
+			defer wg.Done()
+			got, err := a.att.Torrent().ReadRange(ctx, 0, readOffset, readLength, swarm.MinTraffic)
+			switch {
+			case err != nil:
+				errs[i] = err
+			case !bytes.Equal(got, a.payload[readOffset:readOffset+readLength]):
+				errs[i] = fmt.Errorf("read %d bytes that do not match the payload", len(got))
+			}
+		}(i, a)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("torrent %d: %v", i, err)
+		}
+	}
+
+	// And the refusal when there is no port to give it one. One allocated
+	// port, already held by the shared client, so the only way to attach a
+	// private torrent would be to put it in with the public ones - which is
+	// why this must fail instead.
+	tightSet, err := swarm.ParsePortSet(strconv.Itoa(torrenttest.FreePort(t)))
+	if err != nil {
+		t.Fatalf("parse a one-port set: %v", err)
+	}
+	tightCfg := swarm.DefaultConfig(t.TempDir())
+	tightCfg.DHT = false
+	tightCfg.MetadataTimeout = 30 * time.Second
+	tightCfg.Ports = swarm.NewPortPool(tightSet)
+
+	tight := swarm.NewPool(tightCfg)
+	defer tight.Close()
+
+	filler := torrenttest.Build(t, "filler.mkv", poolPayload, poolPiece)
+	fillerSrc, err := swarm.ParseSource(filler.TorrentPath)
+	if err != nil {
+		t.Fatalf("parse the filler fixture: %v", err)
+	}
+	held, err := tight.Attach(ctx, fillerSrc, filler.StartSeeder(t))
+	if err != nil {
+		t.Fatalf("attach a public torrent to the one-port pool: %v", err)
+	}
+	defer held.Detach()
+
+	refused, tightErr := tight.Attach(ctx, shutSrc)
+	if refused != nil {
+		refused.Detach()
+	}
+
+	// ---- the verdict ----------------------------------------------------
+
 	verdict := Met
-	note := "tested against a private torrent built for the run: a public torrent cannot carry " +
-		"the private flag and still be public, so this condition cannot be ordered from a live swarm"
-	if session.UsesDHT() {
-		verdict, note = Missed, "DHT was running for a private torrent"
+	note := "tested against private torrents built for the run: a public torrent cannot carry " +
+		"the private flag and still be public, so this condition cannot be ordered from a live swarm. " +
+		"Measured twice - one private torrent alone, and one attached while two public torrents " +
+		"fetched in the shared client at the same time"
+
+	switch {
+	case aloneOnDHT:
+		verdict, note = Missed, "DHT was running for a private torrent on a client of its own"
+	case shut.Pooled():
+		verdict, note = Missed, "a private torrent joined the shared public client"
+	case shut.UsesDHT():
+		verdict, note = Missed, "DHT was running on the client carrying a private torrent"
+	case shut.ListenPort() == pool.ListenPort():
+		verdict, note = Missed, "a private torrent shares the shared client's port, so it shares its client"
+	case !errors.Is(tightErr, swarm.ErrNoPortAvailable):
+		verdict, note = Missed, fmt.Sprintf(
+			"with one allocated port already held, attaching a private torrent returned %v; "+
+				"it must be refused rather than put in the shared client", tightErr)
 	}
 
 	report.Add(Result{
@@ -335,11 +500,17 @@ func TestCriterion5PrivateTorrentStaysOffDHT(t *testing.T) {
 		Measured: []Measurement{
 			Measure("private flag read offline", "%v", true),
 			Measure("DHT requested by config", "%v", cfg.DHT),
-			Measure("DHT actually running", "%v", session.UsesDHT()),
+			Measure("DHT actually running (own client)", "%v", aloneOnDHT),
+			Measure("public torrents fetching in the shared client", "%d", len(busy)-1),
+			Measure("private torrent joined the shared client", "%v", shut.Pooled()),
+			Measure("DHT actually running (while the pool is busy)", "%v", shut.UsesDHT()),
+			Measure("private port vs shared client port", "%d vs %d", shut.ListenPort(), pool.ListenPort()),
+			Measure("refused when no port is left for a client of its own", "%v",
+				errors.Is(tightErr, swarm.ErrNoPortAvailable)),
 		},
 	})
 	if verdict == Missed {
-		t.Error("criterion 5: DHT ran for a private torrent")
+		t.Errorf("criterion 5: %s", note)
 	}
 }
 

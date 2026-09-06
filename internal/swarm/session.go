@@ -100,6 +100,21 @@ var (
 	// ErrPrivacyUnresolvable means the only way to fetch metadata would be
 	// DHT, which we refuse to touch before knowing the torrent is public.
 	ErrPrivacyUnresolvable = errors.New("magnet has no trackers and DHT is disabled")
+
+	// ErrPrivateOnDHTClient means a torrent carrying the BEP 27 private flag
+	// was offered to a client that has DHT - and therefore PEX - running, and
+	// the add was refused.
+	//
+	// It is what makes acceptance criterion 5 structural rather than
+	// incidental. Before there was a pool the criterion held by construction:
+	// one client held one torrent and Open decided that client's DHT from
+	// that torrent's own flag, so a private torrent's client simply never had
+	// DHT. A client shared between torrents took that construction away, and
+	// this error is how it comes back - not as a rule stated in a comment
+	// upstream of the add, but as a refusal by the add itself. See
+	// Session.addTo, which is the one door every torrent enters a client
+	// through.
+	ErrPrivateOnDHTClient = errors.New("a private torrent may not be added to a client with DHT enabled")
 )
 
 // Session owns a BitTorrent client for the lifetime of one run.
@@ -214,7 +229,9 @@ func openOnPort(ctx context.Context, cfg Config, src Source, route onlineRoute) 
 			return nil, nil, err
 		}
 		// The trackers stayed silent, so DHT is the only way left - and we
-		// still do not know whether this torrent is private.
+		// still do not know whether this torrent is private. If it turns out
+		// to be, the add refuses it rather than carrying it on a client that
+		// has DHT on; see onlineRoute.blind for why that is the decision.
 		return openBlind(ctx, cfg, src)
 	}
 
@@ -263,8 +280,16 @@ func carriedOverMetainfo(mi metainfo.MetaInfo) metainfo.MetaInfo {
 	return mi
 }
 
-// openBlind is the honest-but-imperfect path: DHT before the privacy check,
-// reachable only when a magnet carries no working trackers.
+// openBlind starts a client with DHT on for a source whose private flag
+// cannot be read first, and is the second of the two ways onto that route:
+// openOnPort takes it directly for a magnet with no trackers at all, and this
+// is the fallback for one whose trackers turned out silent, where the probe
+// with DHT off has already been tried and answered by nobody.
+//
+// What happens when the metadata then says "private" - and why it is not the
+// convenient thing - is written down at onlineRoute.blind. Both ways onto the
+// route enforce it through the same line in addTo, so neither of them decides
+// anything here.
 func openBlind(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, error) {
 	s, err := newSession(cfg, true)
 	if err != nil {
@@ -358,9 +383,38 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 //
 // A non-nil mi short-circuits the metadata wait by supplying the info bytes
 // directly.
+//
+// # Where BEP 27 is enforced
+//
+// Here, because this is the one door: every torrent that has ever entered a
+// client entered it through this function. A private torrent offered to a
+// client with DHT (and so PEX) on is refused with ErrPrivateOnDHTClient, and
+// that refusal is not a check some caller has to remember to perform first -
+// no route, no existing caller and no caller added later can put a private
+// torrent on an announcing client, because the add itself will not do it.
 func (s *Session) addTo(ctx context.Context, src Source, mi *metainfo.MetaInfo, peers []string) (*Torrent, error) {
 	if s.cl == nil {
 		return nil, errors.New("swarm: session is closed")
+	}
+
+	// The guard is in two halves, and `known` is the seam: it says whether
+	// the flag can be read without asking the swarm.
+	//
+	// Half one, for every source that settles the flag offline - which is
+	// every source but a magnet whose metadata has not arrived - refuses
+	// BEFORE AddTorrent. The ordering is the whole value of it: a client with
+	// DHT on starts announcing an infohash as soon as the torrent is added,
+	// so a check that ran afterwards would already have published the thing
+	// it exists to keep unpublished. Nothing is added here, so nothing is
+	// announced.
+	//
+	// Half two is below, after the metadata wait, and covers exactly the
+	// sources this one cannot. Neither half backs the other up: each is the
+	// only thing standing in the way on the sources it covers, which is what
+	// makes each of them separately able to fail a test.
+	private, known := privacyInHand(src, mi)
+	if known && private && s.dhtOn {
+		return nil, ErrPrivateOnDHTClient
 	}
 
 	var (
@@ -405,7 +459,64 @@ func (s *Session) addTo(ctx context.Context, src Source, mi *metainfo.MetaInfo, 
 		return nil, fmt.Errorf("%w after %s", ErrNoMetadata, timeout)
 	}
 
-	return newTorrent(t), nil
+	tor := newTorrent(t)
+
+	// Half two, and there is exactly one way to reach it: a magnet whose
+	// metadata has only just arrived, on the one client that had to have DHT
+	// on to fetch that metadata at all (onlineRoute.blind). Until this line
+	// the flag was unreadable; now it is read, and a private torrent goes no
+	// further on this client.
+	//
+	// Gated on `known` rather than run unconditionally, and that is
+	// deliberate. A second reading of a flag half one already acted on would
+	// be untestable belt-and-braces: delete half one and this would quietly
+	// cover for it, so nothing could show that the ordering - refuse before
+	// the announce, not after - was still being honoured. There is no gap
+	// between the two either. The info bytes AddTorrent is handed are the
+	// same bytes privacyInHand read, so a source that settled the flag
+	// offline cannot arrive here saying something else.
+	//
+	// Dropped rather than reported and kept: Drop removes it from the client
+	// and waits for its storage to close, so nothing of it stays attached to
+	// something that announces, and its staging subtree goes with it because
+	// this attempt has no session for the caller to Close.
+	if !known && tor.Private() && s.dhtOn {
+		t.Drop()
+		refusal := fmt.Errorf("%w: the metadata says this torrent is private, and it could "+
+			"only be fetched through DHT (a magnet carrying no trackers)", ErrPrivateOnDHTClient)
+		if err := discardPieces(s.cfg.DataDir, t.InfoHash().HexString()); err != nil {
+			return nil, errors.Join(refusal, err)
+		}
+		return nil, refusal
+	}
+
+	return tor, nil
+}
+
+// privacyInHand settles the BEP 27 private flag from what is already known,
+// without a single connection: the source itself states it (a .torrent does),
+// or metadata a client that already fetched it handed over.
+//
+// known false means only the swarm can answer, and that is one case: a magnet
+// whose metadata has not arrived. It is the sole reason the enforcement in
+// addTo needs a second half after the metadata wait rather than being a
+// single check before the add.
+//
+// Deliberately not a method on Source: the second argument is the point.
+// Metadata carried over from another client settles the flag exactly as
+// authoritatively as a .torrent's own bytes do, and both callers of the
+// shared client's door arrive with one or the other.
+func privacyInHand(src Source, mi *metainfo.MetaInfo) (private, known bool) {
+	if mi != nil {
+		info, err := mi.UnmarshalInfo()
+		if err != nil {
+			// Unreadable info bytes settle nothing. Saying "not private"
+			// here would be the one lie that matters.
+			return false, false
+		}
+		return info.Private != nil && *info.Private, true
+	}
+	return src.Privacy()
 }
 
 // DHTEnabled reports whether this session's client has DHT and PEX on.
