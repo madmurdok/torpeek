@@ -386,16 +386,59 @@ form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
   form { flex-wrap: wrap; }
 }
 
+/* TOR-173: was `border: 1px dashed var(--rule)`, at 1.36 against --s1 -
+   effectively no edge (see --edge's own comment: 3.0 is the floor for a UI
+   part to be distinguishable at all), while TOR-159 lit every control this
+   frame encloses. Two decisions, not one colour swap:
+
+   THE DASH DROPPED. A dashed rectangle is the conventional "drop it here"
+   cue, but the drop handler is on `document` with a page-wide #drop-overlay
+   (see below) and .hint says so - dropping works anywhere on the page, so a
+   dashed box around just this row promised a narrower target than the truth.
+   Solid, hard-cornered brackets read as this row's own frame rather than as
+   a target, which is what the truth actually is.
+
+   HARD CORNERS, REUSING .run-detail::before's TECHNIQUE (border-radius: .5rem
+   was rounded; the reference sheet's vocabulary is not). Two short strokes
+   per corner rather than a closed rectangle - the same "space instead of
+   borders" HUD idiom .run-detail::before's own comment records, applied to a
+   one-line row instead of a whole panel. Deliberately NO filter: var(--stroke-
+   glow) here, unlike .run-detail::before - that glow is accent-tinted, and
+   --accent is reserved for "this is live or this is where you are" (:root);
+   a permanently accented intake would be exactly the furniture-spending that
+   rule exists to prevent. Focus already owns the accent, on #source itself.
+
+   --edge, the same token every control inside this row already rests on:
+   4.09 against --bg (this row's own background, painted by .intake) and 3.83
+   against --s1 - both clear the 3.0 floor with room, and sharing the token
+   makes the frame read as part of the same family as what it encloses rather
+   than a leftover in the old, quieter --rule. */
 .dropzone {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
   gap: .75rem;
   flex-wrap: wrap;
-  border: 1px dashed var(--rule);
-  border-radius: .5rem;
   padding: .45rem .75rem;
+}
+.dropzone::before, .dropzone::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+}
+.dropzone::before {
+  top: 0; left: 0;
+  border-top: 1px solid var(--edge);
+  border-left: 1px solid var(--edge);
+}
+.dropzone::after {
+  bottom: 0; right: 0;
+  border-bottom: 1px solid var(--edge);
+  border-right: 1px solid var(--edge);
 }
 
 #source {

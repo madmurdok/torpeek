@@ -285,3 +285,79 @@ func TestLeftPanelArtifactsAreFullyRemoved(t *testing.T) {
 			"(intake=%d status=%d form=%d)", intakeIdx, statusIdx, formIdx)
 	}
 }
+
+// TestDropzoneFrameIsHardCorneredAndUsesEdge is TOR-173's guard. .dropzone
+// used to be `border: 1px dashed var(--rule)` (1.36 against --s1, no edge at
+// all by the 3.0 floor --edge's own comment sets) with rounded corners - the
+// opposite of both decisions that ticket makes: the dash implied a narrower
+// drop target than the truth (the handler is on `document`, with a
+// page-wide #drop-overlay doing that job instead), and the reference sheet's
+// corners are hard, with brackets set just inside them, reusing
+// .run-detail::before's own corner-bracket technique rather than a
+// rectangle. Neither may spend --accent: app.css reserves that for "this is
+// live or this is where you are", and a permanently accented resting frame
+// would be exactly the furniture-spending that rule exists to prevent.
+func TestDropzoneFrameIsHardCorneredAndUsesEdge(t *testing.T) {
+	css := stylesheet(t)
+
+	dz := block(t, css, ".dropzone {")
+	if v, ok := dz["border-radius"]; ok && v != "0" {
+		t.Errorf(".dropzone declares border-radius: %q - TOR-173 wants hard corners, "+
+			"matching the reference sheet's vocabulary, not the old rounded box", v)
+	}
+	if v, ok := dz["border"]; ok {
+		t.Errorf(".dropzone still declares its own border (%q) - TOR-173 replaces the "+
+			"dashed --rule box with corner brackets drawn by ::before/::after, not a "+
+			"rectangle border", v)
+	}
+
+	// Both selectors are searched with a leading "\n": .dropzone::after {" is
+	// also, verbatim, the tail of the combined ".dropzone::before,
+	// .dropzone::after {" rule just above (the one that only sets content/
+	// position/width/height), so a bare substring search finds that one
+	// first and silently reads the wrong block. Anchoring on the newline
+	// that starts the dedicated single-selector rule's own line is what
+	// finds the one that actually declares the border colours.
+	for _, rawSel := range []string{"\n.dropzone::before {", "\n.dropzone::after {"} {
+		sel := strings.TrimSpace(rawSel)
+		b := block(t, css, rawSel)
+		sawEdge := false
+		for prop, val := range b {
+			if !strings.Contains(prop, "border") {
+				continue
+			}
+			if strings.Contains(val, "var(--edge)") {
+				sawEdge = true
+			}
+			if strings.Contains(val, "var(--accent") {
+				t.Errorf("%s %s is %q - a resting frame must not spend --accent; focus "+
+					"is where TOR-159 already put it", sel, prop, val)
+			}
+		}
+		if !sawEdge {
+			t.Errorf("%s draws no var(--edge) border - TOR-173 takes --edge, the token "+
+				"TOR-159 measured for exactly this job", sel)
+		}
+		if _, ok := b["filter"]; ok {
+			t.Errorf("%s declares filter (a glow) - that glow is accent-tinted "+
+				"(--stroke-glow) and this is a resting frame, not a live one", sel)
+		}
+		if _, ok := b["box-shadow"]; ok {
+			t.Errorf("%s declares box-shadow - box-shadow paints a glowing rectangle "+
+				"over a stroke-drawn shape (see .run-detail::before's own comment); this "+
+				"frame is stroke-drawn corners, not a box", sel)
+		}
+	}
+
+	// The contrast claim itself, computed rather than trusted: .dropzone has
+	// no background of its own, so its real ground is --bg, painted by the
+	// sticky .intake it sits inside.
+	root := block(t, css, ":root {")
+	edge := hexToken(t, root, "--edge")
+	bg := hexToken(t, root, "--bg")
+	if ratio := contrastRatio(edge, bg); ratio < 3.0 {
+		t.Errorf("--edge (%s) against --bg (%s), .dropzone's own ground, is %.2f:1, "+
+			"want >= 3.0 (the floor for a UI part to be distinguishable at all)",
+			edge, bg, ratio)
+	}
+}
