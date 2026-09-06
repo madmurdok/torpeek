@@ -118,6 +118,28 @@ type RunSummary struct {
 	// the first time anybody reordered anything.
 	Priority      *int `json:"priority,omitempty"`
 	QueuePosition int  `json:"queue_position,omitempty"`
+
+	// Arrival is "this was the Nth torrent added to this server", 1-based,
+	// and it is the figure the Queue column shows (TOR-156). It is NOT
+	// QueuePosition under another name - see runEntry.arrival for the full
+	// three-way distinction - and the two are reported side by side here
+	// precisely so that nothing downstream has to guess which of them a
+	// single number was meant to be. TOR-153 merged two bars that said the
+	// same thing; this is the opposite trap, two facts that look like one,
+	// and the answer is to name both rather than to ship one number twice.
+	//
+	// Present for every LIVE row in every state - queued, running, parked,
+	// done, failed, cancelled - which is the whole change: before this,
+	// the queue column had something to say only about a row still waiting,
+	// and at the shipped queue width of 5 (TOR-149) almost nothing ever is.
+	//
+	// Absent, not zero, for a row found only on disk: the counter is this
+	// process's own, so a run from a previous process was never handed one
+	// (runEntry.arrival says why per-process is the only honest scope for
+	// it). Zero is not a real ordinal - the count is 1-based - so omitempty
+	// says "no ordinal" exactly, the same way it does for QueuePosition
+	// above and for every other absent-is-not-zero field on this type.
+	Arrival int `json:"arrival,omitempty"`
 }
 
 // Live is one row's most recent live reading: peers, seeds, both speeds and
@@ -382,6 +404,11 @@ func (s *Server) listRuns() []RunSummary {
 			// run's own record. A merged row's Live is still the run's own
 			// live reading, exactly as before the merge.
 			Live: info.Live,
+			// TOR-156: unconditional, where the queue's own two fields below
+			// are not. Every live entry has an ordinal and keeps it for as
+			// long as this process holds the row; only a disk-only row, which
+			// never passed through this loop, goes without.
+			Arrival: info.Arrival,
 		}
 		// TOR-140: the queue's own two fields, on exactly the rows the queue
 		// still has something to say about - see RunSummary.Priority for why

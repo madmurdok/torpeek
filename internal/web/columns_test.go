@@ -204,9 +204,23 @@ func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T)
 		t.Error("app.js's queuePosition() does not answer null for a row with no position - a 0 would sort and " +
 			"render as a real place in a 1-based queue")
 	}
-	if !strings.Contains(js, `case "priority": return queuePosition(entry);`) {
-		t.Error(`app.js's sortValue() does not answer the "priority" column from queuePosition() - the Queue ` +
-			`header would sort by something other than the position it displays`)
+	// The Queue column must sort by the figure it DISPLAYS. That subject is
+	// unchanged since TOR-140; which figure it is changed in TOR-156, when
+	// the cell's own number became the arrival ordinal (queuePosition moved
+	// to the labelled second line under it, and queuePosition() itself is
+	// still checked just above, because that line still needs it). A header
+	// left sorting by the position would now reorder the table by a number
+	// most rows do not have while printing one they all do.
+	if !strings.Contains(js, `case "priority": return arrivalOrdinal(entry);`) {
+		t.Error(`app.js's sortValue() does not answer the "priority" column from arrivalOrdinal() - the Queue ` +
+			`header would sort by something other than the figure it displays`)
+	}
+	// And the ordinal's own absent case, the same null-not-zero shape
+	// queuePosition() is held to above: only a row read off disk has none,
+	// and a 0 would sort it as though it had been added before everything.
+	if !strings.Contains(js, "return entry.arrival > 0 ? entry.arrival : null;") {
+		t.Error("app.js's arrivalOrdinal() does not answer null for a row with no ordinal - a 0 would sort " +
+			"and render as a real place in a 1-based count")
 	}
 }
 

@@ -463,6 +463,14 @@ type Server struct {
 	// queueSeq hands out the arrival tiebreak, one per ENQUEUE - see
 	// runEntry.queueSeq for why that is not the same thing as queuedAt.
 	queueSeq uint64
+	// arrivalSeq hands out the arrival ordinal, one per ENTRY CREATED, and
+	// never at any other moment - see runEntry.arrival for the three-way
+	// distinction between this, queueSeq and a queue position, and for why
+	// only a counter that goes up can survive both trimming and a parked
+	// torrent rejoining the queue. It is deliberately never decremented by
+	// trim: the whole point is that the ordinals already handed out keep
+	// meaning what they meant.
+	arrivalSeq int
 	// running is every torrent currently holding a slot, keyed by id. Its
 	// being a map rather than one pointer is TOR-130's whole change: the
 	// concurrency limit is now the number maxActive names, not the shape of
@@ -747,6 +755,7 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	entry := &runEntry{
 		id: newRunID(), source: display, req: req,
 		state: RunQueued, cleanup: cleanup, queuedAt: time.Now(),
+		arrival: s.nextArrivalLocked(),
 	}
 	s.runs[entry.id] = entry
 	s.order = append(s.order, entry.id)
@@ -1053,6 +1062,14 @@ func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
 		id: newRunID(), source: "reopened", state: RunReplaying,
 		infoHash: infoHash, cancel: func() {},
 		queuedAt: time.Now(), startedAt: time.Now(),
+		// A reopen takes an ordinal like any other entry, and that is the
+		// answer rather than an oversight: reopening is how a run this
+		// process never held becomes something it is working on now, so it
+		// joins the order in which this session was asked to do things. The
+		// alternative - no ordinal, because "the torrent was added long ago"
+		// - would leave the one row a person just clicked as the only live
+		// row in the table with a dash where every other one has a number.
+		arrival: s.nextArrivalLocked(),
 	}
 	s.runs[entry.id] = entry
 	s.order = append(s.order, entry.id)
@@ -1827,6 +1844,23 @@ func (s *Server) enqueueWaitingLocked(entry *runEntry) {
 	s.insertWaitingLocked(entry)
 }
 
+// nextArrivalLocked hands out the next arrival ordinal (TOR-156).
+//
+// It sits beside enqueueWaitingLocked deliberately, because the pair is the
+// whole ticket: that one stamps a counter on every ENQUEUE, this one on every
+// entry CREATED, and the two must never be collapsed however similar the
+// lines look. An entry passes through enqueueWaitingLocked more than once -
+// a parked torrent that is decided, a finished row that is topped up or
+// retried (Server.again) - and every one of those must keep the ordinal it
+// already has, which it does for the plain reason that nothing here is
+// reachable from those paths.
+//
+// The caller must hold s.mu.
+func (s *Server) nextArrivalLocked() int {
+	s.arrivalSeq++
+	return s.arrivalSeq
+}
+
 // insertWaitingLocked puts an entry that already has its queueSeq back into
 // the sorted queue - the second half of a priority change, where the entry
 // keeps the arrival it earned and only its level moved.
@@ -2235,6 +2269,21 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 		if pos := s.queuePositionLocked(entry); pos > 0 {
 			m["queue_position"] = pos
 		}
+	}
+	// TOR-156: the arrival ordinal, on EVERY run_state rather than only a
+	// queueable one, and that difference from the two fields above is the
+	// distinction the whole ticket rests on. Priority and position are absent
+	// once a run starts because the queue has nothing left to say about it;
+	// an ordinal is still true of a row that finished yesterday, so gating it
+	// on state would blank the very rows this ticket exists to fill in.
+	//
+	// It never changes, so strictly it only has to travel once - but it rides
+	// along on each message for the reason the paragraph above gives for the
+	// queue's own fields: the hub replays a run's LAST run_state to a page
+	// that reconnects, and a field that appeared on only the first would be
+	// missing from exactly the message a reconnecting page reads.
+	if entry.arrival > 0 {
+		m["arrival"] = entry.arrival
 	}
 	// TOR-117: the state a person watches longest in the worst case - queued
 	// or running, before any metadata has arrived - is also the one this
