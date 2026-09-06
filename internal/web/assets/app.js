@@ -53,7 +53,7 @@ const LIVE_COLUMNS = [
   { key: "availability", label: "Avail", unit: "copies/piece",
     title: "Swarm availability, in copies per piece - not a percentage. Below 1.0 means pieces are missing from the swarm; above 1.0 (commonly) means it is healthy. A dash means this torrent has not been asked for bytes yet, so nothing has reported what the swarm holds." },
   { key: "priority", label: "Queue",
-    title: "This row's own place in the FIFO queue, from its reported queued time - only meaningful while a torrent is actually queued. There is no priority you can set or reorder here yet (that is TOR-140); this is only where the server already has you." },
+    title: "This row's place in the queue, as the server itself holds it - 1 is the next torrent to start. Use ▲ and ▼ at the end of a waiting row to move it up or down; priority orders the torrents that are WAITING and never interrupts one that is already downloading. A dash means this row is not in the queue at all." },
 ];
 
 // buildLiveColumnHeaders inserts the six <th>s into the existing thead row,
@@ -511,38 +511,81 @@ function availabilityCellTitle(entry) {
   return "no reading yet - this torrent has not been asked for bytes, so nothing has reported what the swarm holds";
 }
 
-// queueRank answers "download priority" (TOR-139's own scope note): GET
-// /runs has no priority or queue-position field to read - there is no
-// reordering concept yet, that is TOR-140 - so this is derived from what the
-// response DOES report rather than invented. runs.go documents s.waiting as
-// strict arrival order ("the queue, in arrival order") serviced strictly
-// from the front (dispatch), with a cancelled entry spliced out in place
-// (dropWaitingLocked) rather than the remainder being reshuffled; and
-// listing.go's liveWhen reports a queued row's own QueuedAt as its "when".
-// So ranking every currently-queued row by "when" ascending recovers the
-// server's own FIFO order exactly. Not queued (running, done, on disk,
-// anything else) means this question does not apply, and answers null - not
-// a guess at a position a row does not have.
+// ---------------------------------------------------------------------------
+// THE QUEUE COLUMN, AND THE ONE PLACE ITS POSITION COMES FROM (TOR-140).
 //
-// O(n) per call, called once per row per comparison during a sort - fine at
-// the scale this page ever holds (a person's own torrents, not a swarm's
-// worth of rows).
-function queueRank(entry) {
-  if (entry.state !== "queued") return null;
-  let rank = 1;
-  for (const other of state.runs.values()) {
-    if (other === entry || other.state !== "queued") continue;
-    if (other.when < entry.when || (other.when === entry.when && other.id < entry.id)) rank++;
-  }
-  return rank;
+// TOR-139 had to DERIVE this. GET /runs reported no priority and no position,
+// the queue was strict FIFO over arrival, and so ranking every queued row by
+// its own reported queued time recovered the server's order exactly - a
+// queueRank() function that lived here and answered from state.runs.
+//
+// It is gone, and deliberately not kept alongside the server's answer. The
+// moment a queue can be REORDERED, arrival time stops predicting position,
+// and a page holding its own derivation would draw one order while the server
+// dispatched another - with nothing on screen to say which was real. So the
+// position is now a fact the server reports (listing.go's
+// RunSummary.QueuePosition, and the same field on every run_state that
+// concerns a waiting row) and this file renders it. There is exactly one
+// notion of queue position in the codebase, and it is not this one.
+//
+// Absent (0 or missing) means this row is not waiting for a slot at all -
+// running, parked for a file selection, finished, or read off disk - and
+// answers null, the same ABSENT IS NOT ZERO rule the five live figures
+// follow: position 0 is not a place in a 1-based queue.
+function queuePosition(entry) {
+  return entry.queuePosition > 0 ? entry.queuePosition : null;
 }
+
+// The three levels runs.go's Priority declares, mirrored here because the
+// two buttons have to know what the ends of the band are to disable
+// themselves there. Widening the band is a change in both places, which is
+// why the names match exactly.
+const PRIORITY_LOW = -1;
+const PRIORITY_NORMAL = 0;
+const PRIORITY_HIGH = 1;
+
+// hasPriority is "does the queue still have anything to say about this row",
+// which is the server's own question (RunState.queueable) answered by the
+// presence of the field rather than re-derived from entry.state here. A
+// running or finished row carries no priority at all - not a zero - so this
+// is a null check, and it is what gates whether the row gets controls.
+function hasPriority(entry) {
+  return entry.priority === PRIORITY_LOW || entry.priority === PRIORITY_NORMAL || entry.priority === PRIORITY_HIGH;
+}
+
+function priorityLabel(priority) {
+  if (priority > PRIORITY_NORMAL) return "high";
+  if (priority < PRIORITY_NORMAL) return "low";
+  return "normal";
+}
+
 function queueCellText(entry) {
-  const rank = queueRank(entry);
-  return rank === null ? ABSENT : String(rank);
+  const position = queuePosition(entry);
+  return position === null ? ABSENT : String(position);
 }
+
+// The level under the figure, in the same muted second line the availability
+// cell uses for its own subtitle - and only when it is not the default: a
+// column of rows all reading "normal" would be noise saying nothing, while
+// "high" or "low" on one row is exactly the thing worth seeing at a glance.
+function queueCellMetaText(entry) {
+  if (!hasPriority(entry) || entry.priority === PRIORITY_NORMAL) return "";
+  return priorityLabel(entry.priority);
+}
+
 function queueCellTitle(entry) {
-  const rank = queueRank(entry);
-  if (rank !== null) return "position " + rank + " in the queue, from this row's own queued time";
+  const position = queuePosition(entry);
+  if (position !== null) {
+    return "position " + position + " of the queue the server actually holds, at " +
+      priorityLabel(entry.priority) + " priority" +
+      (position === 1 ? " - this is the next torrent to start" : "");
+  }
+  if (hasPriority(entry)) {
+    // A parked torrent: it has a level, and it will re-enter the queue with
+    // it the moment someone picks files (server.go's DecideRun).
+    return "not in the queue while it waits for a file selection - it will rejoin at " +
+      priorityLabel(entry.priority) + " priority";
+  }
   return entry.disk ? "not in the queue - a row read off disk" : "not in the queue";
 }
 
@@ -551,7 +594,7 @@ function sortValue(entry, key) {
     case "name": return displayName(entry).text.toLowerCase();
     case "status": return badgeLabel(entry).toLowerCase();
     // The five live figures and the queue position are null, never 0, the
-    // moment their reading is absent (hasLive, queueRank) - see compareEntries
+    // moment their reading is absent (hasLive, queuePosition) - see compareEntries
     // for what that null is FOR: an absent row is not "the lowest value", it
     // is excluded from the comparison entirely and sinks to the end.
     case "peers": return hasLive(entry) ? entry.live.peers : null;
@@ -562,7 +605,12 @@ function sortValue(entry, key) {
       const s = availabilityReading(entry);
       return s ? s.copies_per_piece : null;
     }
-    case "priority": return queueRank(entry);
+    // Sorting the Queue column sorts by POSITION, not by level: position is
+    // what the column shows, and it already carries the level inside it -
+    // a high row is at a lower number than the normals it passed. Ascending
+    // is therefore the order the server will actually run them in, which is
+    // the one thing a person clicking this header wants to see.
+    case "priority": return queuePosition(entry);
     case "when":
     default: return entry.when || 0;
   }
@@ -735,18 +783,46 @@ function newRunEntry(id) {
   const availMeta = document.createElement("span");
   availMeta.className = "run-meta run-cell-availability-meta";
   availCell.append(availValue, availMeta);
+  // The queue cell is two lines, the same shape the availability cell uses:
+  // the position on top, the priority level under it when it is not the
+  // default (TOR-140). It stays a pure FIGURE column - the two buttons that
+  // change the level live in the actions cell below, beside Cancel, because
+  // .run-cell-metric's own rule in app.css is "narrow, monospace,
+  // tabular-nums, right-aligned, figures meant to be compared straight down
+  // a column", and putting controls in one would break that for every cell
+  // in the row.
   const queueCell = document.createElement("td");
   queueCell.className = "run-cell-metric run-cell-queue";
+  const queueValue = document.createElement("span");
+  queueValue.className = "run-cell-queue-value";
+  const queueMeta = document.createElement("span");
+  queueMeta.className = "run-meta run-cell-queue-meta";
+  queueCell.append(queueValue, queueMeta);
 
   const actionsCell = document.createElement("td");
   actionsCell.className = "run-cell-actions";
+  // The two verbs a WAITING torrent has, in the column the row's verbs
+  // already live in: move it up the queue, move it down. Absent - not
+  // disabled - for every row the queue has nothing to say about, the same
+  // way Cancel is absent on a finished one: a control that cannot do
+  // anything is worse than no control, because it invites the click.
+  const raise = document.createElement("button");
+  raise.type = "button";
+  raise.className = "run-priority run-priority-up";
+  raise.textContent = "▲";
+  raise.hidden = true;
+  const lower = document.createElement("button");
+  lower.type = "button";
+  lower.className = "run-priority run-priority-down";
+  lower.textContent = "▼";
+  lower.hidden = true;
   const cancel = document.createElement("button");
   cancel.type = "button";
   cancel.className = "run-cancel";
   cancel.title = "Cancel";
   cancel.textContent = "✕";
   cancel.hidden = true;
-  actionsCell.append(cancel);
+  actionsCell.append(raise, lower, cancel);
 
   row.append(nameCell, whenCell, statusCell, peersCell, seedsCell, downCell, upCell, availCell, queueCell, actionsCell);
 
@@ -835,6 +911,15 @@ function newRunEntry(id) {
     // field rather than defaulting any piece of it to 0 - see that block's
     // own opening comment for why.
     live: null,
+    // priority is the queue level the server reports for this row (runs.go's
+    // Priority, TOR-140) and queuePosition its 1-based place in the queue.
+    // null and 0 mean the same thing they mean on the wire: this row is not
+    // one the queue has anything to say about - never "normal" and never
+    // "position zero", which is why the first is null rather than 0 (see
+    // hasPriority, and RunSummary.Priority's own doc for why one field is a
+    // pointer server-side and the other is not).
+    priority: null,
+    queuePosition: 0,
     // when is this row's sort key for the default (date, newest-first) sort.
     // Set once, here, at creation - never touched again by a status update -
     // which is what keeps a live run from jumping position as events arrive.
@@ -865,7 +950,8 @@ function newRunEntry(id) {
     rowWhen: whenCell, rowCancel: cancel, rowToggle: main,
     rowPeers: peersCell, rowSeeds: seedsCell, rowDown: downCell, rowUp: upCell,
     rowAvail: availValue, rowAvailMeta: availMeta, rowAvailCell: availCell,
-    rowQueue: queueCell,
+    rowQueue: queueValue, rowQueueMeta: queueMeta, rowQueueCell: queueCell,
+    rowRaise: raise, rowLower: lower,
     detailRowEl: detailRow,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
@@ -902,6 +988,18 @@ function newRunEntry(id) {
   cancel.addEventListener("click", (event) => {
     event.stopPropagation();
     cancelRun(entry.id);
+  });
+  // Same stopPropagation the cancel button needs, for the same reason:
+  // reordering the queue must not also open or close the row it was done
+  // from - a person moving three torrents around would otherwise leave three
+  // details expanded behind them.
+  raise.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setPriority(entry, entry.priority + 1);
+  });
+  lower.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setPriority(entry, entry.priority - 1);
   });
   entry.detailCancel.addEventListener("click", () => cancelRun(entry.id));
 
@@ -951,19 +1049,6 @@ function resetRunContent(entry) {
   showTorrent(entry, "");
 }
 
-// refreshQueuePositions repaints the queue column of every currently-queued
-// row from queueRank(), which reads live off state.runs each time rather
-// than a cached number - so this is never more than a display catch-up, and
-// never a second place the ranking itself is decided.
-function refreshQueuePositions() {
-  for (const other of state.runs.values()) {
-    if (other.state !== "queued") continue;
-    other.rowQueue.textContent = queueCellText(other);
-    other.rowQueue.title = queueCellTitle(other);
-    other.rowQueue.dataset.absent = "false";
-  }
-}
-
 function syncEntry(entry) {
   entry.rowEl.dataset.state = badgeState(entry);
   entry.rowBadge.textContent = badgeLabel(entry);
@@ -1010,16 +1095,35 @@ function syncEntry(entry) {
   entry.rowAvailMeta.textContent = availabilityMetaText(entry);
   entry.rowAvailCell.title = availabilityCellTitle(entry);
   entry.rowAvailCell.dataset.absent = String(!availabilityReading(entry));
+  // The queue column, and the two controls that change it (TOR-140). Note
+  // what is NOT here any more: a pass over every other queued row to repaint
+  // its rank. TOR-139 needed one, because dequeuing #1 silently made #2 into
+  // #1 and only this page knew it; now the server publishes a run_state to
+  // every row whose position moved (server.go's queueRecordsLocked), so each
+  // row's own sync is the whole of it and no row's cell depends on another
+  // row's last update being right.
   entry.rowQueue.textContent = queueCellText(entry);
-  entry.rowQueue.title = queueCellTitle(entry);
-  entry.rowQueue.dataset.absent = String(queueRank(entry) === null);
-
-  // A change to THIS row's queued-ness can shift every other queued row's
-  // own rank (dequeuing #1 makes #2 into #1), and syncEntry is only ever
-  // called for the one entry that changed - so the queue column repaints
-  // every currently-queued row's cell here rather than trusting each row's
-  // own last sync to still be right.
-  refreshQueuePositions();
+  entry.rowQueueMeta.textContent = queueCellMetaText(entry);
+  entry.rowQueueCell.title = queueCellTitle(entry);
+  entry.rowQueueCell.dataset.absent = String(queuePosition(entry) === null);
+  const canReorder = !entry.disk && hasPriority(entry);
+  entry.rowRaise.hidden = !canReorder;
+  entry.rowLower.hidden = !canReorder;
+  if (canReorder) {
+    // Disabled at the ends of the band rather than hidden there: a button
+    // that vanishes when you reach the top makes the pair jump sideways
+    // under the cursor, and the row is the one place a person is aiming.
+    entry.rowRaise.disabled = entry.priority >= PRIORITY_HIGH;
+    entry.rowLower.disabled = entry.priority <= PRIORITY_LOW;
+    entry.rowRaise.title = entry.rowRaise.disabled
+      ? "already at high priority - the front of the queue"
+      : "move up the queue (to " + priorityLabel(entry.priority + 1) + " priority)";
+    entry.rowLower.title = entry.rowLower.disabled
+      ? "already at low priority - behind everything else waiting"
+      : "move down the queue (to " + priorityLabel(entry.priority - 1) + " priority)";
+    entry.rowRaise.setAttribute("aria-label", "Move this torrent up the queue");
+    entry.rowLower.setAttribute("aria-label", "Move this torrent down the queue");
+  }
 
   reorderRuns();
 
@@ -1177,6 +1281,33 @@ async function cancelRun(id) {
     await post("runs/cancel", { id });
   } catch (err) {
     showError(String(err.message || err));
+  }
+}
+
+// setPriority moves one waiting torrent up or down the queue (TOR-140) - the
+// whole of what the ▲/▼ buttons do, and the answer to the pain this release
+// is written from: changing a priority no longer means cancelling a download
+// and adding it again at the back.
+//
+// An ABSOLUTE level is sent, never a step, even though the buttons are steps:
+// the arithmetic happens here, against the level this page was last told, and
+// the server is asked for that exact value. Sending "one higher" would let
+// two clicks on a stale row walk a torrent past where anybody asked for, and
+// a retried request would do it a second time.
+//
+// NOTHING HERE WRITES entry.priority OR entry.queuePosition. The response
+// carries both, and they are still ignored: the server publishes a run_state
+// to this row and to every other row the move displaced, and applying only
+// those keeps one path into those two fields for every browser tab watching -
+// this one has no standing to know sooner than the others.
+async function setPriority(entry, priority) {
+  const want = Math.max(PRIORITY_LOW, Math.min(PRIORITY_HIGH, priority));
+  if (!hasPriority(entry) || want === entry.priority) return;
+  try {
+    await post("runs/priority", { id: entry.id, priority: want });
+  } catch (err) {
+    showError(String(err.message || err));
+    logFor(entry, "could not change the queue priority: " + (err.message || err));
   }
 }
 
@@ -2521,6 +2652,19 @@ function apply(ev) {
       entry.provisionalName = ev.provisional_name;
     }
     entry.error = ev.error || "";
+    // TOR-140: run_state carries the queue's two fields only while this run
+    // is still one the queue has something to say about (server.go's
+    // runStateFieldsLocked, gated on RunState.queueable). Their ABSENCE is
+    // information, so both are CLEARED rather than left at their last value:
+    // the run_state announcing queued -> running is exactly the message that
+    // must stop the row showing the position it held a moment ago.
+    //
+    // This message also arrives for rows nobody touched. Reordering, a
+    // cancel, or a run simply starting moves everybody behind it, and the
+    // server publishes a run_state to each of them - so a row's position
+    // stays right without this page recomputing anything.
+    entry.priority = ev.priority === undefined ? null : ev.priority;
+    entry.queuePosition = ev.queue_position || 0;
     // ev.partial rides on exactly one run_state a run ever publishes: the one
     // sent after this run's own record was written to disk (server.go's
     // pump, TOR-87) - the only moment the verdict this page is already
@@ -2827,6 +2971,14 @@ async function loadRuns() {
     // current, the same relationship entry.partial has with run_state's own
     // "partial" field.
     entry.live = row.live || null;
+    // TOR-140: the queue's own two fields, present only for a row still
+    // waiting to be told to go (listing.go's RunSummary). Read, never
+    // derived - see queuePosition's own comment for what was deleted to make
+    // that true. `row.priority === undefined` rather than a falsy test: 0 is
+    // PriorityNormal, a real answer, and `row.priority || null` would erase
+    // exactly the commonest one.
+    entry.priority = row.priority === undefined ? null : row.priority;
+    entry.queuePosition = row.queue_position || 0;
     // row.when is GET /runs's own answer for this row - the newest lifecycle
     // timestamp for a live entry, run.json's created_at for a disk one - and
     // it is the one moment this page overwrites entry.when after creation:
