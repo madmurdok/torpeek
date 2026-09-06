@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,11 +285,40 @@ func TestMergesALiveFinishedRunWithItsOwnDiskRecord(t *testing.T) {
 	}
 }
 
-// TestQueuedOrRunningNeverMergesWithADiskRecord: only a final live entry may
-// merge. A live run must never be hidden behind a disk snapshot while it is
-// still going - the queued/running row always carries its own live id and
-// state, whatever a same-infohash disk record says.
-func TestQueuedOrRunningNeverMergesWithADiskRecord(t *testing.T) {
+// rowsFor pulls every row of one infohash out of a listing. The COUNT is the
+// point of it: TOR-162 is a ticket about how many rows one torrent gets, so
+// the tests below assert on the length of this and then on the row itself,
+// rather than reaching for the first match and never noticing a second.
+func rowsFor(rows []RunSummary, hash string) []RunSummary {
+	var out []RunSummary
+	for _, row := range rows {
+		if row.InfoHash == hash {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// TestALiveRunAgainstAnExistingRecordIsStillOneRow is TOR-54's
+// TestQueuedOrRunningNeverMergesWithADiskRecord, INVERTED, the same way
+// TOR-140 inverted TOR-139's queue-ranking test rather than deleting it.
+//
+// The old test asserted TWO rows here and was right to, given the rule it
+// guarded: a live entry merged only once it was final, so a run going against
+// a directory that already had a record was listed beside that record. What
+// it did not say is that the shape it constructs - a record on disk, then an
+// ordinary live run of the same torrent - is a REGENERATE (TOR-68), and a
+// reopen (TOR-55), and since TOR-152 a top-up. So this test is the evidence
+// the ticket asked for: the duplicate was NOT a top-up regression, it was
+// asserted as intended behaviour from the day listRuns was written, and
+// top-up only made it easy to hit.
+//
+// The subject is unchanged and so is the half that was always right: a live
+// run must never be HIDDEN behind a disk snapshot. That is now checked on the
+// merged row itself - it has to carry the live id, the live state and the
+// live name, and the disk record may only fill in what the live entry has
+// nothing to say about.
+func TestALiveRunAgainstAnExistingRecordIsStillOneRow(t *testing.T) {
 	root := t.TempDir()
 	const (
 		hash   = "d0d0000000000000000000000000000000000d"
@@ -315,19 +345,226 @@ func TestQueuedOrRunningNeverMergesWithADiskRecord(t *testing.T) {
 	fake.send(t, source, core.MetadataReady{Name: "Live Run", InfoHash: hash})
 	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == hash })
 
-	rows := listRuns(t, ts.URL)
-	var matches []RunSummary
-	for _, row := range rows {
-		if row.InfoHash == hash {
-			matches = append(matches, row)
-		}
+	// Listed WHILE the run is going: the stream is still open, nothing has
+	// been finished, and this is the exact window the old rule refused to
+	// merge in.
+	matches := rowsFor(listRuns(t, ts.URL), hash)
+	if len(matches) != 1 {
+		t.Fatalf("torrent %s appears %d times while a run against its own directory is going, want 1: %+v",
+			hash, len(matches), matches)
 	}
-	if len(matches) != 2 {
-		t.Fatalf("run %s appears %d times while live, want 2 (the running row and the untouched disk row): %+v", hash, len(matches), matches)
+
+	row := matches[0]
+	if row.ID != run.id {
+		t.Errorf("the one row's id = %q, want the live run's %q - the live entry must not be the half "+
+			"that disappears into the merge", row.ID, run.id)
+	}
+	if row.State != "running" {
+		t.Errorf("the one row's state = %q, want running - a merge that reported the disk record's silence "+
+			"would hide a run that is going", row.State)
+	}
+	if row.Name != "Live Run" {
+		t.Errorf("the one row's name = %q, want the live entry's own confirmed %q rather than the record's "+
+			"older reading", row.Name, "Live Run")
+	}
+	if row.Params != "deadbeef" {
+		t.Errorf("the one row's params = %q, want deadbeef - the merge's whole job is to tell the live row "+
+			"which directory it is filling", row.Params)
+	}
+}
+
+// TestATopUpInFlightIsStillOneRow is TOR-162's acceptance criterion, and the
+// load-bearing word in it is DURING. A test that listed after the top-up
+// finished would pass against the rule this ticket REPLACED - a final entry
+// merged even then - so it would prove nothing whatsoever. Everything here is
+// asserted with the run's event stream still open.
+//
+// It also covers what the test above cannot: the merged counts. A top-up runs
+// against a set that is half-taken, so the row has to report that set's own
+// standing (16 of 20 per file, two files short) while the run filling it is
+// still going - which before this ticket was reported on a SECOND row, the
+// one a person could not act on.
+func TestATopUpInFlightIsStillOneRow(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "3333bb22cc33dd44ee55ff66aa77bb88cc99dd11"
+		params = "deadbeefdeadbeef"
+		source = "magnet:?xt=urn:btih:" + hash
+	)
+	writePartialSet(t, root, hash, params, source, budgetCost(), takenPerFile, takenPerFile)
+
+	fake, srv, base := serverOver(t, root, 0)
+
+	// A finished run of this torrent, so the page's row has a live id to top
+	// up from - which is the path that re-arms the entry in place
+	// (Server.again) rather than minting a second one.
+	first := startRun(t, base, source)
+	waitFor(t, func() bool { return fake.started(source) })
+	fake.send(t, source, core.MetadataReady{Name: "Season 1", InfoHash: hash})
+	fake.finish(t, source)
+	waitFor(t, func() bool { return stateOf(t, srv, first.id) == RunDone })
+
+	resp := post(t, base, "/runs/topup", `{"infohash":"`+hash+`","id":"`+first.id+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/topup: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	// The second call to the runner: the top-up is now IN FLIGHT, and its
+	// stream stays open for the rest of this test.
+	waitFor(t, func() bool { return fake.count() == 2 })
+	if got := stateOf(t, srv, first.id); got.final() {
+		t.Fatalf("the topped-up entry is already %s - this test has to list while the run is going", got)
+	}
+
+	matches := rowsFor(listRuns(t, base), hash)
+	if len(matches) != 1 {
+		t.Fatalf("torrent %s appears %d times while a top-up is in flight, want 1 - this is the "+
+			"three-rows-for-two-torrents the ticket was found by: %+v", hash, len(matches), matches)
+	}
+
+	row := matches[0]
+	if row.ID != first.id {
+		t.Errorf("the one row's id = %q, want the re-armed entry's %q", row.ID, first.id)
+	}
+	if row.State != string(RunRunning) {
+		t.Errorf("the one row's state = %q, want running", row.State)
+	}
+	if row.Params != params {
+		t.Errorf("the one row's params = %q, want %q - the set being filled", row.Params, params)
+	}
+	if row.Files != 2 || row.Selected != 2 || row.Complete != 0 {
+		t.Errorf("the one row reports files/selected/complete = %d/%d/%d, want 2/2/0 - the standing of the "+
+			"set this run is filling, which is what the second row used to carry",
+			row.Files, row.Selected, row.Complete)
+	}
+	if !row.Partial() {
+		t.Error("the one row is not partial, but the set it is filling is 16 of 20 frames short on both " +
+			"files - that verdict is the only thing on the row that says why a top-up is running at all")
+	}
+}
+
+// TestAQueuedTopUpIsStillOneRow is the state the replaced rule was actually
+// WRITTEN for: an entry that is waiting for a slot, has written nothing, and
+// yet already names a directory that has a record. Worth its own test because
+// queued is the one state where the old reasoning ("it has not written a
+// record yet, whatever its infohash") is literally true and still does not
+// justify a second row.
+//
+// The entry knows its infohash here only because a top-up RE-ARMS the row it
+// was started from, and that row learned it from its own first run
+// (Server.again keeps what belongs to the torrent). A top-up started against
+// a disk-only row mints a fresh entry instead, which has no infohash until
+// its own metadata_ready - and for that window nothing can merge, because the
+// key does not exist yet. app.js's liveRowFor had the identical hole for the
+// identical reason, so removing it loses nothing.
+func TestAQueuedTopUpIsStillOneRow(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "3333bb22cc33dd44ee55ff66aa77bb88cc99dd22"
+		params = "deadbeefdeadbeef"
+		source = "magnet:?xt=urn:btih:" + hash
+		hog    = "magnet:?xt=urn:btih:9999bb22cc33dd44ee55ff66aa77bb88cc99dd22"
+	)
+	writePartialSet(t, root, hash, params, source, budgetCost(), takenPerFile, takenPerFile)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	// One slot, so the top-up below has to wait for it rather than start.
+	cfg.MaxActiveTorrents = 1
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	first := startRun(t, ts.URL, source)
+	waitFor(t, func() bool { return fake.started(source) })
+	fake.send(t, source, core.MetadataReady{Name: "Season 1", InfoHash: hash})
+	fake.finish(t, source)
+	waitFor(t, func() bool { return stateOf(t, srv, first.id) == RunDone })
+
+	// Something else takes the only slot and keeps it: its stream stays open
+	// for the rest of the test, so nothing dispatches behind it.
+	startRun(t, ts.URL, hog)
+	waitFor(t, func() bool { return fake.started(hog) })
+
+	resp := post(t, ts.URL, "/runs/topup", `{"infohash":"`+hash+`","id":"`+first.id+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/topup: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if got := stateOf(t, srv, first.id); got != RunQueued {
+		t.Fatalf("the topped-up entry is %s, want queued - this test needs the queued window", got)
+	}
+
+	matches := rowsFor(listRuns(t, ts.URL), hash)
+	if len(matches) != 1 {
+		t.Fatalf("torrent %s appears %d times while its top-up waits for a slot, want 1: %+v",
+			hash, len(matches), matches)
+	}
+	if row := matches[0]; row.ID != first.id || row.State != string(RunQueued) {
+		t.Errorf("the one row is %+v, want the queued live entry %q", row, first.id)
+	}
+}
+
+// TestTwoCapturePlansOfOneTorrentStayTwoRows is the line TOR-162 deliberately
+// did NOT cross. Dropping finality from the merge key does not touch the other
+// half of the rule: an infohash naming more than one result set has no single
+// record to pair a live entry with, TOR-54 chose to list them all rather than
+// guess, and this pins that choice so a later widening of the key cannot
+// silently swallow a set a person is looking at.
+func TestTwoCapturePlansOfOneTorrentStayTwoRows(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "d1d1000000000000000000000000000000000d11"
+		source = "magnet:?xt=urn:btih:" + hash
+	)
+
+	for _, params := range []string{"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"} {
+		writeRun(t, root, hash, params, cache.Run{
+			Version:  cache.Version,
+			InfoHash: hash,
+			Name:     "Two Plans",
+			Videos:   []cache.File{{Index: 0, Path: "a.mkv"}},
+			Selected: []int{0},
+			Complete: []int{0},
+		})
+	}
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	run := startRun(t, ts.URL, source)
+	fake.send(t, source, core.MetadataReady{Name: "Two Plans", InfoHash: hash})
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == hash })
+
+	matches := rowsFor(listRuns(t, ts.URL), hash)
+	if len(matches) != 3 {
+		t.Fatalf("torrent %s appears %d times, want 3 - the live row plus both sets on disk, since no one "+
+			"record can be paired with the live entry: %+v", hash, len(matches), matches)
 	}
 	for _, row := range matches {
-		if row.ID == run.id && row.State != "running" {
-			t.Errorf("the live row's state was overwritten: %+v", row)
+		if row.ID == run.id && row.Params != "" {
+			t.Errorf("the live row was paired with set %q anyway - merging on a guess is what this rule "+
+				"refuses: %+v", row.Params, row)
+		}
+	}
+}
+
+// TestThePageKeepsNoMergeRuleOfItsOwn is the third acceptance criterion:
+// once the listing holds the invariant, app.js's liveRowFor has to GO rather
+// than sit there as a second implementation of the same rule. Two copies of
+// one rule is what this ticket exists to close - the rule was in the client,
+// where a second consumer of GET /runs could not see it - so leaving the
+// workaround behind would leave the ticket half-done.
+//
+// Read as served text, the way every other front-end guard in this package
+// works (see columns_test.go's own opening note on why there is no JS runner
+// here).
+func TestThePageKeepsNoMergeRuleOfItsOwn(t *testing.T) {
+	js := appJS(t)
+
+	for _, gone := range []string{"function liveRowFor(", "liveRowFor(row)"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("app.js still contains %q - the page is still deciding which rows are the same torrent, "+
+				"beside a listing that now decides it for every consumer", gone)
 		}
 	}
 }

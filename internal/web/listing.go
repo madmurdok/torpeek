@@ -254,17 +254,22 @@ func partial(complete, selected int) bool {
 // Selected/Complete - Partial() alone stays the only place the comparison is
 // written.
 //
-// This does not make a live run's badge any more (or less) able to show
-// partial than it already was. Selected and Complete are only ever non-zero
-// once listRuns has merged a disk record in - never for a live entry that
-// has not yet reached a final state (see this type's own field comments) -
-// so Partial() answers false at exactly the moments it always did. TOR-80
+// A LIVE ROW CAN NOW ANSWER TRUE HERE, which it could not before TOR-162.
+// Selected and Complete are still only ever non-zero once listRuns has
+// merged a disk record in, but that merge no longer waits for a final state,
+// so a top-up in flight against a half-finished set reports partial: true
+// beside state: "running". That is the set's own honest standing - those are
+// the very frames the run is reusing - and it does not become a badge:
+// app.js reads "partial" only for a row already done (badgeState), so what a
+// person sees while a run is going still comes from the run's own state. A
+// consumer that branched on partial without reading state beside it was
+// already wrong about a disk row, which has no state at all. TOR-80
 // left one gap here, closed by TOR-87 in server.go's pump rather than in
 // this method: the page also learns of a run's state over the WebSocket
 // (run_state records), and until TOR-87 run_state carried neither count, so
 // a run that went running -> done while a page was open kept whatever
-// "partial" this response had last reported (false, since a live entry has
-// nothing merged in) until that page's next GET /runs. Closing it here would
+// "partial" this response had last reported until that page's next
+// GET /runs. Closing it here would
 // have meant this method reaching into the registry and the filesystem for
 // an entry it is never handed - the fix belongs where run_state itself is
 // built, once that message's own entry has reached a final state and (per
@@ -291,20 +296,70 @@ type diskRun struct {
 // registry does not already account for - merged so a run that is both live
 // and already on disk appears once.
 //
-// A live entry only merges with a disk row when it has reached a final state
-// with a known infohash (see runs.go's RunState.final and RunInfo.InfoHash)
-// and that infohash names exactly one directory on disk. A queued or running
-// entry can never merge - it has not written a record yet, whatever its
-// infohash - so it is never at risk of being hidden behind a stale disk row.
-// When an infohash names more than one directory - different capture plans
-// of the same torrent, which core.ParamsKey distinguishes but this package
-// deliberately does not compute (it is a client of the event stream, not a
-// second place run parameters are decided, per ARCHITECTURE.md) - merging is
-// skipped rather than guessed: the live entry is listed without Files or
-// Complete, and every one of those disk directories is listed too. That is
-// the one case a run can still show up twice; it is rare (the same torrent
-// captured under two different plans, one of them still in memory) and
-// listing both is safer than silently merging with the wrong one.
+// THE MERGE KEY IS THE INFOHASH, AT ANY STATE, and TOR-162 is the ticket that
+// took the word "final" out of it. The rule used to be that a live entry
+// merged only once it had FINISHED, on the reasoning that a queued or running
+// entry has not written a record yet and must never be hidden behind a stale
+// one. That was true for as long as a live run always PRECEDED its own
+// record. Three things break it, and all three predate the ticket:
+//
+//   - a TOP-UP (TOR-152) spends its whole life non-final against a directory
+//     that already has a record - that is what a top-up IS;
+//   - a REGENERATE (TOR-68) is an ordinary run started against a torrent that
+//     already has at least one set on disk;
+//   - a REOPEN (TOR-55) replays a record that is on disk by definition, and
+//     RunReplaying is not final either.
+//
+// In every one of them the same torrent was listed twice for the duration of
+// the run. It is a LATENT BUG rather than a regression: TOR-54's own test
+// (the ancestor of TestALiveRunAgainstAnExistingRecordIsStillOneRow) asserted
+// the two rows as intended behaviour from the day this function was written,
+// and top-up only made the shape easy to hit rather than introducing it.
+//
+// Dropping finality is safe because the merge has never been a merge of
+// EQUALS: everything that identifies the row - id, state, error, the live
+// reading, When - is the live entry's, and only Params, the three counts and
+// (since this ticket) a name the live entry does not have yet come off disk.
+// A merged row cannot hide a live run; it can only tell that live run which
+// directory it is filling and what is already in it, which for a top-up is
+// exactly the truth a person is watching for.
+//
+// What it CANNOT do is know which set a non-final entry will write. A live
+// entry knows its infohash only after metadata_ready and never knows its
+// params at all - this package is a client of the event stream, not a second
+// place core.ParamsKey is computed (ARCHITECTURE.md) - so "same torrent, same
+// params" is not a key that exists on this side of the join. The considered
+// alternative was to have the top-up path MARK its entry with the set it was
+// launched against; it was declined because it answers only one of the three
+// shapes above (a regenerate and a fresh run have no set to be marked with),
+// which would leave the invariant half-held in the listing and half-held in
+// the page - the exact split this ticket exists to close. So the one guess
+// this makes is that a non-final entry against a torrent with exactly ONE set
+// on disk is filling that set. It fails toward one row rather than two, and
+// it self-corrects: a run that turns out to have written a sibling set leaves
+// two directories behind, and the next listing reports both.
+//
+// One window stays open and cannot be closed here: an entry that has not
+// learned its infohash yet - a fresh run, queued or running before its own
+// metadata_ready - has no key at all, so a torrent added a second time from
+// scratch is two rows until its metadata arrives. app.js's liveRowFor had the
+// identical hole for the identical reason (it skipped any entry with no
+// infohash), so nothing was lost by deleting it; closing this one means
+// keying on the SOURCE, which two different requests can legitimately share.
+//
+// When an infohash names more than one directory - different capture plans of
+// the same torrent - merging is skipped rather than guessed: the live entry is
+// listed without Files or Complete, and every one of those disk directories is
+// listed too. That is the one case a run can still show up twice, it is
+// TOR-54's own deliberate decision, and listing both is safer than silently
+// merging with the wrong one.
+//
+// consumed also guards the second thing an unconditional key could do: two
+// live entries for one infohash (two tabs topping up the same set, say) can
+// each want the same record, and only the first - oldest, since s.order is
+// oldest-first - takes it. Those are still two rows, because they are two real
+// runs; merging live entries with EACH OTHER would hide one, which is a
+// different and worse failure than showing both.
 func (s *Server) listRuns() []RunSummary {
 	live := s.snapshot()
 	disk := walkRuns(s.cfg.OutputRoot)
@@ -336,10 +391,22 @@ func (s *Server) listRuns() []RunSummary {
 			row.Priority = &level
 			row.QueuePosition = info.QueuePosition
 		}
-		if info.State.final() && info.InfoHash != "" {
-			if idxs := byHash[info.InfoHash]; len(idxs) == 1 {
+		if info.InfoHash != "" {
+			if idxs := byHash[info.InfoHash]; len(idxs) == 1 && !consumed[idxs[0]] {
 				d := disk[idxs[0]]
-				row.Name, row.Params = d.Name, d.Params
+				// The live entry's own confirmed name WINS, where before this
+				// ticket the record's always did. Both are confirmed - a disk
+				// record's name was written by a completed metadata pass, so
+				// neither is a guess (TOR-117's distinction) - but they are
+				// two readings of one torrent and the live one is this
+				// process's own, taken now. The record still answers for the
+				// rows that have nothing: a queued top-up has no name of its
+				// own until its metadata arrives, and before this ticket no
+				// non-final row ever reached this branch to be given one.
+				if row.Name == "" {
+					row.Name = d.Name
+				}
+				row.Params = d.Params
 				row.Files, row.Complete, row.Selected = d.Files, d.Complete, d.Selected
 				if row.Source == "" {
 					row.Source = d.Source

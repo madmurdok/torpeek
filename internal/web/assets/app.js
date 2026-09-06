@@ -3494,22 +3494,18 @@ async function loadRuns() {
 
   for (const row of data.runs || []) {
     const disk = !row.id;
-    // TOR-152: a disk row for a torrent this page is ALREADY showing as a
-    // live run is the same torrent, and drawing both would be two rows for
-    // one of them (TOR-140).
+    // NOTHING HERE DECIDES WHICH ROWS ARE THE SAME TORRENT, and TOR-162 is
+    // what deleted the code that did. TOR-152 had to keep "one torrent, one
+    // row" (TOR-140) from this loop, with a liveRowFor() that skipped a disk
+    // row whose torrent a live entry on this page was already showing,
+    // because listing.go merged a live entry with its record only once the
+    // entry was FINAL and a top-up spends its whole life before that. The
+    // merge no longer waits for a final state (listing.go's listRuns), so
+    // every row this loop is handed is already one torrent's one row - and
+    // the rule now lives where a second consumer of GET /runs can see it,
+    // which was the point of moving it rather than the point of the code
+    // that moved.
     //
-    // GET /runs cannot merge them itself here, and that is not an oversight:
-    // listing.go merges a live entry with a disk record only once the entry
-    // has reached a FINAL state, because a queued or running entry has not
-    // written a record and must never be hidden behind a stale one. A
-    // top-up spends its whole life in exactly that non-final window - it is
-    // a run against a directory that already has a record - so a reload
-    // while one is going would list the set being filled beside the run
-    // filling it. Skipping it here is the client-side half of the same
-    // "one torrent, one row" rule, and it is safe for the same reason the
-    // server's version is: this only ever hides a row whose infohash and
-    // params a live entry on this page already names.
-    if (disk && liveRowFor(row)) continue;
     // A disk-only row has no run id to key on - nothing ever minted one for
     // it - so infohash+params, the same pair that addresses it for reopening,
     // stands in. TOR-54 documented that the same torrent captured under two
@@ -3585,29 +3581,6 @@ async function loadRuns() {
     }
     syncEntry(entry);
   }
-}
-
-// liveRowFor finds a live entry on this page already showing the torrent (and
-// the result set) a disk row names, or null.
-//
-// A FINAL live entry is deliberately not a match: listing.go merges those
-// itself, and one that it declined to merge was declined for a reason worth
-// keeping - an infohash naming two capture plans, which is the documented
-// case where the same torrent legitimately shows up twice (TOR-54). Only a
-// row that is mid-flight is hidden here, which is the case the server cannot
-// merge yet.
-//
-// The params match tolerates a live row that does not know its own set yet:
-// run_state carries no params, so a run that started on this page has none
-// until GET /runs or a top-up offer tells it one.
-function liveRowFor(row) {
-  for (const entry of state.runs.values()) {
-    if (entry.disk || !entry.infohash || entry.infohash !== row.infohash) continue;
-    if (FINAL.has(entry.state)) continue;
-    if (entry.params && row.params && entry.params !== row.params) continue;
-    return entry;
-  }
-  return null;
 }
 
 // A dropped .torrent is bytes, not a string, so it takes a different request

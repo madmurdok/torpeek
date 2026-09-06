@@ -619,9 +619,15 @@ func TestTheServedPageOffersToppingUpAndRetrying(t *testing.T) {
 		"run-again-go",
 		"run-again-retry",
 		"run-again-cost",
-		// One torrent, one row (TOR-140), kept true while a top-up is going -
-		// the window GET /runs cannot merge across.
-		"function liveRowFor",
+		// "function liveRowFor" was here: one torrent, one row (TOR-140),
+		// kept true from the page while a top-up was going. TOR-162 moved
+		// that rule into listing.go, where every consumer of GET /runs gets
+		// it, and deleted this copy - so the assertion moved too, inverted,
+		// to TestThePageKeepsNoMergeRuleOfItsOwn (listing_test.go), which
+		// now guards that the page has no merge rule of its own at all.
+		// The invariant itself is checked at the source by
+		// TestATopUpInFlightIsStillOneRow.
+		//
 		// The figure, before it is spent.
 		"more traffic",
 		// Pieces are discarded after every run (REQUIREMENTS.md 2.9), so a
