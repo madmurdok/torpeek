@@ -1157,3 +1157,54 @@ func TestLiveRowMeasuringZeroPeersStillCarriesLiveFigures(t *testing.T) {
 		t.Errorf(`live carries "swarm" before the availability reading is known: %+v`, live)
 	}
 }
+
+// TestAProgressEventReachesTheLiveRow closes TOR-136's last gap, and it is the
+// one test the rest of that ticket could not have: every other live-row test
+// calls runEntry.applyProgress by hand, because server.go was being rebuilt
+// for the queue width while they were written. Calling it by hand proves the
+// shape downstream is right and says nothing about whether anything ever
+// calls it - and for a while nothing did, so GET /runs reported every live
+// row's figures as absent while every one of those tests passed.
+//
+// So this one puts a real core.Progress onto a run's event stream and reads
+// the row back off the HTTP endpoint, with pump the only thing in between.
+func TestAProgressEventReachesTheLiveRow(t *testing.T) {
+	fake := newFakeRuns()
+	srv, ts := newTestServerWithConfig(t, DefaultConfig(), fake.runner)
+	_ = srv
+
+	const source = "magnet:?xt=urn:btih:f00d000000000000000000000000000000000f"
+	run := startRun(t, ts.URL, source)
+	stream := fake.stream(t, source)
+
+	dl, ul := 4096.0, 512.0
+	stream.events <- core.Progress{
+		Peers: 5, Seeds: 3,
+		DownloadRate: &dl, UploadRate: &ul,
+		Swarm: &core.SwarmAvailability{CopiesPerPiece: 1.5, Unavailable: 0, NumPieces: 64},
+	}
+
+	// pump reads the channel on its own goroutine, so the row is not expected
+	// to carry the reading the instant the send returns.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		row := findByID(t, listRuns(t, ts.URL), run.id)
+		if row.Live != nil {
+			if row.Live.Peers != 5 || row.Live.Seeds != 3 {
+				t.Errorf("live.peers/seeds = %d/%d, want 5/3", row.Live.Peers, row.Live.Seeds)
+			}
+			if row.Live.DownloadBps == nil || *row.Live.DownloadBps != dl {
+				t.Errorf("live.download_bps = %v, want %v", row.Live.DownloadBps, dl)
+			}
+			if row.Live.Swarm == nil || row.Live.Swarm.CopiesPerPiece != 1.5 {
+				t.Errorf("live.swarm = %+v, want copies_per_piece 1.5", row.Live.Swarm)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a Progress event travelled through pump and the live row still " +
+				"carries no figures - applyProgress is not being called")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

@@ -1417,6 +1417,16 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 			entry.infoHash = e.InfoHash
 			entry.name = e.Name
 			s.mu.Unlock()
+		case core.Progress:
+			// The only place a live row's figures come from. Everything
+			// downstream of here - runEntry.live, RunInfo.Live,
+			// RunSummary.Live, GET /runs - was built by TOR-136 and tested
+			// by calling applyProgress directly, because server.go was
+			// being rebuilt for the queue width at the time; without this
+			// case the whole chain is correct and permanently empty.
+			s.mu.Lock()
+			entry.applyProgress(e)
+			s.mu.Unlock()
 		case core.Failed:
 			// A run-scoped failure (File < 0) ends the run; a file-scoped one
 			// is about one video and the run carries on.
