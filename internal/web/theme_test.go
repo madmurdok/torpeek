@@ -212,3 +212,66 @@ func TestInkTokensReachAAOnEverySurface(t *testing.T) {
 		}
 	}
 }
+
+// ---- TOR-159: the resting edge, measured, and kept apart from the accent. ----
+
+// TestEdgeTokenIsVisibleAndNotTheAccent is TOR-159's measurement half.
+// #source was styled border: 1px solid var(--rule) on background: var(--s1)
+// - a contrast of 1.36, which is not a faint edge, it is no edge: 3.0 is the
+// floor for a UI part to be distinguishable at all.
+//
+// The fix is a new token, --edge, for an interactive control's resting
+// border - not --accent, which app.css's own comment reserves for "this is
+// live or this is where you are" and spends nowhere decorative, and not a
+// brighter --rule, which keeps its quiet job separating rows and panels
+// elsewhere in the page.
+func TestEdgeTokenIsVisibleAndNotTheAccent(t *testing.T) {
+	css := stylesheet(t)
+	root := block(t, css, ":root {")
+
+	edge := hexToken(t, root, "--edge")
+	accent := hexToken(t, root, "--accent")
+	rule := hexToken(t, root, "--rule")
+
+	if edge == accent {
+		t.Errorf("--edge equals --accent (%s) - a resting border must not spend the "+
+			"accent's meaning on furniture", accent)
+	}
+	if edge == rule {
+		t.Errorf("--edge equals --rule (%s) - --rule stays quiet on purpose for row/panel "+
+			"separators; an interactive edge needs its own, brighter, token", rule)
+	}
+
+	for _, surf := range []string{"--s1", "--s2"} {
+		surfHex := hexToken(t, root, surf)
+		if ratio := contrastRatio(edge, surfHex); ratio < 3.0 {
+			t.Errorf("--edge (%s) against %s (%s) is %.2f:1, want >= 3.0 (the floor for a "+
+				"UI part to be distinguishable at all)", edge, surf, surfHex, ratio)
+		}
+	}
+}
+
+// TestIntakeRowSharesTheEdgeAndReservesTheAccentForFocus is TOR-159's other
+// half. The number field and the mode select in the same row as #source
+// carried the identical invisible border, and fixing only the magnet field
+// would leave one lit control between two unlit ones - so all three must
+// share --edge at rest. None may borrow --accent to do it: focus is where
+// the accent belongs, so #source needs its own :focus-visible rule reaching
+// for it, visibly different from the resting edge.
+func TestIntakeRowSharesTheEdgeAndReservesTheAccentForFocus(t *testing.T) {
+	css := stylesheet(t)
+
+	for _, sel := range []string{`#source {`, `input[type="number"] {`, `select, button {`} {
+		b := block(t, css, sel)
+		border, ok := b["border"]
+		if !ok || !strings.Contains(border, "var(--edge)") {
+			t.Errorf("%s border is %q, want it to use var(--edge)", sel, border)
+		}
+	}
+
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	if !regexp.MustCompile(`#source:focus-visible[\s\S]{0,400}?var\(--accent\)`).MatchString(live) {
+		t.Errorf("no #source:focus-visible rule reaching for var(--accent) - focus is where " +
+			"the accent belongs, and there is nothing here saying so")
+	}
+}

@@ -183,6 +183,23 @@
 
   --rule: #1A2F38;
 
+  /* --edge (TOR-159): the resting border of an interactive control - #source,
+     the frame-count number field, the mode select. Their old border was
+     1px solid var(--rule) on var(--s1)/var(--s2), and --rule measures 1.36
+     against --s1 - not a faint edge, no edge, since 3.0 is the floor for a
+     UI part to be distinguishable at all. --rule itself is left untouched:
+     it keeps doing its quiet, deliberately-near-invisible job separating
+     table rows and panels elsewhere, and lifting it globally would draw
+     visible lines through the whole table. --edge is a separate token for
+     the different job an interactive control's edge has to do - visible at
+     rest, not the accent (see --accent's own comment: nothing decorative
+     wears it, and an idle input is decorative furniture, not "live" or
+     "where you are"). Measured: --edge (#42778D) against --s1 is 3.83,
+     against --s2 (button/select's own background) is 3.51 - both clear the
+     3.0 floor with room. Focus is where the accent belongs instead: see
+     the :focus-visible rules on #source, input[type="number"] and select. */
+  --edge: #42778D;
+
   /* One accent, and it means "this is live or this is where you are" -
      nothing decorative wears it. */
   --accent:     #22E0E8;
@@ -391,12 +408,25 @@ form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
   padding: .45rem .6rem;
   font-family: var(--mono);
   font-size: .82rem;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   border-radius: 0;
   background: var(--s1);
   color: var(--ink);
 }
 #source::placeholder { color: var(--ink-2); }
+/* Focus is where the accent belongs (see --accent's own comment in :root):
+   the resting edge is --edge, deliberately not the accent, so focus has to
+   say so itself rather than borrowing whatever the border already wears -
+   otherwise a focused field and an idle one would look the same. Shared by
+   the whole intake row, so tabbing through it reads as one consistent
+   control set rather than the magnet field getting special treatment. */
+#source:focus-visible,
+input[type="number"]:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
 
 .browse { font-size: .85rem; opacity: .8; cursor: pointer; white-space: nowrap; }
 .browse .link { text-decoration: underline; }
@@ -411,7 +441,7 @@ input[type="number"] {
   padding: .45rem .6rem;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   border-radius: 0;
   background: var(--s1);
   color: var(--ink);
@@ -423,7 +453,7 @@ select, button {
   border-radius: 0;
   background: var(--s2);
   color: var(--ink);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
 }
 /* Take frames is the one filled control on the page: it is the thing that
    spends traffic, and it should look like it. */
