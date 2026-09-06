@@ -19,6 +19,80 @@
 // the tab - is accepted rather than worked around (see server.go's Config.Token).
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 
+// ---------------------------------------------------------------------------
+// THE SIX LIVE COLUMNS (TOR-139): peers, seeds, both rates, availability and
+// queue position, added to the table TOR-137 moved into the right pane and
+// TOR-138 made expandable.
+//
+// ABSENT IS NOT ZERO, everywhere in this block. GET /runs' "live" object
+// (listing.go's Live) is present only for a row with an actual client that
+// has spoken at least once, and even then download_bps/upload_bps/swarm can
+// still be individually absent (before the run's second heartbeat, or before
+// the swarm has answered what it holds). A queued row and a running row with
+// nobody connected are opposite situations, and rendering both as "0" would
+// make them read the same - so every cell below reads ABSENT, never a
+// literal 0, whenever the reading itself is missing rather than measured.
+const ABSENT = "—"; // em dash
+
+// LIVE_COLUMNS builds both the header cells (below) and, by the same keys,
+// the sortValue() switch further down - one list rather than two, so a
+// column added here cannot forget to be wired into sorting or the reverse.
+// unit, when present, is shown on its own line under the label: the
+// availability column needs it (its figure is copies per piece, not a
+// percentage, and commonly exceeds 1.0) to be legible without a tooltip
+// nobody opens, per this ticket's own acceptance criterion.
+const LIVE_COLUMNS = [
+  { key: "peers", label: "Peers",
+    title: "Connected peers. A dash means this torrent has no client (queued, needs-action, or a row read off disk) - not zero peers." },
+  { key: "seeds", label: "Seeds",
+    title: "Connected seeds. A dash means no client, not zero seeds." },
+  { key: "download_bps", label: "Down",
+    title: "Download speed. A dash means no reading yet - before a run's second heartbeat a rate cannot be computed - never 0 B/s." },
+  { key: "upload_bps", label: "Up",
+    title: "Upload speed. A dash means no reading yet, never 0 B/s." },
+  { key: "availability", label: "Avail", unit: "copies/piece",
+    title: "Swarm availability, in copies per piece - not a percentage. Below 1.0 means pieces are missing from the swarm; above 1.0 (commonly) means it is healthy. A dash means this torrent has not been asked for bytes yet, so nothing has reported what the swarm holds." },
+  { key: "priority", label: "Queue",
+    title: "This row's own place in the FIFO queue, from its reported queued time - only meaningful while a torrent is actually queued. There is no priority you can set or reorder here yet (that is TOR-140); this is only where the server already has you." },
+];
+
+// buildLiveColumnHeaders inserts the six <th>s into the existing thead row,
+// before the (headerless) actions column, so RUN_TABLE_COLUMNS below and
+// el.sortHeaders' own querySelectorAll both see them without index.html ever
+// naming them by hand - this file owns every column past the three the page
+// shipped with (name, added, status).
+function buildLiveColumnHeaders() {
+  const headRow = document.querySelector("#run-table thead tr");
+  const actionsHeader = document.querySelector("#run-table thead th.run-actions-header");
+  if (!headRow || !actionsHeader) return;
+  const frag = document.createDocumentFragment();
+  for (const col of LIVE_COLUMNS) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.tabIndex = 0;
+    th.setAttribute("role", "button");
+    th.setAttribute("aria-sort", "none");
+    th.dataset.sort = col.key;
+    th.className = "run-cell-metric-header" +
+      (col.key === "availability" ? " run-cell-availability-header" : "") +
+      (col.key === "priority" ? " run-cell-queue-header" : "");
+    th.title = col.title;
+    const label = document.createElement("span");
+    label.className = "run-th-label";
+    label.textContent = col.label;
+    th.append(label);
+    if (col.unit) {
+      const unit = document.createElement("span");
+      unit.className = "run-th-unit";
+      unit.textContent = col.unit;
+      th.append(unit);
+    }
+    frag.append(th);
+  }
+  headRow.insertBefore(frag, actionsHeader);
+}
+buildLiveColumnHeaders();
+
 const el = {
   status: document.getElementById("status"),
   form: document.getElementById("start"),
@@ -366,19 +440,158 @@ function whenLabel(ms) {
 // /runs is small enough that a server-side sort parameter would only add a
 // second place order is decided (TOR-62).
 
+// hasLive is the one question every one of the six live columns asks first:
+// does this row have a client that has spoken at all. entry.live is null
+// until it does (loadRuns copies GET /runs' own "live" object, the
+// "progress" case in apply() below keeps it current), never a zeroed
+// stand-in - see this block's own opening comment.
+function hasLive(entry) {
+  return !!entry.live;
+}
+
+// absentReason is the title text for a peers/seeds/rate/availability cell
+// that has nothing to show, so a person who does wonder why gets an answer
+// that matches what the cell actually knows rather than a bare dash.
+function absentReason(entry) {
+  if (entry.disk) return "no reading - this row was read off disk, never a live client";
+  if (!hasLive(entry)) return "no reading yet - this torrent has no client (queued, needs-action, or not yet started)";
+  return "";
+}
+
+function peersCellText(entry) {
+  return hasLive(entry) ? String(entry.live.peers) : ABSENT;
+}
+function peersCellTitle(entry) {
+  return hasLive(entry) ? entry.live.peers + " connected peer(s)" : absentReason(entry);
+}
+
+function seedsCellText(entry) {
+  return hasLive(entry) ? String(entry.live.seeds) : ABSENT;
+}
+function seedsCellTitle(entry) {
+  return hasLive(entry) ? entry.live.seeds + " connected seed(s)" : absentReason(entry);
+}
+
+// rateCellText/rateCellTitle serve both the download and upload columns -
+// bps is entry.live.download_bps or entry.live.upload_bps, already null
+// (never 0) when this heartbeat has nothing to report, per Live's own doc.
+function rateCellText(bps) {
+  return bps == null ? ABSENT : bytesLabel(bps) + "/s";
+}
+function rateCellTitle(entry, bps, label) {
+  if (bps != null) return label + ": " + bytesLabel(bps) + "/s";
+  if (!hasLive(entry)) return absentReason(entry);
+  return "no reading yet - a rate needs an interval between two heartbeats, so it is absent until this run's second one";
+}
+
+function availabilityReading(entry) {
+  return hasLive(entry) ? entry.live.swarm : null;
+}
+function availabilityCellText(entry) {
+  const s = availabilityReading(entry);
+  return s ? s.copies_per_piece.toFixed(2) + "×" : ABSENT;
+}
+// availabilityMetaText is deliberately shorter than the title
+// (availabilityCellTitle) that carries the full "N of M pieces" sentence:
+// measured in a real browser at this column's width, "N of M unavailable"
+// wraps to three lines and makes the row taller than every other one, which
+// is worse than the information it was trying to fit. "N missing" is what
+// actually stays legible on a single line - the total is one hover away.
+function availabilityMetaText(entry) {
+  const s = availabilityReading(entry);
+  return s ? s.unavailable + " missing" : "";
+}
+function availabilityCellTitle(entry) {
+  const s = availabilityReading(entry);
+  if (s) {
+    return s.copies_per_piece.toFixed(2) + " copies per piece, on average, across the swarm - not a " +
+      "percentage. " + s.unavailable + " of " + s.pieces + " pieces are held by no connected peer.";
+  }
+  if (!hasLive(entry)) return absentReason(entry);
+  return "no reading yet - this torrent has not been asked for bytes, so nothing has reported what the swarm holds";
+}
+
+// queueRank answers "download priority" (TOR-139's own scope note): GET
+// /runs has no priority or queue-position field to read - there is no
+// reordering concept yet, that is TOR-140 - so this is derived from what the
+// response DOES report rather than invented. runs.go documents s.waiting as
+// strict arrival order ("the queue, in arrival order") serviced strictly
+// from the front (dispatch), with a cancelled entry spliced out in place
+// (dropWaitingLocked) rather than the remainder being reshuffled; and
+// listing.go's liveWhen reports a queued row's own QueuedAt as its "when".
+// So ranking every currently-queued row by "when" ascending recovers the
+// server's own FIFO order exactly. Not queued (running, done, on disk,
+// anything else) means this question does not apply, and answers null - not
+// a guess at a position a row does not have.
+//
+// O(n) per call, called once per row per comparison during a sort - fine at
+// the scale this page ever holds (a person's own torrents, not a swarm's
+// worth of rows).
+function queueRank(entry) {
+  if (entry.state !== "queued") return null;
+  let rank = 1;
+  for (const other of state.runs.values()) {
+    if (other === entry || other.state !== "queued") continue;
+    if (other.when < entry.when || (other.when === entry.when && other.id < entry.id)) rank++;
+  }
+  return rank;
+}
+function queueCellText(entry) {
+  const rank = queueRank(entry);
+  return rank === null ? ABSENT : String(rank);
+}
+function queueCellTitle(entry) {
+  const rank = queueRank(entry);
+  if (rank !== null) return "position " + rank + " in the queue, from this row's own queued time";
+  return entry.disk ? "not in the queue - a row read off disk" : "not in the queue";
+}
+
 function sortValue(entry, key) {
   switch (key) {
     case "name": return displayName(entry).text.toLowerCase();
     case "status": return badgeLabel(entry).toLowerCase();
+    // The five live figures and the queue position are null, never 0, the
+    // moment their reading is absent (hasLive, queueRank) - see compareEntries
+    // for what that null is FOR: an absent row is not "the lowest value", it
+    // is excluded from the comparison entirely and sinks to the end.
+    case "peers": return hasLive(entry) ? entry.live.peers : null;
+    case "seeds": return hasLive(entry) ? entry.live.seeds : null;
+    case "download_bps": return hasLive(entry) && entry.live.download_bps != null ? entry.live.download_bps : null;
+    case "upload_bps": return hasLive(entry) && entry.live.upload_bps != null ? entry.live.upload_bps : null;
+    case "availability": {
+      const s = availabilityReading(entry);
+      return s ? s.copies_per_piece : null;
+    }
+    case "priority": return queueRank(entry);
     case "when":
     default: return entry.when || 0;
   }
 }
 
+// compareEntries' first job, before it compares anything: decide where a row
+// with nothing to say goes. An absent value is not zero and must not sort as
+// though it were - the trap the ticket names directly, that a column where
+// most rows are absent would otherwise bury a running torrent with a real
+// zero reading among the queued rows that have none at all, which is exactly
+// backwards. The decision made here is that absent rows sink to the END of
+// EVERY sort, ascending or descending alike - unconditionally, before dir is
+// ever consulted, so a person clicking a header to sort by "most peers" and
+// then again for "fewest peers" finds the running-but-friendless torrents at
+// one end both times, and the never-had-a-client rows at the other,
+// consistently. name/status/when never produce a null/undefined sortValue,
+// so this is a no-op for the three columns that existed before TOR-139.
 function compareEntries(a, b) {
   const { key, dir } = state.sort;
   const va = sortValue(a, key);
   const vb = sortValue(b, key);
+
+  const aAbsent = va === null || va === undefined;
+  const bAbsent = vb === null || vb === undefined;
+  if (aAbsent || bAbsent) {
+    if (aAbsent && bAbsent) return 0;
+    return aAbsent ? 1 : -1;
+  }
+
   let cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
   if (dir === "desc") cmp = -cmp;
   return cmp;
@@ -459,9 +672,13 @@ for (const th of el.sortHeaders) {
 let detailSeq = 0;
 
 // RUN_TABLE_COLUMNS is how far the detail row has to span, read off the
-// header rather than written as 4. TOR-139 is about to add columns, and a
-// literal here would go wrong silently - a short colspan leaves an empty cell
-// at the end of the detail row and narrows the detail by a column.
+// header rather than written as a literal - TOR-139 added six more columns to
+// the three the page shipped with, via buildLiveColumnHeaders() above, and a
+// hard-coded count here would have gone wrong silently the moment it did: a
+// short colspan leaves an empty cell at the end of the detail row and narrows
+// the detail by a column. Reading it after that function has already run
+// (both are top-level statements, in source order) is what keeps this correct
+// without the two having to be kept in sync by hand.
 const RUN_TABLE_COLUMNS = document.querySelectorAll("#run-table thead th").length || 1;
 
 function newRunEntry(id) {
@@ -499,6 +716,28 @@ function newRunEntry(id) {
   bar.hidden = true;
   statusCell.append(badge, meta, bar);
 
+  // The six live columns (TOR-139), in the same order as LIVE_COLUMNS'
+  // headers above. peers/seeds/down/up are one text node each; availability
+  // carries a second, muted line for "N unavailable" the same way the status
+  // cell's own badge carries .run-meta under it.
+  const peersCell = document.createElement("td");
+  peersCell.className = "run-cell-metric run-cell-peers";
+  const seedsCell = document.createElement("td");
+  seedsCell.className = "run-cell-metric run-cell-seeds";
+  const downCell = document.createElement("td");
+  downCell.className = "run-cell-metric run-cell-down";
+  const upCell = document.createElement("td");
+  upCell.className = "run-cell-metric run-cell-up";
+  const availCell = document.createElement("td");
+  availCell.className = "run-cell-metric run-cell-availability";
+  const availValue = document.createElement("span");
+  availValue.className = "run-cell-availability-value";
+  const availMeta = document.createElement("span");
+  availMeta.className = "run-meta run-cell-availability-meta";
+  availCell.append(availValue, availMeta);
+  const queueCell = document.createElement("td");
+  queueCell.className = "run-cell-metric run-cell-queue";
+
   const actionsCell = document.createElement("td");
   actionsCell.className = "run-cell-actions";
   const cancel = document.createElement("button");
@@ -509,7 +748,7 @@ function newRunEntry(id) {
   cancel.hidden = true;
   actionsCell.append(cancel);
 
-  row.append(nameCell, whenCell, statusCell, actionsCell);
+  row.append(nameCell, whenCell, statusCell, peersCell, seedsCell, downCell, upCell, availCell, queueCell, actionsCell);
 
   // The detail's own row, and the ONE thing collapse touches: its `hidden`
   // attribute, nothing else. Same rule the file and metadata accordions
@@ -588,6 +827,14 @@ function newRunEntry(id) {
     // selected start at zero: nothing has merged a disk record into this
     // entry yet, and loadRuns is the only place that changes.
     partial: false,
+    // live is GET /runs' own "live" object (listing.go's Live) for this row -
+    // null, not a zeroed struct, until the run actually has a client that has
+    // spoken at least once (loadRuns copies row.live; the "progress" case in
+    // apply() below keeps it current for the rest of the page's life). Every
+    // one of the six live columns (TOR-139) reads through hasLive()/this
+    // field rather than defaulting any piece of it to 0 - see that block's
+    // own opening comment for why.
+    live: null,
     // when is this row's sort key for the default (date, newest-first) sort.
     // Set once, here, at creation - never touched again by a status update -
     // which is what keeps a live run from jumping position as events arrive.
@@ -616,6 +863,9 @@ function newRunEntry(id) {
     expanded: false,
     rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
     rowWhen: whenCell, rowCancel: cancel, rowToggle: main,
+    rowPeers: peersCell, rowSeeds: seedsCell, rowDown: downCell, rowUp: upCell,
+    rowAvail: availValue, rowAvailMeta: availMeta, rowAvailCell: availCell,
+    rowQueue: queueCell,
     detailRowEl: detailRow,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
@@ -701,6 +951,19 @@ function resetRunContent(entry) {
   showTorrent(entry, "");
 }
 
+// refreshQueuePositions repaints the queue column of every currently-queued
+// row from queueRank(), which reads live off state.runs each time rather
+// than a cached number - so this is never more than a display catch-up, and
+// never a second place the ranking itself is decided.
+function refreshQueuePositions() {
+  for (const other of state.runs.values()) {
+    if (other.state !== "queued") continue;
+    other.rowQueue.textContent = queueCellText(other);
+    other.rowQueue.title = queueCellTitle(other);
+    other.rowQueue.dataset.absent = "false";
+  }
+}
+
 function syncEntry(entry) {
   entry.rowEl.dataset.state = badgeState(entry);
   entry.rowBadge.textContent = badgeLabel(entry);
@@ -724,6 +987,40 @@ function syncEntry(entry) {
   entry.rowWhen.textContent = whenLabel(entry.when);
   entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
   entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
+
+  // The six live columns (TOR-139). Each pair of lines below is a text and a
+  // title, and every one of them can legitimately be ABSENT rather than a
+  // number - see this block's own helpers (peersCellText and friends,
+  // defined beside sortValue) for what decides which.
+  entry.rowPeers.textContent = peersCellText(entry);
+  entry.rowPeers.title = peersCellTitle(entry);
+  entry.rowPeers.dataset.absent = String(!hasLive(entry));
+  entry.rowSeeds.textContent = seedsCellText(entry);
+  entry.rowSeeds.title = seedsCellTitle(entry);
+  entry.rowSeeds.dataset.absent = String(!hasLive(entry));
+  const downBps = hasLive(entry) ? entry.live.download_bps : null;
+  entry.rowDown.textContent = rateCellText(downBps);
+  entry.rowDown.title = rateCellTitle(entry, downBps, "Download speed");
+  entry.rowDown.dataset.absent = String(downBps == null);
+  const upBps = hasLive(entry) ? entry.live.upload_bps : null;
+  entry.rowUp.textContent = rateCellText(upBps);
+  entry.rowUp.title = rateCellTitle(entry, upBps, "Upload speed");
+  entry.rowUp.dataset.absent = String(upBps == null);
+  entry.rowAvail.textContent = availabilityCellText(entry);
+  entry.rowAvailMeta.textContent = availabilityMetaText(entry);
+  entry.rowAvailCell.title = availabilityCellTitle(entry);
+  entry.rowAvailCell.dataset.absent = String(!availabilityReading(entry));
+  entry.rowQueue.textContent = queueCellText(entry);
+  entry.rowQueue.title = queueCellTitle(entry);
+  entry.rowQueue.dataset.absent = String(queueRank(entry) === null);
+
+  // A change to THIS row's queued-ness can shift every other queued row's
+  // own rank (dequeuing #1 makes #2 into #1), and syncEntry is only ever
+  // called for the one entry that changed - so the queue column repaints
+  // every currently-queued row's cell here rather than trusting each row's
+  // own last sync to still be right.
+  refreshQueuePositions();
+
   reorderRuns();
 
   entry.detailBadge.textContent = badgeLabel(entry);
@@ -2310,6 +2607,26 @@ function apply(ev) {
       // cannot be either of those things (TOR-123).
       entry.framesDone = ev.frames_done;
       entry.framesTotal = ev.frames_total;
+      // TOR-139: the same heartbeat carries this run's current swarm reading
+      // - peers, seeds, both rates and the availability figure - under the
+      // identical keys GET /runs' own "live" object uses (wire.go's
+      // core.Progress case, listing.go's Live), so the six live columns keep
+      // updating after page load rather than only once at loadRuns(). Built
+      // fresh every time rather than merged onto the previous reading,
+      // because that is what the registry itself does before this ever
+      // reaches the wire (runEntry.applyProgress's own doc: "a whole new
+      // *Live replaces the old one rather than being edited field by
+      // field") - merging here instead could keep a stale rate or swarm
+      // reading on screen past the heartbeat that actually dropped it.
+      // download_bps/upload_bps/swarm are checked with "in" rather than
+      // ev.download_bps (etc.) being truthy, because a real reading of 0
+      // must stay 0, not fall through to absent.
+      entry.live = {
+        peers: ev.peers, seeds: ev.seeds,
+        download_bps: "download_bps" in ev ? ev.download_bps : null,
+        upload_bps: "upload_bps" in ev ? ev.upload_bps : null,
+        swarm: ev.swarm || null,
+      };
       syncEntry(entry);
       logFor(entry, "progress: " + ev.frames_done + "/" + ev.frames_total +
           ", " + ev.downloaded + " bytes, " + ev.peers + " peers");
@@ -2501,6 +2818,15 @@ async function loadRuns() {
     entry.partial = !!row.partial;
     if (!disk) entry.state = row.state || entry.state;
     entry.error = row.error || entry.error;
+    // row.live is GET /runs' own Live object (listing.go), present only for
+    // a row with an actual client that has spoken at least once - copied
+    // through as-is, null rather than defaulted to anything with numbers in
+    // it, exactly like every other "absent, not zero" field this page reads
+    // (row.partial above, entry.provisionalName). This is the one place
+    // loadRuns sets it; from here on the "progress" case in apply() keeps it
+    // current, the same relationship entry.partial has with run_state's own
+    // "partial" field.
+    entry.live = row.live || null;
     // row.when is GET /runs's own answer for this row - the newest lifecycle
     // timestamp for a live entry, run.json's created_at for a disk one - and
     // it is the one moment this page overwrites entry.when after creation:
