@@ -228,6 +228,66 @@ function bytesLabel(n) {
   return (i === 0 ? value : value.toFixed(1)) + " " + units[i];
 }
 
+// stallDuration is "how long" for a stall reading - the load-bearing part of
+// TOR-141's own acceptance criterion. Distinct from seconds() above: that one
+// prints a single measurement to a tenth of a second ("21.3s"), useful for a
+// run's own total elapsed time; this is meant to be read at a glance while it
+// keeps climbing, so it drops the fraction and grows a minutes field rather
+// than ever showing something like "812.4s".
+function stallDuration(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return total + "s";
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m + "m " + String(s).padStart(2, "0") + "s";
+}
+
+// STALL_REASON gives each of the causes core.ErrorCode can name on a stall
+// reading (core.Progress.Stall, wire.go's "stall" key) a short phrase in a
+// person's own words, rather than the bare wire code - the same vocabulary
+// errors.go's own doc comments use for each one, kept short enough to sit
+// under a badge. An unrecognised code (there should never be one; core's own
+// classifyPointFailure/classifyLiveStall only ever produce these four) falls
+// back to the bare code rather than hiding the reading entirely.
+const STALL_REASON = {
+  no_peers: "no peers connected",
+  unavailable: "peers connected, but nobody holds this yet",
+  no_metadata: "no metadata yet",
+  read_stalled: "a read timed out",
+};
+
+// stallPhrase renders one stall reading as the row's own status line reads
+// it: which cause, for how long. now is the caller's current clock (Date.now()
+// by default) rather than always "right now" internally, so the same
+// function drives both a fresh render and the ticking refresh below
+// (refreshStallDurations) off one consistent instant per pass, rather than
+// each row computing its own now() microseconds apart.
+function stallPhrase(stall, now) {
+  now = now == null ? Date.now() : now;
+  // observedAt is stamped by apply()'s "progress" case the moment this
+  // reading arrived (Date.now() at receipt, never the server's own clock,
+  // which this page has no synchronised way to compare against) - since_ms
+  // is only ever as fresh as that last heartbeat, and adding the wall time
+  // since then is what keeps the displayed duration ticking up smoothly
+  // between heartbeats (at most stallHeartbeatInterval, 5s, apart) instead
+  // of visibly standing still and then jumping.
+  const liveMS = stall.since_ms + Math.max(0, now - stall.observedAt);
+  return (STALL_REASON[stall.code] || stall.code) + " for " + stallDuration(liveMS);
+}
+
+// waitingForMetadata is true for the one stall-shaped state the engine
+// cannot yet report a Stall reading for at all (TOR-141's own scope note):
+// the run is running, but no client has spoken - not even once, per hasLive
+// - and no name has been confirmed either. There is no torrent object to
+// read peers from during this phase (pool.Attach is still resolving it), so
+// this is computed here, client-side, from what the row already carries
+// rather than invented on the wire - and it clears itself the instant either
+// a name or a live reading arrives, which is the same run_state/progress
+// traffic that already flows regardless.
+function waitingForMetadata(entry) {
+  return entry.state === "running" && !entry.name && !hasLive(entry) && !entry.stall;
+}
+
 function channelsLabel(n) {
   switch (n) {
     case 1: return "mono";
@@ -314,7 +374,19 @@ function badgeLabel(entry) {
 // what the badge cannot - PARTIAL tells you a run is incomplete, 3/6 tells
 // you how incomplete - and metaTitle below keeps the full sentence for the
 // tooltip, so nothing is actually lost.
-function metaLabel(entry) {
+// TOR-141: a stall reading (or, before there is even a torrent to read
+// peers from, waitingForMetadata) takes priority over the plain frame
+// ratio. Distinguishable from a run that is merely slow is this ticket's own
+// acceptance criterion, and showing "4/20 frames" unchanged while a run sits
+// stalled is exactly the failure it names - a slow run's ratio keeps
+// climbing, a stalled one's would not, but nothing about the TEXT says so.
+// now, when passed, is the caller's current clock (refreshStallDurations'
+// own ticking redraw); omitted, both branches fall back to Date.now().
+function metaLabel(entry, now) {
+  if (entry.stall) return stallPhrase(entry.stall, now);
+  if (waitingForMetadata(entry)) {
+    return "waiting for metadata, " + stallDuration((now == null ? Date.now() : now) - entry.runningSince);
+  }
   if (entry.progress) return entry.progress;
   if (entry.disk) return entry.complete + "/" + entry.selected;
   if (entry.error) return entry.error;
@@ -322,9 +394,17 @@ function metaLabel(entry) {
 }
 
 // The long form, on hover, for the row whose label was shortened.
-function metaTitle(entry) {
+function metaTitle(entry, now) {
+  if (entry.stall) {
+    const base = "stalled: " + (STALL_REASON[entry.stall.code] || entry.stall.code);
+    return entry.progress ? base + " (" + entry.progress + " so far)" : base;
+  }
+  if (waitingForMetadata(entry)) {
+    return "still waiting for the torrent's own metadata - no peer has answered yet, " +
+        "or none has offered the file list";
+  }
   if (entry.disk) return entry.complete + " of " + entry.selected + " file(s) complete";
-  return metaLabel(entry);
+  return metaLabel(entry, now);
 }
 
 // renderRunProgress draws a run's progress as a segmented bar in its row
@@ -911,6 +991,21 @@ function newRunEntry(id) {
     // field rather than defaulting any piece of it to 0 - see that block's
     // own opening comment for why.
     live: null,
+    // stall is TOR-141's own reading (core.Progress.Stall, wire.go's "stall"
+    // key on the progress event) - which distinct cause currently explains
+    // no progress, and how long, plus observedAt, THIS page's own wall clock
+    // reading stamped the moment the reading arrived (never the server's
+    // clock, which this page cannot compare against). Null, not a stale
+    // object, whenever the run is progressing or has never run at all - the
+    // same "absent, not zero" shape live above already follows, and cleared
+    // at exactly the same moments entry.progress is (see the run_state and
+    // terminal-event handling in apply()).
+    stall: null,
+    // runningSince is stamped in local wall-clock time the moment this row
+    // is FIRST seen in the "running" state (the run_state handler below) -
+    // used only to compute waitingForMetadata's own duration, since there is
+    // no torrent yet during that phase for a Stall reading to ride on.
+    runningSince: 0,
     // priority is the queue level the server reports for this row (runs.go's
     // Priority, TOR-140) and queuePosition its 1-based place in the queue.
     // null and 0 mean the same thing they mean on the wire: this row is not
@@ -1034,6 +1129,12 @@ function resetRunContent(entry) {
   entry.torrentSummary.hidden = true;
   entry.torrentSummary.textContent = "";
   entry.error = "";
+  // A reconnecting page is about to replay this run's history from the
+  // start, the same as every other field cleared here - a stall reading
+  // from before the reset would otherwise sit stale on screen until the
+  // replay's own next progress event happens to overwrite it.
+  entry.stall = null;
+  entry.runningSince = 0;
   // The picker goes with everything else this run has shown. It comes back
   // from the replayed needs_action that follows in the same history, so a
   // reconnecting page rebuilds it rather than keeping a stale copy of a list
@@ -1068,6 +1169,12 @@ function syncEntry(entry) {
   entry.rowName.classList.toggle("run-name-provisional", shown.provisional);
   entry.rowMeta.textContent = metaLabel(entry);
   entry.rowMeta.title = metaTitle(entry);
+  // Styling hook for app.css - a stalled or still-waiting-on-metadata row
+  // reads in the same amber the queue and "needs a decision" already use
+  // (--warn), so it does not look like the same plain, quiet text a normal
+  // "4/20 frames" or "queued" line does. See TestEveryColourComesFromAToken:
+  // the colour itself lives in app.css's :root, never here.
+  entry.rowMeta.dataset.stall = String(!!entry.stall || waitingForMetadata(entry));
   renderRunProgress(entry);
   entry.rowWhen.textContent = whenLabel(entry.when);
   entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
@@ -2638,6 +2745,16 @@ function apply(ev) {
     const entry = resolveIncomingRun(ev.run, ev.infohash);
     if (ev.reset) resetRunContent(entry);
     entry.disk = false;
+    // TOR-141: stamped the FIRST time this row is seen running, in this
+    // page's own wall clock - waitingForMetadata's only source of "how
+    // long", since there is no torrent yet at that point for a Stall
+    // reading (core.Progress.Stall) to ride on. Guarded on the transition
+    // rather than stamped unconditionally, so a run_state that merely
+    // repeats "running" (a reordering elsewhere, TOR-140's own note two
+    // paragraphs down) does not reset a clock already ticking.
+    if (ev.state === "running" && entry.state !== "running") {
+      entry.runningSince = Date.now();
+    }
     entry.state = ev.state;
     if (ev.source) entry.source = ev.source;
     if (ev.infohash) entry.infohash = ev.infohash;
@@ -2680,7 +2797,14 @@ function apply(ev) {
       entry.selected = ev.selected || 0;
       entry.partial = !!ev.partial;
     }
-    if (!cancellable(entry.state)) entry.progress = "";
+    // A stall reading belongs to a run that is actively going nowhere; a
+    // run that just left a cancellable state (done, failed, cancelled) is
+    // not stalled any more, it is over - cleared the same moment and by the
+    // same test entry.progress already is.
+    if (!cancellable(entry.state)) {
+      entry.progress = "";
+      entry.stall = null;
+    }
     syncEntry(entry);
     return;
   }
@@ -2740,17 +2864,29 @@ function apply(ev) {
     }
 
     case "progress": {
-      const fentry = fileBlock(entry, ev.file);
-      fentry.progress.hidden = false;
-      fentry.progress.textContent =
-        ev.frames_done + " / " + ev.frames_total + " frames · " +
-        bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
-      entry.progress = ev.frames_done + "/" + ev.frames_total + " frames";
-      // The numbers as numbers, for the bar. The sentence stays because it is
-      // the exact figure and the statement of what is being counted; the bar
-      // cannot be either of those things (TOR-123).
-      entry.framesDone = ev.frames_done;
-      entry.framesTotal = ev.frames_total;
+      // TOR-141: frames_total is 0 on a stall heartbeat (engine.go's
+      // startFileHeartbeat) - a reading of peers/seeds/rates/swarm/stall
+      // taken whether or not any capture point has even been attempted,
+      // never a real 0-of-0 plan (frames.Plan.Validate rejects an empty
+      // one, so a genuine per-point heartbeat never reports that). Applying
+      // it to the per-file card would blank out real progress between two
+      // genuine capture-point heartbeats - "3 / 12 frames" flashing to
+      // "0 / 0 frames" and back every five seconds - so it is skipped here;
+      // the six live columns and the stall reading below still update every
+      // time regardless, which is the whole point of that heartbeat.
+      if (ev.frames_total > 0) {
+        const fentry = fileBlock(entry, ev.file);
+        fentry.progress.hidden = false;
+        fentry.progress.textContent =
+          ev.frames_done + " / " + ev.frames_total + " frames · " +
+          bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
+        entry.progress = ev.frames_done + "/" + ev.frames_total + " frames";
+        // The numbers as numbers, for the bar. The sentence stays because it
+        // is the exact figure and the statement of what is being counted;
+        // the bar cannot be either of those things (TOR-123).
+        entry.framesDone = ev.frames_done;
+        entry.framesTotal = ev.frames_total;
+      }
       // TOR-139: the same heartbeat carries this run's current swarm reading
       // - peers, seeds, both rates and the availability figure - under the
       // identical keys GET /runs' own "live" object uses (wire.go's
@@ -2771,6 +2907,17 @@ function apply(ev) {
         upload_bps: "upload_bps" in ev ? ev.upload_bps : null,
         swarm: ev.swarm || null,
       };
+      // TOR-141: which distinct cause currently explains no progress for
+      // THIS file, and how long - core.Progress.Stall's own doc has the
+      // rule that keeps the duration from restarting on every heartbeat
+      // that merely repeats the same finding. observedAt is stamped here,
+      // in this page's own clock, at the moment the reading arrived -
+      // stallPhrase adds the wall time since then, which is what keeps the
+      // displayed duration ticking between heartbeats rather than only
+      // updating once every stallHeartbeatInterval. Absent (ev.stall is
+      // undefined) means progressing, which clears whatever this row showed
+      // a moment ago rather than leaving it stuck on an old cause.
+      entry.stall = ev.stall ? { ...ev.stall, observedAt: Date.now() } : null;
       syncEntry(entry);
       logFor(entry, "progress: " + ev.frames_done + "/" + ev.frames_total +
           ", " + ev.downloaded + " bytes, " + ev.peers + " peers");
@@ -2796,6 +2943,10 @@ function apply(ev) {
 
     case "done":
       entry.progress = "";
+      // Whatever this run's own clock last said stopped mattering the
+      // moment the run itself did - a finished run cannot still be
+      // "stalled", it is simply over.
+      entry.stall = null;
       // The run's own .torrent rides on this event because there is one per
       // run: a live run announces the file it just wrote, and a run reopened
       // from disk announces the same one, so the link does not depend on
@@ -2826,11 +2977,36 @@ function apply(ev) {
 
     case "failed":
       entry.progress = "";
+      // TOR-141: a run-scoped failure IS the final answer to "why" - the
+      // engine already names it (ev.code) below the badge via entry.error,
+      // so a stall reading from a moment ago would only repeat, in fainter
+      // words, what the row is about to say plainly.
+      entry.stall = null;
       syncEntry(entry);
       logFor(entry, "failed: " + ev.code + " " + ev.error);
       break;
   }
 }
+
+// TOR-141: a stall's (or a metadata wait's) own "how long" would otherwise
+// only refresh when a new heartbeat happens to redraw this row - every
+// stallHeartbeatInterval (5s) at best, or not at all while metadata is still
+// being waited for, since nothing else touches this row in the meantime.
+// That reads as broken rather than as "nothing new to report" - a duration
+// standing visibly still is indistinguishable from one that stopped being
+// tracked. This recomputes just the one line every second, from numbers
+// already on the entry (stallPhrase's own since_ms + observedAt, or
+// runningSince) - it never invents a reading a heartbeat has not itself
+// reported, only keeps the display of one honest between heartbeats.
+function refreshStallDurations() {
+  const now = Date.now();
+  for (const entry of state.runs.values()) {
+    if (!entry.stall && !waitingForMetadata(entry)) continue;
+    entry.rowMeta.textContent = metaLabel(entry, now);
+    entry.rowMeta.title = metaTitle(entry, now);
+  }
+}
+setInterval(refreshStallDurations, 1000);
 
 // The socket carries events only. Reconnecting replays every run the server
 // still holds from the start, so a dropped connection costs nothing but a
@@ -2971,6 +3147,17 @@ async function loadRuns() {
     // current, the same relationship entry.partial has with run_state's own
     // "partial" field.
     entry.live = row.live || null;
+    // TOR-141: row.live.stall is listing.go's own mirror of the same
+    // "stall" reading the WebSocket progress event carries - not yet
+    // populated by this server (see listing.go's Live.Stall doc for the
+    // one-line follow-up that would close that gap), so this is normally
+    // null on a fresh load and the page picks the reading up from its next
+    // WebSocket heartbeat instead, same as row.live itself does for a run
+    // this page has never seen a "progress" for yet. Read defensively
+    // anyway, the same shape apply()'s "progress" case gives it, so the
+    // follow-up needs nothing here once it lands.
+    entry.stall = row.live && row.live.stall
+      ? { ...row.live.stall, observedAt: Date.now() } : null;
     // TOR-140: the queue's own two fields, present only for a row still
     // waiting to be told to go (listing.go's RunSummary). Read, never
     // derived - see queuePosition's own comment for what was deleted to make
@@ -2987,6 +3174,17 @@ async function loadRuns() {
     // move a row under the default sort.
     const when = row.when ? Date.parse(row.when) : NaN;
     if (!Number.isNaN(when)) entry.when = when;
+    // TOR-141: seeds waitingForMetadata's own clock from the server's own
+    // timestamp on a page load or reload, rather than leaving it at 0 (which
+    // would read as "waiting since the epoch") for a run that was already
+    // running before this page ever asked. row.when is StartedAt for a
+    // running entry (RunSummary.When's own doc), which is exactly what
+    // runningSince means; only set once, the same "never move a row" rule
+    // entry.when's own comment gives for why this is safe on the initial
+    // listing alone.
+    if (entry.state === "running" && !entry.runningSince && !Number.isNaN(when)) {
+      entry.runningSince = when;
+    }
     syncEntry(entry);
   }
 }

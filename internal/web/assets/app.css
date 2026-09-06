@@ -553,6 +553,15 @@ button:disabled { opacity: .5; }
 }
 .run-meta { display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: -.01em; color: var(--ink-3); overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
 
+/* TOR-141: a run that is going nowhere reads differently from one that is
+   merely slow - that distinction is the ticket's own acceptance criterion,
+   and colour is what makes it legible at a glance rather than only on
+   careful reading. --warn is the same amber "queued"/"needs-action"/
+   "partial" already wear (see .run-badge below) for the same reason: this
+   is a row that wants attention, not a row that is broken (--bad) or a row
+   quietly working (the plain --ink-3 every other .run-meta line uses). */
+.run-meta[data-stall="true"] { color: var(--warn); font-weight: 600; }
+
 /* TOR-117: a name read off a magnet's own dn= is not confirmed - anyone can
    put anything after it - so it must never look like one. Italic plus the
    same muted ink .run-meta already uses is the smallest difference that

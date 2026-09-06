@@ -1217,3 +1217,67 @@ func TestAProgressEventReachesTheLiveRow(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestAStalledRunReportsItsStallOnGetRuns closes the seam TOR-141 left open
+// on purpose: it built the Stall reading all the way to Live but could not
+// fill it, because runs.go belonged to another ticket at the time. The
+// reading reached a live page through the WebSocket regardless, so nothing
+// looked broken — the gap was only visible in the instant after a page load
+// or a reconnect, which is exactly when somebody opens the tab to find out
+// why nothing is happening.
+//
+// The same gap, one layer out, cost TOR-147 and then TOR-136 a follow-up
+// ticket each. This is the test that would have caught all three.
+func TestAStalledRunReportsItsStallOnGetRuns(t *testing.T) {
+	fake := newFakeRuns()
+	srv, ts := newTestServerWithConfig(t, DefaultConfig(), fake.runner)
+
+	run := startRun(t, ts.URL, "magnet:?xt=urn:btih:5741100000000000000000000000000000000a")
+
+	srv.mu.Lock()
+	entry, ok := srv.runs[run.id]
+	if !ok {
+		srv.mu.Unlock()
+		t.Fatalf("run %s is not in the registry", run.id)
+	}
+	entry.applyProgress(core.Progress{
+		Peers: 0, Seeds: 0,
+		Stall: &core.Stall{Code: core.CodeNoPeers, Since: 4*time.Minute + 12*time.Second},
+	})
+	srv.mu.Unlock()
+
+	row := findByID(t, listRuns(t, ts.URL), run.id)
+	if row.Live == nil || row.Live.Stall == nil {
+		t.Fatalf("a stalled run carries no stall reading on GET /runs: %+v", row.Live)
+	}
+	if row.Live.Stall.Code != string(core.CodeNoPeers) {
+		t.Errorf("stall.code = %q, want %q", row.Live.Stall.Code, core.CodeNoPeers)
+	}
+	// The duration is the load-bearing half: a cause with no time attached
+	// cannot tell "normal" from "the answer".
+	if want := (4*time.Minute + 12*time.Second).Milliseconds(); row.Live.Stall.SinceMS != want {
+		t.Errorf("stall.since_ms = %d, want %d", row.Live.Stall.SinceMS, want)
+	}
+}
+
+// TestAProgressingRunCarriesNoStall is the other arm, and without it the test
+// above would pass for a build that reported every run as stalled.
+func TestAProgressingRunCarriesNoStall(t *testing.T) {
+	fake := newFakeRuns()
+	srv, ts := newTestServerWithConfig(t, DefaultConfig(), fake.runner)
+
+	run := startRun(t, ts.URL, "magnet:?xt=urn:btih:5741100000000000000000000000000000000b")
+
+	srv.mu.Lock()
+	entry := srv.runs[run.id]
+	entry.applyProgress(core.Progress{Peers: 6, Seeds: 3})
+	srv.mu.Unlock()
+
+	row := findByID(t, listRuns(t, ts.URL), run.id)
+	if row.Live == nil {
+		t.Fatalf("a live row carries no figures at all: %+v", row)
+	}
+	if row.Live.Stall != nil {
+		t.Errorf("a progressing run carries a stall reading: %+v", row.Live.Stall)
+	}
+}

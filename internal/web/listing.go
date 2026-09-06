@@ -158,6 +158,40 @@ type Live struct {
 	// core.Progress.Swarm's own doc, wire.go's identical "swarm" key on the
 	// progress event added by TOR-147).
 	Swarm *Availability `json:"swarm,omitempty"`
+
+	// Stall is why this run is getting nowhere and for how long, or absent
+	// when it is progressing (TOR-141). Filled by runEntry.applyProgress
+	// from the same heartbeat the rest of Live comes from, so a page that
+	// has only just loaded reads it out of GET /runs rather than waiting for
+	// the next WebSocket progress event.
+	Stall *Stall `json:"stall,omitempty"`
+}
+
+// Stall mirrors wire.go's "stall" object on the progress event (TOR-141)
+// field for field, the same way Availability mirrors "swarm" - so a client
+// reads a stall reading the same way whichever endpoint it came from.
+type Stall struct {
+	// Code is one of core's own ErrorCode strings (CodeNoPeers,
+	// CodeUnavailable, CodeNoMetadata, CodeReadStalled) - the same
+	// vocabulary Err above already carries for a failed run, so a client
+	// reading this needs no second lookup table.
+	Code string `json:"code"`
+	// SinceMS is how long - continuously, not merely "as of ever" - this
+	// exact code has explained no progress. See core.Progress.Stall's own
+	// doc for the rule that keeps it from restarting on every heartbeat that
+	// merely repeats the same finding.
+	SinceMS int64 `json:"since_ms"`
+}
+
+// renderStall turns a core reading into the wire shape, or nil when the run
+// is progressing - core.Progress.Stall's own "absent, not zero" rule,
+// carried through rather than re-decided here, the same way
+// renderAvailability carries Progress.Swarm's identical rule.
+func renderStall(s *core.Stall) *Stall {
+	if s == nil {
+		return nil
+	}
+	return &Stall{Code: string(s.Code), SinceMS: s.Since.Milliseconds()}
 }
 
 // Availability mirrors wire.go's "swarm" object on the progress event

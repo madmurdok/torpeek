@@ -285,3 +285,51 @@ func TestProgressOmitsSwarmWhenUnknown(t *testing.T) {
 		t.Errorf("progress with no swarm reading still carries a swarm key: %v", m["swarm"])
 	}
 }
+
+// TestProgressCarriesStall is TOR-141: which distinct cause explains no
+// progress, and how long, has to actually reach the wire for a row to show
+// it. Two different codes are asserted, not just one, so this test can tell
+// them apart rather than merely proving SOME string made it through -
+// exactly the distinction the ticket itself demands of a test like this.
+func TestProgressCarriesStall(t *testing.T) {
+	cases := []struct {
+		code    core.ErrorCode
+		sinceMS int64
+	}{
+		{core.CodeNoPeers, 2000},
+		{core.CodeReadStalled, 245300},
+	}
+
+	for _, c := range cases {
+		ev := core.Progress{
+			File: 0, FramesDone: 1, FramesTotal: 4, Peers: 0,
+			Stall: &core.Stall{Code: c.code, Since: time.Duration(c.sinceMS) * time.Millisecond},
+		}
+
+		m := Event("", ev)
+
+		stall, ok := m["stall"].(map[string]any)
+		if !ok {
+			t.Fatalf("stall = %T, want map[string]any: %v", m["stall"], m)
+		}
+		if stall["code"] != string(c.code) {
+			t.Errorf("code = %v, want %s", stall["code"], c.code)
+		}
+		if stall["since_ms"] != c.sinceMS {
+			t.Errorf("since_ms = %v, want %d", stall["since_ms"], c.sinceMS)
+		}
+	}
+}
+
+// TestProgressOmitsStallWhenProgressing is the "absent, not zero" half:
+// core.Progress.Stall is nil the moment a run IS progressing, and that must
+// reach the wire as a missing key, never as a stall object claiming an empty
+// code or a zero duration - either of which a client could mistake for a
+// real, named cause.
+func TestProgressOmitsStallWhenProgressing(t *testing.T) {
+	m := Event("", core.Progress{File: 0, FramesDone: 1, FramesTotal: 4, Peers: 3})
+
+	if _, has := m["stall"]; has {
+		t.Errorf("progress with no stall reading still carries a stall key: %v", m["stall"])
+	}
+}
