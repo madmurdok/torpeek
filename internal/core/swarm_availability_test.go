@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/madmurdok/torpeek/internal/bridge"
+	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
@@ -118,4 +120,87 @@ func waitForKnownAvailability(ctx context.Context, tor *swarm.Torrent) (*SwarmAv
 		}
 	}
 	return nil, false
+}
+
+// TestProgressCarriesLiveAvailability is TOR-135's acceptance criterion at
+// the level that matters: not that newSwarmAvailability converts a snapshot
+// correctly (the tests above cover that), but that the reading survives onto
+// the event a consumer actually reads.
+//
+// It also pins the UNIT at the far end, the thing most likely to be quietly
+// misread later: with one seeder holding everything, every piece has exactly
+// one copy, so CopiesPerPiece is 1.0 - not 100, not 0.01. Anything that
+// starts treating this figure as a percentage breaks here rather than in a
+// UI.
+//
+// The fixture has to be big, and that is a measurement rather than caution.
+// On the small clips the rest of this package uses, the run has the WHOLE
+// torrent before its first capture point, so anacrolix has already dropped
+// the seeder by the time the first heartbeat fires: measured, peers=0 seeds=0
+// swarm=nil on both heartbeats of an eight-second clip, and the same for a
+// sixty-second one. That is availability correctly reporting unknown - there
+// is genuinely nobody connected any more - so a test built on such a fixture
+// would be asking for a reading at the one moment there cannot be one. Hence
+// roofTorrent, which is large enough that the run is still fetching while it
+// works.
+func TestProgressCarriesLiveAvailability(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder, _ := roofTorrent(t, tools)
+
+	cfg := DefaultConfig(torrentPath, t.TempDir(), t.TempDir())
+	cfg.Swarm.DHT = false
+	cfg.Swarm.MetadataTimeout = 10 * time.Second
+	cfg.Swarm.Peers = []string{seeder}
+	cfg.Profile = swarm.MinTraffic
+	cfg.Plan = frames.Plan{Count: 8, Start: 0.05, End: 0.95}
+	cfg.Budget = Budget{MaxBytes: 512 << 20, MaxTime: 3 * time.Minute}
+	cfg.Parallelism = 1
+	cfg.Bridge = bridge.DefaultConfig()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var (
+		heartbeats int
+		known      *SwarmAvailability
+	)
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case Progress:
+			heartbeats++
+			if e.Swarm != nil && known == nil {
+				reading := *e.Swarm
+				known = &reading
+			}
+		case Failed:
+			t.Errorf("the run reported a failure (%s: %v)", e.Code, e.Err)
+		}
+	}
+
+	if heartbeats == 0 {
+		t.Fatal("the run published no Progress at all - nothing to carry a reading")
+	}
+	if known == nil {
+		t.Fatalf("no Progress carried an availability reading across %d heartbeats, "+
+			"against a fixture this run is still fetching from", heartbeats)
+	}
+
+	// One seeder with the whole torrent: one copy of every piece, and nothing
+	// missing from the swarm.
+	if known.CopiesPerPiece != 1 {
+		t.Errorf("CopiesPerPiece = %v, want exactly 1 - one seeder holding every piece. "+
+			"A value near 100 would mean someone started reporting a percentage",
+			known.CopiesPerPiece)
+	}
+	if known.Unavailable != 0 {
+		t.Errorf("Unavailable = %d, want 0 - the seeder holds the whole torrent", known.Unavailable)
+	}
+	if known.NumPieces <= 0 {
+		t.Errorf("NumPieces = %d, want the torrent's real piece count", known.NumPieces)
+	}
 }
