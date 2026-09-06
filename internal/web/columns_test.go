@@ -254,6 +254,194 @@ func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
 	}
 }
 
+// TestExactlyOneThPerColumnIsEverBuilt guards TOR-157's own precondition
+// before its own tests get to it: the detail row's colspan (RUN_TABLE_COLUMNS,
+// read off "#run-table thead th" at load) is only ever correct if nothing
+// past buildLiveColumnHeaders() creates another <th> - a resize handle that
+// turned out to be a header cell of its own, say, rather than a plain <span>
+// living inside one, would inflate the count RUN_TABLE_COLUMNS reads without
+// TestLiveColumnsAreWiredIntoBothHeadersAndSorting or anything else here
+// noticing, since both still agree on nine sortable columns either way.
+func TestExactlyOneThPerColumnIsEverBuilt(t *testing.T) {
+	js := appJS(t)
+
+	if n := strings.Count(js, `document.createElement("th")`); n != 1 {
+		t.Errorf(`app.js calls document.createElement("th") %d times, want exactly 1 (inside `+
+			"buildLiveColumnHeaders) - a second call would add a column the detail row's colspan "+
+			"was never told about", n)
+	}
+}
+
+// TestColumnWidthsKeyOffElSortHeaders is TOR-157's own version of the
+// LIVE_COLUMNS "one list rather than two" guard: el.sortHeaders (already
+// exactly the nine resizable headers - the actions column carries no
+// data-sort) is what decides which columns get a width to persist. A second,
+// hand-written list of column keys here could drift from LIVE_COLUMNS the
+// header set actually came from, the same way a hard-coded colspan drifted
+// from the header count before RUN_TABLE_COLUMNS existed.
+func TestColumnWidthsKeyOffElSortHeaders(t *testing.T) {
+	js := appJS(t)
+
+	if !strings.Contains(js, `Array.from(el.sortHeaders, (th) => th.dataset.sort)`) {
+		t.Error("app.js's resizableColumnKeys() does not derive its column list from el.sortHeaders - a " +
+			"hand-written list here could silently drift from the headers buildLiveColumnHeaders() actually built")
+	}
+	if !strings.Contains(js, `th.style.width = "var(--col-w-" + key + ")";`) {
+		t.Error(`app.js does not set each sortable header's own width from its --col-w-* token - without this ` +
+			`table-layout: fixed would have nothing but the CSS default to size that column with, and a stored or ` +
+			`dragged width would never reach the page`)
+	}
+}
+
+// TestStoredColumnWidthsDegradeGracefully is this ticket's own acceptance
+// criterion: a stored value must fall back to the default widths when it is
+// empty, unreadable, or - the one this ticket calls out by name - naming a
+// column that no longer exists (an older column set than the page currently
+// renders). Read as served text because there is no JS runner here (see this
+// file's opening note); what a real browser did with an actually-corrupt
+// value is recorded in the summary at the bottom of this file instead.
+func TestStoredColumnWidthsDegradeGracefully(t *testing.T) {
+	js := appJS(t)
+
+	m := regexp.MustCompile(`(?s)function loadColumnWidths\(\) \{.*?\n\}`).FindString(js)
+	if m == "" {
+		t.Fatal("app.js has no loadColumnWidths() function to check")
+	}
+
+	for _, want := range []string{
+		// Unreadable localStorage (private window, site data blocked) and a
+		// missing key both fall back to the same empty map.
+		"try {",
+		`if (!raw) return {};`,
+		// Malformed JSON throws inside the try, caught below.
+		"} catch (err) {",
+		"return {};",
+		// Not an object at all (a bare number or string JSON-decodes fine
+		// but isn't a map of columns).
+		`if (!parsed || typeof parsed !== "object") return {};`,
+		// THE ticket's own named case: a key from an older column set.
+		"const known = new Set(resizableColumnKeys());",
+		"if (!known.has(key)) continue;",
+		// A width that doesn't parse as a finite number (corrupted, or not
+		// a number at all) is dropped rather than applied as NaN.
+		"if (Number.isFinite(width)) widths[key] = clampColumnWidth(width);",
+	} {
+		if !strings.Contains(m, want) {
+			t.Errorf("app.js's loadColumnWidths() does not contain %q - a stored value could render a broken "+
+				"table instead of degrading to the default widths: %q", want, m)
+		}
+	}
+
+	// The read itself, and the whole function, must be inside the try - not
+	// just the JSON.parse - since localStorage.getItem itself is what throws
+	// in a private window.
+	if !strings.Contains(m, "localStorage.getItem(COLUMN_WIDTHS_KEY)") {
+		t.Error("app.js's loadColumnWidths() does not read COLUMN_WIDTHS_KEY from localStorage at all")
+	}
+
+	// savePanelWidth's own try/catch pattern, reused for the column map:
+	// a write that throws (private window, quota) must not crash the drag
+	// it was trying to persist.
+	if !strings.Contains(js, "function saveColumnWidths(widths) {") ||
+		!strings.Contains(js, "localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(widths));") {
+		t.Error("app.js's saveColumnWidths() does not write the whole widths map back to COLUMN_WIDTHS_KEY as JSON")
+	}
+}
+
+// TestColumnDragNeverTriggersSort is the trap this ticket names directly:
+// every header is a sort control (TOR-139), so the resize handle app.js
+// appends inside each one sits inside a click target that reorders the
+// table. TOR-140's raise/lower buttons hit the identical problem for the
+// accordion and fixed it with stopPropagation; this checks the same fix
+// landed on every one of the handle's own events, not just the drag start -
+// a plain click (pointerdown+pointerup with no movement) still bubbles a
+// separate click event that pointerdown's own stopPropagation does not
+// touch.
+func TestColumnDragNeverTriggersSort(t *testing.T) {
+	js := appJS(t)
+
+	// el.sortHeaders is walked twice in app.js - once to wire up sorting
+	// (click/keydown, near updateSortIndicators) and once, here, to build
+	// the resize handles - so the match is anchored on `const key =
+	// th.dataset.sort;`, unique to this second loop, rather than on the
+	// `for (const th of el.sortHeaders)` line the two share.
+	block := regexp.MustCompile(`(?s)for \(const th of el\.sortHeaders\) \{\n  const key = th\.dataset\.sort;.*?\n\}`).
+		FindString(js)
+	if block == "" {
+		t.Fatal("app.js has no `for (const th of el.sortHeaders) { ... }` block wiring up the resize handles")
+	}
+
+	if !strings.Contains(block, `handle.className = "col-resizer";`) {
+		t.Fatal("app.js's el.sortHeaders loop does not create a .col-resizer handle - nothing below would be " +
+			"testing what this test thinks it is")
+	}
+
+	for _, want := range []string{
+		// pointerdown: stops the drag itself from reaching the header.
+		`handle.addEventListener("pointerdown", (event) => {`,
+		// pointermove: stopped too, since a pointer captured on the handle
+		// still dispatches move events the header never asked for.
+		`handle.addEventListener("pointermove", (event) => {`,
+		// A plain click - the case pointerdown's own stopPropagation cannot
+		// reach, since click is a separate event fired after pointerup.
+		`handle.addEventListener("click", (event) => event.stopPropagation());`,
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the resize-handle wiring does not contain %q", want)
+		}
+	}
+
+	// One call each in pointerdown, pointermove and endColumnDrag (shared by
+	// both pointerup and pointercancel) - the click listener's own call is
+	// already checked above by its exact line instead, since as a one-line
+	// arrow body ("(event) => event.stopPropagation())") it reads
+	// "stopPropagation());", not "stopPropagation();", and would not count
+	// here.
+	if n := strings.Count(block, "event.stopPropagation();"); n < 3 {
+		t.Errorf("the resize-handle wiring calls event.stopPropagation() only %d times across pointerdown, "+
+			"pointermove and endColumnDrag - expected at least 3, so a drag cannot also reorder the table", n)
+	}
+}
+
+// TestColumnWidthTokensMatchThePanelWidthFamily is the ticket's own
+// instruction, checked directly: "a column-width equivalent belongs in the
+// same family" as --panel-width. Same mechanism as TestStoredColumnWidthsDegradeGracefully's
+// sibling tests above, but on the stylesheet side - the CSS half of what
+// makes a dragged width actually move a border on screen.
+func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
+	css := stylesheet(t)
+
+	for _, key := range []string{
+		"name", "when", "status", "peers", "seeds", "download_bps", "upload_bps", "availability", "priority",
+	} {
+		token := "--col-w-" + key + ":"
+		if !strings.Contains(css, token) {
+			t.Errorf("app.css declares no %q token in :root - app.js's applyColumnWidth(%q, ...) would be "+
+				"setting a custom property nothing in the stylesheet ever reads a default from", token, key)
+		}
+	}
+
+	// table-layout: fixed is what makes a header's own width authoritative
+	// for the whole column regardless of a row's content - without it, a
+	// dragged column could be overridden right back open by a long name or
+	// status line, the same shrink problem .run-cell-name's old max-width: 0
+	// trick existed to solve for exactly one column.
+	if !regexp.MustCompile(`\.run-table\s*\{[^}]*table-layout:\s*fixed`).MatchString(css) {
+		t.Error("app.css's .run-table rule does not set table-layout: fixed - a column's width would still be " +
+			"whatever its content wants regardless of what app.js sets --col-w-* to")
+	}
+
+	// The actions column has no data-sort and so no --col-w-* token of its
+	// own (see resizableColumnKeys()) - table-layout: fixed still needs an
+	// explicit width somewhere on its header, or that column (and the ones
+	// with an explicit width) would fight over the fixed grid's leftover
+	// space in a way nothing here chose on purpose.
+	if !regexp.MustCompile(`\.run-table\s+thead\s+th\.run-actions-header\s*\{[^}]*width:\s*3\.8rem`).MatchString(css) {
+		t.Error("app.css's .run-actions-header rule does not set an explicit width - table-layout: fixed reads " +
+			"column widths off the header row alone, and this header has no --col-w-* token to fall back to")
+	}
+}
+
 // WHAT THESE TESTS DO NOT COVER, in one place - the summary the top of this
 // file promises, written when TOR-140 added the first tests here that guard a
 // CONTROL rather than a rendering rule.

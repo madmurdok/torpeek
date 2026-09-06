@@ -3496,6 +3496,151 @@ window.addEventListener("resize", () => {
   applyPanelWidth(clampPanelWidth(panelWidth));
 });
 
+// ---------------------------------------------------------------------------
+// Column widths: the same drag-a-border-and-remember-it pattern as the panel
+// divider just above, once per column instead of once for the whole panel -
+// one localStorage entry holding a { key: px, ... } map rather than nine
+// separate ones, since a stale-column check (below) needs to see the whole
+// set at once to decide what to drop.
+//
+// Every key here is a column's own data-sort value - el.sortHeaders already
+// is exactly the nine resizable headers (name/when/status plus the six
+// LIVE_COLUMNS keys; the unlabelled actions column has no data-sort and
+// keeps the plain 3.8rem app.css always gave it, see .run-actions-header) -
+// so this reuses it rather than keeping a second list of column names that
+// could drift from the first, the same reason LIVE_COLUMNS itself is one
+// list rather than two.
+//
+// localStorage is read through a try/catch on purpose, same as the panel
+// width above: it throws in a private window or with site data blocked, and
+// a stored value can also simply be malformed JSON from a build that wrote
+// it differently. Either way the page must still render at the defaults
+// app.css declares (--col-w-name and its siblings) rather than break.
+const COLUMN_WIDTHS_KEY = "torpeek.columnWidths";
+const COLUMN_MIN_WIDTH = 44;
+const COLUMN_MAX_WIDTH = 640;
+
+function clampColumnWidth(px) {
+  return Math.min(COLUMN_MAX_WIDTH, Math.max(COLUMN_MIN_WIDTH, px));
+}
+
+function resizableColumnKeys() {
+  return Array.from(el.sortHeaders, (th) => th.dataset.sort);
+}
+
+// A column that no longer exists - the table shipped fewer or differently-
+// named columns when the value was stored - is dropped rather than kept:
+// nothing on the current page would ever read it, and rendering the OTHER
+// columns from a partly-stale map is still exactly the graceful fallback the
+// acceptance criterion asks for. Malformed JSON, a non-object, or a width
+// that doesn't parse as a finite number all fall back to the same empty map,
+// which is indistinguishable from "nothing was ever stored" - the table then
+// simply renders at app.css's own defaults for every column.
+function loadColumnWidths() {
+  try {
+    const raw = localStorage.getItem(COLUMN_WIDTHS_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const known = new Set(resizableColumnKeys());
+    const widths = {};
+    for (const key of Object.keys(parsed)) {
+      if (!known.has(key)) continue; // a column this page no longer has
+      const width = parseFloat(parsed[key]);
+      if (Number.isFinite(width)) widths[key] = clampColumnWidth(width);
+    }
+    return widths;
+  } catch (err) {
+    return {};
+  }
+}
+
+function saveColumnWidths(widths) {
+  try {
+    localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(widths));
+  } catch (err) {
+    // Best-effort only - the default widths still work.
+  }
+}
+
+// Mirrors applyPanelWidth: one custom property per column, on :root, so the
+// header's own inline width (set once below, as `var(--col-w-KEY)`) picks
+// up every later drag without needing to be touched again itself.
+function applyColumnWidth(key, px) {
+  document.documentElement.style.setProperty("--col-w-" + key, px + "px");
+}
+
+// columnWidths holds only the entries a drag (or a valid stored value) has
+// actually produced - same shape loadPanelWidth's null-until-touched state
+// has, kept as a map here instead of a single value because saving has to
+// write back the whole set, not just the one column that just moved.
+const columnWidths = loadColumnWidths();
+for (const [key, px] of Object.entries(columnWidths)) applyColumnWidth(key, px);
+
+// Every sortable header gets its width from the matching --col-w-* token
+// (app.css declares the defaults; the loop above already overrode any that
+// were stored) and a drag handle at its own right edge - the border between
+// it and the next column. The actions header is deliberately excluded: it
+// is not in el.sortHeaders (no data-sort), so its width stays the plain
+// 3.8rem app.css gives .run-actions-header and it grows no handle of its
+// own, since there is no column past it for a border to belong to.
+for (const th of el.sortHeaders) {
+  const key = th.dataset.sort;
+  th.style.width = "var(--col-w-" + key + ")";
+
+  const handle = document.createElement("span");
+  handle.className = "col-resizer";
+  handle.setAttribute("aria-hidden", "true");
+  th.append(handle);
+
+  let colDragStartX = 0;
+  let colDragStartWidth = 0;
+
+  // stopPropagation on every one of the handle's own events, not just
+  // pointerdown: the handle sits inside a <th> that is itself a sort
+  // control (el.sortHeaders' own click listener, wired above), and without
+  // this a drag - or even a plain click that lands on the handle - would
+  // bubble up and also reorder the table, the same trap TOR-140's ▲/▼
+  // buttons stopPropagation against so a reorder did not also toggle the
+  // accordion.
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    event.stopPropagation();
+    event.preventDefault();
+    colDragStartX = event.clientX;
+    colDragStartWidth = th.getBoundingClientRect().width;
+    handle.classList.add("dragging");
+    handle.setPointerCapture(event.pointerId);
+  });
+
+  handle.addEventListener("pointermove", (event) => {
+    if (!handle.classList.contains("dragging")) return;
+    event.stopPropagation();
+    const width = clampColumnWidth(colDragStartWidth + (event.clientX - colDragStartX));
+    columnWidths[key] = width;
+    applyColumnWidth(key, width);
+  });
+
+  function endColumnDrag(event) {
+    if (!handle.classList.contains("dragging")) return;
+    event.stopPropagation();
+    handle.classList.remove("dragging");
+    try {
+      handle.releasePointerCapture(event.pointerId);
+    } catch (err) {
+      // Already released (e.g. on pointercancel) - nothing more to do.
+    }
+    saveColumnWidths(columnWidths);
+  }
+  handle.addEventListener("pointerup", endColumnDrag);
+  handle.addEventListener("pointercancel", endColumnDrag);
+  // A plain click - no drag, pointerdown and pointerup on the same spot -
+  // still bubbles to the header's own click listener unless stopped here
+  // too; pointerdown's stopPropagation only stops the pointerdown event
+  // itself, not the separate click event the browser dispatches afterwards.
+  handle.addEventListener("click", (event) => event.stopPropagation());
+}
+
 updateSortIndicators();
 loadDefaults();
 loadRuns();

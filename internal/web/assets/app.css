@@ -135,6 +135,29 @@
      visual one, and the only custom property that existed before TOR-113. */
   --panel-width: 17rem;
 
+  /* TOR-157: the same family as --panel-width above, one token per
+     resizable run-table column rather than one shared box, because each
+     column's border moves independently of the others. Read by the
+     matching <th>'s own inline style (app.js sets `width: var(--col-w-KEY)`
+     on each header once, at load) and overwritten in place by app.js when
+     that column's border is dragged - .run-table's table-layout: fixed is
+     what makes a header's width authoritative for the whole column
+     regardless of a row's own content. The actions column is deliberately
+     absent here: it carries no data-sort, so nothing drags its own border,
+     and it keeps the plain 3.8rem app.css always gave it (see
+     .run-actions-header). Defaults below match the widths this table
+     already rendered at before this ticket (see .run-cell-metric and its
+     siblings), so a page that has never stored anything looks unchanged. */
+  --col-w-name: 20rem;
+  --col-w-when: 6.5rem;
+  --col-w-status: 8.75rem;
+  --col-w-peers: 3.4rem;
+  --col-w-seeds: 3.4rem;
+  --col-w-download_bps: 3.4rem;
+  --col-w-upload_bps: 3.4rem;
+  --col-w-availability: 5.4rem;
+  --col-w-priority: 3.4rem;
+
   /* The comparison stage's shape, set by app.js once per comparison from the
      first arm's own resolution (TOR-109) and never touched again while it is
      open. A layout token like the one above, and for the same kind of reason
@@ -489,11 +512,18 @@ button:disabled { opacity: .5; }
 
    overflow-x stays. It is the horizontal escape hatch for a narrow viewport,
    and it is also the reason the detail's own content must keep its
-   min-content width small: a detail cell wider than the wrap would widen the
-   TABLE, which would resize every other row's columns - a reflow reaching
-   well beyond the row that was opened. Everything inside .run-detail either
-   wraps, ellipsises or has a min-width of a pixel per block, so the measured
-   min-content of a detail row stays under the columns' own. */
+   min-content width small - though TOR-157's table-layout: fixed changed
+   WHY: a colspanned cell is excluded from the fixed algorithm's column-width
+   pass entirely, so a wide detail can no longer widen the table or resize
+   any other row's columns the way it could under automatic layout (the
+   RUN_TABLE_COLUMNS colspan just gets whatever the nine columns currently
+   sum to, draggable borders included). What is still true, and still the
+   reason for it: that cell's fixed width can be narrower than its content
+   wants, and without a min-content kept small, the content would overflow
+   its own box rather than wrap - visible spillage instead of a reflow.
+   Everything inside .run-detail either wraps, ellipsises or has a min-width
+   of a pixel per block, so the measured min-content of a detail row stays
+   under whatever the columns currently sum to. */
 .run-table-wrap { overflow-x: auto; }
 /* TOR-158: was opacity: .6 on the inherited full-strength --ink, dimming a
    sentence a person needs to read (it is the only thing on the page telling
@@ -502,7 +532,22 @@ button:disabled { opacity: .5; }
    known, measured strength. */
 .run-list-empty { font-size: .82rem; color: var(--ink-2); margin: 0; }
 
-.run-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+/* table-layout: fixed (TOR-157) is what makes a column's width absolute
+   rather than a hint the browser can override from content: with the
+   default automatic layout a column cannot shrink below its own content's
+   width (a magnet's whole name, unbreakable), which is exactly what
+   dragging a border narrower has to be able to do. Fixed layout reads every
+   column's width off its <th> alone (app.js sets each one from the
+   --col-w-* tokens above) and holds every row to it regardless of what a
+   cell contains - the same guarantee .run-name's own overflow: hidden;
+   text-overflow: ellipsis (below) then turns into "…" instead of a shoved
+   layout. width: 100% still matters under fixed layout: the used width is
+   the GREATER of it and the columns' own summed widths, so it fills the
+   pane by default and, the moment a drag makes that sum wider than 100%, it
+   simply loses the comparison and the table grows past the pane instead -
+   which is what pushes .run-table-wrap's own overflow-x: auto rather than
+   the page. */
+.run-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .82rem; }
 .run-table th, .run-table td { padding: .4rem .3rem; text-align: left; vertical-align: middle; }
 
 .run-table thead th {
@@ -532,15 +577,47 @@ button:disabled { opacity: .5; }
   letter-spacing: var(--track);
   color: var(--ink-2);
   white-space: nowrap;
+  /* TOR-157: a dragged column can go as narrow as COLUMN_MIN_WIDTH (app.js),
+     narrower than a label like "Availability" - clipped rather than left to
+     overflow into the next header, the same reason .run-name gets an
+     ellipsis instead of a shoved layout. */
+  overflow: hidden;
+  text-overflow: ellipsis;
   border-bottom: 1px solid var(--rule);
   cursor: pointer;
   user-select: none;
 }
-.run-table thead th.run-actions-header { cursor: default; }
+/* Fixed (TOR-157): the actions column carries no data-sort and its border
+   never drags, so unlike every other header it keeps a plain, un-tokened
+   width here instead of a --col-w-* var - table-layout: fixed still needs
+   it stated on the header cell itself, since a <td>'s own width (see
+   .run-cell-actions) is no longer read for column sizing. */
+.run-table thead th.run-actions-header { cursor: default; width: 3.8rem; }
 .run-table thead th:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .run-table thead th[aria-sort]::after { display: inline-block; width: .9em; text-align: center; }
 .run-table thead th[aria-sort="ascending"]::after { content: "▲"; }
 .run-table thead th[aria-sort="descending"]::after { content: "▼"; }
+
+/* TOR-157: the drag handle sitting inside every sortable header (app.js
+   appends one .col-resizer span per <th data-sort>, after buildLiveColumnHeaders
+   has built all nine). position: sticky on .run-table thead th above already
+   gives each header its own containing block, so this needs nothing extra to
+   anchor to its header rather than the table. Same shape as .resizer above -
+   transparent at rest, --accent-dim on hover/focus/drag - deliberately the
+   narrower of the two families of border this page now drags, since a
+   column border sits inside a clickable sort control and must not read as
+   large a target as the panel's own divider. */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.col-resizer:hover, .col-resizer.dragging { background: var(--accent-dim); }
 
 .run-row { border-bottom: 1px solid var(--rule); }
 .run-row:hover { background: var(--hover); }
@@ -562,13 +639,18 @@ button:disabled { opacity: .5; }
   border-bottom-color: transparent;
 }
 
-/* A name is cut off, not shredded. `max-width: 0` with `width: 100%` is what
-   makes a table cell shrinkable enough for an ellipsis to happen at all - a
-   td is sized by its content otherwise, and the name would either push the
-   other columns out or wrap one character at a time. The date and status
-   columns keep their intrinsic width, so this cell takes whatever is left,
-   which is exactly what widening the panel gives it more of. */
-.run-cell-name { min-width: 0; max-width: 0; width: 100%; }
+/* A name is cut off, not shredded. Before TOR-157 this cell needed its own
+   `max-width: 0` / `width: 100%` trick to shrink below its content at all -
+   an automatic-layout table cell is sized by its content otherwise, and a
+   long name would push the other columns out rather than truncate. Now that
+   .run-table is table-layout: fixed, the column's width comes solely from
+   its <th> (--col-w-name, draggable) and every cell in it is held there
+   regardless of content, so the trick is gone; .run-name's own
+   overflow: hidden; text-overflow: ellipsis (below) is what still turns an
+   over-long name into "…" rather than nothing at all. min-width: 0 stays -
+   without it a flex child's default min-width: auto would keep .run-row-main
+   from shrinking past its own content, defeating the ellipsis one level in. */
+.run-cell-name { min-width: 0; }
 .run-row-main {
   display: flex;
   align-items: baseline;
@@ -627,11 +709,14 @@ button:disabled { opacity: .5; }
 .run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .run-cell-status { white-space: nowrap; }
 /* Deliberately NOT nowrap-with-a-max-width, which is what this was first and
-   why TOR-121 exists: a cell that will not shrink has to take its width from
-   somewhere, and .run-cell-name's `max-width: 0` trick means the somewhere is
-   always the torrent's name. The label is short instead (metaLabel in
-   app.js), so there is nothing to constrain. An error message is the one
-   long thing that still lands here, and it is allowed to wrap. */
+   why TOR-121 exists: before TOR-157 an unshrinkable cell here would have
+   taken its width from .run-cell-name's own `max-width: 0` trick, which gave
+   the somewhere it stole from a name. TOR-157's table-layout: fixed removed
+   that trick - no column can grow for content any more - so today an
+   unshrinkable, over-long line here would simply overflow its own fixed
+   column instead. The label is short (metaLabel in app.js), so there is
+   nothing to constrain there; an error message is the one long thing that
+   still lands here, and it is allowed to wrap rather than risk that. */
 .run-cell-status .run-meta { max-width: 11rem; }
 
 /* THE SIX LIVE COLUMNS (TOR-139): peers, seeds, both rates, availability and
@@ -647,9 +732,13 @@ button:disabled { opacity: .5; }
    The `.run-table td` in the selector is not decoration: `.run-table th,
    .run-table td` above already sets text-align left at two classes' worth of
    specificity, and a bare `.run-cell-metric` rule (one class) would lose to
-   it silently, leaving every figure here flush left with nothing to say why. */
+   it silently, leaving every figure here flush left with nothing to say why.
+
+   No `width` here since TOR-157: table-layout: fixed reads a column's width
+   off its <th> alone (see --col-w-peers etc. and .run-table's own comment),
+   so a td's own width is never consulted for layout - the figure just sits
+   wherever its column ends up. */
 .run-table td.run-cell-metric {
-  width: 3.4rem;
   white-space: nowrap;
   text-align: right;
   font-family: var(--mono);
@@ -669,7 +758,6 @@ button:disabled { opacity: .5; }
    signal: it cannot be mistaken for a digit regardless of colour. */
 .run-table td.run-cell-metric[data-absent="true"] { color: var(--ink-2); }
 
-.run-cell-availability { width: 5.4rem; }
 /* Two lines, the same shape .run-cell-status gives a badge and its .run-meta
    underneath: the copies-per-piece figure on top, and how many pieces no
    connected peer holds at all directly under it - both from the one swarm
@@ -700,7 +788,6 @@ button:disabled { opacity: .5; }
    but "high" and "low" are, and a wrapped level would make the row taller
    than every other one - the same measurement .run-cell-availability-meta
    records. */
-.run-cell-queue { width: 3.4rem; }
 .run-cell-queue-value { display: block; }
 .run-cell-queue-meta {
   display: block;
@@ -713,13 +800,16 @@ button:disabled { opacity: .5; }
 /* Header cells for the same six columns. Left-aligned like every other
    header in this table (unlike their own data cells) - .run-table thead th's
    own rule already sizes and cases the label, so nothing here needs to
-   repeat it; only the width matches its column's data cells, and the unit
-   line (.run-th-unit) gives the availability header its own second line so its
-   figure's unit is legible without a tooltip nobody opens, per this ticket's
-   acceptance criterion. */
-.run-cell-metric-header { width: 3.4rem; }
-.run-cell-availability-header { width: 5.4rem; }
-.run-cell-queue-header { width: 3.4rem; }
+   repeat it, and (TOR-157) nothing here sets a width either any more: each
+   header's width comes from app.js's own inline `style.width =
+   "var(--col-w-KEY)"`, set once per <th data-sort> so table-layout: fixed
+   has something authoritative to read column by column instead of one class
+   shared by four differently-resizable headers (.run-cell-metric-header
+   used to be exactly that: peers, seeds, download_bps and upload_bps all
+   wore it, which would have made all four resize together). The unit line
+   (.run-th-unit) still gives the availability header its own second line so
+   its figure's unit is legible without a tooltip nobody opens, per that
+   ticket's acceptance criterion. */
 .run-th-label { display: block; }
 .run-th-unit {
   display: block;
@@ -734,8 +824,10 @@ button:disabled { opacity: .5; }
 /* Wider than the 1.6rem one ✕ needed: since TOR-140 a waiting row also
    carries the two buttons that move it up and down the queue, and they
    belong here rather than in the Queue cell because this is the column the
-   row's VERBS live in - the figure columns stay figures. */
-.run-cell-actions { width: 3.8rem; text-align: right; white-space: nowrap; }
+   row's VERBS live in - the figure columns stay figures. No `width` here
+   since TOR-157 (see .run-table thead th.run-actions-header, which is where
+   this column's fixed 3.8rem now actually lives under table-layout: fixed). */
+.run-cell-actions { text-align: right; white-space: nowrap; }
 .run-cancel,
 .run-priority {
   border: none;
