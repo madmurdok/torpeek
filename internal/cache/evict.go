@@ -132,15 +132,20 @@ type EvictResult struct {
 // delete anything; a caller (core.Engine) may also skip calling it in that
 // case purely to avoid the scan, but correctness does not depend on that.
 //
-// protect names one set's directory - the run this process is writing right
-// now - that is never removed, however old it looks. It is checked by path,
+// live names every directory some run in this process is writing right now -
+// not only the run whose finish triggered this call. It is checked by path,
 // explicitly, rather than left to fall out of the ordering on its own (a
 // live run's CreatedAt would normally be the newest thing in the tree
-// anyway): the single-slot queue (REQUIREMENTS.md 3.3) guarantees there is
-// at most one such run, but that is a guarantee about the queue, not about
-// the clock, and the one case this must never get wrong - deleting a result
-// a running job is producing - is worth an explicit check rather than an
-// inference.
+// anyway): once more than one run can be going at once (core.Engine, over
+// swarm.Pool), Set.Aged cannot be trusted to tell "still being written" from
+// "finished long ago" on its own. A fresh run with nothing on disk yet has
+// no run.json, so Aged is already false for it and it is skipped below
+// regardless of live - but a RESUMED run reuses the directory its own
+// earlier, incomplete attempt left behind, run.json included, so it is Aged
+// and can be the oldest thing in the tree for the entire time it is being
+// written back into. live is what tells the two apart; the one case this
+// must never get wrong - deleting a result a running job is producing, or
+// resuming into - is worth an explicit check rather than an inference.
 //
 // A set with an unreadable run.json (Set.Aged == false) is likewise never
 // picked for removal: there is no honest CreatedAt to place it in the
@@ -154,7 +159,7 @@ type EvictResult struct {
 // That is reported, not hidden or forced: the manual clear
 // (REQUIREMENTS.md 2.9's last bullet) is the deliberate way to remove
 // something automatic eviction refuses to guess about.
-func Evict(root string, ceiling int64, protect string) (EvictResult, error) {
+func Evict(root string, ceiling int64, live []string) (EvictResult, error) {
 	if ceiling <= 0 {
 		return EvictResult{}, nil
 	}
@@ -164,13 +169,16 @@ func Evict(root string, ceiling int64, protect string) (EvictResult, error) {
 		return EvictResult{}, err
 	}
 
-	protect = filepath.Clean(protect)
+	protected := make(map[string]struct{}, len(live))
+	for _, dir := range live {
+		protected[filepath.Clean(dir)] = struct{}{}
+	}
 
 	var total int64
 	candidates := make([]Set, 0, len(sets))
 	for _, s := range sets {
 		total += s.Bytes
-		if !s.Aged || filepath.Clean(s.Dir) == protect {
+		if _, isLive := protected[filepath.Clean(s.Dir)]; !s.Aged || isLive {
 			continue
 		}
 		candidates = append(candidates, s)

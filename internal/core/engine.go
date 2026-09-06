@@ -118,11 +118,58 @@ const DefaultParallelism = 4
 // Engine runs one job and reports it as events. It prints nothing.
 type Engine struct {
 	tools ffmpeg.Tools
+
+	// liveMu guards live below - runs share one Engine (TOR-128 put more
+	// than one Engine.Run in flight over a shared swarm.Pool) and finish on
+	// their own goroutines, so marking and reading this map races without
+	// it.
+	liveMu sync.Mutex
+	// live is every RunDir a run on this Engine is currently writing to,
+	// refcounted rather than a plain set: two runs can legitimately resolve
+	// to the same RunDir (same infohash and params - see ParamsKey) and
+	// overlap, and unmarking must not clear a directory the other one is
+	// still writing. cache.Evict reads a snapshot of this to know which
+	// directories no run's own CreatedAt-based ordering can be trusted to
+	// protect (see its own doc for why Aged alone stopped being enough).
+	live map[string]int
 }
 
 // NewEngine returns an engine using the given external tools.
 func NewEngine(tools ffmpeg.Tools) *Engine {
-	return &Engine{tools: tools}
+	return &Engine{tools: tools, live: make(map[string]int)}
+}
+
+// markLive records dir as a run's own directory for as long as that run is
+// still writing to it, and unmarkLive is called once - always paired, always
+// deferred - when that run is done with it.
+func (e *Engine) markLive(dir string) {
+	e.liveMu.Lock()
+	e.live[dir]++
+	e.liveMu.Unlock()
+}
+
+func (e *Engine) unmarkLive(dir string) {
+	e.liveMu.Lock()
+	if e.live[dir] <= 1 {
+		delete(e.live, dir)
+	} else {
+		e.live[dir]--
+	}
+	e.liveMu.Unlock()
+}
+
+// liveDirs snapshots every directory currently marked live, for a run's own
+// cache.Evict call to exclude - not just its own directory, since any other
+// run on this Engine may be mid-write (or mid-resume - see cache.Evict) at
+// the same moment.
+func (e *Engine) liveDirs() []string {
+	e.liveMu.Lock()
+	defer e.liveMu.Unlock()
+	dirs := make([]string, 0, len(e.live))
+	for dir := range e.live {
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 // Run starts a job and returns the events it produces. The channel closes when
@@ -248,6 +295,14 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		return
 	}
 
+	// Marked live for the rest of this function, resume included: a resumed
+	// run reuses a directory its own earlier, incomplete attempt already put
+	// a run.json in (Aged is already true, on an old CreatedAt), so without
+	// this a concurrent run finishing elsewhere could pick it as the
+	// oldest-first eviction candidate it looks like. See cache.Evict's doc.
+	e.markLive(writer.Layout().RunDir())
+	defer e.unmarkLive(writer.Layout().RunDir())
+
 	// The .torrent is written before a single frame is fetched, not at the end
 	// beside the run record. It can only be reconstructed while this session
 	// is open - the info dictionary is what the swarm just handed over - and a
@@ -360,14 +415,16 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		// eviction at all - skipping the call entirely also skips the scan
 		// cost of Evict finding that out for itself on every run).
 		//
-		// This run's own directory is named explicitly as the one set Evict
-		// must never remove: the single-slot queue (REQUIREMENTS.md 3.3)
-		// guarantees this is the only run writing right now, but a failure
-		// here must not cost a person the frames this run just finished
-		// producing - so, like a .torrent that could not be written
+		// e.liveDirs() names every directory any run on this Engine is
+		// currently writing - this run's own included, since unmarkLive is
+		// still deferred - not just this one: with more than one run able to
+		// be live at once (TOR-128's pool), each finishing run's own Evict
+		// call has to protect every sibling still going, not only itself. A
+		// failure here must not cost a person the frames this run just
+		// finished producing - so, like a .torrent that could not be written
 		// (TOR-79), it becomes a warning on Done rather than a run-scoped
 		// Failed.
-		if _, err := cache.Evict(cfg.OutputRoot, cfg.CacheCeiling, writer.Layout().RunDir()); err != nil {
+		if _, err := cache.Evict(cfg.OutputRoot, cfg.CacheCeiling, e.liveDirs()); err != nil {
 			warnings = append(warnings, fmt.Sprintf("cache eviction: %v", err))
 		}
 	}
