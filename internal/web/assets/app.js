@@ -3213,9 +3213,10 @@ function link(href, text) {
 // a path, and there is no broken link to press.
 //
 // The anchor carries a bare download attribute rather than a filename: the
-// server sends a Content-Disposition naming the file after its infohash,
-// which is what a browser uses, and putting a prettier name here would only
-// be a name that never takes effect.
+// server sends a Content-Disposition that already names the file after the
+// torrent itself (TOR-170) - or, absent a name, after its infohash - and
+// that server-sent filename is what a browser uses. Putting a name here too
+// would only be a second name that never takes effect.
 function showTorrent(entry, href) {
   entry.torrentURL = href || "";
   entry.torrentActions.hidden = !entry.torrentURL;
