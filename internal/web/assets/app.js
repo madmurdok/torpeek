@@ -1505,10 +1505,10 @@ function refreshAgain(entry) {
 // the whole of this ticket's second question: which lever is the right one.
 //
 // A per-run traffic raise only ever helps the first of these. The other two
-// are recorded distinctly all the way from core (StopBudget against
-// StopRoof, and the clock recovered from the manifest's own elapsed figure -
-// see TopUp.Limit), so the page can say which one it was instead of offering
-// more traffic to a run that never ran out of any.
+// are recorded distinctly all the way from core (StopBudget, StopTime and
+// StopRoof are three separate reasons since TOR-161 - see TopUp.Limit), so
+// the page can say which one it was instead of offering more traffic to a
+// run that never ran out of any.
 const LIMIT_LEVER = {
   traffic: "stopped at this run's own traffic ceiling",
   time: "stopped at this run's own time limit",
@@ -3484,16 +3484,22 @@ function apply(ev) {
       syncEntry(entry);
       logFor(entry, "done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
           " file(s), " + ev.downloaded + " bytes in " + seconds(ev.elapsed_ms));
-      // The reason spelled out, for the two that are not self-explanatory
+      // The reason spelled out, for the three that are not self-explanatory
       // from a word. A run that hit the client-wide roof must not read like
-      // a run that hit its own ceiling: the first is about traffic this run
-      // may not have caused and cannot narrow its way out of, the second is
-      // about this run's own spending (core.StopRoof against StopBudget).
+      // a run that hit its own ceiling, and a run that hit its own TIME
+      // ceiling must not read like one that hit its own TRAFFIC ceiling: the
+      // first is about traffic this run may not have caused and cannot
+      // narrow its way out of, the second two are about this run's own
+      // spending but call for different responses - more traffic helps one
+      // and does nothing for the other (core.StopRoof, core.StopBudget and
+      // core.StopTime are three separate reasons since TOR-161).
       if (ev.reason === "traffic_roof") {
         logFor(entry, "stopped at the client-wide traffic roof, not at this run's own limit; " +
             "what was produced is kept");
       } else if (ev.reason === "budget") {
-        logFor(entry, "stopped at this run's own limit; what was produced is kept");
+        logFor(entry, "stopped at this run's own traffic limit; what was produced is kept");
+      } else if (ev.reason === "time") {
+        logFor(entry, "stopped at this run's own time limit; what was produced is kept");
       }
       // A run that finished and still left something out says so here rather
       // than by reading as failed, which is what it used to do when its

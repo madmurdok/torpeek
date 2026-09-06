@@ -1496,8 +1496,12 @@ func reachable(avail availabilityMap, profile swarm.Profile,
 func haltReason(ctx context.Context, tracker *BudgetTracker) (StopReason, bool) {
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			// The only deadline on this context is the time budget.
-			return StopBudget, true
+			// The only deadline on this context is the time budget
+			// (BudgetTracker.Context), so a context that expired on its own
+			// - rather than being cancelled by a caller - can only mean the
+			// clock. StopTime, never StopBudget: this is the run's own wall
+			// clock, told apart from its own traffic ceiling since TOR-161.
+			return StopTime, true
 		}
 		return StopCancelled, true
 	}

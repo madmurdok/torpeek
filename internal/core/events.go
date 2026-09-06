@@ -558,9 +558,35 @@ type StopReason string
 
 const (
 	StopCompleted StopReason = "completed"
-	// StopBudget means this run reached a ceiling of its OWN - the traffic or
-	// wall-clock limit sized for it (Budget, REQUIREMENTS.md 2.6).
+	// StopBudget means this run reached its OWN traffic ceiling (Budget.MaxBytes,
+	// REQUIREMENTS.md 2.6).
+	//
+	// Until TOR-161 this reason also covered the run's own wall-clock ceiling -
+	// BudgetTracker.Exhausted returned StopBudget for either, and
+	// manifest.Cost.LimitHit recorded both as "budget". That collapsed two
+	// causes a person acts on differently ("narrow the run" fits a traffic
+	// stop and is useless advice for a clock) into one, and left every
+	// consumer to re-derive which one actually happened by comparing elapsed
+	// time against the time ceiling - which is exactly what TOR-152's topUpFor
+	// had to do. See StopTime.
 	StopBudget StopReason = "budget"
+	// StopTime means this run reached its OWN wall-clock ceiling
+	// (Budget.MaxTime, REQUIREMENTS.md 2.6) - the clock's own reason, apart
+	// from StopBudget's traffic ceiling, for the same reason StopBudget is
+	// apart from StopRoof: a bigger traffic allowance cannot help a run that
+	// ran out of time, and folding the two into one reason hands every
+	// consumer the job of telling them apart itself.
+	//
+	// A run that has crossed BOTH its own byte ceiling and its own time
+	// ceiling by the moment it is asked reports StopTime, never StopBudget:
+	// BudgetTracker.Exhausted checks the clock first for exactly this reason
+	// - more traffic could not have finished a run whose time had already run
+	// out, so "reached its traffic ceiling" would be true but misleading
+	// advice, while "ran out of time" is true and actionable regardless of
+	// how much traffic was left. This precedence is decided here, at the
+	// source, rather than by a consumer (contrast the pre-TOR-161 state
+	// above).
+	StopTime StopReason = "time"
 	// StopRoof means the CLIENT reached the traffic roof over every run
 	// sharing it (Roof), so this run stopped along with all of them.
 	//
