@@ -102,11 +102,30 @@ func event(ev core.Event) map[string]any {
 			"requested_ms": e.Requested.Milliseconds(), "code": string(e.Code), "reason": e.Reason,
 		}
 	case core.Progress:
-		return map[string]any{
+		m := map[string]any{
 			"type": "progress", "file": e.File, "frames_done": e.FramesDone,
 			"frames_total": e.FramesTotal, "downloaded": e.DownloadedByte,
-			"elapsed_ms": e.Elapsed.Milliseconds(), "peers": e.Peers, "seeds": e.Seeds,
+			"uploaded":   e.UploadedByte,
+			"elapsed_ms": e.Elapsed.Milliseconds(),
+			"peers":      e.Peers, "seeds": e.Seeds,
 		}
+		// download_bps/upload_bps are this heartbeat's INSTANTANEOUS speed
+		// in bytes per second - the byte delta since the previous heartbeat
+		// divided by the real time between the two, never a nominal period
+		// (core.Progress.DownloadRate's own doc). A stall followed by a
+		// burst therefore reports the burst averaged over the whole stalled
+		// window, never as a sustained peak. Present only from the run's
+		// second heartbeat on: a client must read a missing key as "not yet
+		// known", not as "stopped" or "0 B/s" - the same "absent, not zero"
+		// rule core.Progress.Swarm's own doc argues for (TOR-119, TOR-111,
+		// TOR-135), applied here for the same reason.
+		if e.DownloadRate != nil {
+			m["download_bps"] = *e.DownloadRate
+		}
+		if e.UploadRate != nil {
+			m["upload_bps"] = *e.UploadRate
+		}
+		return m
 	case core.BudgetWarning:
 		// scope says whether spent/limit are this run's or the whole
 		// client's, and is the difference between "you asked for a lot" and

@@ -80,9 +80,54 @@ type Progress struct {
 	FramesDone     int
 	FramesTotal    int
 	DownloadedByte int64
-	Elapsed        time.Duration
-	Peers          int
-	Seeds          int
+	// UploadedByte is what this run has SENT to peers so far -
+	// swarm.Torrent.Uploaded(), the counter TOR-133 added. Read fresh on
+	// every heartbeat the same way DownloadedByte is; no second counter
+	// exists or is kept here.
+	UploadedByte int64
+	Elapsed      time.Duration
+	Peers        int
+	Seeds        int
+
+	// DownloadRate and UploadRate are this heartbeat's speed, in bytes per
+	// second: the delta in DownloadedByte/UploadedByte since the PREVIOUS
+	// heartbeat, divided by the REAL time between the two - never a nominal
+	// period, because the heartbeat is not a ticker and its spacing is
+	// whatever the network and the capture loop happened to take. That is
+	// what keeps a stall honest: a run that goes quiet for twenty seconds
+	// and then receives a burst divides the burst's bytes by the whole
+	// twenty-plus seconds, since that is how long the window it is reported
+	// for actually took - so the figure is never the burst's own peak rate,
+	// without needing to smooth across more than the two heartbeats that
+	// bracket it.
+	//
+	// Deliberately the INSTANTANEOUS rate since the one heartbeat before
+	// this, not smoothed across a longer window. A heartbeat already fires
+	// about once per frame produced, which is the cadence a person watching
+	// a stalled file needs left intact - averaging further would blur the
+	// very signal that says "this file is going nowhere" into a number that
+	// still looks like progress. A client wanting a smoother figure can
+	// average successive readings of this field itself; recovering the
+	// instantaneous rate back out of an average this event never sent is
+	// not possible, so this is the one direction that keeps both options
+	// open.
+	//
+	// Nil before the run's second heartbeat, and nil rather than zero for
+	// the same reason Swarm below is nil rather than a zeroed reading
+	// (TOR-119, TOR-111, TOR-135): a rate with no interval behind it yet is
+	// unknown, not measured at zero, and reporting 0 B/s would read as
+	// "stalled" for a run that has simply not had a second heartbeat yet.
+	//
+	// They are the WHOLE RUN's rates, not this File's, even though they
+	// arrive on a per-file event. DownloadedByte and UploadedByte are
+	// run-wide counters too, so there is no per-file figure here to be had -
+	// but a client that labels these beside the file name is saying
+	// something the event never claimed. With cfg.Parallelism above one,
+	// heartbeats from several files interleave and each takes its delta
+	// against whichever fired last, so successive readings are also shorter
+	// and noisier windows than one file's cadence alone would give.
+	DownloadRate *float64
+	UploadRate   *float64
 
 	// Swarm is this heartbeat's live availability reading - what the SWARM
 	// HOLDS right now, never what this run has ordered from it. That other
@@ -160,6 +205,54 @@ func newSwarmAvailability(a swarmSnapshot) *SwarmAvailability {
 		Unavailable:    a.Unavailable(),
 		NumPieces:      n,
 	}
+}
+
+// rateSample is the pure arithmetic behind Progress.DownloadRate and
+// Progress.UploadRate: a delta between two readings of a cumulative counter,
+// divided by the REAL time between them rather than a nominal heartbeat
+// period. See Progress.DownloadRate's own doc for why that is what keeps a
+// stall-then-burst honest and why the result is deliberately not smoothed
+// further.
+//
+// Kept as its own tiny type, independent of core.Progress, the engine or
+// anything that stands up a swarm, so the rule is testable against a
+// synthetic sequence of (bytes, elapsed) readings alone - TOR-134's own
+// requirement, and the same reasoning swarmSnapshot above gives for keeping
+// newSwarmAvailability testable without a swarm.
+type rateSample struct {
+	known   bool
+	bytes   int64
+	elapsed time.Duration
+}
+
+// next folds in one heartbeat's cumulative byte count and cumulative
+// elapsed time, and returns the rate since the previous call - nil before a
+// previous call exists to take an interval against, or if the clock did not
+// advance (a repeated or out-of-order heartbeat has no honest interval to
+// divide by). Absent, not zero: the same "unknown, not zero" rule
+// newSwarmAvailability's own doc gives for Progress.Swarm.
+func (r *rateSample) next(bytes int64, elapsed time.Duration) *float64 {
+	prevBytes, prevElapsed, known := r.bytes, r.elapsed, r.known
+	r.bytes, r.elapsed, r.known = bytes, elapsed, true
+
+	if !known {
+		return nil
+	}
+	dt := elapsed - prevElapsed
+	if dt <= 0 {
+		return nil
+	}
+	delta := bytes - prevBytes
+	if delta < 0 {
+		// A counter that went backwards is not a rate either; nothing in
+		// this run's own counters does this, but a caller feeding a
+		// synthetic sequence out of order should get "unknown" rather than
+		// a negative speed.
+		return nil
+	}
+
+	rate := float64(delta) / dt.Seconds()
+	return &rate
 }
 
 // LimitScope says WHOSE ceiling a warning is about. The two are easy to

@@ -388,6 +388,11 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
+	// One tracker for the whole run, shared by every file's goroutine below
+	// - see runSpeed's own doc for why that has to be one instance rather
+	// than one per file.
+	speed := &runSpeed{}
+
 	for _, video := range selected {
 		if reason, halt := haltReason(runCtx, tracker); halt {
 			mu.Lock()
@@ -410,6 +415,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 				extractor: extractor,
 				writer:    writer,
 				tracker:   tracker,
+				speed:     speed,
 				bus:       bus,
 			}, file)
 
@@ -506,6 +512,33 @@ func stallSince(b *bridge.Bridge, url string, before int) error {
 	return last
 }
 
+// runSpeed is one run's download and upload rate tracker, shared across
+// every file's goroutine. Progress heartbeats fire from more than one file
+// at once (cfg.Parallelism), but they read off the SAME cumulative
+// counters - the budget tracker's Spent and torrent.Uploaded are both
+// run-wide, not per-file (NewBudgetTracker's own doc: "the budget covers
+// the whole run, so every file shares one tracker") - so the previous
+// reading a rate is a delta against has to be one shared point too, not one
+// per goroutine, and reading or advancing it from two files at once needs a
+// lock rather than each guessing at the other's last sample.
+//
+// The arithmetic itself is rateSample (events.go); this only adds the
+// concurrency this run's parallel files need around it.
+type runSpeed struct {
+	mu   sync.Mutex
+	down rateSample
+	up   rateSample
+}
+
+// sample folds in this heartbeat's cumulative download and upload bytes,
+// both read against the one shared elapsed reading, and returns the two
+// rates - see rateSample.next and Progress.DownloadRate for what nil means.
+func (s *runSpeed) sample(downloadedByte, uploadedByte int64, elapsed time.Duration) (downloadRate, uploadRate *float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.down.next(downloadedByte, elapsed), s.up.next(uploadedByte, elapsed)
+}
+
 // fileDeps groups what processing one file needs, so the signature does not
 // grow a parameter per collaborator.
 type fileDeps struct {
@@ -515,7 +548,10 @@ type fileDeps struct {
 	extractor *frames.Extractor
 	writer    *output.Writer
 	tracker   *BudgetTracker
-	bus       *Bus
+	// speed is this run's shared rate tracker (see runSpeed's own doc for
+	// why one instance, not one per file).
+	speed *runSpeed
+	bus   *Bus
 
 	// toneMap is the colour conversion decided for this one file, once its
 	// stream has been inspected. It lives here rather than on the extractor
@@ -748,14 +784,23 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 
 		spent, elapsed := deps.tracker.Spent()
 		connected, seeds := deps.torrent.Peers()
+		uploaded := deps.torrent.Uploaded()
+		// Both rates are taken against this one shared elapsed reading, so a
+		// download stall and an upload burst arriving on the very same
+		// heartbeat are each divided by the same real interval rather than
+		// two different notions of "since last time" (runSpeed, rateSample).
+		downloadRate, uploadRate := deps.speed.sample(spent, uploaded, elapsed)
 		deps.bus.Publish(Progress{
 			File:           file.Index,
 			FramesDone:     produced,
 			FramesTotal:    len(points),
 			DownloadedByte: spent,
+			UploadedByte:   uploaded,
 			Elapsed:        elapsed,
 			Peers:          connected,
 			Seeds:          seeds,
+			DownloadRate:   downloadRate,
+			UploadRate:     uploadRate,
 			// What the SWARM holds, read fresh on every heartbeat, and nil
 			// when the client has not learned it yet - which is a real state
 			// and not zero copies (newSwarmAvailability, Progress.Swarm).
