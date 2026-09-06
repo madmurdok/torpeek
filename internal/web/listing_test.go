@@ -2,10 +2,12 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,11 +286,40 @@ func TestMergesALiveFinishedRunWithItsOwnDiskRecord(t *testing.T) {
 	}
 }
 
-// TestQueuedOrRunningNeverMergesWithADiskRecord: only a final live entry may
-// merge. A live run must never be hidden behind a disk snapshot while it is
-// still going - the queued/running row always carries its own live id and
-// state, whatever a same-infohash disk record says.
-func TestQueuedOrRunningNeverMergesWithADiskRecord(t *testing.T) {
+// rowsFor pulls every row of one infohash out of a listing. The COUNT is the
+// point of it: TOR-162 is a ticket about how many rows one torrent gets, so
+// the tests below assert on the length of this and then on the row itself,
+// rather than reaching for the first match and never noticing a second.
+func rowsFor(rows []RunSummary, hash string) []RunSummary {
+	var out []RunSummary
+	for _, row := range rows {
+		if row.InfoHash == hash {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// TestALiveRunAgainstAnExistingRecordIsStillOneRow is TOR-54's
+// TestQueuedOrRunningNeverMergesWithADiskRecord, INVERTED, the same way
+// TOR-140 inverted TOR-139's queue-ranking test rather than deleting it.
+//
+// The old test asserted TWO rows here and was right to, given the rule it
+// guarded: a live entry merged only once it was final, so a run going against
+// a directory that already had a record was listed beside that record. What
+// it did not say is that the shape it constructs - a record on disk, then an
+// ordinary live run of the same torrent - is a REGENERATE (TOR-68), and a
+// reopen (TOR-55), and since TOR-152 a top-up. So this test is the evidence
+// the ticket asked for: the duplicate was NOT a top-up regression, it was
+// asserted as intended behaviour from the day listRuns was written, and
+// top-up only made it easy to hit.
+//
+// The subject is unchanged and so is the half that was always right: a live
+// run must never be HIDDEN behind a disk snapshot. That is now checked on the
+// merged row itself - it has to carry the live id, the live state and the
+// live name, and the disk record may only fill in what the live entry has
+// nothing to say about.
+func TestALiveRunAgainstAnExistingRecordIsStillOneRow(t *testing.T) {
 	root := t.TempDir()
 	const (
 		hash   = "d0d0000000000000000000000000000000000d"
@@ -315,19 +346,226 @@ func TestQueuedOrRunningNeverMergesWithADiskRecord(t *testing.T) {
 	fake.send(t, source, core.MetadataReady{Name: "Live Run", InfoHash: hash})
 	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == hash })
 
-	rows := listRuns(t, ts.URL)
-	var matches []RunSummary
-	for _, row := range rows {
-		if row.InfoHash == hash {
-			matches = append(matches, row)
-		}
+	// Listed WHILE the run is going: the stream is still open, nothing has
+	// been finished, and this is the exact window the old rule refused to
+	// merge in.
+	matches := rowsFor(listRuns(t, ts.URL), hash)
+	if len(matches) != 1 {
+		t.Fatalf("torrent %s appears %d times while a run against its own directory is going, want 1: %+v",
+			hash, len(matches), matches)
 	}
-	if len(matches) != 2 {
-		t.Fatalf("run %s appears %d times while live, want 2 (the running row and the untouched disk row): %+v", hash, len(matches), matches)
+
+	row := matches[0]
+	if row.ID != run.id {
+		t.Errorf("the one row's id = %q, want the live run's %q - the live entry must not be the half "+
+			"that disappears into the merge", row.ID, run.id)
+	}
+	if row.State != "running" {
+		t.Errorf("the one row's state = %q, want running - a merge that reported the disk record's silence "+
+			"would hide a run that is going", row.State)
+	}
+	if row.Name != "Live Run" {
+		t.Errorf("the one row's name = %q, want the live entry's own confirmed %q rather than the record's "+
+			"older reading", row.Name, "Live Run")
+	}
+	if row.Params != "deadbeef" {
+		t.Errorf("the one row's params = %q, want deadbeef - the merge's whole job is to tell the live row "+
+			"which directory it is filling", row.Params)
+	}
+}
+
+// TestATopUpInFlightIsStillOneRow is TOR-162's acceptance criterion, and the
+// load-bearing word in it is DURING. A test that listed after the top-up
+// finished would pass against the rule this ticket REPLACED - a final entry
+// merged even then - so it would prove nothing whatsoever. Everything here is
+// asserted with the run's event stream still open.
+//
+// It also covers what the test above cannot: the merged counts. A top-up runs
+// against a set that is half-taken, so the row has to report that set's own
+// standing (16 of 20 per file, two files short) while the run filling it is
+// still going - which before this ticket was reported on a SECOND row, the
+// one a person could not act on.
+func TestATopUpInFlightIsStillOneRow(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "3333bb22cc33dd44ee55ff66aa77bb88cc99dd11"
+		params = "deadbeefdeadbeef"
+		source = "magnet:?xt=urn:btih:" + hash
+	)
+	writePartialSet(t, root, hash, params, source, budgetCost(), takenPerFile, takenPerFile)
+
+	fake, srv, base := serverOver(t, root, 0)
+
+	// A finished run of this torrent, so the page's row has a live id to top
+	// up from - which is the path that re-arms the entry in place
+	// (Server.again) rather than minting a second one.
+	first := startRun(t, base, source)
+	waitFor(t, func() bool { return fake.started(source) })
+	fake.send(t, source, core.MetadataReady{Name: "Season 1", InfoHash: hash})
+	fake.finish(t, source)
+	waitFor(t, func() bool { return stateOf(t, srv, first.id) == RunDone })
+
+	resp := post(t, base, "/runs/topup", `{"infohash":"`+hash+`","id":"`+first.id+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/topup: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	// The second call to the runner: the top-up is now IN FLIGHT, and its
+	// stream stays open for the rest of this test.
+	waitFor(t, func() bool { return fake.count() == 2 })
+	if got := stateOf(t, srv, first.id); got.final() {
+		t.Fatalf("the topped-up entry is already %s - this test has to list while the run is going", got)
+	}
+
+	matches := rowsFor(listRuns(t, base), hash)
+	if len(matches) != 1 {
+		t.Fatalf("torrent %s appears %d times while a top-up is in flight, want 1 - this is the "+
+			"three-rows-for-two-torrents the ticket was found by: %+v", hash, len(matches), matches)
+	}
+
+	row := matches[0]
+	if row.ID != first.id {
+		t.Errorf("the one row's id = %q, want the re-armed entry's %q", row.ID, first.id)
+	}
+	if row.State != string(RunRunning) {
+		t.Errorf("the one row's state = %q, want running", row.State)
+	}
+	if row.Params != params {
+		t.Errorf("the one row's params = %q, want %q - the set being filled", row.Params, params)
+	}
+	if row.Files != 2 || row.Selected != 2 || row.Complete != 0 {
+		t.Errorf("the one row reports files/selected/complete = %d/%d/%d, want 2/2/0 - the standing of the "+
+			"set this run is filling, which is what the second row used to carry",
+			row.Files, row.Selected, row.Complete)
+	}
+	if !row.Partial() {
+		t.Error("the one row is not partial, but the set it is filling is 16 of 20 frames short on both " +
+			"files - that verdict is the only thing on the row that says why a top-up is running at all")
+	}
+}
+
+// TestAQueuedTopUpIsStillOneRow is the state the replaced rule was actually
+// WRITTEN for: an entry that is waiting for a slot, has written nothing, and
+// yet already names a directory that has a record. Worth its own test because
+// queued is the one state where the old reasoning ("it has not written a
+// record yet, whatever its infohash") is literally true and still does not
+// justify a second row.
+//
+// The entry knows its infohash here only because a top-up RE-ARMS the row it
+// was started from, and that row learned it from its own first run
+// (Server.again keeps what belongs to the torrent). A top-up started against
+// a disk-only row mints a fresh entry instead, which has no infohash until
+// its own metadata_ready - and for that window nothing can merge, because the
+// key does not exist yet. app.js's liveRowFor had the identical hole for the
+// identical reason, so removing it loses nothing.
+func TestAQueuedTopUpIsStillOneRow(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "3333bb22cc33dd44ee55ff66aa77bb88cc99dd22"
+		params = "deadbeefdeadbeef"
+		source = "magnet:?xt=urn:btih:" + hash
+		hog    = "magnet:?xt=urn:btih:9999bb22cc33dd44ee55ff66aa77bb88cc99dd22"
+	)
+	writePartialSet(t, root, hash, params, source, budgetCost(), takenPerFile, takenPerFile)
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	// One slot, so the top-up below has to wait for it rather than start.
+	cfg.MaxActiveTorrents = 1
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	first := startRun(t, ts.URL, source)
+	waitFor(t, func() bool { return fake.started(source) })
+	fake.send(t, source, core.MetadataReady{Name: "Season 1", InfoHash: hash})
+	fake.finish(t, source)
+	waitFor(t, func() bool { return stateOf(t, srv, first.id) == RunDone })
+
+	// Something else takes the only slot and keeps it: its stream stays open
+	// for the rest of the test, so nothing dispatches behind it.
+	startRun(t, ts.URL, hog)
+	waitFor(t, func() bool { return fake.started(hog) })
+
+	resp := post(t, ts.URL, "/runs/topup", `{"infohash":"`+hash+`","id":"`+first.id+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/topup: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if got := stateOf(t, srv, first.id); got != RunQueued {
+		t.Fatalf("the topped-up entry is %s, want queued - this test needs the queued window", got)
+	}
+
+	matches := rowsFor(listRuns(t, ts.URL), hash)
+	if len(matches) != 1 {
+		t.Fatalf("torrent %s appears %d times while its top-up waits for a slot, want 1: %+v",
+			hash, len(matches), matches)
+	}
+	if row := matches[0]; row.ID != first.id || row.State != string(RunQueued) {
+		t.Errorf("the one row is %+v, want the queued live entry %q", row, first.id)
+	}
+}
+
+// TestTwoCapturePlansOfOneTorrentStayTwoRows is the line TOR-162 deliberately
+// did NOT cross. Dropping finality from the merge key does not touch the other
+// half of the rule: an infohash naming more than one result set has no single
+// record to pair a live entry with, TOR-54 chose to list them all rather than
+// guess, and this pins that choice so a later widening of the key cannot
+// silently swallow a set a person is looking at.
+func TestTwoCapturePlansOfOneTorrentStayTwoRows(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "d1d1000000000000000000000000000000000d11"
+		source = "magnet:?xt=urn:btih:" + hash
+	)
+
+	for _, params := range []string{"aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"} {
+		writeRun(t, root, hash, params, cache.Run{
+			Version:  cache.Version,
+			InfoHash: hash,
+			Name:     "Two Plans",
+			Videos:   []cache.File{{Index: 0, Path: "a.mkv"}},
+			Selected: []int{0},
+			Complete: []int{0},
+		})
+	}
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	run := startRun(t, ts.URL, source)
+	fake.send(t, source, core.MetadataReady{Name: "Two Plans", InfoHash: hash})
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).InfoHash == hash })
+
+	matches := rowsFor(listRuns(t, ts.URL), hash)
+	if len(matches) != 3 {
+		t.Fatalf("torrent %s appears %d times, want 3 - the live row plus both sets on disk, since no one "+
+			"record can be paired with the live entry: %+v", hash, len(matches), matches)
 	}
 	for _, row := range matches {
-		if row.ID == run.id && row.State != "running" {
-			t.Errorf("the live row's state was overwritten: %+v", row)
+		if row.ID == run.id && row.Params != "" {
+			t.Errorf("the live row was paired with set %q anyway - merging on a guess is what this rule "+
+				"refuses: %+v", row.Params, row)
+		}
+	}
+}
+
+// TestThePageKeepsNoMergeRuleOfItsOwn is the third acceptance criterion:
+// once the listing holds the invariant, app.js's liveRowFor has to GO rather
+// than sit there as a second implementation of the same rule. Two copies of
+// one rule is what this ticket exists to close - the rule was in the client,
+// where a second consumer of GET /runs could not see it - so leaving the
+// workaround behind would leave the ticket half-done.
+//
+// Read as served text, the way every other front-end guard in this package
+// works (see columns_test.go's own opening note on why there is no JS runner
+// here).
+func TestThePageKeepsNoMergeRuleOfItsOwn(t *testing.T) {
+	js := appJS(t)
+
+	for _, gone := range []string{"function liveRowFor(", "liveRowFor(row)"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("app.js still contains %q - the page is still deciding which rows are the same torrent, "+
+				"beside a listing that now decides it for every consumer", gone)
 		}
 	}
 }
@@ -1355,5 +1593,334 @@ func TestAProgressingRunCarriesNoStall(t *testing.T) {
 	}
 	if row.Live.Stall != nil {
 		t.Errorf("a progressing run carries a stall reading: %+v", row.Live.Stall)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TOR-156: the arrival ordinal. "This was the Nth torrent you added" - which
+// is NOT the queue position beside it, and the two tests after the first are
+// there because those are the two ways the difference goes quietly wrong.
+
+// arrivalOf reads one row's ordinal out of a fresh listing, by run id.
+func arrivalOf(t *testing.T, base, id string) int {
+	t.Helper()
+	return findByID(t, listRuns(t, base), id).Arrival
+}
+
+// TestEveryStateCarriesItsArrivalOrdinal is the acceptance criterion's own
+// sentence: every row shows where it stands in the order torrents were added,
+// including the running, done and failed ones - not only those waiting.
+//
+// Six live states in one server, in the order they were added, plus the one
+// row that legitimately has no ordinal: a record on disk from a run of the
+// server before this one, which no counter in this process ever saw.
+func TestEveryStateCarriesItsArrivalOrdinal(t *testing.T) {
+	root := t.TempDir()
+	const diskHash = "aaaa11112222333344445555666677778888999a"
+	writeRun(t, root, diskHash, "deadbeefdeadbeef", cache.Run{
+		Version:  cache.Version,
+		InfoHash: diskHash,
+		Name:     "From An Earlier Process",
+		Videos:   []cache.File{{Index: 0, Path: "a.mkv"}},
+		Selected: []int{0},
+		Complete: []int{0},
+	})
+
+	fake := newFakeRuns()
+	lister := newFakeLister()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	// One slot, so that something can be made to wait for it.
+	cfg.MaxActiveTorrents = 1
+	srv, ts := newTestServerWithConfigAndLister(t, cfg, fake.runner, lister.list)
+	base := ts.URL
+
+	// Distinct lengths as well as distinct text: fakeLister derives an
+	// infohash from the length of the source, and two rows sharing one would
+	// make this test about the merge rather than about the counter.
+	const (
+		sFailed    = "magnet:?xt=urn:btih:f1"
+		sDone      = "magnet:?xt=urn:btih:d22"
+		sParked    = "magnet:?xt=urn:btih:p333"
+		sRunning   = "magnet:?xt=urn:btih:r4444"
+		sQueued    = "magnet:?xt=urn:btih:q55555"
+		sCancelled = "magnet:?xt=urn:btih:c666666"
+	)
+
+	// 1: a listing that cannot be read fails the run and frees the slot.
+	lister.fails(sFailed, errors.New("no peer answered"))
+	failed := startRun(t, base, sFailed)
+	waitFor(t, func() bool { return runInfo(t, srv, failed.id).State == RunFailed })
+
+	// 2: one video, so it never parks - straight through to done.
+	lister.holds(sDone, 1)
+	done := startRun(t, base, sDone)
+	waitFor(t, func() bool { return fake.started(sDone) })
+	fake.finish(t, sDone)
+	waitFor(t, func() bool { return runInfo(t, srv, done.id).State == RunDone })
+
+	// 3: three videos, so it parks for a decision and gives the slot back.
+	lister.holds(sParked, 3)
+	parked := startRun(t, base, sParked)
+	waitFor(t, func() bool { return runInfo(t, srv, parked.id).State == RunNeedsAction })
+
+	// 4: takes the only slot and keeps it for the rest of the test.
+	lister.holds(sRunning, 1)
+	running := startRun(t, base, sRunning)
+	waitFor(t, func() bool { return fake.started(sRunning) })
+
+	// 5 and 6: both wait behind it, and the last is then cancelled where it
+	// stands.
+	lister.holds(sQueued, 1)
+	queued := startRun(t, base, sQueued)
+	lister.holds(sCancelled, 1)
+	cancelled := startRun(t, base, sCancelled)
+	if resp := post(t, base, "/runs/cancel", `{"id":"`+cancelled.id+`"}`); resp.StatusCode != http.StatusAccepted {
+		// 202: the cancel is accepted, and the row settles on its own.
+		t.Fatalf("POST /runs/cancel: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	waitFor(t, func() bool { return runInfo(t, srv, cancelled.id).State == RunCancelled })
+
+	rows := listRuns(t, base)
+
+	// The ordinals are the order they were added, whatever state each one
+	// ended up in - which is the whole point: before this, four of these six
+	// rows reported nothing at all.
+	for _, want := range []struct {
+		state string
+		id    string
+		n     int
+	}{
+		{"failed", failed.id, 1},
+		{"done", done.id, 2},
+		{"needs-action", parked.id, 3},
+		{"running", running.id, 4},
+		{"queued", queued.id, 5},
+		{"cancelled", cancelled.id, 6},
+	} {
+		row := findByID(t, rows, want.id)
+		if row.State != want.state {
+			t.Errorf("the %s row is in state %q - this test is no longer covering that state", want.state, row.State)
+		}
+		if row.Arrival != want.n {
+			t.Errorf("the %s row's arrival = %d, want %d - the order it was added in, which is true of a row "+
+				"in every state and not only of one still waiting", want.state, row.Arrival, want.n)
+		}
+	}
+
+	// The queue's own field stays what it always was, on exactly the rows it
+	// always was on. If a change ever made these two agree everywhere, this
+	// test would be measuring one fact twice.
+	if pos := findByID(t, rows, queued.id).QueuePosition; pos != 1 {
+		t.Errorf("the queued row's position = %d, want 1", pos)
+	}
+	if pos := findByID(t, rows, running.id).QueuePosition; pos != 0 {
+		t.Errorf("the running row reports queue position %d, want none - it has left the queue, and its "+
+			"arrival ordinal is a different fact that outlives it", pos)
+	}
+
+	// And the one row that honestly has none: written by a process this
+	// counter never ran in.
+	if disk := findByHash(t, rows, diskHash); disk.Arrival != 0 {
+		t.Errorf("the disk-only row reports arrival %d, want none - no counter in this process ever "+
+			"handed it one, and inventing a number would date it to this session", disk.Arrival)
+	}
+}
+
+// TestAnArrivalOrdinalSurvivesTrimming is the first of the two ways this goes
+// quietly wrong, and the reason the number comes from a counter rather than
+// from a row's index. keepFinishedRuns bounds how many finished runs stay in
+// memory, so the oldest fall off - and an ordinal counted from a position
+// would renumber every survivor when they did, turning "the third torrent I
+// added" into the second while a person was reading it.
+func TestAnArrivalOrdinalSurvivesTrimming(t *testing.T) {
+	fake := newFakeRuns()
+	srv, ts := newTestServer(t, fake.runner)
+	base := ts.URL
+
+	// Two more than the registry keeps, run one after another so each is
+	// finished before the next is added.
+	total := keepFinishedRuns + 2
+	ids := make([]string, 0, total)
+	for i := 0; i < total; i++ {
+		source := fmt.Sprintf("magnet:?xt=urn:btih:%040x", i)
+		run := startRun(t, base, source)
+		waitFor(t, func() bool { return fake.started(source) })
+		fake.finish(t, source)
+		waitFor(t, func() bool { return runInfo(t, srv, run.id).State == RunDone })
+		ids = append(ids, run.id)
+	}
+
+	rows := listRuns(t, base)
+	if len(rows) != keepFinishedRuns {
+		t.Fatalf("the listing holds %d rows after %d runs, want %d (keepFinishedRuns) - this test needs the "+
+			"trim to have actually happened", len(rows), total, keepFinishedRuns)
+	}
+
+	// The two oldest are gone, and the survivors kept the numbers they were
+	// given rather than closing the gap.
+	for i := total - keepFinishedRuns; i < total; i++ {
+		row := findByID(t, rows, ids[i])
+		if row.Arrival != i+1 {
+			t.Errorf("the run added at position %d reports arrival %d after %d older rows were trimmed, want %d - "+
+				"an ordinal that renumbers is not an ordinal", i+1, row.Arrival, total-keepFinishedRuns, i+1)
+		}
+	}
+	if last := findByID(t, rows, ids[total-1]); last.Arrival != total {
+		t.Errorf("the last torrent added reports arrival %d, want %d", last.Arrival, total)
+	}
+}
+
+// TestDecidingAParkedTorrentDoesNotMoveItsArrivalOrdinal is the second way,
+// and the sharper one: DecideRun re-appends a needs-action entry to the queue
+// once a person has picked files, deliberately at the BACK (TOR-140 found its
+// arrival time stale by then, which is why the queue's tiebreak is a
+// per-enqueue counter). An arrival ordinal built on that counter would send
+// the torrent down the list at the very moment someone acted on it.
+//
+// The comparison is built to be able to tell the two arms apart rather than
+// merely to pass: the parked torrent is decided while a LATER-ADDED torrent
+// is already waiting, so the queue position and the arrival ordinal are
+// forced into opposite orders. A test where both agreed would prove nothing.
+func TestDecidingAParkedTorrentDoesNotMoveItsArrivalOrdinal(t *testing.T) {
+	fake := newFakeRuns()
+	lister := newFakeLister()
+	cfg := DefaultConfig()
+	cfg.MaxActiveTorrents = 1
+	srv, ts := newTestServerWithConfigAndLister(t, cfg, fake.runner, lister.list)
+	base := ts.URL
+
+	const (
+		sParked = "magnet:?xt=urn:btih:pk1"
+		sHog    = "magnet:?xt=urn:btih:hog22"
+		sLater  = "magnet:?xt=urn:btih:later333"
+	)
+
+	// Added first, and parked waiting for a person.
+	lister.holds(sParked, 3)
+	parked := startRun(t, base, sParked)
+	waitFor(t, func() bool { return runInfo(t, srv, parked.id).State == RunNeedsAction })
+
+	// Added second, and holding the only slot for the rest of the test.
+	lister.holds(sHog, 1)
+	startRun(t, base, sHog)
+	waitFor(t, func() bool { return fake.started(sHog) })
+
+	// Added third, and waiting - so it is AHEAD of the parked torrent in the
+	// queue and BEHIND it in arrival, the moment the decision lands.
+	lister.holds(sLater, 1)
+	later := startRun(t, base, sLater)
+	waitFor(t, func() bool { return runInfo(t, srv, later.id).State == RunQueued })
+
+	before := arrivalOf(t, base, parked.id)
+	if before != 1 {
+		t.Fatalf("the parked torrent's arrival = %d, want 1 - it was added first", before)
+	}
+
+	if resp := decideRun(t, base, parked.id, []string{"0"}, 4); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/decide: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	waitFor(t, func() bool { return runInfo(t, srv, parked.id).State == RunQueued })
+
+	rows := listRuns(t, base)
+	decided, behind := findByID(t, rows, parked.id), findByID(t, rows, later.id)
+
+	if decided.Arrival != before {
+		t.Errorf("deciding the parked torrent's files moved its arrival from %d to %d - the ordinal has to be "+
+			"the FIRST arrival, or acting on a row reorders the list a person is reading", before, decided.Arrival)
+	}
+	if decided.Arrival >= behind.Arrival {
+		t.Errorf("the decided torrent's arrival (%d) is not ahead of the one added after it (%d)",
+			decided.Arrival, behind.Arrival)
+	}
+
+	// The proof that the two arms are distinguishable at all: the queue put
+	// the decided torrent BEHIND the later one, exactly as TOR-140 intends,
+	// while the ordinals stayed in the order the two were added. If this
+	// assertion ever fails because the positions agree with the ordinals, the
+	// test above has stopped proving anything.
+	if !(decided.QueuePosition > behind.QueuePosition) {
+		t.Errorf("the decided torrent is at queue position %d and the later-added one at %d: the queue did "+
+			"NOT reorder them, so this test cannot tell an arrival ordinal from a queue position and would "+
+			"pass with the two wired together", decided.QueuePosition, behind.QueuePosition)
+	}
+}
+
+// TestATopUpKeepsTheRowsArrivalOrdinal is the same hazard on TOR-152's path:
+// Server.again re-arms a finished entry and puts it back in the queue, which
+// stamps a fresh queueSeq on it. The ordinal must not follow - a row is not
+// newly added because it was topped up.
+func TestATopUpKeepsTheRowsArrivalOrdinal(t *testing.T) {
+	root := t.TempDir()
+	const (
+		hash   = "3333bb22cc33dd44ee55ff66aa77bb88cc99dd33"
+		params = "deadbeefdeadbeef"
+		source = "magnet:?xt=urn:btih:" + hash
+	)
+	writePartialSet(t, root, hash, params, source, budgetCost(), takenPerFile, takenPerFile)
+
+	fake, srv, base := serverOver(t, root, 0)
+
+	first := startRun(t, base, source)
+	waitFor(t, func() bool { return fake.started(source) })
+	fake.send(t, source, core.MetadataReady{Name: "Season 1", InfoHash: hash})
+	fake.finish(t, source)
+	waitFor(t, func() bool { return stateOf(t, srv, first.id) == RunDone })
+
+	// A second torrent added after it, so "1" cannot come out right by
+	// accident from a counter that was reset or recomputed.
+	startRun(t, base, "magnet:?xt=urn:btih:5555bb22cc33dd44ee55ff66aa77bb88cc99dd33")
+
+	if got := arrivalOf(t, base, first.id); got != 1 {
+		t.Fatalf("the first torrent's arrival = %d, want 1", got)
+	}
+
+	resp := post(t, base, "/runs/topup", `{"infohash":"`+hash+`","id":"`+first.id+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/topup: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	waitFor(t, func() bool { return fake.count() == 3 })
+
+	if got := arrivalOf(t, base, first.id); got != 1 {
+		t.Errorf("topping the row up moved its arrival to %d, want 1 - re-arming an entry re-enqueues it, "+
+			"and the ordinal must not be one of the things that re-enqueueing changes", got)
+	}
+}
+
+// TestTheQueueCellShowsTheOrdinalAndMarksThePosition guards TOR-156's actual
+// DECISION, which is not "report an ordinal" but "which of the two facts is
+// the figure". Both numbers now reach the page, so nothing about the wire
+// stops a later change from putting the position back on top - and that
+// change would restore the whole complaint (a column of em dashes at queue
+// width 5) while every server-side test here stayed green.
+//
+// It also pins the marked form of the position. The second line does not
+// wrap, it ellipsises (app.css's .run-cell-queue-meta, nowrap +
+// text-overflow), and at that column's width it holds about seven
+// characters - so "queue 12" renders as "queue 1…", a truncated position
+// that reads as a perfectly plausible different one. "#12" cannot run out
+// of room.
+//
+// Read as served text, the way every front-end guard in this package works
+// (see columns_test.go's own opening note on why there is no JS runner).
+func TestTheQueueCellShowsTheOrdinalAndMarksThePosition(t *testing.T) {
+	js := appJS(t)
+
+	// The figure is the ordinal - the fact every row has.
+	if !strings.Contains(js, "function queueCellText(entry) {\n  const arrival = arrivalOrdinal(entry);") {
+		t.Error("app.js's queueCellText() does not read arrivalOrdinal() - if the cell's figure is the queue " +
+			"position again, the column is empty for every row that is not waiting, which is the whole complaint")
+	}
+	// And the position is the second line, marked so two stacked numbers
+	// cannot be read as the same kind of thing.
+	if !strings.Contains(js, `if (position !== null) return "#" + position;`) {
+		t.Error(`app.js's queueCellMetaText() does not render the waiting position as "#" + position - a ` +
+			`spelled-out label does not fit the cell and gets ellipsised mid-number`)
+	}
+	// The dimmed state has to follow the figure too, or almost every row in
+	// the table renders as absent while showing a number.
+	if !strings.Contains(js, `entry.rowQueueCell.dataset.absent = String(arrivalOrdinal(entry) === null);`) {
+		t.Error("app.js dims the queue cell by something other than its own figure - a row with an ordinal " +
+			"would render as absent, or one without would not")
 	}
 }

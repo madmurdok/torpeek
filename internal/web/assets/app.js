@@ -53,7 +53,7 @@ const LIVE_COLUMNS = [
   { key: "availability", label: "Avail", unit: "copies/piece",
     title: "Swarm availability, in copies per piece - not a percentage. Below 1.0 means pieces are missing from the swarm; above 1.0 (commonly) means it is healthy. A dash means this torrent has not been asked for bytes yet, so nothing has reported what the swarm holds." },
   { key: "priority", label: "Queue",
-    title: "This row's place in the queue, as the server itself holds it - 1 is the next torrent to start. Use ▲ and ▼ at the end of a waiting row to move it up or down; priority orders the torrents that are WAITING and never interrupts one that is already downloading. A dash means this row is not in the queue at all." },
+    title: "The order torrents were added to this server: 1 is the first one you added, and the number never changes - not when a torrent finishes, not when you reprioritise it, not when you pick its files. Under it, while a row is still waiting, is its place in the queue as the server actually holds it (\"#2\" means one torrent is ahead of it), which is the number that moves. Use ▲ and ▼ at the end of a waiting row to change that; priority orders the torrents that are WAITING and never interrupts one that is already downloading. A dash means this row was added by an earlier run of the server, so this session never gave it a number - the Added column is what dates it." },
 ];
 
 // buildLiveColumnHeaders inserts the six <th>s into the existing thead row,
@@ -616,6 +616,67 @@ function queuePosition(entry) {
   return entry.queuePosition > 0 ? entry.queuePosition : null;
 }
 
+// ---------------------------------------------------------------------------
+// TWO FACTS IN ONE COLUMN, AND WHICH OF THEM IS THE FIGURE (TOR-156).
+//
+// The owner asked for "в каком порядке торренты добавлены" - the order
+// torrents were added - after watching 1.2.0 with the queue width at 5
+// (TOR-149), where almost nothing ever queues and so the column read as a
+// feature that does not work. TOR-140 had built the column honestly for what
+// it meant: a queue POSITION, set only on the rows the queue still has
+// something to say about, an em dash everywhere else.
+//
+// The trap this ticket is written around is that those are TWO facts which
+// look like one number:
+//
+//   - ARRIVAL ORDINAL: "the third torrent you added". True for the life of
+//     the row, unmoved by priority, still meaningful on a row that finished
+//     an hour ago. This is the one the owner named.
+//   - QUEUE POSITION: "one ahead of you". Exists only while waiting, and
+//     moves whenever anything ahead finishes or a priority changes.
+//
+// TOR-153 had just been bitten by the mirror image of this - two bars saying
+// the same thing - so shipping these two as two numbers in two columns would
+// have repeated it from the other side. THE DECISION, and the reason it is
+// written here rather than only in the ticket:
+//
+//   - ONE COLUMN carries both, in the two-line shape TOR-140 already gave
+//     this very cell (a figure, and a muted second line under it). Nothing
+//     grows a column, and nothing has to be sorted twice.
+//   - THE ORDINAL IS THE FIGURE. It is the fact that is never absent, so it
+//     is the one that fixes the empty column; it is the fact the owner asked
+//     for; and it is the fact that means something on the finished rows,
+//     which are most of the table.
+//   - THE POSITION IS THE SECOND LINE, marked ("#2"), present only while it
+//     applies. Marked because two bare numbers stacked in one narrow cell is
+//     precisely the confusion this ticket exists to avoid - the figure needs
+//     nothing under a header that says Queue, the one that is only sometimes
+//     there does. See queueCellMetaText for why it is "#2" and not the
+//     spelled-out "queue 2" it started as.
+//   - THE ADDED COLUMN STAYS A TIMESTAMP. It is not redundant with the
+//     ordinal and the ordinal is not redundant with it: a date answers
+//     arrival order only RELATIONALLY, by comparing rows, and only under the
+//     default sort - sorted by peers, the timestamps scatter and nothing on a
+//     row says it was the third. A cardinal number reads the same whatever
+//     order the rows are in, which is TOR-140's own argument for a priority
+//     LEVEL over a dragged position, applied to the same table one column
+//     over.
+//
+// What was considered and rejected: giving the ordinal to the Added column
+// (two numbers in two places again, and it would make a date column carry
+// something that is not a date), and dropping the position (it is TOR-140's
+// own acceptance criterion - the person who reorders a queue has to be able
+// to see the order - and no other cell answers "how long until mine starts").
+//
+// Absent means one thing only: a row this session never gave a number,
+// i.e. one read off disk from an earlier run of the server (see
+// RunSummary.Arrival for why the counter cannot honestly outlive its
+// process). Never "not waiting" - that is what the second line says by
+// staying empty.
+function arrivalOrdinal(entry) {
+  return entry.arrival > 0 ? entry.arrival : null;
+}
+
 // The three levels runs.go's Priority declares, mirrored here because the
 // two buttons have to know what the ends of the band are to disable
 // themselves there. Widening the band is a change in both places, which is
@@ -640,33 +701,91 @@ function priorityLabel(priority) {
 }
 
 function queueCellText(entry) {
-  const position = queuePosition(entry);
-  return position === null ? ABSENT : String(position);
+  const arrival = arrivalOrdinal(entry);
+  return arrival === null ? ABSENT : String(arrival);
 }
 
-// The level under the figure, in the same muted second line the availability
-// cell uses for its own subtitle - and only when it is not the default: a
-// column of rows all reading "normal" would be noise saying nothing, while
-// "high" or "low" on one row is exactly the thing worth seeing at a glance.
+// The second line, in the same muted subtitle the availability cell uses.
+//
+// It carries the WAITING POSITION while there is one, and otherwise the
+// priority level when that is not the default - which is TOR-140's own rule
+// for this line, kept for the one row it still applies to: a parked torrent
+// holds a level and no position (it rejoins the queue when someone picks its
+// files, server.go's DecideRun).
+//
+// "#2" RATHER THAN "queue 2", AND THE LEVEL LEFT OFF, both for one measured
+// reason: this line does not wrap, it ELLIPSISES. .run-cell-queue-meta is
+// white-space: nowrap with text-overflow: ellipsis (app.css, TOR-140's own
+// rule, so that a long level could not make the row taller than every other
+// one), and at --col-w-priority (3.4rem) the line holds about seven
+// characters. Measured in a real browser: "queue 2" fits exactly, at 54px of
+// 54px; "queue 12" needs 62px and comes out as "queue 1…".
+//
+// A truncated position is not a cosmetic problem, which is what makes this
+// the deciding argument rather than a preference. Every other clipped label
+// on this page loses letters a person can guess at; this one would lose a
+// DIGIT and leave behind another position that is entirely plausible - a row
+// waiting twelfth reading as first, with an ellipsis as the only sign, and
+// "first" is the one value that also means "this starts next". So the format
+// is the one that cannot run out of room: "#" and the number, four characters
+// at three digits.
+//
+// The level goes the same way. "#2 high" is already eight, and the ▲/▼ pair
+// beside the cell says it without a word - the button at the end of the band
+// is disabled, so high and low are both visible at a glance - with the full
+// sentence in this cell's own title. TOR-140 made the opposite trade for the
+// availability cell's "N of M unavailable" and recorded the same measurement:
+// the fact that MOVES is worth the line, the one a control already shows is
+// not.
 function queueCellMetaText(entry) {
+  const position = queuePosition(entry);
+  if (position !== null) return "#" + position;
   if (!hasPriority(entry) || entry.priority === PRIORITY_NORMAL) return "";
   return priorityLabel(entry.priority);
 }
 
 function queueCellTitle(entry) {
+  const arrival = arrivalOrdinal(entry);
   const position = queuePosition(entry);
-  if (position !== null) {
-    return "position " + position + " of the queue the server actually holds, at " +
-      priorityLabel(entry.priority) + " priority" +
-      (position === 1 ? " - this is the next torrent to start" : "");
+
+  // Both facts, always named apart, and the ordinal first because it is the
+  // figure on the row. A tooltip is where the distinction the whole ticket
+  // rests on can be spelled out at length, which two digits in a 3.4rem cell
+  // cannot do for themselves.
+  const parts = [];
+  if (arrival !== null) {
+    parts.push("added " + ordinalWord(arrival) + " to this server - a number that never changes");
+  } else {
+    parts.push("no arrival number: this row was read off disk, from a run of the server before this one");
   }
-  if (hasPriority(entry)) {
+  if (position !== null) {
+    parts.push("waiting at position " + position + " of the queue the server actually holds, at " +
+      priorityLabel(entry.priority) + " priority" +
+      (position === 1 ? " - this is the next torrent to start" : ""));
+  } else if (hasPriority(entry)) {
     // A parked torrent: it has a level, and it will re-enter the queue with
     // it the moment someone picks files (server.go's DecideRun).
-    return "not in the queue while it waits for a file selection - it will rejoin at " +
-      priorityLabel(entry.priority) + " priority";
+    parts.push("not in the queue while it waits for a file selection - it will rejoin at " +
+      priorityLabel(entry.priority) + " priority");
+  } else if (!entry.disk) {
+    parts.push("not waiting for a slot");
   }
-  return entry.disk ? "not in the queue - a row read off disk" : "not in the queue";
+  return parts.join(". ");
+}
+
+// ordinalWord turns 3 into "3rd", for the one place a sentence reads better
+// than a bare figure (the cell itself stays a bare figure - .run-cell-metric
+// is a column of numbers meant to be compared straight down, and "3rd" in it
+// would break the tabular alignment every other metric cell keeps).
+function ordinalWord(n) {
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 13) return n + "th";
+  switch (n % 10) {
+    case 1: return n + "st";
+    case 2: return n + "nd";
+    case 3: return n + "rd";
+    default: return n + "th";
+  }
 }
 
 function sortValue(entry, key) {
@@ -685,12 +804,22 @@ function sortValue(entry, key) {
       const s = availabilityReading(entry);
       return s ? s.copies_per_piece : null;
     }
-    // Sorting the Queue column sorts by POSITION, not by level: position is
-    // what the column shows, and it already carries the level inside it -
-    // a high row is at a lower number than the normals it passed. Ascending
-    // is therefore the order the server will actually run them in, which is
-    // the one thing a person clicking this header wants to see.
-    case "priority": return queuePosition(entry);
+    // Sorting the Queue column sorts by the ARRIVAL ORDINAL, because that is
+    // the figure the column shows (TOR-156) - a header that sorted by the
+    // second line would reorder the table by a number most rows do not have.
+    // Ascending is therefore the order the torrents were added, which is what
+    // the owner asked this column for; the rows still waiting keep their
+    // relative order within it unless somebody has reprioritised them, and
+    // the second line is where that shows.
+    //
+    // Until TOR-156 this returned queuePosition(entry), which was right while
+    // the position was what the cell displayed. The two must not disagree:
+    // the column that sorts by one number and prints another is unreadable in
+    // exactly the way a person only discovers after trusting it.
+    //
+    // Absent - a disk row, which this session never numbered - sinks to the
+    // end like every other absent reading (see compareEntries).
+    case "priority": return arrivalOrdinal(entry);
     case "when":
     default: return entry.when || 0;
   }
@@ -1037,6 +1166,14 @@ function newRunEntry(id) {
     // pointer server-side and the other is not).
     priority: null,
     queuePosition: 0,
+    // arrival is "this was the Nth torrent added to this server" (TOR-156) -
+    // the figure the Queue column shows. 0 means this row has none, which
+    // happens for exactly one kind of row: one read off disk, from a run of
+    // the server before this one. Unlike the two fields above it never
+    // changes and never goes away once set, which is why the two readers
+    // below keep the value they have rather than clearing it when a message
+    // arrives without one.
+    arrival: 0,
     // when is this row's sort key for the default (date, newest-first) sort.
     // Set once, here, at creation - never touched again by a status update -
     // which is what keeps a live run from jumping position as events arrive.
@@ -1260,7 +1397,12 @@ function syncEntry(entry) {
   entry.rowQueue.textContent = queueCellText(entry);
   entry.rowQueueMeta.textContent = queueCellMetaText(entry);
   entry.rowQueueCell.title = queueCellTitle(entry);
-  entry.rowQueueCell.dataset.absent = String(queuePosition(entry) === null);
+  // absent tracks the FIGURE, which since TOR-156 is the arrival ordinal -
+  // so the cell is only dimmed for a row this session never numbered, not
+  // for every row that happens not to be waiting. That was the visible half
+  // of the complaint: at queue width 5 almost nothing waits, so almost every
+  // cell was dimmed and the column read as broken.
+  entry.rowQueueCell.dataset.absent = String(arrivalOrdinal(entry) === null);
   const canReorder = !entry.disk && hasPriority(entry);
   entry.rowRaise.hidden = !canReorder;
   entry.rowLower.hidden = !canReorder;
@@ -3160,6 +3302,11 @@ function apply(ev) {
     // stays right without this page recomputing anything.
     entry.priority = ev.priority === undefined ? null : ev.priority;
     entry.queuePosition = ev.queue_position || 0;
+    // TOR-156: on every run_state (server.go's runStateFieldsLocked), not
+    // only a queueable one, and kept rather than cleared when it is missing -
+    // see the same two lines in loadRuns for why this field's absence is not
+    // the information the two above it carry.
+    entry.arrival = ev.arrival || entry.arrival;
     // ev.partial rides on exactly one run_state a run ever publishes: the one
     // sent after this run's own record was written to disk (server.go's
     // pump, TOR-87) - the only moment the verdict this page is already
@@ -3494,22 +3641,18 @@ async function loadRuns() {
 
   for (const row of data.runs || []) {
     const disk = !row.id;
-    // TOR-152: a disk row for a torrent this page is ALREADY showing as a
-    // live run is the same torrent, and drawing both would be two rows for
-    // one of them (TOR-140).
+    // NOTHING HERE DECIDES WHICH ROWS ARE THE SAME TORRENT, and TOR-162 is
+    // what deleted the code that did. TOR-152 had to keep "one torrent, one
+    // row" (TOR-140) from this loop, with a liveRowFor() that skipped a disk
+    // row whose torrent a live entry on this page was already showing,
+    // because listing.go merged a live entry with its record only once the
+    // entry was FINAL and a top-up spends its whole life before that. The
+    // merge no longer waits for a final state (listing.go's listRuns), so
+    // every row this loop is handed is already one torrent's one row - and
+    // the rule now lives where a second consumer of GET /runs can see it,
+    // which was the point of moving it rather than the point of the code
+    // that moved.
     //
-    // GET /runs cannot merge them itself here, and that is not an oversight:
-    // listing.go merges a live entry with a disk record only once the entry
-    // has reached a FINAL state, because a queued or running entry has not
-    // written a record and must never be hidden behind a stale one. A
-    // top-up spends its whole life in exactly that non-final window - it is
-    // a run against a directory that already has a record - so a reload
-    // while one is going would list the set being filled beside the run
-    // filling it. Skipping it here is the client-side half of the same
-    // "one torrent, one row" rule, and it is safe for the same reason the
-    // server's version is: this only ever hides a row whose infohash and
-    // params a live entry on this page already names.
-    if (disk && liveRowFor(row)) continue;
     // A disk-only row has no run id to key on - nothing ever minted one for
     // it - so infohash+params, the same pair that addresses it for reopening,
     // stands in. TOR-54 documented that the same torrent captured under two
@@ -3564,6 +3707,12 @@ async function loadRuns() {
     // exactly the commonest one.
     entry.priority = row.priority === undefined ? null : row.priority;
     entry.queuePosition = row.queue_position || 0;
+    // TOR-156: kept rather than cleared when the row carries none, which is
+    // the opposite of the two lines above and for the opposite reason. Their
+    // absence is INFORMATION - it says the queue has nothing left to say
+    // about this row - while an arrival ordinal, once handed out, is true
+    // forever and only ever missing because nothing ever handed one out.
+    entry.arrival = row.arrival || entry.arrival;
     // row.when is GET /runs's own answer for this row - the newest lifecycle
     // timestamp for a live entry, run.json's created_at for a disk one - and
     // it is the one moment this page overwrites entry.when after creation:
@@ -3585,29 +3734,6 @@ async function loadRuns() {
     }
     syncEntry(entry);
   }
-}
-
-// liveRowFor finds a live entry on this page already showing the torrent (and
-// the result set) a disk row names, or null.
-//
-// A FINAL live entry is deliberately not a match: listing.go merges those
-// itself, and one that it declined to merge was declined for a reason worth
-// keeping - an infohash naming two capture plans, which is the documented
-// case where the same torrent legitimately shows up twice (TOR-54). Only a
-// row that is mid-flight is hidden here, which is the case the server cannot
-// merge yet.
-//
-// The params match tolerates a live row that does not know its own set yet:
-// run_state carries no params, so a run that started on this page has none
-// until GET /runs or a top-up offer tells it one.
-function liveRowFor(row) {
-  for (const entry of state.runs.values()) {
-    if (entry.disk || !entry.infohash || entry.infohash !== row.infohash) continue;
-    if (FINAL.has(entry.state)) continue;
-    if (entry.params && row.params && entry.params !== row.params) continue;
-    return entry;
-  }
-  return null;
 }
 
 // A dropped .torrent is bytes, not a string, so it takes a different request

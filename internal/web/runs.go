@@ -220,6 +220,11 @@ type RunInfo struct {
 	// listing.go omits the field entirely rather than reporting it (the
 	// same absent-is-not-zero rule Live follows).
 	QueuePosition int
+	// Arrival is "this was the Nth torrent added to this server", 1-based,
+	// and it is NOT QueuePosition by another name (TOR-156). See
+	// runEntry.arrival for the whole distinction and why the two are
+	// separate fields rather than one number reused.
+	Arrival int
 }
 
 // runEntry is one run in the registry: what it is, where it got to, and the
@@ -283,8 +288,48 @@ type runEntry struct {
 	// earlier. Ordering by queuedAt would silently promote every decided
 	// torrent to the front of its level; ordering by the moment it actually
 	// joined the queue reproduces today's behaviour exactly.
-	priority  Priority
-	queueSeq  uint64
+	priority Priority
+	queueSeq uint64
+	// arrival is "this was the Nth torrent added to this server", 1-based,
+	// stamped once when the entry is CREATED and never touched again
+	// (Server.arrivalSeq). TOR-156 is the ticket that added it, and its whole
+	// content is that this is a different fact from queueSeq and from
+	// QueuePosition, however alike three counters look sitting next to each
+	// other:
+	//
+	//   - ARRIVAL ORDINAL, this field: the order torrents were added. Stable
+	//     for the life of the row, unaffected by priority, and still true of
+	//     a row that finished an hour ago. It is what the project owner asked
+	//     to see - "в каком порядке торренты добавлены" - and the only one of
+	//     the three that means anything on a row which is not waiting.
+	//   - QUEUE POSITION (Server.queuePositionLocked): how many are ahead of
+	//     you. Exists only while waiting, moves when a priority changes or
+	//     when something ahead of you finishes, and is meaningless the moment
+	//     a run starts.
+	//   - queueSeq: the tiebreak WITHIN a priority level, re-stamped on every
+	//     enqueue precisely so that a parked torrent coming back through
+	//     DecideRun rejoins at the back rather than at the front (see the
+	//     field above).
+	//
+	// Which is exactly why this cannot be queueSeq: a torrent that parks for
+	// a file selection and is then decided gets a NEW queueSeq, and an
+	// ordinal built on it would move "the third torrent I added" down the
+	// list at the moment a person acted on it - the same staleness TOR-140
+	// found in queuedAt, mirrored. It cannot be a row's index either:
+	// keepFinishedRuns trims the oldest finished entries, and an ordinal
+	// counted from a position would silently renumber every survivor when
+	// they fall off. A counter that only ever goes up is the only shape that
+	// survives both.
+	//
+	// PER PROCESS, and it has to be: the counter lives in this server, so a
+	// run found only on disk - from a previous process, or one this one has
+	// since trimmed - has no ordinal and reports zero. That is honest rather
+	// than a gap. "The third torrent you added" is a fact about a session; a
+	// number minted by yesterday's process and read back today would answer a
+	// question nobody asked. A disk row already carries no id and no state
+	// for the same reason, and the listing reports this one absent the same
+	// way (RunSummary.Arrival).
+	arrival   int
 	queuedAt  time.Time
 	startedAt time.Time
 	endedAt   time.Time
@@ -308,6 +353,12 @@ func (e *runEntry) info(queuePosition int) RunInfo {
 		QueuedAt: e.queuedAt, StartedAt: e.startedAt, EndedAt: e.endedAt,
 		Live:     e.live,
 		Priority: e.priority, QueuePosition: queuePosition,
+		// Read straight off the entry, unlike queuePosition beside it: an
+		// arrival ordinal is a property of the entry (stamped at creation and
+		// never revised), where a queue position is a property of the queue
+		// and only the server can answer it. That asymmetry is the two facts
+		// being different facts, in the shape of a function signature.
+		Arrival: e.arrival,
 	}
 	if e.err != nil {
 		out.Err = e.err.Error()
