@@ -113,8 +113,73 @@ func TestExhaustedOnTime(t *testing.T) {
 
 	clock.advance(time.Second)
 	done, reason := tracker.Exhausted()
-	if !done || reason != StopBudget {
-		t.Errorf("Exhausted() = (%v, %q), want (true, %q)", done, reason, StopBudget)
+	if !done || reason != StopTime {
+		t.Errorf("Exhausted() = (%v, %q), want (true, %q)", done, reason, StopTime)
+	}
+}
+
+// TestExhaustedTellsTrafficApartFromTime is TOR-161's own unit test: the two
+// ceilings BudgetTracker.Exhausted used to fold into one reason (StopBudget
+// for either) must now report reasons that DIFFER, not just reasons that
+// happen to be correct in isolation - a test that only checked one arm could
+// pass by coincidence if both cases still returned the same value. Both
+// arms are built from otherwise-identical trackers so the only thing that
+// differs between them is which ceiling was crossed.
+func TestExhaustedTellsTrafficApartFromTime(t *testing.T) {
+	trafficClock := newFakeClock()
+	traffic := newBudgetTracker(Budget{MaxBytes: 1000, MaxTime: time.Hour},
+		&fakeMeter{bytes: 1000}, Roof{}, nil, trafficClock.Now)
+
+	timeClock := newFakeClock()
+	clockOnly := newBudgetTracker(Budget{MaxBytes: 1 << 40, MaxTime: time.Minute},
+		&fakeMeter{}, Roof{}, nil, timeClock.Now)
+	timeClock.advance(time.Minute)
+
+	trafficDone, trafficReason := traffic.Exhausted()
+	timeDone, timeReason := clockOnly.Exhausted()
+
+	if !trafficDone || !timeDone {
+		t.Fatalf("both trackers should report exhausted: traffic=%v time=%v", trafficDone, timeDone)
+	}
+	if trafficReason == timeReason {
+		t.Fatalf("a byte-exhausted tracker and a time-exhausted tracker both reported %q - "+
+			"the two ceilings are not told apart", trafficReason)
+	}
+	if trafficReason != StopBudget {
+		t.Errorf("byte ceiling reported %q, want %q", trafficReason, StopBudget)
+	}
+	if timeReason != StopTime {
+		t.Errorf("time ceiling reported %q, want %q", timeReason, StopTime)
+	}
+}
+
+// TestExhaustedReportsTimeWhenBothCeilingsAreCrossed is TOR-161's
+// both-exceeded decision, moved to the source: a run that crossed its own
+// byte ceiling AND its own time ceiling by the moment it is asked must
+// report StopTime, on the grounds TOR-152 already gave when it made this
+// choice itself - a bigger traffic allowance cannot finish a run whose clock
+// already ran out, so reporting the traffic ceiling would be true but
+// useless advice.
+//
+// The first arm (bytes alone) is what proves the second arm's StopTime is
+// the CLOCK's doing and not some unconditional default: the same tracker,
+// with only the clock NOT yet crossed, reports StopBudget.
+func TestExhaustedReportsTimeWhenBothCeilingsAreCrossed(t *testing.T) {
+	clock := newFakeClock()
+	meter := &fakeMeter{}
+	tracker := newBudgetTracker(Budget{MaxBytes: 1000, MaxTime: time.Minute}, meter, Roof{}, nil, clock.Now)
+
+	meter.set(1000)
+	if done, reason := tracker.Exhausted(); !done || reason != StopBudget {
+		t.Fatalf("bytes alone: Exhausted() = (%v, %q), want (true, %q)", done, reason, StopBudget)
+	}
+
+	clock.advance(time.Minute)
+	done, reason := tracker.Exhausted()
+	if !done || reason != StopTime {
+		t.Errorf("both ceilings crossed: Exhausted() = (%v, %q), want (true, %q) - "+
+			"a run out of time is not one more traffic can finish, whatever its "+
+			"byte ceiling also says", done, reason, StopTime)
 	}
 }
 

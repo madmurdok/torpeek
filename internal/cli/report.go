@@ -147,7 +147,14 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer, count int) i
 			}
 			switch e.Reason {
 			case core.StopBudget:
-				fmt.Fprintln(stderr, "stopped at this run's own limit; what was produced is kept")
+				fmt.Fprintln(stderr, "stopped at this run's own traffic limit; what was produced is kept")
+				code = ExitPartial
+			case core.StopTime:
+				// Named apart from the traffic line deliberately (TOR-161):
+				// telling someone to lower their traffic or narrow a run that
+				// ran out of TIME is advice that does not apply, and sharing
+				// the wording with StopBudget would give it anyway.
+				fmt.Fprintln(stderr, "stopped at this run's own time limit; what was produced is kept")
 				code = ExitPartial
 			case core.StopRoof:
 				// Named apart from the line above deliberately. This run may
@@ -184,7 +191,7 @@ func reportJSON(events <-chan core.Event, stdout, stderr io.Writer) int {
 		}
 		if done, ok := ev.(core.Done); ok {
 			switch done.Reason {
-			case core.StopBudget, core.StopRoof, core.StopCancelled:
+			case core.StopBudget, core.StopTime, core.StopRoof, core.StopCancelled:
 				code = ExitPartial
 			default:
 				if done.Frames == 0 && code == ExitOK {

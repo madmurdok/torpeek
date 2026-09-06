@@ -84,3 +84,73 @@ func TestTheCostCountsSelectedFilesNotEveryFile(t *testing.T) {
 		t.Errorf("the cost line counts every video file, not the %d selected:\n%s", 1, text)
 	}
 }
+
+// TestDoneReasonTextTellsTimeApartFromTraffic is TOR-161's CLI-side unit
+// test: core.StopBudget and core.StopTime used to be one reason
+// (core.StopBudget covered both the run's own traffic ceiling and its own
+// clock), and report.go already told StopBudget apart from StopRoof, so this
+// is the same treatment extended to the third reason.
+//
+// Both arms run through reportText with nothing else different about the
+// Done event, so the only thing that can make the two outputs differ is the
+// switch in reportText itself - a test that only checked one reason's
+// wording could pass even if both cases had collapsed back onto the same
+// sentence.
+func TestDoneReasonTextTellsTimeApartFromTraffic(t *testing.T) {
+	cases := []struct {
+		reason core.StopReason
+		want   string
+		bad    []string
+	}{
+		{
+			reason: core.StopBudget,
+			want:   "stopped at this run's own traffic limit",
+			bad:    []string{"time limit"},
+		},
+		{
+			reason: core.StopTime,
+			want:   "stopped at this run's own time limit",
+			bad:    []string{"traffic limit"},
+		},
+	}
+
+	for _, tc := range cases {
+		events := make(chan core.Event, 1)
+		events <- core.Done{Reason: tc.reason, Files: 1, Frames: 4}
+		close(events)
+
+		var stdout, stderr bytes.Buffer
+		code := reportText(events, &stdout, &stderr, 4)
+
+		if code != ExitPartial {
+			t.Errorf("reason %q: exit code = %d, want %d", tc.reason, code, ExitPartial)
+		}
+		if !strings.Contains(stderr.String(), tc.want) {
+			t.Errorf("reason %q: stderr = %q, want it to contain %q", tc.reason, stderr.String(), tc.want)
+		}
+		for _, bad := range tc.bad {
+			if strings.Contains(stderr.String(), bad) {
+				t.Errorf("reason %q: stderr = %q, must not contain %q - "+
+					"a traffic stop and a time stop must not share wording",
+					tc.reason, stderr.String(), bad)
+			}
+		}
+	}
+}
+
+// TestDoneReasonJSONExitsPartialForTime is the NDJSON counterpart: a caller
+// reading only the exit code, not the event stream, must still be able to
+// tell "stopped early but kept results" from success for a run the CLOCK
+// stopped, exactly as it already can for StopBudget and StopRoof.
+func TestDoneReasonJSONExitsPartialForTime(t *testing.T) {
+	events := make(chan core.Event, 1)
+	events <- core.Done{Reason: core.StopTime, Files: 1, Frames: 4}
+	close(events)
+
+	var stdout, stderr bytes.Buffer
+	code := reportJSON(events, &stdout, &stderr)
+
+	if code != ExitPartial {
+		t.Errorf("exit code = %d, want %d for a run stopped by its own clock", code, ExitPartial)
+	}
+}

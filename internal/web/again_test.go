@@ -346,14 +346,58 @@ func TestTopUpOfARoofStoppedRunOffersNoRaise(t *testing.T) {
 }
 
 // TestTopUpOfATimeStoppedRunOffersNoRaise is the same argument for the other
-// ceiling core folds into StopBudget. The engine reports the clock and the
-// byte ceiling under one reason, so the manifest's own elapsed figure is the
-// only thing that tells them apart - and a run that ran out of TIME is not
-// one more traffic helps either.
+// ceiling, now read directly (TOR-161: core reports the clock as its own
+// reason, core.StopTime, instead of folding it into StopBudget) - and a run
+// that ran out of TIME is not one more traffic helps either.
+//
+// ElapsedMS is deliberately left FAR under the time ceiling here (unlike
+// before TOR-161, when this test had to set it equal to the limit to be
+// classified as a time stop at all). That is the point of the fixture: if
+// absorbCost were still inferring the reason from elapsed-against-limit
+// instead of reading c.LimitHit directly, this record would be read as a
+// TRAFFIC stop (elapsed is nowhere near the limit) rather than the time stop
+// it actually records. Only a direct read of LimitHit gets this right.
 func TestTopUpOfATimeStoppedRunOffersNoRaise(t *testing.T) {
 	root := t.TempDir()
 	hash := "ee11bb22cc33dd44ee55ff66aa77bb88cc99dd00"
 	cost := budgetCost()
+	cost.DownloadedBytes = 40 << 20      // nowhere near its byte ceiling
+	cost.ElapsedMS = stoppedLimitMS / 10 // and nowhere near its time ceiling either
+	cost.LimitHit = string(core.StopTime)
+	writePartialSet(t, root, hash, "deadbeefdeadbeef", "magnet:?xt=urn:btih:"+hash,
+		cost, takenPerFile, takenPerFile)
+
+	_, _, base := serverOver(t, root, 0)
+
+	offer, _ := getTopUp(t, base, hash, "")
+	if offer.Limit != LimitTime {
+		t.Errorf("limit is %q, want %q - this run spent 40 MB of a 300 MB ceiling and "+
+			"only a tenth of its time ceiling, yet core recorded LimitHit as %q "+
+			"directly; calling that a traffic stop would offer more traffic to a "+
+			"run that never ran out of any", offer.Limit, LimitTime, core.StopTime)
+	}
+	if offer.RaiseHelps || offer.OfferBytes != 0 {
+		t.Errorf("raise_helps=%v offer_bytes=%d for a run the clock stopped",
+			offer.RaiseHelps, offer.OfferBytes)
+	}
+}
+
+// TestTopUpFallsBackToTheElapsedComparisonForAPreTOR161Record covers the
+// backward-compatibility half of TOR-161: a manifest.Cost written by a
+// torpeek from before this change can only ever say LimitHit "budget" for a
+// run its own clock stopped - core.StopTime did not exist yet - so absorbCost
+// falls back to the same elapsed-against-limit comparison this package used
+// exclusively before. This is a best-effort reading of an ambiguous old
+// record, not a certainty; see LimitTime's own doc.
+//
+// The arm that makes this mean something: TestTopUpStatesWhatItWillSpendBeforeItIsSpent
+// exercises the SAME "budget" LimitHit value with elapsed well under the
+// limit and gets LimitTraffic - so the fallback comparison, not the mere
+// presence of "budget", is what is under test here.
+func TestTopUpFallsBackToTheElapsedComparisonForAPreTOR161Record(t *testing.T) {
+	root := t.TempDir()
+	hash := "ff11bb22cc33dd44ee55ff66aa77bb88cc99dd00"
+	cost := budgetCost()            // LimitHit "budget" - the only value a pre-TOR-161 torpeek ever wrote
 	cost.DownloadedBytes = 40 << 20 // nowhere near its byte ceiling
 	cost.ElapsedMS = stoppedLimitMS // and out of time exactly
 	writePartialSet(t, root, hash, "deadbeefdeadbeef", "magnet:?xt=urn:btih:"+hash,
@@ -363,12 +407,17 @@ func TestTopUpOfATimeStoppedRunOffersNoRaise(t *testing.T) {
 
 	offer, _ := getTopUp(t, base, hash, "")
 	if offer.Limit != LimitTime {
-		t.Errorf("limit is %q, want %q - this run spent 40 MB of a 300 MB ceiling and "+
-			"ran the clock out; calling that a traffic stop would offer more traffic "+
-			"to a run that never ran out of any", offer.Limit, LimitTime)
+		t.Errorf("limit is %q, want %q - a pre-TOR-161 record can only say \"budget\" "+
+			"for a clock stop too, and this one has elapsed at exactly its time "+
+			"ceiling with almost no traffic spent", offer.Limit, LimitTime)
+	}
+	if offer.StoppedBy != string(core.StopBudget) {
+		t.Errorf("stopped_by = %q, want %q - StoppedBy stays what the record actually "+
+			"says, ambiguous or not; only Limit is the refined reading",
+			offer.StoppedBy, string(core.StopBudget))
 	}
 	if offer.RaiseHelps || offer.OfferBytes != 0 {
-		t.Errorf("raise_helps=%v offer_bytes=%d for a run the clock stopped",
+		t.Errorf("raise_helps=%v offer_bytes=%d for a record read as a clock stop",
 			offer.RaiseHelps, offer.OfferBytes)
 	}
 }

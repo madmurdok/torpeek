@@ -422,14 +422,14 @@ type TopUp struct {
 	SpentBytes   int64 `json:"spent_bytes"`
 	CeilingBytes int64 `json:"ceiling_bytes,omitempty"`
 
-	// StoppedBy is manifest.Cost.LimitHit as recorded - "budget" for one of
-	// the run's own two ceilings, "traffic_roof" for the client-wide one,
-	// empty for a set nothing stopped. Limit is the same fact one notch
-	// finer, and it is the field a client should act on: "traffic", "time"
-	// or "roof". The distinction is the whole of this ticket's second
-	// question - a run stopped by the clock or by the roof is not one a
-	// bigger traffic allowance can help, and saying "budget" alone would
-	// hide the clock case inside the traffic case.
+	// StoppedBy is manifest.Cost.LimitHit as recorded - "budget" for the
+	// run's own traffic ceiling, "time" for its own clock, "traffic_roof" for
+	// the client-wide one, empty for a set nothing stopped (core.StopReason,
+	// TOR-161). Limit is the same fact translated into the vocabulary this
+	// package and app.js already share: "traffic", "time" or "roof". A
+	// client should act on Limit, not StoppedBy - see LimitTime's own doc for
+	// why a record from before TOR-161 can still say "budget" for a run the
+	// clock actually stopped.
 	StoppedBy string `json:"stopped_by,omitempty"`
 	Limit     string `json:"limit,omitempty"`
 
@@ -488,10 +488,12 @@ func (f TopUpFile) Short() bool { return f.Captured < f.Planned }
 const (
 	// LimitTraffic is the run's own byte ceiling: the one a top-up raises.
 	LimitTraffic = "traffic"
-	// LimitTime is the run's own wall clock. core records both under
-	// StopBudget (BudgetTracker.Exhausted returns the same reason for
-	// either), so this is recovered here by comparing the elapsed figure the
-	// manifest kept against the ceiling beside it.
+	// LimitTime is the run's own wall clock. Since TOR-161, core records this
+	// as its own reason (core.StopTime) and absorbCost reads it directly -
+	// the elapsed-against-limit comparison this used to rest on entirely is
+	// now only a fallback, for a manifest.Cost written before that change,
+	// when core.StopBudget covered both ceilings and "time" could not appear
+	// in LimitHit at all.
 	LimitTime = "time"
 	// LimitRoof is the client-wide roof (core.StopRoof).
 	LimitRoof = "roof"
@@ -624,10 +626,21 @@ func (t *TopUp) absorbCost(c manifest.Cost) {
 	switch {
 	case c.LimitHit == string(core.StopRoof):
 		t.Limit = LimitRoof
+	case c.LimitHit == string(core.StopTime):
+		// Since TOR-161 core reports the clock as its own reason - read
+		// directly, nothing left to infer.
+		t.Limit = LimitTime
 	case c.LimitMS > 0 && c.ElapsedMS >= c.LimitMS:
-		// core reports the clock and the byte ceiling under one reason
-		// (StopBudget covers both), so the two are told apart here, from the
-		// only place that kept the figures: the manifest's own cost.
+		// Fallback for a manifest.Cost written before TOR-161, when core
+		// folded the clock into "budget" too and comparing the elapsed
+		// figure against the ceiling beside it was the only way to recover
+		// which one actually happened. Never reached for a record written
+		// after that change: the engine now checks the clock BEFORE the byte
+		// ceiling (BudgetTracker.Exhausted), so a "budget" it writes never
+		// again has ElapsedMS >= LimitMS - if the clock had also run out, it
+		// would have written "time" instead. This case exists only to give
+		// an old, ambiguous "budget" record a best-effort reading; it cannot
+		// be certain, only likely.
 		t.Limit = LimitTime
 	default:
 		t.Limit = LimitTraffic

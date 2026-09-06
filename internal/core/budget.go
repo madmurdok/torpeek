@@ -250,11 +250,24 @@ func (t *BudgetTracker) RoofLimit() int64 {
 
 // Exhausted reports whether a ceiling has been reached, and which one.
 //
-// The roof is asked FIRST, and the answer it gives is StopRoof rather than
-// StopBudget. A run that crossed both at the same moment is reported as
-// stopped by the roof on purpose: the roof is the ceiling that also stopped
-// every other run on the client, and that is the fact the person needs. The
-// two reasons never blur into one - see StopRoof.
+// Checked in order roof, clock, bytes - and the order IS the policy for what
+// a run reports when more than one ceiling is true at once, decided once
+// here rather than left for every consumer to re-derive:
+//
+//   - The roof is asked FIRST, and the answer it gives is StopRoof rather
+//     than StopBudget or StopTime. A run that crossed its own ceiling and the
+//     roof at the same moment is reported as stopped by the roof on purpose:
+//     the roof is the ceiling that also stopped every other run on the
+//     client, and that is the fact the person needs. See StopRoof.
+//   - The CLOCK is asked before the byte ceiling. A run that crossed both its
+//     own ceilings by the time anyone asked reports StopTime, never
+//     StopBudget: raising the traffic ceiling cannot finish a run whose time
+//     already ran out, so "reached its traffic limit" would be true but the
+//     wrong advice, while "ran out of time" is true and the whole reason
+//     StopTime exists apart from StopBudget - see StopTime's own doc, which
+//     also names what this replaced (TOR-161).
+//
+// None of these three reasons ever blur into one.
 func (t *BudgetTracker) Exhausted() (bool, StopReason) {
 	if t.client != nil && t.roof.Reached(t.client.Downloaded()) {
 		return true, StopRoof
@@ -262,10 +275,10 @@ func (t *BudgetTracker) Exhausted() (bool, StopReason) {
 
 	bytes, elapsed := t.Spent()
 
-	if t.budget.MaxBytes > 0 && bytes >= t.budget.MaxBytes {
-		return true, StopBudget
-	}
 	if t.budget.MaxTime > 0 && elapsed >= t.budget.MaxTime {
+		return true, StopTime
+	}
+	if t.budget.MaxBytes > 0 && bytes >= t.budget.MaxBytes {
 		return true, StopBudget
 	}
 	return false, StopCompleted
