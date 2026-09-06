@@ -417,6 +417,95 @@ func TestColumnDragNeverTriggersSort(t *testing.T) {
 	}
 }
 
+// TestColumnDragEndsWhenPointerCaptureIsLost is TOR-165: a drag whose
+// pointerup/pointercancel never reaches the handle - because the capture was
+// lost some other way, e.g. the handle leaving the document (per spec, the
+// baseline trigger for lostpointercapture) - must not leave the drag "stuck"
+// active forever. Before this ticket the handle's "dragging" class was the
+// only state a drag left behind, and nothing here ever cleared it back off.
+// buildLiveColumnHeaders() only builds this table's header once today, so a
+// header rebuild is not a live way to hit this in the current app - the
+// browser repro below instead reproduced a real capture loss straight from
+// this repo's own browser-automation tooling, no header rebuild involved.
+// Reuses TestColumnDragNeverTriggersSort's own block extraction, since both
+// tests are about the same wiring.
+//
+// Text assertions cannot see a pointer actually move or a capture actually
+// get lost - that is the browser pass recorded right below, not this test.
+func TestColumnDragEndsWhenPointerCaptureIsLost(t *testing.T) {
+	js := appJS(t)
+
+	block := regexp.MustCompile(`(?s)for \(const th of el\.sortHeaders\) \{\n  const key = th\.dataset\.sort;.*?\n\}`).
+		FindString(js)
+	if block == "" {
+		t.Fatal("app.js has no `for (const th of el.sortHeaders) { ... }` block wiring up the resize handles")
+	}
+
+	// Half one: lostpointercapture is the event that fires when the capture
+	// set in pointerdown ends WITHOUT a pointerup/pointercancel reaching the
+	// handle. Nothing listened for it before this fix.
+	if !strings.Contains(block, `handle.addEventListener("lostpointercapture", endColumnDrag);`) {
+		t.Error(`app.js's resize-handle wiring does not end the drag on "lostpointercapture" - a capture lost ` +
+			"any way other than pointerup/pointercancel on the handle itself would leave the handle lit and " +
+			"dragging forever")
+	}
+
+	// Half two, and the one that matters more per the ticket: pointermove
+	// must require the primary button still be held (event.buttons bit 0)
+	// and end the drag itself when it is not - so a plain hover with no
+	// button down is never computed as a continued drag, which is what
+	// makes ANY future way of losing the pointer harmless instead of sticky,
+	// not just the lostpointercapture case above.
+	if !strings.Contains(block, "if (!(event.buttons & 1)) {") {
+		t.Error("app.js's pointermove handler does not check event.buttons for the primary button - a hover " +
+			"with no button held would be computed as though it were a continued drag")
+	}
+	if !strings.Contains(block, "endColumnDrag(event);\n      return;") {
+		t.Error("app.js's pointermove handler does not end the drag when event.buttons shows no button held - " +
+			"it would keep reading a stale start point instead of stopping")
+	}
+}
+
+// TOR-165's browser pass (its own acceptance criterion: "Verified in a
+// browser by interrupting a drag, not only by asserting the served text"),
+// against a real binary built from this branch, serving on 127.0.0.1:8811:
+//
+//   - reading the wiring first: buildLiveColumnHeaders() builds the header
+//     row exactly once, at page load, and nothing else in app.js ever
+//     touches a .col-resizer node afterward - so "this table re-renders its
+//     header row on events," the mechanism the ticket named, is not a live
+//     path in the CURRENT code. The rest of the ticket's read was accurate:
+//     colDragStartX/colDragStartWidth were the sole state (this task turned
+//     them into a null-until-dragging `drag` object instead, per-handle by
+//     closure either way), pointermove trusted the "dragging" class alone,
+//     and nothing listened for lostpointercapture.
+//   - a real capture loss was still found without forcing one: on the
+//     UNFIXED binary, a single plain left-click on the NAME/ADDED resize
+//     handle (browser automation via CDP, no drag distance at all) left the
+//     handle's classList as "col-resizer dragging" - pointerup's own event
+//     target had already become the <th> rather than the handle, meaning
+//     capture was already gone before pointerup fired, exactly the gap the
+//     ticket describes, from an ordinary click rather than any header
+//     rebuild. A subsequent hover (mousemove, event.buttons: 0, no click)
+//     at a point 27px to the right then widened --col-w-name from
+//     356.734375px to 383.734375px - the column visibly grew under a
+//     hover with no button held, matching "afterwards merely moving the
+//     cursor over it dragged the column further right" from the ticket
+//     verbatim, confirmed by screenshot (the divider sat lit and the NAME
+//     column had visibly widened).
+//   - the exact same sequence (fresh page load, one plain click on the
+//     handle, then a hover 27px right of it) against the FIXED binary left
+//     handle.className as plain "col-resizer" after the click - the same
+//     capture loss happened, but lostpointercapture (or the event.buttons
+//     guard - either half independently ends it) cleared it - and the
+//     following hover left --col-w-name unchanged at 20rem, confirmed by
+//     screenshot (divider unlit, NAME column back at its original width).
+//
+// No console errors during the pass. Server started and stopped cleanly on
+// port 8811; `uptime`'s load average at the time (13-25, a shared, heavily
+// loaded machine) is why timings are not reported - nothing here depended on
+// wall-clock speed.
+
 // TestColumnWidthTokensMatchThePanelWidthFamily is the ticket's own
 // instruction, checked directly: "a column-width equivalent belongs in the
 // same family" as --panel-width. Same mechanism as TestStoredColumnWidthsDegradeGracefully's
@@ -501,3 +590,42 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 //     row height unchanged, and the table still fit the pane.
 //
 // The console carried no errors or exceptions throughout.
+
+// TestFileDoneNoLongerLinksManifest is TOR-171: the page has no use for the
+// raw JSON manifest a finished file's event carries, so onFileDone must not
+// turn ev.manifest_url into a link the way it still does for ev.sheet_url -
+// unrelated to this file's own ticket, but placed here because app.js's
+// served-text tests all live in this one file. manifest_url itself stays on
+// the wire (server.go's record() is unchanged) for whatever else reads the
+// NDJSON stream - this test is only about what the page renders from it.
+func TestFileDoneNoLongerLinksManifest(t *testing.T) {
+	js := appJS(t)
+
+	if strings.Contains(js, `link(ev.manifest_url`) {
+		t.Error("app.js's onFileDone still turns ev.manifest_url into a link - the page should not offer a " +
+			"manifest link at all, live or reopened from disk")
+	}
+
+	// The contact sheet link is the one an end user does want, and must
+	// survive this change untouched.
+	if !strings.Contains(js, `link(ev.sheet_url, "contact sheet")`) {
+		t.Error("app.js's onFileDone no longer links ev.sheet_url as \"contact sheet\" - that link should stay")
+	}
+}
+
+// TOR-171's browser check, same session and binary as TOR-165's pass above:
+// no completed file was available to inspect through the real event path
+// (the one seeded run in this environment was FAILED, with no frames), so
+// the single-link-row rendering ("whatever separates two links must not
+// leave a dangling separator" once the manifest link is gone, since a
+// finished file usually offers only the contact sheet now) was checked
+// directly against app.css's actual rule for it - .file-links is `display:
+// flex; gap: 1rem` - by rendering one <a> inside a .file-links element on
+// the live page and reading its layout back: one child, and a zoomed
+// screenshot showing only "contact sheet" with nothing beside it. flex gap
+// only inserts space BETWEEN children, so a single child leaves nothing to
+// dangle by construction - confirmed rather than assumed.
+//
+// What this did not verify: manifest_url actually still arriving over a
+// live NDJSON stream end to end (server.go's record() is unchanged, so this
+// is read off the source, not observed on the wire, in this pass).

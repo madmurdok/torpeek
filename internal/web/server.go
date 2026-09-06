@@ -2186,6 +2186,12 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 			m["sheet_url"] = s.files.publish(e.SheetPath)
 		}
 		if e.ManifestPath != "" {
+			// TOR-171: the page itself no longer links this (app.js's
+			// onFileDone) - a person looking at frames has no use for the raw
+			// JSON manifest. It stays on the wire regardless, because this
+			// event also reaches whatever else is reading the NDJSON stream,
+			// and a manifest URL is exactly the kind of thing a script - not
+			// a person - would want.
 			m["manifest_url"] = s.files.publish(e.ManifestPath)
 		}
 	case core.Done:
