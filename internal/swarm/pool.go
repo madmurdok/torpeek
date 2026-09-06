@@ -23,6 +23,17 @@ var (
 	// unreachable (one run at a time); saying so is what keeps it unreachable
 	// now that it is not.
 	ErrTorrentBusy = errors.New("this torrent is already being worked on")
+
+	// ErrSharedClientIsPublicOnly means something that is not a torrent known
+	// to be public was offered to the shared client, and the add was refused
+	// at the door rather than routed away from it upstream.
+	//
+	// Note what the bar is: known PUBLIC, not "not known private". A magnet
+	// whose metadata has not arrived is refused too, because the only way to
+	// find out here would be to fetch that metadata on the shared client -
+	// which is the one mistake this whole arrangement exists to make
+	// impossible. See onlineRoute.blind, which names it.
+	ErrSharedClientIsPublicOnly = errors.New("only a torrent known to be public may join the shared public client")
 )
 
 // Pool is where a run gets its torrent from.
@@ -44,13 +55,23 @@ var (
 //   - a magnet with trackers is probed on a throwaway client with DHT off -
 //     the same probe Open has always done - and joins the shared client only
 //     once the metadata says it is public;
-//   - a private torrent, and a magnet with no trackers that had to reach the
-//     DHT before its flag could be read, stay on a client of their own.
+//   - a private torrent stays on a client of its own;
+//   - a magnet with no trackers cannot have its flag read at all without
+//     reaching the DHT first, so it goes online blind on a client of its own,
+//     and if the metadata then says private the attach is refused outright
+//     rather than carried on (see onlineRoute.blind, which is where that
+//     decision is written down).
 //
 // The rule is one sentence: nothing enters the shared client until it is
 // known public. A private torrent sharing a client with a public one is the
 // single failure this whole arrangement exists to make impossible, and
 // "probably public" is not knowing.
+//
+// The rule is also not merely stated here. attachShared settles the flag from
+// the torrent's own bytes and refuses anything else, and Session.addTo
+// refuses a private torrent on any client with DHT on. The list above is how
+// routing keeps torrents away from those doors; the doors are what make it
+// true whether the routing is right or not.
 //
 // # What this costs in ports
 //
@@ -60,6 +81,20 @@ var (
 // why section 4.1 asks for N greater than one; a single-port allocation can
 // still serve a .torrent, but not a magnet while the shared client is up. It
 // is reported as ErrNoPortAvailable, which names the limit.
+//
+// A private torrent costs one more for as long as it is attached, and that is
+// where the port set stops being an accounting detail and becomes a bound on
+// concurrency: two private torrents cannot be worked at the same time unless
+// two ports are free, because each needs a client to itself and a client
+// binds a port. That is TOR-127's port set showing through, not something
+// this type chose - public torrents have no such bound, however many of them
+// there are, because they share one client and therefore one port.
+//
+// The bound is also the shape of the guarantee, and worth reading that way: a
+// pool with one port left will refuse a private torrent with
+// ErrNoPortAvailable rather than let it into the shared client. Failing is
+// the correct outcome there. Nothing in this type will ever trade the
+// guarantee for a port.
 type Pool struct {
 	// cfg is the template every client here is built from. Its Ports field
 	// is the one thing shared between them: it is what stops the shared
@@ -316,7 +351,14 @@ func (p *Pool) attach(ctx context.Context, src Source, key string, peers []strin
 }
 
 // attachAlone is the unchanged path: this torrent gets a client to itself,
-// configured by exactly the rules Open has always applied.
+// configured by exactly the rules Open has always applied - which for a
+// private torrent means DHT off, decided before the client starts.
+//
+// A client to itself means a port to itself, and that is the concurrency
+// bound the type comment describes: a second private torrent has to wait for
+// a second free port, and gets ErrNoPortAvailable rather than a place in the
+// shared client if there is not one. Public torrents never queue like this,
+// because they are not the ones that need a client of their own.
 func (p *Pool) attachAlone(ctx context.Context, src Source, key string, peers []string) (*Attachment, error) {
 	cfg := p.cfg
 	cfg.Peers = mergePeers(p.cfg.Peers, peers)
@@ -400,8 +442,33 @@ func (p *Pool) probeThenAttach(ctx context.Context, src Source, key string, peer
 // spare, when non-nil, is a port claim the caller already holds and no longer
 // needs: the shared client takes it over if it has no port yet, and it is
 // handed back otherwise.
+//
+// # Known public is established here, not taken on trust
+//
+// This function settles the flag itself, out of the source's own bytes or the
+// metadata handed to it, and refuses everything else with
+// ErrSharedClientIsPublicOnly. It could have taken a boolean from the caller
+// that had just worked the same thing out a few lines above - and that is
+// precisely the version worth not writing. Routing decides where a torrent
+// SHOULD go; this is the door, and a door that opens only for a torrent whose
+// own bytes say public cannot be walked past by a caller added later, a
+// branch reordered, or a route that grows a case its author did not think
+// through. Criterion 5 used to hold because one client held one torrent and
+// there was nowhere else for a private one to go. This is what holds it now.
+//
+// It is deliberately a second, independent reading of the same fact
+// Pool.attach already routed on. Two readings that must agree is the cheapest
+// structure there is for a guarantee that has no acceptable failure rate.
 func (p *Pool) attachShared(ctx context.Context, src Source, key string,
 	mi *metainfo.MetaInfo, peers []string, spare *portClaim) (*Attachment, error) {
+
+	if private, known := privacyInHand(src, mi); !known || private {
+		// Before the lock, and before the port: a refusal here must give
+		// back whatever the caller was carrying, and the shared client is
+		// not to be started for a torrent that is not joining it.
+		spare.release()
+		return nil, fmt.Errorf("%w (private=%v, known=%v)", ErrSharedClientIsPublicOnly, private, known)
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -525,9 +592,31 @@ func (a *Attachment) ListenPort() int {
 	return a.pool.ListenPort()
 }
 
+// UsesDHT reports whether the client carrying this torrent has DHT - and so
+// PEX - running.
+//
+// For a private torrent it is false, and the point of the method is that this
+// is checkable rather than asserted: it reads the live client (Session.UsesDHT
+// counts the DHT servers anacrolix actually started), not the config that
+// asked for one. It is what acceptance criterion 5 is measured on now that a
+// run's torrent may be sharing a client with other runs' torrents - "the
+// session has DHT off" was a whole answer when a session held one torrent,
+// and is only half of one now.
+func (a *Attachment) UsesDHT() bool {
+	if a.sess != nil {
+		return a.sess.UsesDHT()
+	}
+	return a.pool.UsesDHT()
+}
+
 // WentOnlineBlind reports that DHT was used before the private flag could be
 // checked - only possible for a magnet carrying no trackers, and therefore
 // only ever for a torrent on a client of its own.
+//
+// It is never true for a PRIVATE torrent: a blind magnet whose metadata turns
+// out to carry the private flag is refused rather than attached, so there is
+// no attachment left to ask (onlineRoute.blind). True here means the torrent
+// went online blind and turned out public.
 func (a *Attachment) WentOnlineBlind() bool {
 	return a.sess != nil && a.sess.WentOnlineBlind()
 }
