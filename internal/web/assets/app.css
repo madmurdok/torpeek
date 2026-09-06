@@ -984,6 +984,54 @@ button:disabled { opacity: .5; }
    torrent client pick the file up. */
 .torrent-note { font-size: .8rem; opacity: .75; }
 
+/* RUNNING THIS ROW AGAIN (TOR-152): topping up a run that stopped at a
+   ceiling, or retrying one that produced nothing. It sits in the detail
+   rather than in the row's actions cell, which is 3.8rem and nowrap
+   (.run-cell-actions) and would squeeze the torrent's name to fit a fourth
+   control - and it is where the run's other verbs already are.
+
+   One rung up from the detail's own --s1 ground rather than bordered like
+   the picker below: the picker is a BLOCKING state - nothing happens until
+   somebody ticks a box, which is what earns it a --warn frame - while this
+   is an offer on a finished row, and framing the two the same way would say
+   this row is waiting for something. --ink-2 on --s2 measures 6.75, well
+   clear of AA (see :root's ink table). */
+.run-again {
+  margin: .7rem 0 0;
+  border: 1px solid var(--rule);
+  border-radius: .4rem;
+  padding: .55rem .7rem;
+  background: var(--s2);
+}
+.run-again-line { margin: 0; font-size: .85rem; }
+.run-again-foot { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: .5rem 0 0; }
+.run-again-go, .run-again-retry { font-size: .85rem; }
+/* The traffic this row is about to spend, before it is spent. --warn, not
+   --accent: the accent means "this is live or this is where you are" and
+   wears nothing else (:root), and this is a caution about somebody's
+   allowance - the same thing the picker's --warn frame is saying about the
+   frames a person is picking. Monospace and tabular because it is a figure
+   meant to be compared against the ceiling named in the line above it. */
+.run-again-cost {
+  font-family: var(--mono);
+  font-size: .82rem;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}
+/* The sentence about what a top-up actually re-fetches. Quiet, because it is
+   a standing fact about how torpeek works rather than news about this run -
+   but present, because a person expecting a download to resume where it
+   stopped would be surprised twice (REQUIREMENTS.md 2.9: pieces are
+   discarded after every run, so only the frames survive). */
+.run-again-note { margin: .45rem 0 0; font-size: .78rem; color: var(--ink-2); }
+/* An empty line still costs its margins, and this section shows two of the
+   three lines at a time - a refusal has no cost or note, a retry has no cost.
+   Collapsing the empty ones is what keeps the block the same shape either
+   way. */
+.run-again-line:empty,
+.run-again-cost:empty,
+.run-again-note:empty { display: none; }
+
 /* The picker a multi-file torrent parks on (TOR-67): nothing has been
    downloaded beyond the metadata, and nothing will be until someone ticks a
    box here. It sits between the torrent's summary line and its (still
