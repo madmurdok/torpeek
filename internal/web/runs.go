@@ -341,6 +341,7 @@ func (e *runEntry) applyProgress(p core.Progress) {
 		Peers: p.Peers, Seeds: p.Seeds,
 		DownloadBps: p.DownloadRate, UploadBps: p.UploadRate,
 		Swarm: renderAvailability(p.Swarm),
+		Stall: renderStall(p.Stall),
 	}
 }
 

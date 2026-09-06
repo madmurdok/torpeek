@@ -159,26 +159,11 @@ type Live struct {
 	// progress event added by TOR-147).
 	Swarm *Availability `json:"swarm,omitempty"`
 
-	// Stall mirrors wire.go's "stall" object on the progress event
-	// (core.Progress.Stall, TOR-141) field for field: which of the distinct
-	// "nothing is landing" causes explains this row right now, and how long
-	// it has continuously been true. Nil means progressing, the same
-	// "absent, not zero" rule Swarm above already follows.
-	//
-	// NOT YET SET by this package's own live snapshot (runEntry.applyProgress,
-	// internal/web/runs.go) - that file was explicitly out of this task's
-	// scope (the same seam TOR-136 left for TOR-139/140 to close: see
-	// runEntry.applyProgress's own doc for that precedent). It needs exactly
-	// one more line there, mirroring the existing Swarm one:
-	//
-	//	Stall: renderStall(p.Stall),
-	//
-	// Until that lands, a row's Stall reading reaches a page only through
-	// the WebSocket progress event (app.js reads ev.stall directly, the same
-	// way it already reads ev.swarm before GET /runs ever taught Live about
-	// Availability) - which every live run keeps refreshing on its own clock
-	// regardless (engine.go's stallHeartbeatInterval), so a page that loaded
-	// before this field existed is never more than one heartbeat behind.
+	// Stall is why this run is getting nowhere and for how long, or absent
+	// when it is progressing (TOR-141). Filled by runEntry.applyProgress
+	// from the same heartbeat the rest of Live comes from, so a page that
+	// has only just loaded reads it out of GET /runs rather than waiting for
+	// the next WebSocket progress event.
 	Stall *Stall `json:"stall,omitempty"`
 }
 
