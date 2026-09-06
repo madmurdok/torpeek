@@ -40,6 +40,21 @@ const (
 	DefaultAddr = "127.0.0.1:8765"
 )
 
+// DefaultMaxActiveTorrents is how many torrents this server fetches at once
+// when nothing says otherwise: the width the queue has always had.
+//
+// It has to sit inside REQUIREMENTS.md 4.1's own number for the platform
+// this targets - 1 to 3 active downloads, because high IO on a shared-HDD
+// plan hits neighbours - without exceeding it, and 1 is the value that keeps
+// every existing deployment's behaviour exactly what it already was: no flag
+// starts a widened queue by accident, and none needs -max-client-bytes
+// suddenly set just to keep serving (see Server's own doc, and
+// core.DefaultRoof, for why a queue wider than one slot must not ship
+// without one). Raising it past 1 - what serveWeb calls "widening the
+// queue" - is an operator's explicit choice, made with
+// -max-active-torrents, and it is the one choice that also obliges a roof.
+const DefaultMaxActiveTorrents = 1
+
 // Config configures the UI server.
 type Config struct {
 	// Addr is the listen address. Both the host and the port are part of it:
@@ -115,6 +130,30 @@ type Config struct {
 	// page then leaves its field empty - which sends no count at all, and
 	// so still gets the server's default.
 	DefaultCount int
+
+	// MaxActiveTorrents caps how many torrents this server fetches at once -
+	// the width of the request queue (REQUIREMENTS.md 3.3), not a limit on
+	// anything inside a torrent. Above it, a request WAITS its turn exactly
+	// as it always has; nothing is ever refused for arriving over it
+	// (StartRun).
+	//
+	// It governs TORRENTS, not readers. Config.Parallelism (core, default 4)
+	// is a separate per-torrent knob applied once a torrent is already
+	// running, so N torrents each at that default is N times as many
+	// concurrent file reads - three torrents at two files each is six,
+	// against REQUIREMENTS.md 4.1's fair-use guidance of 1 to 3 ACTIVE
+	// DOWNLOADS, which counts readers, not torrents. This cap does not
+	// correct for that multiplication; understating real load this way is
+	// this choice's known weakness, not something hidden from it.
+	//
+	// Zero uses DefaultMaxActiveTorrents. Raising it past 1 must arrive with
+	// a client-wide traffic roof configured - core.Config.Roof, set once
+	// beside the pool in cli/web.go - or N runs multiply the per-run ceiling
+	// by N exactly as core.DefaultRoof warns against; serveWeb refuses to
+	// start rather than let that happen silently (REQUIREMENTS.md 2.6).
+	// Lowering it, including below however many are already running, stops
+	// nothing already going - see Server.SetMaxActiveTorrents.
+	MaxActiveTorrents int
 }
 
 // DefaultConfig serves the desktop case: loopback, fixed port.
@@ -272,27 +311,36 @@ const keepFinishedRuns = 10
 
 // Server serves the embedded UI and the event streams of the runs it holds.
 //
-// It holds a registry of runs and exactly one slot to run them in. One at a
-// time is still the rule, but since TOR-128 it is a policy rather than a
-// limit of the machinery: every public torrent shares one long-lived client
-// on one port (swarm.Pool), so a second concurrent run could now start.
+// It holds a registry of runs and a slot count to run them in - TOR-130's own
+// change, so read this alongside Config.MaxActiveTorrents. One at a time was
+// the rule for a long time as a policy rather than a limit of the machinery:
+// since TOR-128 every public torrent shares one long-lived client on one
+// port (swarm.Pool), so more than one concurrent run was always mechanically
+// possible; what kept the slot at one was that two runs would each carry
+// their own traffic budget with no roof over the pair, on a host whose
+// fair-use guidance is one to three active downloads (REQUIREMENTS.md 4.1).
+// That gap closed first: core.Roof is a client-wide traffic ceiling that does
+// not multiply by the number of runs, and every run this server starts is
+// held to it (core.Config.Roof, set once beside the pool in cli/web.go).
 //
-// What used to keep the slot at one was that two runs would each carry their
-// own traffic budget with no roof over the pair, on a host whose fair-use
-// guidance is one to three active downloads (REQUIREMENTS.md 4.1). That gap
-// is closed: core.Roof is a client-wide traffic ceiling that does not
-// multiply by the number of runs, and every run this server starts is held to
-// it (core.Config.Roof, set once beside the pool in cli/web.go).
+// So the width is now a number, s.maxActive, defaulting to
+// DefaultMaxActiveTorrents (1 - unchanged behaviour) and settable past that
+// by an operator (-max-active-torrents) or live (SetMaxActiveTorrents). The
+// roof still ships UNLIMITED by default (core.DefaultRoof says why torpeek
+// will not guess a person's allowance), so raising the width past 1 without
+// one configured would let N runs multiply the per-run ceiling by N exactly
+// as before TOR-131 - which is why serveWeb (cli/web.go) refuses to start a
+// process asked to do that, rather than silently allowing it or only
+// logging a warning nobody attending an unattended systemd unit would read.
 //
-// The slot stays at one because widening it is TOR-130's decision, not
-// because nothing bounds the pair any more. What that decision now owes is
-// smaller and concrete: the roof SHIPS UNLIMITED (core.DefaultRoof says why
-// torpeek will not guess a person's allowance), so a queue wider than one
-// slot must arrive with `-max-client-bytes` set, or N runs multiply the
-// per-run ceiling by N exactly as before.
+// Lowering the width later, including below however many are already
+// running, cancels nothing: dispatch only ever consults it to decide whether
+// to START a new run, so runs already holding a slot keep it and finish (or
+// are cancelled the normal way) while new ones simply wait for the count to
+// drain under the new width on its own - see SetMaxActiveTorrents.
 //
-// What changed before all of that, and still holds: a second request waits
-// its turn instead of being refused.
+// What changed before any of this, and still holds regardless of the width:
+// a request over the cap waits its turn instead of being refused.
 type Server struct {
 	cfg      Config
 	runner   Runner
@@ -316,10 +364,19 @@ type Server struct {
 	// waiting is the queue, in arrival order. It holds runs that have been
 	// accepted and not yet started.
 	waiting []*runEntry
-	// running is the single slot. Its being one pointer rather than a
-	// collection is the concurrency limit: there is no number to raise.
-	running *runEntry
-	stopped bool
+	// running is every torrent currently holding a slot, keyed by id. Its
+	// being a map rather than one pointer is TOR-130's whole change: the
+	// concurrency limit is now the number maxActive names, not the shape of
+	// this field.
+	running map[string]*runEntry
+	// maxActive is the current width of the queue - how many entries running
+	// may hold before dispatch makes the next one wait. Resolved once from
+	// Config.MaxActiveTorrents at construction (defaulting per
+	// DefaultMaxActiveTorrents) and live thereafter: SetMaxActiveTorrents is
+	// the only thing that changes it after that, under s.mu like every other
+	// field here.
+	maxActive int
+	stopped   bool
 }
 
 // Start listens and begins serving. The returned server must be closed.
@@ -387,16 +444,32 @@ func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer
 	}
 	cfg.BasePath = normalizeBasePath(cfg.BasePath)
 	return &Server{
-		cfg:      cfg,
-		runner:   runner,
-		replayer: replayer,
-		deleter:  deleter,
-		lister:   lister,
-		baseCtx:  ctx,
-		files:    newFileSet(),
-		hub:      newHub(connectRecord()),
-		runs:     make(map[string]*runEntry),
+		cfg:       cfg,
+		runner:    runner,
+		replayer:  replayer,
+		deleter:   deleter,
+		lister:    lister,
+		baseCtx:   ctx,
+		files:     newFileSet(),
+		hub:       newHub(connectRecord()),
+		runs:      make(map[string]*runEntry),
+		running:   make(map[string]*runEntry),
+		maxActive: maxActiveOrDefault(cfg.MaxActiveTorrents),
 	}
+}
+
+// maxActiveOrDefault is Config.MaxActiveTorrents resolved the way every
+// other zero-valued Config field here resolves: not stated becomes the
+// documented default rather than "no torrents at all", which a literal zero
+// would otherwise mean for a cap. A negative value - not reachable through
+// the CLI, which refuses one outright (cli/web.go), but reachable from a
+// caller building a Server directly - gets the same treatment rather than a
+// panic, matching ShutdownTimeout's own <= 0 check in Start.
+func maxActiveOrDefault(n int) int {
+	if n <= 0 {
+		return DefaultMaxActiveTorrents
+	}
+	return n
 }
 
 // URL is where the UI can be reached.
@@ -508,12 +581,12 @@ func mountRoot(next http.Handler) http.Handler {
 // StartRun accepts a run and returns what it was given: an id, and whether it
 // took the slot or is waiting for it.
 //
-// It never refuses because another run is going. Only one runs at a time -
-// see the type's own comment for what that is now about, and what the
-// client-wide roof over every run changed - but that is kept by making the
-// second request wait rather than by turning it away. The error
-// it can still return is about the request or the server, not about traffic:
-// a blank source, or a server that has closed.
+// It never refuses because other runs are going. Only Server.maxActive run at
+// a time - see the type's own comment for what decides that number and what
+// the client-wide roof over every run together changed - but that is kept by
+// making a request past it wait rather than by turning it away. The error it
+// can still return is about the request or the server, not about traffic: a
+// blank source, or a server that has closed.
 //
 // It does not refuse a full traffic roof either, and deliberately: a queued
 // run reaches the engine minutes later, and a roof read here would be the
@@ -594,13 +667,19 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	return info, nil
 }
 
-// dispatch gives the slot to the next waiting run, if it is free.
+// dispatch fills every free slot it can from the front of the queue.
 //
-// It loops because a run can fail before it produces any events at all - a
-// source that does not parse - and that must not leave the slot empty with
-// runs still waiting behind it.
+// It loops for two reasons now, not one. The original reason still holds: a
+// run can fail before it produces any events at all - a source that does not
+// parse - and that must not leave a slot empty with runs still waiting
+// behind it, so a refusal keeps the loop going to try the next waiter
+// immediately. TOR-130 added the second: with maxActive possibly greater
+// than 1, successfully starting one run must not stop the loop either - there
+// may still be room and more waiters, so every successful start also loops
+// back rather than returning, and only the top-of-loop check (no room, no
+// waiters, or stopped) ever ends it.
 //
-// A run that still has to be told which files to capture takes the slot for
+// A run that still has to be told which files to capture takes a slot for
 // its metadata pass first (needsListingLocked, listThenRun). That pass reaches
 // the swarm - it attaches the torrent to get its metadata - which is why it
 // happens here rather than beside the queue: RunReplaying's exemption does not
@@ -608,7 +687,7 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 func (s *Server) dispatch() {
 	for {
 		s.mu.Lock()
-		if s.stopped || s.running != nil || len(s.waiting) == 0 {
+		if s.stopped || len(s.running) >= s.maxActive || len(s.waiting) == 0 {
 			s.mu.Unlock()
 			return
 		}
@@ -620,10 +699,10 @@ func (s *Server) dispatch() {
 		if s.needsListingLocked(entry) {
 			// The slot is taken before a single byte is asked for, and the
 			// state is "running" because that is what this is: the run's own
-			// first phase, on the run's own cancellable context, holding the
-			// one thing a second run could not share.
+			// first phase, on the run's own cancellable context, holding one
+			// of the things a run over the cap could not yet share.
 			entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
-			s.running = entry
+			s.running[entry.id] = entry
 			rec := s.runStateRecordLocked(entry, false)
 			s.mu.Unlock()
 
@@ -632,14 +711,15 @@ func (s *Server) dispatch() {
 			// swarm.Config.MetadataTimeout, and dispatch is called from the
 			// goroutine that is answering an HTTP request.
 			go s.listThenRun(ctx, cancel, entry)
-			return
+			continue
 		}
 
 		if s.beginRun(ctx, cancel, entry) {
-			return
+			continue
 		}
-		// The runner refused this one before it produced any events; the slot
-		// is still free, so the next waiter gets its turn immediately.
+		// The runner refused this one before it produced any events; the
+		// slot it would have held is still free, so the next waiter gets its
+		// turn immediately - the same loop-back a successful start now takes.
 	}
 }
 
@@ -699,7 +779,7 @@ func (s *Server) beginRun(ctx context.Context, cancel context.CancelFunc, entry 
 	}
 
 	entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
-	s.running = entry
+	s.running[entry.id] = entry
 	rec := s.runStateRecordLocked(entry, false)
 	s.mu.Unlock()
 
@@ -1007,32 +1087,44 @@ func isTorrentPath(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".torrent")
 }
 
-// CancelRun stops one run: the one in the slot, or one still waiting for it.
+// CancelRun stops one run: one holding a slot, or one still waiting for one.
 // Frames already written stay on disk, which is the whole point of cancelling
 // rather than killing (section 2.10).
 //
-// An empty id means the run in the slot, which is what a page showing one run
-// asks for.
+// An empty id means "the run in the slot" - what a page showing exactly one
+// run asks for, and still unambiguous exactly when there is exactly one:
+// nobody running names none to cancel, and one running names that one. Since
+// TOR-130 there can be more than one at once, and an empty id then names
+// nothing in particular - answered as a 400 about the request rather than a
+// guess at which of several a person meant, because a wrong guess here stops
+// someone's download instead of someone else's.
 //
 // A queued run has no context to cancel - it never got one - so cancelling it
 // is taking it out of the queue, which is why this cannot be left to the run
 // itself to notice. A torrent parked for a file selection is the same case
 // for a different reason: it had a context and gave it back when it released
-// the slot, and nothing is watching it that could notice anything.
+// its slot, and nothing is watching it that could notice anything.
 func (s *Server) CancelRun(id string) (RunInfo, error) {
 	s.mu.Lock()
 
-	entry := s.running
-	if id != "" {
+	var entry *runEntry
+	switch {
+	case id != "":
 		entry = s.runs[id]
 		if entry == nil {
 			s.mu.Unlock()
 			return RunInfo{}, ErrNoSuchRun
 		}
-	}
-	if entry == nil {
+	case len(s.running) == 1:
+		for _, e := range s.running {
+			entry = e
+		}
+	case len(s.running) == 0:
 		s.mu.Unlock()
 		return RunInfo{}, errors.New("no run is in progress")
+	default:
+		s.mu.Unlock()
+		return RunInfo{}, fmt.Errorf("%w: more than one run is going, name which one to cancel", errBadRequest)
 	}
 
 	switch entry.state {
@@ -1211,25 +1303,68 @@ func (e *runEntry) holdsFile(spec string) bool {
 	return false
 }
 
-// releaseSlotLocked gives the single slot back, if this entry is what holds
-// it.
+// SetMaxActiveTorrents changes the queue's width - how many torrents may
+// fetch at once - effective immediately, and reports an error rather than
+// applying anything if n is not a usable width.
 //
-// The one place s.running is ever cleared. Three paths reach it - a run
-// whose event stream ended (pump), a run the runner refused before it
-// produced a stream (beginRun), and a torrent parked for someone to choose
-// files (listThenRun) - and a second assignment written by hand in any of
-// them would be free to drift from the others.
+// Lowering it stops nothing that is already going: dispatch only ever reads
+// the current width to decide whether to START a run, never to decide
+// whether to keep one running, so an entry already holding a slot keeps it
+// and finishes (or is cancelled the ordinary way, CancelRun) exactly as it
+// would have under the old, wider count. A queued run simply waits longer -
+// until enough of the entries holding a slot finish on their own for the
+// count to drop under the new width - which is what "lowering the cap stops
+// nobody" (this task's own framing) actually reduces to in the code: one
+// comparison, unconditionally true for a wider queue and now sometimes false
+// for a narrower one, with nothing that reaches in and cancels a run for
+// having become one too many.
+//
+// Raising it can let queued runs start right away, which is why this calls
+// dispatch before returning rather than leaving the next request to
+// discover the extra room.
+//
+// n must be at least 1: this queue always eventually runs an accepted
+// request (REQUIREMENTS.md 3.3), so a width of zero - "accept nothing new" -
+// is not a state it has, and is a different feature from this one.
+//
+// Nothing in this process calls it yet - -max-active-torrents (cli/web.go)
+// is the only lever wired to an operator today, and it is fixed for the life
+// of the process. This method exists so that lowering the width while runs
+// are already going is a real, exercised code path rather than a claim in a
+// comment - see the concurrency tests for the scenario it makes checkable.
+func (s *Server) SetMaxActiveTorrents(n int) error {
+	if n < 1 {
+		return fmt.Errorf("%w: the queue width must be at least 1, got %d", errBadRequest, n)
+	}
+
+	s.mu.Lock()
+	s.maxActive = n
+	s.mu.Unlock()
+
+	s.dispatch()
+	return nil
+}
+
+// releaseSlotLocked gives back the slot this entry holds, if it holds one.
+//
+// The one place an entry is ever removed from s.running. Three paths reach
+// it - a run whose event stream ended (pump), a run the runner refused
+// before it produced a stream (beginRun), and a torrent parked for someone
+// to choose files (listThenRun) - and a second deletion written by hand in
+// any of them would be free to drift from the others.
 //
 // The guard is not a formality. pump also runs for a replay, which never
-// took the slot at all (ReopenRun), and clearing it there would take the
-// slot away from whoever legitimately holds it; the same guard makes
-// beginRun's failure path safe whether or not its caller had already taken
-// the slot for a listing.
+// took a slot at all (ReopenRun), and deleting blindly by id there could
+// remove some other, unrelated run that happens to hold the same key at that
+// moment; the same guard makes beginRun's failure path safe whether or not
+// its caller had already taken a slot for a listing - deleting a key that
+// was never inserted is a no-op, same as before this held more than one
+// entry.
 //
 // The caller must hold s.mu.
 func (s *Server) releaseSlotLocked(entry *runEntry) {
-	if s.running == entry {
-		s.running = nil
+	if s.running[entry.id] == entry {
+		delete(s.running, entry.id)
 	}
 }
 
@@ -1259,9 +1394,10 @@ func (s *Server) snapshot() []RunInfo {
 // the run, then hands the slot to whoever is next.
 //
 // dispatch is its usual caller, in its own goroutine, for the entry that
-// currently holds the slot; ReopenRun also calls it, synchronously and for
-// an entry that never held the slot at all. Both are safe: the "hands the
-// slot to whoever is next" step only fires `if s.running == entry`, which is
+// currently holds a slot; ReopenRun also calls it, synchronously and for an
+// entry that never held a slot at all. Both are safe: the "hands the slot to
+// whoever is next" step only fires when this entry is actually the one
+// s.running holds under its id (releaseSlotLocked's own guard), which is
 // never true for a replay, so it is simply a no-op dispatch() call there
 // rather than a special case this function has to know about.
 func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
@@ -1543,7 +1679,7 @@ func encode(m map[string]any) []byte {
 	return data
 }
 
-// Close stops serving, cancels the run in the slot and drops the queue.
+// Close stops serving, cancels every run holding a slot and drops the queue.
 //
 // A queued run is cancelled rather than left behind: nothing will ever start
 // it once the server is stopped, so nothing would ever run its cleanup, and
@@ -1563,7 +1699,10 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.stopped = true
-	running := s.running
+	running := make([]*runEntry, 0, len(s.running))
+	for _, entry := range s.running {
+		running = append(running, entry)
+	}
 	ended := time.Now()
 
 	// Everything that was going to start and now never will: the queue, plus
@@ -1581,8 +1720,8 @@ func (s *Server) Close() error {
 	}
 	s.mu.Unlock()
 
-	if running != nil {
-		running.cancel()
+	for _, entry := range running {
+		entry.cancel()
 	}
 	for _, entry := range stranded {
 		if entry.cleanup != nil {

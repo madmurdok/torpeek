@@ -86,10 +86,18 @@ func (r Roof) Reached(received int64) bool {
 // config-and-flags route section 2.6 gives the per-run ceilings - and the
 // mechanism ships set to unlimited.
 //
-// This is safe today only because the web UI's queue is one slot wide
-// (REQUIREMENTS.md 3.3), so there is exactly one run and its own ceiling IS
-// the client's. Whoever widens that queue (TOR-130) is the change that has to
-// arrive with a roof configured; this type existing is what lets it.
+// This was safe by default only while the web UI's queue was one slot wide
+// (REQUIREMENTS.md 3.3), where there was exactly one run and its own ceiling
+// WAS the client's. TOR-130 is the change that widened it: web.Config's
+// MaxActiveTorrents can now be more than one, and its default (1) still
+// keeps that same safety - but raising it past 1 without a roof configured
+// would let that many runs multiply one run's own ceiling by that many,
+// exactly the gap this type exists to close. That is why serveWeb
+// (cli/web.go, via queueWidthError) now refuses to start a process asked to
+// widen the queue with no roof set, rather than starting it and letting the
+// gap reopen silently: this type existing is what makes that refusal
+// possible to write, and the refusal is what makes widening the queue safe
+// in practice rather than merely documented as needing to be.
 func DefaultRoof() Roof {
 	return Roof{WarnAt: defaultWarnAt}
 }

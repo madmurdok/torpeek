@@ -122,3 +122,53 @@ func TestRunConfigKeepsTheDashNFlagWhenTheWebSendsNoCount(t *testing.T) {
 		t.Errorf("Plan.Count = %d, want 6 preserved from -n", cfg.Plan.Count)
 	}
 }
+
+// TestQueueWidthErrorDefaultIsFine is the every-existing-deployment case:
+// -max-active-torrents left at its default (1) with no roof configured at
+// all must keep starting exactly as it always has - TOR-130 must not turn
+// an unrelated flag's absence into a new startup failure for anyone who
+// never touched either one.
+func TestQueueWidthErrorDefaultIsFine(t *testing.T) {
+	if err := queueWidthError(web.DefaultMaxActiveTorrents, 0); err != nil {
+		t.Errorf("queueWidthError(%d, 0) = %v, want nil", web.DefaultMaxActiveTorrents, err)
+	}
+}
+
+// TestQueueWidthErrorNarrowNeedsNoRoof: a width of 1 is not a widened queue,
+// so it must not demand -max-client-bytes either - only widening past 1
+// does.
+func TestQueueWidthErrorNarrowNeedsNoRoof(t *testing.T) {
+	if err := queueWidthError(1, 0); err != nil {
+		t.Errorf("queueWidthError(1, 0) = %v, want nil", err)
+	}
+}
+
+// TestQueueWidthErrorWideningWithoutARoofIsRefused is the ticket's central
+// requirement: TOR-131's roof exists precisely because N runs going at once
+// otherwise multiply one run's own traffic ceiling by N, and a widened
+// queue with the roof still at its unlimited default (core.DefaultRoof)
+// recreates exactly that. This must be refused, not merely logged.
+func TestQueueWidthErrorWideningWithoutARoofIsRefused(t *testing.T) {
+	if err := queueWidthError(2, 0); err == nil {
+		t.Fatal("queueWidthError(2, 0) = nil, want an error - a widened queue with no roof configured")
+	}
+}
+
+// TestQueueWidthErrorWideningWithARoofIsFine: once a roof is configured, the
+// queue may be widened - the roof is what makes it safe.
+func TestQueueWidthErrorWideningWithARoofIsFine(t *testing.T) {
+	if err := queueWidthError(3, 5<<30); err != nil {
+		t.Errorf("queueWidthError(3, 5<<30) = %v, want nil - a roof is configured", err)
+	}
+}
+
+// TestQueueWidthErrorRejectsNonPositive: a width under 1 is not a narrower
+// queue, it is a broken one (see web.Server.SetMaxActiveTorrents), and must
+// be refused regardless of the roof.
+func TestQueueWidthErrorRejectsNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		if err := queueWidthError(n, 5<<30); err == nil {
+			t.Errorf("queueWidthError(%d, 5<<30) = nil, want an error", n)
+		}
+	}
+}
