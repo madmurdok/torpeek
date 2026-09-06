@@ -674,3 +674,81 @@ func TestASecondPrivateTorrentNeedsASecondPort(t *testing.T) {
 		t.Error("the second private torrent joined the shared client")
 	}
 }
+
+// TestPoolClientsAliveAtOnceKeepTheirPieceCompletion is TOR-155 in the
+// topology that actually ships: the shared public client carrying a public
+// torrent while a private torrent is attached beside it on a client of its
+// own, both over one data dir, both fetching.
+//
+// That is the shape that made the bug reachable at all. The piece completion
+// database anacrolix opened for a client is one file per data DIRECTORY, so
+// before TOR-128 - one client at a time - a second opener essentially never
+// existed. A pool that keeps a long-lived shared client and starts another
+// beside it for every torrent that cannot join it made "several clients over
+// one data dir" the normal state of affairs, and every client after the first
+// waited out a one-second flock timeout and then silently fell back to
+// in-memory bookkeeping.
+//
+// Two clients, not one, is load-bearing here: with only the public torrent
+// attached there is a single client, nothing contends for anything, and the
+// test would pass with the bug fully present. The private fixture is what
+// forces the second client - a private torrent may never join the shared
+// public one (see Pool) - so Pooled() is checked on both, to fail loudly if a
+// change to the routing ever quietly collapses this back to one client and
+// takes the test's meaning with it.
+func TestPoolClientsAliveAtOnceKeepTheirPieceCompletion(t *testing.T) {
+	logs := captureSlog(t)
+
+	public := torrenttest.Build(t, "public.mkv", poolPayloadSize, poolPieceLength)
+	private := torrenttest.BuildPrivate(t, "private.mkv", poolPayloadSize, poolPieceLength)
+
+	cfg := poolConfig(t)
+	pool := NewPool(cfg)
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	shared, err := pool.Attach(ctx, poolSource(t, public.TorrentPath), public.StartSeeder(t))
+	if err != nil {
+		t.Fatalf("attach the public torrent: %v", err)
+	}
+	defer shared.Detach()
+
+	alone, err := pool.Attach(ctx, poolSource(t, private.TorrentPath), private.StartSeeder(t))
+	if err != nil {
+		t.Fatalf("attach the private torrent: %v", err)
+	}
+	defer alone.Detach()
+
+	if !shared.Pooled() || alone.Pooled() {
+		t.Fatalf("pooled: public=%v private=%v; this test needs two live clients over one data dir "+
+			"and has only one, so it proves nothing about piece completion",
+			shared.Pooled(), alone.Pooled())
+	}
+
+	const readLength = 64 << 10
+	for _, c := range []struct {
+		name string
+		att  *Attachment
+		want []byte
+	}{
+		{"public, on the shared client", shared, public.Payload[:readLength]},
+		{"private, on its own client", alone, private.Payload[:readLength]},
+	} {
+		got, err := c.att.Torrent().ReadRange(ctx, 0, 0, readLength, MinTraffic)
+		if err != nil {
+			t.Fatalf("read the %s torrent: %v", c.name, err)
+		}
+		if !bytes.Equal(got, c.want) {
+			t.Errorf("the %s torrent read back %d wrong bytes", c.name, len(got))
+		}
+	}
+
+	if got := completionWarningsFor(logs, cfg.DataDir); len(got) != 0 {
+		t.Errorf("two live pool clients over one data dir produced %d piece completion warning(s): %q",
+			len(got), got)
+	}
+	requireOneDirectoryPerTorrent(t, cfg.DataDir,
+		shared.Torrent().InfoHash(), alone.Torrent().InfoHash())
+}

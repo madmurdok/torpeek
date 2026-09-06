@@ -625,9 +625,9 @@ func (a *Attachment) WentOnlineBlind() bool {
 //
 // For a pooled torrent that is a Drop, not a Close: the client stays up
 // holding whatever else is attached to it, and every sibling torrent's pieces
-// stay exactly where they are (storage.NewFileByInfoHash namespaces each
-// torrent under <DataDir>/<infohash>/, which is what makes removing one
-// subtree a local act). For a torrent on a client of its own it is the same
+// stay exactly where they are (pieceStorage namespaces each torrent under
+// <DataDir>/<infohash>/, which is what makes removing one subtree a local
+// act). For a torrent on a client of its own it is the same
 // Close-then-discard a run has always done.
 //
 // Either way the pieces go. Raw pieces are staging data and never a result

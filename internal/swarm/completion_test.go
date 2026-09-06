@@ -8,25 +8,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anacrolix/torrent/metainfo"
-	"github.com/anacrolix/torrent/storage"
-
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
 // The message anacrolix's storage/piece-completion.go emits when the
 // persistent piece completion could not be opened and it silently fell back
-// to an in-memory one (TOR-59). It goes through the process-wide slog default,
-// not the per-client logger, which is why a test has to catch it there - and
-// why torpeek's per-client log filter never hid it from a terminal.
+// to an in-memory one. It goes through the process-wide slog default, not the
+// per-client logger, which is why a test has to catch it there - and why
+// torpeek's per-client anacrolix/log filter never hid it from a terminal.
 //
-// The two tests below reproduce the warning one-for-one when Session.Close
-// stops closing its storage (a leaked storage holds the bbolt flock for the
-// life of the process, and the next opener times out after a second), and
-// never with it - 126 runs, 120 of them at load averages between 84 and 265,
-// produced none. The log check says the library did not complain; the
-// read-back after Close says what the client actually used, which is the half
-// a log line cannot show.
+// Since TOR-155 torpeek does not ask for the persistent completion at all -
+// pieceStorage hands every client an in-memory one deliberately, and says
+// there what that was measured to cost and to save. So this message must
+// never again appear for a torpeek data dir, and if it does, something has
+// put a client back on a database that is one file per data DIRECTORY, which
+// is the whole bug.
+//
+// The two tests here cover the two SEQUENTIAL client shapes TOR-59 was about:
+// one client following another over one data dir. Two clients alive AT ONCE -
+// the ordinary case since TOR-128, and what TOR-155 was actually about - is
+// covered by TestTwoSessionsAliveAtOnceOverOneDataDir and
+// TestPoolClientsAliveAtOnceKeepTheirPieceCompletion.
+//
+// Each test checks three separable things. The scoped log check says the
+// library did not complain about our directory (completionWarningsFor
+// explains why the scoping is load-bearing rather than tidiness). The
+// client-side read-back says the completion the client actually got was
+// working, which is the half a log line cannot show. And
+// requireOneDirectoryPerTorrent says no persistent database was created at
+// all - the half that can also fail in a cgo build, where sqlite shares its
+// file and never warns.
 const pieceCompletionWarning = "couldn't open piece completion db"
 
 // slogCapture stands in for the process-wide slog default and keeps every
@@ -80,54 +91,27 @@ func captureSlog(t *testing.T) *slogCapture {
 	return c
 }
 
-// requireExclusiveCompletionDB skips a test whose whole premise is that the
-// build's default piece completion database refuses a second opener while
-// one is held. That is bbolt, which anacrolix uses only when cgo is off
-// (storage/default-dir-piece-completion-boltdb.go); with cgo on it uses
-// sqlite, which happily shares the file, and the failure these tests exist
-// to catch cannot happen at all - a pass there would say nothing. The
-// shipped binary is built with CGO_ENABLED=0 (see the Makefile), so that is
-// the build the tests mean.
-func requireExclusiveCompletionDB(t *testing.T) {
+// pieceCompleteInClient asks the LIVE client whether it holds a piece, which
+// reads the completion its storage actually handed it rather than any file on
+// disk.
+//
+// This is what replaced reading the answer back out of the persistent
+// database after Close (TOR-155): there is no database to read now, and there
+// was never much point in it - what a client needs is completion that works
+// while it is running, and that is exactly what this asks. It is also a
+// sharper question than the old one, because it fails for any broken
+// completion rather than only for a missing persistent one.
+func pieceCompleteInClient(t *testing.T, tor *Torrent, piece int) bool {
 	t.Helper()
-	dir := t.TempDir()
-	first, err := storage.NewDefaultPieceCompletionForDir(dir)
-	if err != nil {
-		t.Fatalf("open the default piece completion in an empty dir: %v", err)
-	}
-	defer first.Close()
-	second, err := storage.NewDefaultPieceCompletionForDir(dir)
-	if err == nil {
-		second.Close()
-		t.Skip("this build's default piece completion shares its file between openers; " +
-			"the exclusive-lock failure under test needs the CGO_ENABLED=0 build (make check)")
-	}
+
+	return tor.t.Piece(piece).State().Complete
 }
 
-// completionOnDisk opens the data dir's persistent piece completion after the
-// sessions using it have closed, and reads back one piece. If a session was
-// still holding it the open fails; if a session had fallen back to in-memory
-// bookkeeping the piece reads back as unknown.
-func completionOnDisk(t *testing.T, dataDir, infoHash string, piece int) storage.Completion {
-	t.Helper()
-	pc, err := storage.NewDefaultPieceCompletionForDir(dataDir)
-	if err != nil {
-		t.Fatalf("open the piece completion db after every session closed: %v - something still holds it", err)
-	}
-	defer pc.Close()
-	c, err := pc.Get(metainfo.PieceKey{InfoHash: metainfo.NewHashFromHex(infoHash), Index: piece})
-	if err != nil {
-		t.Fatalf("read piece %d back from the completion db: %v", piece, err)
-	}
-	return c
-}
-
-// TestPublicMagnetRestartKeepsPersistentPieceCompletion is TOR-59's shape: a
+// TestPublicMagnetRestartKeepsWorkingPieceCompletion is TOR-59's shape: a
 // public magnet makes Open close its DHT-less client and start a second one
-// over the same data dir. The second one's storage has to get the persistent
-// piece completion, not a warning and an in-memory fallback.
-func TestPublicMagnetRestartKeepsPersistentPieceCompletion(t *testing.T) {
-	requireExclusiveCompletionDB(t)
+// over the same data dir. The second one has to get working piece completion,
+// not a warning and a silent fallback.
+func TestPublicMagnetRestartKeepsWorkingPieceCompletion(t *testing.T) {
 	withOfflineDHT(t)
 	logs := captureSlog(t)
 
@@ -165,24 +149,24 @@ func TestPublicMagnetRestartKeepsPersistentPieceCompletion(t *testing.T) {
 	}
 	infoHash := tor.InfoHash()
 
-	if got := logs.matching(pieceCompletionWarning); len(got) != 0 {
+	if piece := readOffset / testPieceLength; !pieceCompleteInClient(t, tor, piece) {
+		t.Errorf("the restarted client does not hold piece %d, which it has just read; "+
+			"its piece completion is not working", piece)
+	}
+	if got := completionWarningsFor(logs, cfg.DataDir); len(got) != 0 {
 		t.Errorf("the restart produced %d piece completion warning(s): %q", len(got), got)
 	}
+	requireOneDirectoryPerTorrent(t, cfg.DataDir, infoHash)
 
 	if err := session.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	piece := readOffset / testPieceLength
-	if c := completionOnDisk(t, cfg.DataDir, infoHash, piece); !c.Ok || !c.Complete {
-		t.Errorf("piece %d reads back as %+v after the run; the restarted client was not using the persistent completion", piece, c)
-	}
 }
 
-// TestSessionsOverOneDataDirKeepPersistentPieceCompletion is the other shape
-// the warning was seen in: two runs, one after the other, over one data
-// dir in one process - what cancel-and-resume does.
-func TestSessionsOverOneDataDirKeepPersistentPieceCompletion(t *testing.T) {
-	requireExclusiveCompletionDB(t)
+// TestSessionsOverOneDataDirKeepWorkingPieceCompletion is the other shape the
+// warning was seen in: two runs, one after the other, over one data dir in
+// one process - what cancel-and-resume does.
+func TestSessionsOverOneDataDirKeepWorkingPieceCompletion(t *testing.T) {
 	logs := captureSlog(t)
 
 	fixture := torrenttest.Build(t, "movie.mkv", testPayloadSize, testPieceLength)
@@ -217,18 +201,20 @@ func TestSessionsOverOneDataDirKeepPersistentPieceCompletion(t *testing.T) {
 			t.Fatalf("run %d: read: %v", run, err)
 		}
 		infoHash = tor.InfoHash()
+		// While this run's client is still up, because that is the only
+		// moment its own completion exists to be asked about.
+		if piece := int(readOffset / testPieceLength); !pieceCompleteInClient(t, tor, piece) {
+			session.Close()
+			t.Fatalf("run %d: the client does not hold piece %d, which it has just read; "+
+				"its piece completion is not working", run, piece)
+		}
 		if err := session.Close(); err != nil {
 			t.Fatalf("run %d: close: %v", run, err)
 		}
 	}
 
-	if got := logs.matching(pieceCompletionWarning); len(got) != 0 {
+	if got := completionWarningsFor(logs, cfg.DataDir); len(got) != 0 {
 		t.Errorf("%d sequential runs produced %d piece completion warning(s): %q", runs, len(got), got)
 	}
-	for run := 0; run < runs; run++ {
-		piece := run * (4 << 20) / testPieceLength
-		if c := completionOnDisk(t, cfg.DataDir, infoHash, piece); !c.Ok || !c.Complete {
-			t.Errorf("run %d's piece %d reads back as %+v; that run was not using the persistent completion", run, piece, c)
-		}
-	}
+	requireOneDirectoryPerTorrent(t, cfg.DataDir, infoHash)
 }
