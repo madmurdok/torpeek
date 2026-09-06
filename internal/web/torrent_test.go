@@ -2,6 +2,7 @@ package web
 
 import (
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -370,5 +371,218 @@ func TestAReopenedRunWithNoSavedTorrentOffersNoLink(t *testing.T) {
 	if _, ok := cache.LoadManifest(output.Layout{Root: root, InfoHash: infoHash, Params: params}.
 		FileDir(0, "movie.mkv")); !ok {
 		t.Error("the reopened run's manifest is no longer readable")
+	}
+}
+
+// writeSavedTorrentWithName is writeSavedTorrent plus a run.json beside the
+// .torrent recording name as cache.Run.Name - the record
+// torrentContentDisposition (handlers.go) reads to decide what a downloaded
+// .torrent is called (TOR-170).
+func writeSavedTorrentWithName(t *testing.T, root, infoHash, params, name string) string {
+	t.Helper()
+
+	torrentPath := writeSavedTorrent(t, root, infoHash, params)
+	layout := output.Layout{Root: root, InfoHash: infoHash, Params: params}
+	if err := cache.SaveRun(layout.RunDir(), cache.Run{
+		Version: cache.Version, InfoHash: infoHash, Name: name,
+	}); err != nil {
+		t.Fatalf("save run.json: %v", err)
+	}
+	return torrentPath
+}
+
+// downloadSavedTorrent drives one run to completion over a .torrent already
+// on disk and returns the GET response for it - the same path
+// TestAFinishedRunOffersItsTorrentAsADownload exercises above, factored out
+// so each case below is one call rather than a copy of the same handful of
+// lines.
+func downloadSavedTorrent(t *testing.T, root, source, torrentPath string) *http.Response {
+	t.Helper()
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	conn := dial(t, ts.URL)
+	next(t, conn) // the connection marker
+
+	run := startRun(t, ts.URL, source)
+	fake.send(t, source, core.Done{Reason: core.StopCompleted, Files: 1, Frames: 3, TorrentPath: torrentPath})
+	fake.finish(t, source)
+
+	url, _ := awaitDone(t, conn, run.id)["torrent_url"].(string)
+	if url == "" {
+		t.Fatal("the done event announced no torrent_url")
+	}
+	return get(t, ts.URL, "/"+url)
+}
+
+// TestContentDispositionSurvivesAHostileTorrentName is TOR-170's central
+// claim: a torrent's name is arbitrary text handed over by a stranger, and
+// none of what it can hold - a quote, a semicolon, a path separator, a
+// control character, a non-ASCII character - may reach outside the quoted
+// header value, turn into a path, or inject a second header. A test using
+// only a tidy name would prove nothing; these five are the whole risk.
+//
+// Each case is checked by parsing the actual response header back with the
+// standard library's own RFC 2231/5987-aware parser (mime.ParseMediaType)
+// rather than by searching the raw string for what should be absent - a
+// header a real client cannot even parse would make that search
+// meaningless, and this is exactly the kind of bug a naive
+// `filename="`+name+`"` patch produces.
+func TestContentDispositionSurvivesAHostileTorrentName(t *testing.T) {
+	const infoHash = "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+
+	cases := []struct {
+		label    string
+		name     string // the raw, hostile cache.Run.Name
+		wantFile string // what mime.ParseMediaType should hand back for "filename", including .torrent
+	}{
+		{
+			label:    "quote",
+			name:     `Val's "Director's Cut"`,
+			wantFile: `Val's 'Director's Cut'.torrent`,
+		},
+		{
+			label:    "semicolon",
+			name:     "Movie; rm -rf everything",
+			wantFile: "Movie; rm -rf everything.torrent",
+		},
+		{
+			label:    "path separator",
+			name:     `Movies/2024\Vol.1`,
+			wantFile: "Movies-2024-Vol.1.torrent",
+		},
+		{
+			label: "control character",
+			// A literal CRLF is the classic header-injection payload: a
+			// naive interpolation would end the Content-Disposition line
+			// early and start a Set-Cookie line of its own.
+			name:     "Movie\r\nSet-Cookie: evil=1",
+			wantFile: "MovieSet-Cookie- evil=1.torrent",
+		},
+		{
+			label:    "non-ASCII",
+			name:     "Фильм Ночь 北京",
+			wantFile: "Фильм Ночь 北京.torrent",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			root := t.TempDir()
+			torrentPath := writeSavedTorrentWithName(t, root, infoHash, "0123456789abcdef", tc.name)
+
+			resp := downloadSavedTorrent(t, root, "magnet:?xt=urn:btih:"+strings.ReplaceAll(tc.label, " ", ""), torrentPath)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET: status %d, want 200", resp.StatusCode)
+			}
+
+			// Exactly one Content-Disposition line: a raw CR or LF that
+			// reached the header value would either corrupt this one, or -
+			// the whole point of the control-character case above -
+			// inject a second header entirely.
+			values := resp.Header["Content-Disposition"]
+			if len(values) != 1 {
+				t.Fatalf("Content-Disposition: %d header lines, want exactly 1: %v", len(values), values)
+			}
+			disposition := values[0]
+			if strings.ContainsAny(disposition, "\r\n") {
+				t.Fatalf("Content-Disposition carries a raw CR or LF: %q", disposition)
+			}
+			if got := resp.Header.Get("Set-Cookie"); got != "" {
+				t.Fatalf("a Set-Cookie header exists (%q) - the hostile name injected it", got)
+			}
+
+			mediatype, params, err := mime.ParseMediaType(disposition)
+			if err != nil {
+				t.Fatalf("a real client cannot even parse this header: %v (%q)", err, disposition)
+			}
+			if mediatype != "attachment" {
+				t.Errorf("media type is %q, want attachment", mediatype)
+			}
+			if got := params["filename"]; got != tc.wantFile {
+				t.Errorf("filename decodes to %q, want %q (raw header: %q)", got, tc.wantFile, disposition)
+			}
+		})
+	}
+}
+
+// TestContentDispositionFallsBackWhenNameSanitisesToNothing covers the first
+// of TOR-170's two "what happens when" decisions: a name that sanitises down
+// to nothing - here, a name that is nothing but control characters - is
+// treated exactly like a missing or empty record. There is no better name
+// than the infohash already on disk, so the header falls back to it whole,
+// with no filename* at all.
+func TestContentDispositionFallsBackWhenNameSanitisesToNothing(t *testing.T) {
+	const infoHash = "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+	root := t.TempDir()
+	torrentPath := writeSavedTorrentWithName(t, root, infoHash, "0123456789abcdef",
+		"\x00\x01\x02\x1b\r\n")
+
+	resp := downloadSavedTorrent(t, root, "magnet:?xt=urn:btih:nothing", torrentPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: status %d, want 200", resp.StatusCode)
+	}
+
+	disposition := resp.Header.Get("Content-Disposition")
+	want := `attachment; filename="` + infoHash + `.torrent"`
+	if disposition != want {
+		t.Errorf("Content-Disposition = %q, want %q - a name that sanitises to nothing "+
+			"must fall back to the infohash exactly as a missing record does", disposition, want)
+	}
+}
+
+// TestContentDispositionTruncatesALongTorrentName covers the second "what
+// happens when" decision: a name long enough to trip a filesystem's own
+// filename limit is shortened to maxTorrentNameBytes rather than served
+// whole (which some filesystems would simply refuse to save) or rejected
+// outright (which would cost the download over a name that is merely long).
+func TestContentDispositionTruncatesALongTorrentName(t *testing.T) {
+	const infoHash = "f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+	root := t.TempDir()
+	torrentPath := writeSavedTorrentWithName(t, root, infoHash, "0123456789abcdef", strings.Repeat("A", 500))
+
+	resp := downloadSavedTorrent(t, root, "magnet:?xt=urn:btih:long", torrentPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: status %d, want 200", resp.StatusCode)
+	}
+
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse Content-Disposition: %v", err)
+	}
+	got := strings.TrimSuffix(params["filename"], ".torrent")
+	if len(got) != maxTorrentNameBytes {
+		t.Errorf("saved name is %d bytes long, want exactly maxTorrentNameBytes (%d)",
+			len(got), maxTorrentNameBytes)
+	}
+}
+
+// TestContentDispositionKeepsTheTorrentExtensionEvenWhenTheNameHasOne covers
+// the third "what happens when" decision: .torrent is always appended, never
+// substituted for whatever the torrent's own name already ends in. A torrent
+// called "Movie.mkv" saves as "Movie.mkv.torrent" - not "Movie.torrent"
+// (which would silently drop what the uploader actually called it, on the
+// guess that ".mkv" was an extension to strip) and not "Movie.mkv" with no
+// .torrent extension at all (which stops a torrent client recognising the
+// file by extension the way it does for one it downloaded itself).
+func TestContentDispositionKeepsTheTorrentExtensionEvenWhenTheNameHasOne(t *testing.T) {
+	const infoHash = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3"
+	root := t.TempDir()
+	torrentPath := writeSavedTorrentWithName(t, root, infoHash, "0123456789abcdef", "Movie.mkv")
+
+	resp := downloadSavedTorrent(t, root, "magnet:?xt=urn:btih:extension", torrentPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: status %d, want 200", resp.StatusCode)
+	}
+
+	_, params, err := mime.ParseMediaType(resp.Header.Get("Content-Disposition"))
+	if err != nil {
+		t.Fatalf("parse Content-Disposition: %v", err)
+	}
+	if want := "Movie.mkv.torrent"; params["filename"] != want {
+		t.Errorf("filename = %q, want %q", params["filename"], want)
 	}
 }
