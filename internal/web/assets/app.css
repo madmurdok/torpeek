@@ -131,11 +131,7 @@
      TestEveryColourComesFromAToken holds the first half of that. */
   color-scheme: dark;
 
-  /* Set by app.js when the divider is dragged - a layout token, not a
-     visual one, and the only custom property that existed before TOR-113. */
-  --panel-width: 17rem;
-
-  /* TOR-157: the same family as --panel-width above, one token per
+  /* TOR-157: one token per
      resizable run-table column rather than one shared box, because each
      column's border moves independently of the others. Read by the
      matching <th>'s own inline style (app.js sets `width: var(--col-w-KEY)`
@@ -301,12 +297,14 @@ h3 {
 .status[data-state="live"] { color: var(--accent); opacity: 1; }
 .status[data-state="lost"] { color: var(--warn); opacity: 1; }
 
-/* The whole page: a full-height left panel (just the torpeek title for now,
-   TOR-137 - kept rather than removed, on the chance a later ticket wants the
-   space) and a draggable divider next to a right column that starts with the
-   one-line intake, pinned above the torrent table, with the selected
-   torrent's detail below both.
-   Narrow viewports stack the two instead of squeezing the panel to nothing. */
+/* The whole page: one column that starts with the pinned intake - which
+   since TOR-168 also carries the page's title and its live connection
+   indicator, the left panel's two occupants before that ticket removed the
+   panel and its divider (see TOR-168's own ticket description for their
+   former shape, kept accurate there in case either is wanted back) - above
+   the torrent table, with the selected torrent's detail below.
+   Narrow viewports drop the forced full-height minimum, which mattered when
+   a second column had to be kept the same height as this one. */
 .workspace {
   display: flex;
   align-items: stretch;
@@ -316,46 +314,7 @@ h3 {
 }
 
 @media (max-width: 52rem) {
-  .workspace { flex-direction: column; min-height: 0; }
-}
-
-.panel-header { display: flex; align-items: baseline; gap: .75rem; flex-wrap: wrap; }
-
-/* Empty on purpose since TOR-137 - the torrent table moved to the right pane
-   below. Still draggable (the resizer's own PANEL_MIN_WIDTH in app.js keeps
-   it from shrinking to nothing and being lost) so the space stays reachable
-   for whatever a later ticket puts here. */
-.runs-panel {
-  flex: 0 0 var(--panel-width, 17rem);
-  min-width: 0;
-  box-sizing: border-box;
-  padding: 1.25rem 1rem;
-  /* The panel sits one rung up from the page, which is what the ladder is
-     for - depth without a border doing the work (TOR-113). The rule stays
-     because the divider is draggable and needs an edge to grab. */
-  background: var(--s1);
-  border-right: 1px solid var(--rule);
-  display: flex;
-  flex-direction: column;
-}
-
-@media (max-width: 52rem) {
-  .runs-panel { flex: 0 0 auto; border-right: none; border-bottom: 1px solid var(--rule); }
-}
-
-/* The draggable divider. Only present above the stacking breakpoint - there
-   is no second column to widen once the panel sits above the detail pane. */
-.resizer {
-  flex: 0 0 6px;
-  cursor: col-resize;
-  background: transparent;
-  touch-action: none;
-}
-.resizer:hover, .resizer:focus-visible, .resizer.dragging { background: var(--accent-dim); }
-.resizer:focus-visible { outline: none; }
-
-@media (max-width: 52rem) {
-  .resizer { display: none; }
+  .workspace { min-height: 0; }
 }
 
 .main {
@@ -392,6 +351,20 @@ h3 {
   padding: 1.25rem 0 .8rem;
   margin-top: -1.25rem;
   background: var(--bg);
+}
+
+/* The title and the live connection indicator, TOR-168's addition to this
+   section - the left panel's only two occupants before that ticket removed
+   the panel. .panel-header supplied their side-by-side layout there; it is
+   gone with the panel, so this is that arrangement's new home. Baseline
+   alignment is what keeps a short mono status word sitting on the same line
+   as the much larger h1 rather than at its top. */
+.intake-head {
+  display: flex;
+  align-items: baseline;
+  gap: .75rem;
+  flex-wrap: wrap;
+  margin: 0 0 .75rem;
 }
 
 /* TOR-137: the torrent table's new home, between the pinned intake above and
@@ -555,18 +528,29 @@ button:disabled { opacity: .5; }
   /* Sticky within the wrap, which since TOR-137's cap was removed has no
      height to scroll inside - so today the header travels with the page and
      tucks under the pinned intake rather than coming to rest below it.
-     Measured rather than guessed: the intake is 130px tall, not the 5rem a
-     first attempt at an offset assumed, and an offset in rem would be wrong
-     again the moment the hint line wraps.
-     
+     Measured rather than guessed, twice now: the intake was 130px tall when
+     TOR-139 first measured it; TOR-168 moved the page's title and its live
+     status indicator into the intake, ahead of the input row, and the
+     re-measured height at a 1440px window is 173px. Neither number changes
+     top: 0 here, which never depended on the exact height - it just accepts
+     that the header comes to rest hidden behind the intake rather than
+     computing an offset in rem, which would be wrong again the moment the
+     hint line wraps (or, now, the moment the title/status row wraps).
+
      Left as it is on purpose, and TOR-139's own decision, now that it has
      six more columns to make room for, is to leave it exactly here rather
      than change how the header comes to rest: .run-table-wrap's own
      overflow-x: auto is already the answer to a table wider than the pane
      (see that rule's own comment), and the six new cells are the narrowest
      things in the row (.run-cell-metric) rather than additional prose, so
-     the table only actually needs that escape hatch at widths the panel was
-     already tight at before this ticket. */
+     the table only actually needs that escape hatch at widths this pane was
+     already tight at before that ticket. TOR-168 later widened the pane by
+     removing the left panel: measured at a 1440px window, the nine columns
+     (1079px) now fit inside the pane (1168px) with no overflow at all - see
+     TOR-168's own ticket for the before/after numbers, and TOR-164 (not
+     TOR-166, which TOR-168's own text names by mistake - TOR-166 is the
+     unrelated top-up pricing ticket) for whatever of the overflow this
+     leaves at a narrower window. */
   top: 0;
   z-index: 2;
   background: var(--s1);
@@ -602,11 +586,10 @@ button:disabled { opacity: .5; }
    appends one .col-resizer span per <th data-sort>, after buildLiveColumnHeaders
    has built all nine). position: sticky on .run-table thead th above already
    gives each header its own containing block, so this needs nothing extra to
-   anchor to its header rather than the table. Same shape as .resizer above -
-   transparent at rest, --accent-dim on hover/focus/drag - deliberately the
-   narrower of the two families of border this page now drags, since a
-   column border sits inside a clickable sort control and must not read as
-   large a target as the panel's own divider. */
+   anchor to its header rather than the table. Transparent at rest,
+   --accent-dim on hover/focus/drag - deliberately narrow, since a column
+   border sits inside a clickable sort control and must not read as large a
+   target as that. */
 .col-resizer {
   position: absolute;
   top: 0;

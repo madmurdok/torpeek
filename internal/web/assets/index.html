@@ -11,21 +11,17 @@
 </head>
 <body>
 <div class="workspace">
-  <aside id="runs-panel" class="runs-panel">
-    <header class="panel-header">
-      <h1>torpeek</h1>
-      <span id="status" class="status">connecting</span>
-    </header>
-    <!-- Deliberately empty for now (TOR-137): the torrent list moved to the
-         right pane below. Kept, not removed, on the chance a later ticket
-         wants this space again. -->
-  </aside>
-
-  <div id="resizer" class="resizer" role="separator" aria-orientation="vertical"
-       aria-label="Resize the left panel" tabindex="0"></div>
-
   <div class="main">
     <section id="intake" class="intake">
+      <!-- The page's title and its live connection indicator, moved in here
+           from the left panel TOR-168 removed (see that ticket's own
+           description for the panel's full former shape). Ahead of the input
+           row per the project owner's call: this section is sticky, so the
+           two travel with it and stay reachable without scrolling back up. -->
+      <div class="intake-head">
+        <h1>torpeek</h1>
+        <span id="status" class="status">connecting</span>
+      </div>
       <form id="start" autocomplete="off">
         <div id="dropzone" class="dropzone">
           <input id="source" name="source" type="text" spellcheck="false"
