@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/madmurdok/torpeek/internal/core"
@@ -123,52 +124,82 @@ func TestRunConfigKeepsTheDashNFlagWhenTheWebSendsNoCount(t *testing.T) {
 	}
 }
 
-// TestQueueWidthErrorDefaultIsFine is the every-existing-deployment case:
-// -max-active-torrents left at its default (1) with no roof configured at
-// all must keep starting exactly as it always has - TOR-130 must not turn
-// an unrelated flag's absence into a new startup failure for anyone who
-// never touched either one.
-func TestQueueWidthErrorDefaultIsFine(t *testing.T) {
-	if err := queueWidthError(web.DefaultMaxActiveTorrents, 0); err != nil {
-		t.Errorf("queueWidthError(%d, 0) = %v, want nil", web.DefaultMaxActiveTorrents, err)
+// TestQueueWidthErrorAcceptsTheShippedDefault: the default is now a WIDENED
+// queue (web.DefaultMaxActiveTorrents is 5) and no roof is configured out of
+// the box, so the case that used to be refused is now the ordinary one. If
+// this ever fails, torpeek will not start with its own defaults.
+func TestQueueWidthErrorAcceptsTheShippedDefault(t *testing.T) {
+	if err := queueWidthError(web.DefaultMaxActiveTorrents); err != nil {
+		t.Errorf("queueWidthError(%d) = %v, want nil - that is the shipped default",
+			web.DefaultMaxActiveTorrents, err)
 	}
 }
 
-// TestQueueWidthErrorNarrowNeedsNoRoof: a width of 1 is not a widened queue,
-// so it must not demand -max-client-bytes either - only widening past 1
-// does.
-func TestQueueWidthErrorNarrowNeedsNoRoof(t *testing.T) {
-	if err := queueWidthError(1, 0); err != nil {
-		t.Errorf("queueWidthError(1, 0) = %v, want nil", err)
-	}
-}
-
-// TestQueueWidthErrorWideningWithoutARoofIsRefused is the ticket's central
-// requirement: TOR-131's roof exists precisely because N runs going at once
-// otherwise multiply one run's own traffic ceiling by N, and a widened
-// queue with the roof still at its unlimited default (core.DefaultRoof)
-// recreates exactly that. This must be refused, not merely logged.
-func TestQueueWidthErrorWideningWithoutARoofIsRefused(t *testing.T) {
-	if err := queueWidthError(2, 0); err == nil {
-		t.Fatal("queueWidthError(2, 0) = nil, want an error - a widened queue with no roof configured")
-	}
-}
-
-// TestQueueWidthErrorWideningWithARoofIsFine: once a roof is configured, the
-// queue may be widened - the roof is what makes it safe.
-func TestQueueWidthErrorWideningWithARoofIsFine(t *testing.T) {
-	if err := queueWidthError(3, 5<<30); err != nil {
-		t.Errorf("queueWidthError(3, 5<<30) = %v, want nil - a roof is configured", err)
+// TestQueueWidthErrorWideningNeedsNoRoof is the decision TOR-149 carried out,
+// kept as a test rather than only as a comment: widening past one slot used
+// to be a usage error unless -max-client-bytes was set, and it deliberately
+// is not any more. The multiplication it guarded against is now stated at
+// startup instead, which TestQueueWidthNoticeStatesTheWorstCase covers.
+func TestQueueWidthErrorWideningNeedsNoRoof(t *testing.T) {
+	for _, n := range []int{2, 3, 5, 20} {
+		if err := queueWidthError(n); err != nil {
+			t.Errorf("queueWidthError(%d) = %v, want nil with no roof configured", n, err)
+		}
 	}
 }
 
 // TestQueueWidthErrorRejectsNonPositive: a width under 1 is not a narrower
-// queue, it is a broken one (see web.Server.SetMaxActiveTorrents), and must
-// be refused regardless of the roof.
+// queue, it is a broken one (see web.Server.SetMaxActiveTorrents), and is
+// the one thing still refused here.
 func TestQueueWidthErrorRejectsNonPositive(t *testing.T) {
 	for _, n := range []int{0, -1} {
-		if err := queueWidthError(n, 5<<30); err == nil {
-			t.Errorf("queueWidthError(%d, 5<<30) = nil, want an error", n)
+		if err := queueWidthError(n); err == nil {
+			t.Errorf("queueWidthError(%d) = nil, want an error", n)
+		}
+	}
+}
+
+// TestWorstCaseBytesMultipliesThePerRunCeiling is the arithmetic the startup
+// line prints, checked here rather than through a running server. The
+// zero-budget case is the one that matters: zero means "decide once the file
+// count is known", and the honest ceiling for such a run is the cap
+// core.DefaultBudget applies - not zero, which would print a worst case of
+// nothing at all.
+func TestWorstCaseBytesMultipliesThePerRunCeiling(t *testing.T) {
+	if got, want := worstCaseBytes(5, 0), int64(5)*core.MaxRunBytes; got != want {
+		t.Errorf("worstCaseBytes(5, 0) = %d, want %d - five times the default per-run cap", got, want)
+	}
+	if got, want := worstCaseBytes(3, 100<<20), int64(3)*(100<<20); got != want {
+		t.Errorf("worstCaseBytes(3, 100 MiB) = %d, want %d", got, want)
+	}
+	if got, want := worstCaseBytes(1, 0), int64(core.MaxRunBytes); got != want {
+		t.Errorf("worstCaseBytes(1, 0) = %d, want one run's own ceiling %d", got, want)
+	}
+}
+
+// TestQueueWidthNoticeStatesTheWorstCase is the other half of dropping the
+// refusal. The whole argument for removing it was that the multiplication
+// gets STATED instead of enforced, so if this line ever stops naming the
+// figure, the decision has quietly become plain silence.
+func TestQueueWidthNoticeStatesTheWorstCase(t *testing.T) {
+	notice := queueWidthNotice(5, 0)
+	if notice == "" {
+		t.Fatal("queueWidthNotice(5, 0) = \"\", want a line - five at once is the shipped default")
+	}
+	for _, want := range []string{"5", humanBytes(core.MaxRunBytes), humanBytes(5 * core.MaxRunBytes)} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the notice %q does not contain %q", notice, want)
+		}
+	}
+}
+
+// TestQueueWidthNoticeIsSilentAtOneSlot: a width of one multiplies nothing,
+// so there is nothing to disclose and the line must not appear - a warning
+// that shows up when it does not apply teaches people to ignore it.
+func TestQueueWidthNoticeIsSilentAtOneSlot(t *testing.T) {
+	for _, n := range []int{0, 1} {
+		if notice := queueWidthNotice(n, 0); notice != "" {
+			t.Errorf("queueWidthNotice(%d, 0) = %q, want empty", n, notice)
 		}
 	}
 }

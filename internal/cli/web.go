@@ -145,7 +145,7 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// than left as a log line nobody is watching on an unattended systemd
 	// unit (section 4.1) - the fix is one more flag, and typing it is
 	// cheaper than a traffic bill nobody meant to run up.
-	if err := queueWidthError(cfg.MaxActiveTorrents, base.Roof.MaxBytes); err != nil {
+	if err := queueWidthError(cfg.MaxActiveTorrents); err != nil {
 		fmt.Fprintf(stderr, "torpeek: %v\n", err)
 		return ExitUsage
 	}
@@ -170,11 +170,17 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	} else {
 		fmt.Fprintln(stdout, "torpeek: client-wide traffic roof: none; -max-client-bytes sets one")
 	}
-	// The queue's width, next to the roof it now depends on above 1 - the
-	// same reason that check above exists gives an operator reading this at
-	// startup the other half of the picture: not just what the ceiling is,
-	// but how many runs can be pushing against it together.
+	// The queue's width, and - when it is wider than one slot - the traffic
+	// arithmetic that follows from it. Widening used to be refused without a
+	// roof (queueWidthError); this line is what replaced the refusal, and it
+	// exists so that N times a run's ceiling is a number somebody read once
+	// rather than something they worked out afterwards from a bandwidth
+	// bill. Printed even when a roof IS set, because the roof bounds the
+	// total while this bounds what the runs would ask for.
 	fmt.Fprintf(stdout, "torpeek: queue width: %d torrent(s) at once\n", cfg.MaxActiveTorrents)
+	if notice := queueWidthNotice(cfg.MaxActiveTorrents, base.Budget.MaxBytes); notice != "" {
+		fmt.Fprintf(stdout, "torpeek: %s\n", notice)
+	}
 
 	// A source on the command line starts straight away; without one the page
 	// waits for someone to paste a link.
@@ -288,26 +294,62 @@ func resolveWatchDir(dir string) (string, error) {
 // Options by hand); roofMaxBytes is core.Config.Roof.MaxBytes, zero meaning
 // unlimited, the documented default (core.DefaultRoof).
 //
-// Two ways to fail, both refused as a usage error rather than started and
-// left to go wrong quietly:
-//   - a width under 1, which is not a narrower queue but a broken one (see
-//     web.Server.SetMaxActiveTorrents for why zero is not "pause the
-//     queue");
-//   - a width over 1 with no roof configured, which is exactly the traffic
-//     multiplication TOR-131's roof exists to prevent (core.DefaultRoof,
-//     web.Server's own doc) - N runs going at once, each free to spend up
-//     to its own per-run ceiling, adds up to N times that ceiling with
-//     nothing over the whole client to stop it.
-func queueWidthError(maxActive int, roofMaxBytes int64) error {
-	switch {
-	case maxActive < 1:
+// A width under 1 is the one way to fail: that is not a narrower queue but a
+// broken one (see web.Server.SetMaxActiveTorrents for why zero is not "pause
+// the queue").
+//
+// Widening past 1 used to be refused here unless a client-wide roof was set,
+// because N runs each free to spend their own per-run ceiling adds up to N
+// times that ceiling with nothing over the whole client to stop it
+// (core.Roof). That refusal is gone by decision: torpeek's own default is
+// now a widened queue for local use, where the link and the quota belong to
+// the person running it. The multiplication has not gone anywhere, so
+// serveWeb states it at startup instead - a number said once is the
+// alternative to a refusal, not to silence.
+func queueWidthError(maxActive int) error {
+	if maxActive < 1 {
 		return fmt.Errorf("-max-active-torrents must be at least 1, got %d", maxActive)
-	case maxActive > 1 && roofMaxBytes <= 0:
-		return fmt.Errorf("-max-active-torrents=%d widens the queue past one slot, which needs a client-wide traffic roof (-max-client-bytes) - without one, %d runs going at once would multiply one run's own traffic ceiling by %d; set a roof or drop back to -max-active-torrents=1",
-			maxActive, maxActive, maxActive)
-	default:
-		return nil
 	}
+	return nil
+}
+
+// worstCaseBytes is width times the per-run traffic ceiling: what every run
+// this server allows at once could receive between them, in the worst case.
+//
+// It is the figure the removed roof requirement used to protect against, so
+// it is the figure worth printing (core.Roof, queueWidthError). budgetBytes
+// is core.Config.Budget.MaxBytes, and zero there means "decide once the file
+// count is known", which the engine caps at core.MaxRunBytes - so that cap
+// is the honest worst case for a run whose ceiling nobody set.
+func worstCaseBytes(maxActive int, budgetBytes int64) int64 {
+	return int64(maxActive) * perRunCeiling(budgetBytes)
+}
+
+// queueWidthNotice is the startup line that replaced the refusal, extracted
+// from serveWeb for the same reason queueWidthError and runConfig were: it is
+// the sentence a person reads once about what a widened queue can spend, and
+// checking that it says the right number should not need a listening server,
+// a real ffmpeg or an open port.
+//
+// Empty at a width of one, which multiplies nothing and so has nothing to
+// disclose.
+func queueWidthNotice(maxActive int, budgetBytes int64) string {
+	if maxActive <= 1 {
+		return ""
+	}
+	return fmt.Sprintf("with %d at once, the per-run traffic ceiling of %s adds up to %s received in the worst case",
+		maxActive, humanBytes(perRunCeiling(budgetBytes)),
+		humanBytes(worstCaseBytes(maxActive, budgetBytes)))
+}
+
+// perRunCeiling is the traffic ceiling one run is held to: what -max-bytes
+// said, or the cap the engine applies when it was left to scale with the
+// file count (core.DefaultBudget).
+func perRunCeiling(budgetBytes int64) int64 {
+	if budgetBytes <= 0 {
+		return core.MaxRunBytes
+	}
+	return budgetBytes
 }
 
 // webAddr turns -web-host/-web-port into a listen address, leaving the
