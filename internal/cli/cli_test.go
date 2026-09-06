@@ -14,6 +14,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
 	"github.com/madmurdok/torpeek/internal/torrenttest"
 	"github.com/madmurdok/torpeek/internal/version"
+	"github.com/madmurdok/torpeek/internal/web"
 )
 
 func TestVersionFlag(t *testing.T) {
@@ -268,6 +269,33 @@ func TestBasePathAndHeadlessDefaultOff(t *testing.T) {
 	}
 	if opts.Headless {
 		t.Error("Headless = true, want false by default")
+	}
+}
+
+// TestMaxActiveTorrentsFlagDefaultsToOne: nobody who never heard of TOR-130
+// should see any difference - the flag's default must be the queue's
+// existing width, not a value that starts widening it for them.
+func TestMaxActiveTorrentsFlagDefaultsToOne(t *testing.T) {
+	opts, err := parse([]string{"-web"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.MaxActiveTorrents != web.DefaultMaxActiveTorrents {
+		t.Errorf("MaxActiveTorrents = %d, want %d (web.DefaultMaxActiveTorrents)",
+			opts.MaxActiveTorrents, web.DefaultMaxActiveTorrents)
+	}
+}
+
+// TestMaxActiveTorrentsFlagParses: an explicit value must reach Options
+// unaltered, the same plumbing TestBasePathAndHeadlessFlagsParse proves for
+// -base-path and -headless.
+func TestMaxActiveTorrentsFlagParses(t *testing.T) {
+	opts, err := parse([]string{"-web", "-max-active-torrents", "3"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if opts.MaxActiveTorrents != 3 {
+		t.Errorf("MaxActiveTorrents = %d, want 3", opts.MaxActiveTorrents)
 	}
 }
 

@@ -143,10 +143,10 @@ func waitForTheSlotToEmpty(t *testing.T, srv *Server) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
 		srv.mu.Lock()
-		running := srv.running
+		empty := len(srv.running) == 0
 		srv.mu.Unlock()
 
-		if running == nil {
+		if empty {
 			return
 		}
 		if time.Now().After(deadline) {

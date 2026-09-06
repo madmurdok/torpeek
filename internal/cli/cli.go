@@ -57,22 +57,28 @@ type Options struct {
 	// the only bound that survives the web UI running several at once.
 	MaxClientBytes int64
 	Parallelism    int
-	BridgePort     int
-	WebHost        string
-	WebPort        int
-	BasePath       string
-	Token          string
-	WatchDir       string
-	Headless       bool
-	Peers          []string
-	Upload         bool
-	DHT            bool
-	Sequential     bool
-	JSON           bool
-	Web            bool
-	Version        bool
-	List           bool
-	Files          []string
+	// MaxActiveTorrents is -max-active-torrents: how many torrents the web
+	// UI's queue lets fetch at once (web.Config.MaxActiveTorrents). It is a
+	// -web-only setting, consumed in cli/web.go rather than in config()
+	// below, the same way WebHost, WebPort, BasePath and WatchDir already
+	// are - none of those describe a run, only the server that queues runs.
+	MaxActiveTorrents int
+	BridgePort        int
+	WebHost           string
+	WebPort           int
+	BasePath          string
+	Token             string
+	WatchDir          string
+	Headless          bool
+	Peers             []string
+	Upload            bool
+	DHT               bool
+	Sequential        bool
+	JSON              bool
+	Web               bool
+	Version           bool
+	List              bool
+	Files             []string
 
 	// TorrentPorts is -torrent-ports as typed, parsed by config() with
 	// swarm.ParsePortSet rather than here, the same way CacheMaxSize is.
@@ -215,6 +221,7 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.DurationVar(&opts.MaxTime, "max-time", 0, "time ceiling for the run (default: 10m)")
 	fs.Int64Var(&opts.MaxClientBytes, "max-client-bytes", 0, "traffic ceiling for this whole process, across every run it makes together, counted on bytes actually received (default: no roof). A per-run -max-bytes multiplies by the number of runs going at once; this is the ceiling that does not (section 2.6). It does not cap upload, which nothing caps")
 	fs.IntVar(&opts.Parallelism, "parallel", core.DefaultParallelism, "video files to work on at once")
+	fs.IntVar(&opts.MaxActiveTorrents, "max-active-torrents", web.DefaultMaxActiveTorrents, "torrents the web UI's queue lets fetch at once (default: 1, section 3.3); above it a request waits its turn, never refused. This governs torrents, not per-file readers - -parallel is that knob - so N of these at -parallel's default is N times the concurrent readers, against section 4.1's fair-use guidance of 1-3 active downloads, which counts readers. Above 1 it also requires -max-client-bytes: an unset roof would let that many runs multiply one run's own traffic ceiling by that many (section 2.6)")
 	fs.Var(&opts.TorrentPorts, "torrent-ports", "BitTorrent listen ports, as one port, an inclusive range, a comma-separated list, or any mixture: 51413, 51000-51004, 51000-51002,51010. Each client binds one of them, and also pins its DHT and uTP to it (default: an OS-assigned port). Set it where a port range is allocated and going outside it is forbidden - and take the size seriously: every public torrent shares one client and one port, but a private torrent needs a client of its own, so this is what bounds how many private torrents can fetch at once (section 4.1)")
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge (default: an OS-assigned port; required where a port range is allocated)")
 	fs.StringVar(&opts.WebHost, "web-host", "", "bind address for the web UI (default: "+web.DefaultHost+"; a reverse proxy on the same host is the documented way to expose it, section 3.3)")

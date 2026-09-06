@@ -129,6 +129,26 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// one core.Config this closure already builds every run from, so the
 	// page and a run agree without web deciding anything.
 	cfg.DefaultCount = base.Plan.Count
+	// -max-active-torrents is the queue's width (TOR-130); see
+	// web.Config.MaxActiveTorrents for what it governs and why raising it
+	// past 1 is checked below rather than left to newServer's own default.
+	cfg.MaxActiveTorrents = opts.MaxActiveTorrents
+
+	// A width past 1 that is not TOR-130's own choice to sit safely inside
+	// section 4.1's guidance would defeat the point of a value in the CLI at
+	// all - anyone could type a bigger one - so the value itself is not
+	// bounded above. What IS enforced is the promise both web.Server's own
+	// doc and core.DefaultRoof make: a queue wider than one slot arrives
+	// with a client-wide traffic roof configured, or N runs going at once
+	// multiply one run's own ceiling by N, exactly what TOR-131's roof
+	// exists to prevent. Refused here, before a port is even opened, rather
+	// than left as a log line nobody is watching on an unattended systemd
+	// unit (section 4.1) - the fix is one more flag, and typing it is
+	// cheaper than a traffic bill nobody meant to run up.
+	if err := queueWidthError(cfg.MaxActiveTorrents, base.Roof.MaxBytes); err != nil {
+		fmt.Fprintf(stderr, "torpeek: %v\n", err)
+		return ExitUsage
+	}
 
 	server, err := web.Start(ctx, cfg, runner, replayer, deleter, lister)
 	if err != nil {
@@ -150,6 +170,11 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	} else {
 		fmt.Fprintln(stdout, "torpeek: client-wide traffic roof: none; -max-client-bytes sets one")
 	}
+	// The queue's width, next to the roof it now depends on above 1 - the
+	// same reason that check above exists gives an operator reading this at
+	// startup the other half of the picture: not just what the ceiling is,
+	// but how many runs can be pushing against it together.
+	fmt.Fprintf(stdout, "torpeek: queue width: %d torrent(s) at once\n", cfg.MaxActiveTorrents)
 
 	// A source on the command line starts straight away; without one the page
 	// waits for someone to paste a link.
@@ -250,6 +275,39 @@ func resolveWatchDir(dir string) (string, error) {
 		return "", fmt.Errorf("watch directory %s is not a directory", abs)
 	}
 	return abs, nil
+}
+
+// queueWidthError is TOR-130's own check, extracted out of serveWeb the same
+// way runConfig was: a decision worth verifying without a running server, a
+// real ffmpeg or an open port.
+//
+// maxActive is what -max-active-torrents resolved to (web.Config's own
+// defaulting has already turned "not stated" into
+// web.DefaultMaxActiveTorrents by the time serveWeb calls this, so 0 never
+// legitimately reaches here from a flag - it only can from a caller building
+// Options by hand); roofMaxBytes is core.Config.Roof.MaxBytes, zero meaning
+// unlimited, the documented default (core.DefaultRoof).
+//
+// Two ways to fail, both refused as a usage error rather than started and
+// left to go wrong quietly:
+//   - a width under 1, which is not a narrower queue but a broken one (see
+//     web.Server.SetMaxActiveTorrents for why zero is not "pause the
+//     queue");
+//   - a width over 1 with no roof configured, which is exactly the traffic
+//     multiplication TOR-131's roof exists to prevent (core.DefaultRoof,
+//     web.Server's own doc) - N runs going at once, each free to spend up
+//     to its own per-run ceiling, adds up to N times that ceiling with
+//     nothing over the whole client to stop it.
+func queueWidthError(maxActive int, roofMaxBytes int64) error {
+	switch {
+	case maxActive < 1:
+		return fmt.Errorf("-max-active-torrents must be at least 1, got %d", maxActive)
+	case maxActive > 1 && roofMaxBytes <= 0:
+		return fmt.Errorf("-max-active-torrents=%d widens the queue past one slot, which needs a client-wide traffic roof (-max-client-bytes) - without one, %d runs going at once would multiply one run's own traffic ceiling by %d; set a roof or drop back to -max-active-torrents=1",
+			maxActive, maxActive, maxActive)
+	default:
+		return nil
+	}
 }
 
 // webAddr turns -web-host/-web-port into a listen address, leaving the
