@@ -1030,6 +1030,83 @@ button:disabled { opacity: .5; }
     var(--s3) 0);
 }
 
+/* THE THIRD STRIP (TOR-142): the file's own stretch of the torrent as the
+   extent, the claimed pieces marked on it, and the swarm's live reading
+   beside it - kept visibly apart from both the piece strip below (TOR-111,
+   segmented blocks whose fill is a DENSITY) and the run's own progress bar
+   (TOR-123, in the panel row, gapped segments filling with frames done): this
+   one is a single continuous track with thin position ticks, and the swarm
+   reading is a coloured chip that shares none of the track's own axis.
+
+   The track's ticks carry the accent, same as the piece strip's own fill -
+   these are the identical claimed pieces, the thing the tool did, reused
+   rather than re-measured. The swarm chip carries a SEMANTIC colour instead
+   (ok/warn/bad/unknown), deliberately never the accent: it answers a
+   different question - not "where did this run reach" but "what does the
+   swarm currently hold, torrent-wide" - and giving it the accent would read
+   as a second claimed-pieces strip rather than the separate fact it is. */
+.avail { margin: .2rem 0 .8rem; }
+.avail-body {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+.avail-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 1.1rem;
+  min-width: 0;
+  border-radius: .2rem;
+  overflow: hidden;
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+/* Hatched rather than solid or empty: the file's span is not yet known (no
+   claim recorded for it), and either a full or a blank track would assert a
+   span nobody has measured. */
+.avail-track[data-known="false"] {
+  background-image: repeating-linear-gradient(135deg,
+    var(--s2) 0 6px, var(--s1) 6px 12px);
+}
+.avail-points { position: absolute; inset: 0; }
+.avail-point {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--from, 0) * 100%);
+  width: calc(var(--span, 0) * 100%);
+  background: var(--accent);
+  box-shadow: var(--glow);
+}
+.avail-swarm {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  padding: .15rem .5rem;
+  border-radius: 1rem;
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .02em;
+  color: var(--ink-2);
+}
+.avail-swarm-dot {
+  width: .5rem;
+  height: .5rem;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+.avail-swarm[data-health="ok"]      .avail-swarm-dot { background: var(--ok); }
+.avail-swarm[data-health="warn"]    .avail-swarm-dot { background: var(--warn); }
+.avail-swarm[data-health="bad"]     .avail-swarm-dot { background: var(--bad); }
+.avail-swarm[data-health="unknown"] .avail-swarm-dot { background: var(--ink-3); }
+.avail-note {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--ink-3); margin-top: .3rem;
+}
+
 /* THE PIECE STRIP (TOR-111). How much of the file the run actually ordered,
    as a picture rather than a sentence - the sparseness is the product's whole
    argument and it was being expressed as a number.
