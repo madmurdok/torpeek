@@ -125,6 +125,25 @@ func event(ev core.Event) map[string]any {
 		if e.UploadRate != nil {
 			m["upload_bps"] = *e.UploadRate
 		}
+		// swarm is the live availability reading core.Progress.Swarm
+		// carries, under the identical "absent, not zero" rule
+		// download_bps/upload_bps just followed above, and for the
+		// identical reason (core.Progress.Swarm's own doc, TOR-119,
+		// TOR-111, TOR-135): a torrent that has not been asked for
+		// bytes yet has no reading, and 0 copies would read as "the
+		// swarm holds nothing" - the opposite of "we do not know".
+		//
+		// copies_per_piece names the unit so nobody can read it as a
+		// fraction - it is swarm.Availability's own unit, copies PER
+		// PIECE, and commonly exceeds 1.0 (0.8 means pieces are
+		// missing from the swarm, 3.2 means it is healthy).
+		if e.Swarm != nil {
+			m["swarm"] = map[string]any{
+				"copies_per_piece": e.Swarm.CopiesPerPiece,
+				"unavailable":      e.Swarm.Unavailable,
+				"pieces":           e.Swarm.NumPieces,
+			}
+		}
 		return m
 	case core.BudgetWarning:
 		// scope says whether spent/limit are this run's or the whole

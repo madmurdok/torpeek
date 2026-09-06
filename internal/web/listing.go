@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
+	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
@@ -83,6 +84,73 @@ type RunSummary struct {
 	// When orders the list: a live entry's most recent lifecycle timestamp
 	// (ended, else started, else queued), or a disk row's created_at.
 	When time.Time `json:"when"`
+
+	// Live is this row's most recent live swarm reading - see the Live
+	// type's own doc for exactly which rows get one and why "having a
+	// client" is judged by more than State alone.
+	Live *Live `json:"live,omitempty"`
+}
+
+// Live is one row's most recent live reading: peers, seeds, both speeds and
+// the availability reading, from the run's own core.Progress heartbeats
+// (runEntry.applyProgress).
+//
+// Present only for a row with an actual client that has spoken at least
+// once - the run's first heartbeat - and absent, not zeroed, for every row
+// without one: a queued or needs-action row has no client yet, a disk-only
+// row never will, and a live row still waiting on its first heartbeat has
+// nothing to report either (TOR-136). A queued torrent showing 0 peers and
+// 0 KB/s would be indistinguishable from a running torrent that found
+// nobody, and those are opposite situations - one is waiting its turn, the
+// other is the pain a person actually watches for. This project has now
+// drawn that same "absent, not zero" line five times: TOR-119 for claimed
+// pieces, TOR-111 for reach, TOR-135 for availability, TOR-134 for rates,
+// and wire.go's progress event itself (TOR-147) - this is the sixth, at the
+// listing rather than the event stream.
+//
+// Kept as one struct rather than five independent optional fields because
+// Peers/Seeds/DownloadBps/UploadBps/Swarm all arrive together on one
+// heartbeat (core.Progress): a row either has a reading or it does not, and
+// a client should only have to ask once, the same reasoning FileSet.Reach
+// groups a claim's fields under one pointer for.
+type Live struct {
+	Peers int `json:"peers"`
+	Seeds int `json:"seeds"`
+	// DownloadBps/UploadBps are absent, not zero, before the run's second
+	// heartbeat - wire.go's identical field on the progress event follows
+	// the identical rule for the identical reason
+	// (core.Progress.DownloadRate's own doc): a rate with no interval
+	// behind it yet is unknown, not measured at zero.
+	DownloadBps *float64 `json:"download_bps,omitempty"`
+	UploadBps   *float64 `json:"upload_bps,omitempty"`
+	// Swarm is nil until the swarm has answered at all, independently of
+	// Peers/Seeds already being known - a connected peer is not yet a peer
+	// that has said what it holds (swarm.Torrent.Availability's own doc,
+	// core.Progress.Swarm's own doc, wire.go's identical "swarm" key on the
+	// progress event added by TOR-147).
+	Swarm *Availability `json:"swarm,omitempty"`
+}
+
+// Availability mirrors wire.go's "swarm" object on the progress event
+// (TOR-147) field for field, so a client reads copies-per-piece the same way
+// whichever endpoint it came from.
+type Availability struct {
+	// CopiesPerPiece is copies PER PIECE, not a percentage, and commonly
+	// exceeds 1.0 - core.SwarmAvailability's own unit, named here the same
+	// way so the two endpoints cannot disagree about what the number means.
+	CopiesPerPiece float64 `json:"copies_per_piece"`
+	Unavailable    int     `json:"unavailable"`
+	Pieces         int     `json:"pieces"`
+}
+
+// renderAvailability turns a core reading into the wire shape, or nil when
+// there is nothing to report yet - core.Progress.Swarm's own "unknown, not
+// zero" rule, carried through rather than re-decided here.
+func renderAvailability(a *core.SwarmAvailability) *Availability {
+	if a == nil {
+		return nil
+	}
+	return &Availability{CopiesPerPiece: a.CopiesPerPiece, Unavailable: a.Unavailable, Pieces: a.NumPieces}
 }
 
 // Partial reports whether this row's selection is short of complete - a
@@ -189,6 +257,13 @@ func (s *Server) listRuns() []RunSummary {
 		row := RunSummary{
 			ID: info.ID, State: string(info.State), Source: info.Source,
 			Name: info.Name, InfoHash: info.InfoHash, Err: info.Err, When: liveWhen(info),
+			// Live comes straight off the registry entry's own last
+			// heartbeat (runEntry.applyProgress) - never recomputed here,
+			// and never touched by the disk merge below, which only ever
+			// fills in Files/Complete/Selected/Params/Name from a finished
+			// run's own record. A merged row's Live is still the run's own
+			// live reading, exactly as before the merge.
+			Live: info.Live,
 		}
 		if info.State.final() && info.InfoHash != "" {
 			if idxs := byHash[info.InfoHash]; len(idxs) == 1 {
