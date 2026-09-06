@@ -1747,6 +1747,27 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 		outcome = RunCancelled
 	}
 	entry.state, entry.err, entry.endedAt = outcome, failure, time.Now()
+	// TOR-154: a client, once, said this - peers, seeds, both rates, the
+	// swarm reading, the stall reading. Once the state above is final, none
+	// of that is still true: nobody is connected, nothing is moving, and the
+	// last heartbeat was not wrong, it just stopped being now. Cleared as one
+	// pointer, all five readings together, the same grouping applyProgress
+	// itself replaces wholesale for the identical reason - and cleared here
+	// rather than field by field, because a half-cleared Live (say, rates
+	// gone but Swarm still standing) would just be a second, sneakier way to
+	// show a stale reading as current.
+	//
+	// The swarm reading is not moved anywhere: a person may well want to know
+	// what the swarm looked like while a finished run was going, but that is
+	// a HISTORICAL fact about the run, a different field with a different
+	// name, and no such field exists yet. Nil is the honest answer until one
+	// does; quietly repurposing this field to mean "last known" would be the
+	// same bug this ticket exists to remove, one field over.
+	//
+	// This makes a finished live row read exactly like a disk-only row
+	// (listing.go's RunSummary.Live), which never had a Live to begin with -
+	// they are the same situation now, and after this they read the same.
+	entry.live = nil
 	s.releaseSlotLocked(entry)
 	infoHash := entry.infoHash
 	s.mu.Unlock()
