@@ -1218,6 +1218,82 @@ func TestAProgressEventReachesTheLiveRow(t *testing.T) {
 	}
 }
 
+// TestAFinishedRunDropsItsLiveFigures is TestAProgressEventReachesTheLiveRow's
+// mirror (TOR-154). A run that has ended must not go on reporting the last
+// heartbeat it ever had - peers, seeds, both rates, the swarm reading and the
+// stall reading all have to read absent, the same way a disk-only row
+// (listing.go) always has.
+//
+// The first half is not optional. A test that only checked the row after the
+// stream closed would pass just as well against a build where the figures
+// never reached the row at all - proving "gone" means nothing unless the same
+// row is first proven to have HAD them, so this drives a real core.Progress
+// through pump exactly as the test above does, confirms the row carries it,
+// and only then closes the stream and confirms the row carries nothing.
+func TestAFinishedRunDropsItsLiveFigures(t *testing.T) {
+	fake := newFakeRuns()
+	srv, ts := newTestServerWithConfig(t, DefaultConfig(), fake.runner)
+	_ = srv
+
+	const source = "magnet:?xt=urn:btih:f00dfeed000000000000000000000000000000"
+	run := startRun(t, ts.URL, source)
+	stream := fake.stream(t, source)
+
+	dl, ul := 4096.0, 512.0
+	stream.events <- core.Progress{
+		Peers: 5, Seeds: 3,
+		DownloadRate: &dl, UploadRate: &ul,
+		Swarm: &core.SwarmAvailability{CopiesPerPiece: 1.5, Unavailable: 0, NumPieces: 64},
+		Stall: &core.Stall{Code: core.CodeNoPeers, Since: 4 * time.Minute},
+	}
+
+	// First half: the reading has to actually arrive before there is
+	// anything interesting about it disappearing.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		row := findByID(t, listRuns(t, ts.URL), run.id)
+		if row.Live != nil {
+			if row.Live.Peers != 5 || row.Live.Seeds != 3 {
+				t.Fatalf("live.peers/seeds = %d/%d, want 5/3", row.Live.Peers, row.Live.Seeds)
+			}
+			if row.Live.DownloadBps == nil || *row.Live.DownloadBps != dl {
+				t.Fatalf("live.download_bps = %v, want %v", row.Live.DownloadBps, dl)
+			}
+			if row.Live.Swarm == nil {
+				t.Fatalf("live.swarm is absent before the run ended")
+			}
+			if row.Live.Stall == nil {
+				t.Fatalf("live.stall is absent before the run ended")
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("a Progress event travelled through pump and the live row still " +
+				"carries no figures - applyProgress is not being called")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Second half: end the run the way a real engine run ends - close the
+	// event stream - and read the row back the same way a page would.
+	fake.finish(t, source)
+
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		row := findByID(t, listRuns(t, ts.URL), run.id)
+		if row.State == string(RunDone) {
+			if row.Live != nil {
+				t.Fatalf("a finished run still carries live figures: %+v", row.Live)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run never reached state %q, last seen %q", RunDone, row.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestAStalledRunReportsItsStallOnGetRuns closes the seam TOR-141 left open
 // on purpose: it built the Stall reading all the way to Live but could not
 // fill it, because runs.go belonged to another ticket at the time. The
