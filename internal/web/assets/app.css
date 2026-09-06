@@ -622,7 +622,26 @@ button:disabled { opacity: .5; }
   text-overflow: ellipsis;
 }
 
-.run-cell-queue { width: 2.6rem; }
+/* Two lines, the same shape .run-cell-availability uses: the position the
+   server actually holds this row at on top, and the priority level under it
+   (TOR-140) - the level only when it is not the default, so a queue nobody
+   has reordered shows a plain column of positions and one that has been
+   reordered says so on exactly the rows that moved. The controls that change
+   it are NOT here: this stays a figure column (see .run-cell-metric's own
+   rule), and the ▲/▼ pair lives in .run-cell-actions with the row's other
+   verbs. Wider than the 2.6rem TOR-139 gave it because "normal" is not shown
+   but "high" and "low" are, and a wrapped level would make the row taller
+   than every other one - the same measurement .run-cell-availability-meta
+   records. */
+.run-cell-queue { width: 3.4rem; }
+.run-cell-queue-value { display: block; }
+.run-cell-queue-meta {
+  display: block;
+  margin-top: .05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* Header cells for the same six columns. Left-aligned like every other
    header in this table (unlike their own data cells) - .run-table thead th's
@@ -633,7 +652,7 @@ button:disabled { opacity: .5; }
    acceptance criterion. */
 .run-cell-metric-header { width: 3.4rem; }
 .run-cell-availability-header { width: 5.4rem; }
-.run-cell-queue-header { width: 2.6rem; }
+.run-cell-queue-header { width: 3.4rem; }
 .run-th-label { display: block; }
 .run-th-unit {
   display: block;
@@ -645,8 +664,13 @@ button:disabled { opacity: .5; }
   margin-top: .05rem;
 }
 
-.run-cell-actions { width: 1.6rem; text-align: right; }
-.run-cancel {
+/* Wider than the 1.6rem one ✕ needed: since TOR-140 a waiting row also
+   carries the two buttons that move it up and down the queue, and they
+   belong here rather than in the Queue cell because this is the column the
+   row's VERBS live in - the figure columns stay figures. */
+.run-cell-actions { width: 3.8rem; text-align: right; white-space: nowrap; }
+.run-cancel,
+.run-priority {
   border: none;
   background: none;
   opacity: .55;
@@ -656,7 +680,21 @@ button:disabled { opacity: .5; }
   padding: .3rem .4rem;
   border-radius: .3rem;
 }
-.run-cancel:hover { opacity: 1; background: var(--hover); }
+.run-cancel:hover,
+.run-priority:hover { opacity: 1; background: var(--hover); }
+/* The queue arrows are a step smaller and a step quieter than Cancel. Cancel
+   destroys a run and this only reorders one, and a control that reads as
+   equally weighty as the destructive one next to it is a control people
+   hesitate over. */
+.run-priority { font-size: .7rem; padding: .3rem .15rem; opacity: .45; }
+/* Disabled at the ends of the band (app.js's syncEntry) - shown, not hidden,
+   so the pair does not jump sideways under the cursor as a torrent reaches
+   the top of the queue. It has to READ as unavailable, hence the dimming and
+   the cursor, or a person clicks it and concludes the feature is broken. */
+.run-priority:disabled { opacity: .15; cursor: default; }
+.run-priority:disabled:hover { opacity: .15; background: none; }
+.run-cancel:focus-visible,
+.run-priority:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .run-badge {
   display: inline-block;

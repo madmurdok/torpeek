@@ -361,9 +361,21 @@ type Server struct {
 	// order is their ids, oldest first: what a listing walks and what trim
 	// evicts from the front of.
 	order []string
-	// waiting is the queue, in arrival order. It holds runs that have been
-	// accepted and not yet started.
+	// waiting is the queue, in the order dispatch will actually take them:
+	// highest priority first, arrival order within a level (queueBefore).
+	// It holds runs that have been accepted and not yet started.
+	//
+	// It was strict arrival order until TOR-140. The slice is kept SORTED
+	// rather than scanned for a best candidate at dispatch time, so that
+	// waiting[0] stays "the one that goes next" and an entry's index is its
+	// reported queue position with nothing to recompute - the two things
+	// every other piece of this change reads. Insertion is
+	// enqueueWaitingLocked; a priority change is a removal and a
+	// reinsertion (SetRunPriority); removal is dropWaitingLocked, unchanged.
 	waiting []*runEntry
+	// queueSeq hands out the arrival tiebreak, one per ENQUEUE - see
+	// runEntry.queueSeq for why that is not the same thing as queuedAt.
+	queueSeq uint64
 	// running is every torrent currently holding a slot, keyed by id. Its
 	// being a map rather than one pointer is TOR-130's whole change: the
 	// concurrency limit is now the number maxActive names, not the shape of
@@ -505,6 +517,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
+	mux.HandleFunc("POST /runs/priority", s.authGuard(s.handleSetPriority))
 	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.HandleFunc("POST /files/{id}/watch", s.authGuard(s.handleWatchTorrent))
@@ -647,14 +660,19 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	}
 	s.runs[entry.id] = entry
 	s.order = append(s.order, entry.id)
-	s.waiting = append(s.waiting, entry)
+	s.enqueueWaitingLocked(entry)
 	rec := s.runStateRecordLocked(entry, true)
+	// A fresh run is always PriorityNormal, so it lands behind every normal
+	// and high waiter - but AHEAD of any low one, which moves that low
+	// entry's position down. Nothing else would tell it (TOR-140).
+	moved := s.queueRecordsLocked(entry)
 	s.mu.Unlock()
 
 	// The run opens its own history the moment it is accepted, queued or not:
 	// a page must be able to show a run it asked for before anything has
 	// happened in it. reset marks the record that opens it.
 	s.hub.begin(entry.id, rec)
+	s.publishQueueRecords(moved)
 
 	// Taking the slot here, in the caller's own goroutine, is what makes the
 	// answer to "was I queued?" true rather than a guess: by the time this
@@ -662,7 +680,7 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	s.dispatch()
 
 	s.mu.Lock()
-	info := entry.info()
+	info := s.infoLocked(entry)
 	s.mu.Unlock()
 	return info, nil
 }
@@ -691,8 +709,16 @@ func (s *Server) dispatch() {
 			s.mu.Unlock()
 			return
 		}
+		// waiting[0] is still simply the front, and since TOR-140 that is
+		// the highest-priority, earliest-arrived waiter rather than only the
+		// earliest one: the queue is kept sorted on the way in
+		// (enqueueWaitingLocked), so nothing here has to choose.
 		entry := s.waiting[0]
 		s.waiting = s.waiting[1:]
+		// Everyone behind it has just moved up one place. Gathered here,
+		// under the lock that made it true, and published below by whichever
+		// branch releases that lock.
+		moved := s.queueRecordsLocked(nil)
 
 		ctx, cancel := context.WithCancel(s.baseCtx)
 
@@ -707,6 +733,7 @@ func (s *Server) dispatch() {
 			s.mu.Unlock()
 
 			s.hub.publish(entry.id, rec)
+			s.publishQueueRecords(moved)
 			// Its own goroutine: this waits on the swarm for metadata, up to
 			// swarm.Config.MetadataTimeout, and dispatch is called from the
 			// goroutine that is answering an HTTP request.
@@ -714,12 +741,15 @@ func (s *Server) dispatch() {
 			continue
 		}
 
-		if s.beginRun(ctx, cancel, entry) {
-			continue
-		}
-		// The runner refused this one before it produced any events; the
-		// slot it would have held is still free, so the next waiter gets its
-		// turn immediately - the same loop-back a successful start now takes.
+		// beginRun releases s.mu whichever way it goes, so the queue's new
+		// positions are published after it either way - including when the
+		// runner refused this one, where the entry left the queue all the
+		// same and everyone behind it still moved up.
+		s.beginRun(ctx, cancel, entry)
+		s.publishQueueRecords(moved)
+		// A runner that refused this one produced no events; the slot it
+		// would have held is still free, so the next waiter gets its turn
+		// immediately - the same loop-back a successful start takes.
 	}
 }
 
@@ -951,7 +981,7 @@ func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
 	s.pump(entry, events)
 
 	s.mu.Lock()
-	info := entry.info()
+	info := s.infoLocked(entry)
 	s.mu.Unlock()
 	return info, nil
 }
@@ -1131,7 +1161,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 	case RunRunning:
 		entry.cancelled = true
 		cancel := entry.cancel
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 
 		// The run ends on its own terms: it stops, writes what it has, and
@@ -1144,7 +1174,10 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		entry.state, entry.endedAt = RunCancelled, time.Now()
 		s.dropWaitingLocked(entry)
 		rec := s.runStateRecordLocked(entry, false)
-		info := entry.info()
+		// Everything that was behind it has moved up one place - the same
+		// republish dispatch does when it takes the front of the queue.
+		moved := s.queueRecordsLocked(entry)
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 
 		// It will never start, so nothing will ever be reading its source.
@@ -1152,6 +1185,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 			entry.cleanup()
 		}
 		s.hub.publish(entry.id, rec)
+		s.publishQueueRecords(moved)
 		s.trim()
 		return info, nil
 
@@ -1178,7 +1212,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		entry.cancelled = true
 		entry.state, entry.endedAt = RunCancelled, time.Now()
 		rec := s.runStateRecordLocked(entry, false)
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 
 		if entry.cleanup != nil {
@@ -1189,7 +1223,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		return info, nil
 
 	default:
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 		return info, fmt.Errorf("run %s is already %s", entry.id, info.State)
 	}
@@ -1242,7 +1276,7 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 		return RunInfo{}, ErrNoSuchRun
 	}
 	if entry.state != RunNeedsAction || entry.contents == nil {
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 		return info, fmt.Errorf("run %s is not waiting for a file selection, it is %s", entry.id, info.State)
 	}
@@ -1262,11 +1296,18 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 		entry.req.Count = count
 	}
 	entry.state = RunQueued
-	s.waiting = append(s.waiting, entry)
+	// A decided torrent joins the queue now, not when it was first accepted:
+	// enqueueWaitingLocked stamps it with a fresh arrival, so it waits behind
+	// everything already queued at its level exactly as the plain append it
+	// replaces did. Its priority, if someone set one while it was parked,
+	// is what it comes back at (TOR-140).
+	s.enqueueWaitingLocked(entry)
 	rec := s.runStateRecordLocked(entry, false)
+	moved := s.queueRecordsLocked(entry)
 	s.mu.Unlock()
 
 	s.hub.publish(entry.id, rec)
+	s.publishQueueRecords(moved)
 	// The same call StartRun makes, in the caller's own goroutine and for the
 	// same reason: by the time this returns, this torrent has either started
 	// or is behind one that has - so the state answered here is the truth
@@ -1274,7 +1315,7 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 	s.dispatch()
 
 	s.mu.Lock()
-	info := entry.info()
+	info := s.infoLocked(entry)
 	s.mu.Unlock()
 	return info, nil
 }
@@ -1301,6 +1342,108 @@ func (e *runEntry) holdsFile(spec string) bool {
 		}
 	}
 	return false
+}
+
+// SetRunPriority changes where one waiting torrent sits in the queue,
+// without cancelling it - TOR-140's whole point, and the answer to the one
+// pain this ticket is written from: "нет возможности менять приорететы
+// (только отменяя скачку)". It answers with the entry as it now stands,
+// including the position it has just moved to.
+//
+// IT NEVER PREEMPTS A RUNNING TORRENT, and that is a decision rather than an
+// omission - the request is refused, with the reason, rather than quietly
+// doing less than it looks like it does. Three arguments, and the third is
+// the one that settles it:
+//
+//   - It is the position this project already took. TOR-130 settled that
+//     LOWERING the concurrency cap stops nobody: dispatch reads the width to
+//     decide whether to START a run, never whether to keep one going,
+//     because nobody's work should be destroyed by a settings change. One
+//     could argue this act is different in kind - lowering a cap is a global
+//     setting whose victim the machine picks, while raising X's priority is
+//     a deliberate statement about X - and that argument is real. It is not
+//     enough on its own, which is why it is not the reason.
+//   - What preemption would COST here is not a pause. A run that gives up
+//     its slot releases its torrent, and releasing a torrent erases the
+//     pieces it has pulled (REQUIREMENTS.md 3.3: "он отпускает свою раздачу
+//     и стирает её куски"). The traffic those pieces cost has already been
+//     spent against a shared fair-use allowance (4.1) and a client-wide roof
+//     that counts every byte (2.6, core.Roof). Preempting therefore does not
+//     defer work, it destroys work and its traffic both, and the torrent
+//     promoted past it has to buy the same bytes over again.
+//   - There is nowhere for a preempted run to go. RunCancelled is final
+//     (RunState.final) and nothing moves an entry back from it; the one
+//     state that goes backwards is needs-action, and it goes back only
+//     because a person answered a question. "Preempt" would in practice mean
+//     "cancel someone's download and tell them it was a reorder", which is
+//     precisely what this ticket exists to stop being the only option.
+//
+// So priority orders the WAITING. What it can always do is decide which
+// torrent goes next - raise it, or lower the others - and the queue's own
+// promise is unchanged: a request over the cap waits, and eventually runs.
+//
+// A parked torrent (RunNeedsAction) accepts a priority too, though it holds
+// no position while it waits for a person: DecideRun puts it straight back
+// in the queue at whatever level it was given, so refusing here would only
+// mean asking again a moment later. See RunState.queueable.
+//
+// Setting the level a run already has is accepted and is a no-op in effect -
+// it is an absolute value, not a step, precisely so that a page acting twice
+// on a stale view cannot walk a torrent past where anyone asked for.
+func (s *Server) SetRunPriority(id string, priority Priority) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if !priority.valid() {
+		return RunInfo{}, fmt.Errorf("%w: %d is not a queue priority - it runs from %d (low) to %d (high)",
+			errBadRequest, priority, PriorityLow, PriorityHigh)
+	}
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if !entry.state.queueable() {
+		info := s.infoLocked(entry)
+		s.mu.Unlock()
+		return info, fmt.Errorf("run %s is %s: priority orders the torrents that are waiting, "+
+			"it never interrupts one that is already downloading", entry.id, info.State)
+	}
+
+	entry.priority = priority
+	if entry.state == RunQueued {
+		// Out and back in rather than a re-sort of the whole queue: the rest
+		// of it is already in order, and only this entry moved.
+		s.dropWaitingLocked(entry)
+		s.insertWaitingLocked(entry)
+	}
+
+	// This entry's own record first, then every other waiter's: a reorder
+	// moves the rows it passed as surely as it moves the row a person
+	// clicked, and each of them learns its new position the same way.
+	moved := append([]queuedState{{id: entry.id, rec: s.runStateRecordLocked(entry, false)}},
+		s.queueRecordsLocked(entry)...)
+	info := s.infoLocked(entry)
+	s.mu.Unlock()
+
+	s.publishQueueRecords(moved)
+
+	// Nothing here frees a slot, so this can only ever start something in
+	// the case where a slot was already free and the queue was momentarily
+	// non-empty anyway. It costs one locked comparison when there is no room
+	// - dispatch's own top-of-loop check - and it means this method never
+	// leaves a startable run sitting because the reorder happened to be the
+	// last thing that touched the queue.
+	s.dispatch()
+	return info, nil
 }
 
 // SetMaxActiveTorrents changes the queue's width - how many torrents may
@@ -1378,14 +1521,154 @@ func (s *Server) dropWaitingLocked(entry *runEntry) {
 	}
 }
 
+// enqueueWaitingLocked puts one entry into the queue, at the place its
+// priority and its arrival earn it. The one door into s.waiting: both
+// StartRun (a fresh run) and DecideRun (a parked torrent coming back with a
+// selection) go through it, so there is one place the arrival tiebreak is
+// stamped and one place the ordering rule is applied.
+//
+// The caller must hold s.mu.
+func (s *Server) enqueueWaitingLocked(entry *runEntry) {
+	s.queueSeq++
+	entry.queueSeq = s.queueSeq
+	s.insertWaitingLocked(entry)
+}
+
+// insertWaitingLocked puts an entry that already has its queueSeq back into
+// the sorted queue - the second half of a priority change, where the entry
+// keeps the arrival it earned and only its level moved.
+//
+// A linear insert rather than a sort of the whole slice: the queue is
+// already ordered, so this is the cheaper operation and, more usefully, it
+// cannot reorder anything it was not asked to. A sort.SliceStable over the
+// whole queue would give the same answer today and would quietly stop doing
+// so the day queueBefore grew a third term.
+//
+// The caller must hold s.mu.
+func (s *Server) insertWaitingLocked(entry *runEntry) {
+	at := len(s.waiting)
+	for i, waiting := range s.waiting {
+		if queueBefore(entry, waiting) {
+			at = i
+			break
+		}
+	}
+	s.waiting = append(s.waiting, nil)
+	copy(s.waiting[at+1:], s.waiting[at:])
+	s.waiting[at] = entry
+}
+
+// queueBefore is the queue's whole ordering rule, in one place: a higher
+// priority goes first, and two entries at the same priority keep the order
+// they joined the queue in (TOR-140).
+//
+// The second half is what makes this change invisible to a server nobody
+// reprioritises. Every entry sits at PriorityNormal until someone says
+// otherwise, so the comparison collapses to queueSeq alone - the order they
+// were appended in, which is exactly what "the queue, in arrival order"
+// meant before.
+func queueBefore(a, b *runEntry) bool {
+	if a.priority != b.priority {
+		return a.priority > b.priority
+	}
+	return a.queueSeq < b.queueSeq
+}
+
+// queuePositionLocked is where an entry sits in the queue, 1-based, or zero
+// for an entry that is not waiting for a slot at all.
+//
+// A scan rather than a number kept on the entry, deliberately: a stored
+// position would have to be corrected on every enqueue, dequeue, cancel and
+// reorder, and the first path that forgot would report a position the queue
+// does not actually have. The queue is a person's own torrents, not a
+// swarm's worth of them.
+//
+// The caller must hold s.mu.
+func (s *Server) queuePositionLocked(entry *runEntry) int {
+	for i, waiting := range s.waiting {
+		if waiting == entry {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// infoLocked snapshots one entry together with where the queue currently
+// holds it. Every caller that answers a request with a RunInfo goes through
+// this rather than through entry.info directly, so no answer can carry a
+// position of zero merely because the code path that built it did not think
+// to look one up.
+//
+// The caller must hold s.mu.
+func (s *Server) infoLocked(entry *runEntry) RunInfo {
+	return entry.info(s.queuePositionLocked(entry))
+}
+
+// queuedState is one waiting entry's id and its freshly built run_state,
+// gathered under the lock to be published after it is released.
+type queuedState struct {
+	id  string
+	rec record
+}
+
+// queueRecordsLocked builds a run_state for every entry still in the queue,
+// so a page learns the new position of the rows it did NOT act on.
+//
+// This is the price of the position being a server-side fact instead of a
+// client-side derivation. TOR-139's app.js recomputed every queued row's
+// rank locally whenever any row changed (its refreshQueuePositions), which
+// worked only because the rank was derivable from fields every row already
+// carried. A reorderable position is not derivable, so the moves have to
+// travel: dequeuing the front of the queue moves everyone behind it up one,
+// and nothing else would ever tell them.
+//
+// skip is the entry whose own run_state the caller is already publishing -
+// the one that was just accepted, or just reprioritised - so it does not get
+// two messages saying the same thing. Pass nil to include every waiter.
+//
+// The caller must hold s.mu, and must publish the result after releasing it:
+// the hub is never written to under the registry lock.
+func (s *Server) queueRecordsLocked(skip *runEntry) []queuedState {
+	out := make([]queuedState, 0, len(s.waiting))
+	for _, entry := range s.waiting {
+		if entry == skip {
+			continue
+		}
+		out = append(out, queuedState{id: entry.id, rec: s.runStateRecordLocked(entry, false)})
+	}
+	return out
+}
+
+// publishQueueRecords sends what queueRecordsLocked gathered. The caller
+// must NOT hold s.mu.
+func (s *Server) publishQueueRecords(states []queuedState) {
+	for _, state := range states {
+		s.hub.publish(state.id, state.rec)
+	}
+}
+
 // snapshot lists the registry, oldest first.
+//
+// Every row carries its queue position, so GET /runs can report a real one
+// rather than leave a page to work it out from arrival times (which is what
+// TOR-139's app.js had to do, and what TOR-140's reordering makes wrong).
+// The position comes from one pass over the queue rather than a scan per
+// entry: the registry holds the last ten finished runs as well as the live
+// ones, and looking each of them up in the waiting list to be told "not
+// waiting" is work with a known answer.
 func (s *Server) snapshot() []RunInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	position := make(map[string]int, len(s.waiting))
+	for i, entry := range s.waiting {
+		position[entry.id] = i + 1
+	}
+
 	out := make([]RunInfo, 0, len(s.order))
 	for _, id := range s.order {
-		out = append(out, s.runs[id].info())
+		entry := s.runs[id]
+		out = append(out, entry.info(position[id]))
 	}
 	return out
 }
@@ -1617,6 +1900,27 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 	}
 	if entry.err != nil {
 		m["error"] = entry.err.Error()
+	}
+	// TOR-140: the queue's two facts, and they ride on run_state rather than
+	// on a message of their own precisely so that they cannot go stale in a
+	// replay. The hub keeps every run's records and replays them to a page
+	// that reconnects; a separate "here is the whole queue" message would be
+	// replayed as it was when it was sent, while a per-run field is
+	// overwritten by that run's own next state - and every entry whose
+	// position moved gets one (queueRecordsLocked), so the last run_state
+	// per run is always the current answer for that run.
+	//
+	// Present only while the priority still decides something
+	// (RunState.queueable). A running or finished row reports neither, which
+	// is the same absent-is-not-zero line the live figures draw: "priority
+	// normal, position 0" on a torrent already downloading would read as a
+	// standing it does not have, when the truth is that the queue has
+	// nothing left to say about it.
+	if entry.state.queueable() {
+		m["priority"] = int(entry.priority)
+		if pos := s.queuePositionLocked(entry); pos > 0 {
+			m["queue_position"] = pos
+		}
 	}
 	// TOR-117: the state a person watches longest in the worst case - queued
 	// or running, before any metadata has arrived - is also the one this

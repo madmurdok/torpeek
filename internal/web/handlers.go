@@ -364,11 +364,59 @@ func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
 }
 
+// priorityRequest is a reorder: this run, at this level.
+//
+// Priority is an ABSOLUTE level, never a step, and the field is a plain int
+// rather than a pointer even though its zero value is meaningful: zero IS
+// PriorityNormal, and a request that omits the field is asking for normal,
+// which is a coherent thing to ask for. Sending a step ("one higher") would
+// make two clicks on a stale page walk a torrent somewhere nobody asked for;
+// an absolute value applied twice lands in the same place.
+type priorityRequest struct {
+	ID       string `json:"id"`
+	Priority int    `json:"priority"`
+}
+
+// handleSetPriority moves one waiting torrent up or down the queue without
+// cancelling it (TOR-140). See Server.SetRunPriority for what a priority is
+// and for why this can never reach a torrent that is already downloading.
+//
+// 200 rather than the 202 the start and decide routes answer with: those
+// accept something that will happen later, while this one has already
+// happened by the time it returns - the queue is reordered under the lock
+// this call took, and the position in the body is the one the next dispatch
+// will act on.
+func (s *Server) handleSetPriority(w http.ResponseWriter, r *http.Request) {
+	var req priorityRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.SetRunPriority(req.ID, Priority(req.Priority))
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": info.ID, "state": string(info.State),
+		"priority": int(info.Priority), "queue_position": info.QueuePosition,
+	})
+}
+
 // decideStatus maps a decision's four failures: a run this server does not
 // hold, a request that does not name a selection this torrent can satisfy, a
 // server that has closed, and - everything left - a run that is not waiting
 // to be told anything, which is the same conflict CancelRun reports for a
 // run that has already ended.
+//
+// handleSetPriority answers through it too, because a reorder fails in
+// exactly those same four ways and means the same thing by each: an id this
+// server does not hold, a level outside the band, a closed server, and a run
+// that is not waiting for a slot - which for a reorder is the preemption
+// refusal, and a 409 is the right shape for it (the request was understood,
+// the run is simply not in a state this can act on).
 func decideStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrNoSuchRun):

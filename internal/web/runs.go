@@ -82,6 +82,90 @@ func (s RunState) final() bool {
 	return s == RunDone || s == RunFailed || s == RunCancelled
 }
 
+// queueable reports whether this run's PRIORITY still decides anything -
+// which is the one question Server.SetRunPriority, listing.go and
+// runStateFieldsLocked all have to agree on, so it is written here once
+// rather than as three copies of the same pair of states (TOR-140).
+//
+// True for exactly the two states that describe a torrent which has not
+// started downloading and still might: queued, waiting for a slot, and
+// needs-action, waiting for a person to say which files to capture -
+// DecideRun puts that one straight back in the queue, carrying whatever
+// priority it was given while it waited, so refusing to set one there would
+// only mean setting it a second later.
+//
+// False for running and replaying, and that is the whole preemption
+// decision in one method: a torrent already spending traffic is not
+// something priority reaches. See SetRunPriority for the argument.
+func (s RunState) queueable() bool {
+	return s == RunQueued || s == RunNeedsAction
+}
+
+// Priority is how a person says which waiting torrent should go first
+// (TOR-140). Higher runs earlier; equal priorities keep strict arrival
+// order, so a registry nobody has reprioritised behaves exactly as the FIFO
+// queue always did.
+//
+// A SMALL BAND OF NAMED LEVELS rather than a free integer, and rather than a
+// position a person drags. Three reasons, in the order they decided it:
+//
+//   - A dragged position cannot live in this table. Since TOR-139 every
+//     column sorts, and the table opens sorted by date NEWEST FIRST - the
+//     reverse of queue order. Dragging a row to "third from the top" means
+//     nothing when the rows are ordered by peers, or by name, and it would
+//     mean the opposite of what it looks like under the default sort. A
+//     level is a property of the torrent, so it reads the same whatever
+//     order the rows happen to be in.
+//   - A level survives new arrivals. A torrent added later can be sent to
+//     the front by setting one value, where a drag can only place it
+//     relative to rows that already exist - this ticket's own argument for
+//     the number over the position.
+//   - The band is bounded because an unbounded one has no legible scale.
+//     "What does 7 mean" has no answer; high/normal/low does. Widening the
+//     band later is a change to these constants and nothing else: the field
+//     is an integer on the wire precisely so that adding levels does not
+//     change the shape of anything.
+//
+// What it deliberately does NOT give: an arbitrary permutation of the
+// queue. Within one level the order stays strictly FIFO, so three torrents
+// all set high run in the order they arrived. Any one of them can still be
+// made to go next - raise it, or lower the others - which is what the
+// acceptance criterion asks for; producing every permutation by hand is the
+// drag interaction this table cannot host.
+type Priority int
+
+const (
+	// PriorityLow is "when there is nothing better to do": behind every
+	// normal torrent, however much later they arrive.
+	PriorityLow Priority = -1
+	// PriorityNormal is what every run starts at, and the zero value on
+	// purpose - a registry where nobody has touched a priority is a queue
+	// ordered by arrival alone, byte for byte the behaviour before TOR-140.
+	PriorityNormal Priority = 0
+	// PriorityHigh is "this one next".
+	PriorityHigh Priority = 1
+)
+
+// valid reports whether p is one of the levels this release has. Out of band
+// is refused rather than clamped: a client sending 9 has misunderstood the
+// scale, and silently storing 1 for it would hide that until the day the
+// band widens and 9 starts meaning something else.
+func (p Priority) valid() bool {
+	return p >= PriorityLow && p <= PriorityHigh
+}
+
+// String names the level for a message a person reads.
+func (p Priority) String() string {
+	switch {
+	case p > PriorityNormal:
+		return "high"
+	case p < PriorityNormal:
+		return "low"
+	default:
+		return "normal"
+	}
+}
+
 // RunInfo is a snapshot of one registry entry, safe to read outside the lock.
 type RunInfo struct {
 	ID     string
@@ -115,6 +199,21 @@ type RunInfo struct {
 	// get one. Nil for a queued or needs-action entry, which has no client
 	// yet, and for a running entry before its first heartbeat.
 	Live *Live
+
+	// Priority is the level this entry is queued at (TOR-140). Always a
+	// real value - PriorityNormal is the zero value and the default - but
+	// it only DECIDES anything while State.queueable() holds; a caller
+	// deciding whether to show or offer it should ask that, not this.
+	Priority Priority
+	// QueuePosition is this entry's 1-based place in the waiting list, in
+	// the order dispatch will actually take them: priority first, arrival
+	// order within a level. Zero means this run is not waiting for a slot
+	// at all - running, parked for a file selection, finished, replaying -
+	// and is the reason it is not a pointer: "not in the queue" is a
+	// position no entry can hold, so zero cannot be mistaken for one, and
+	// listing.go omits the field entirely rather than reporting it (the
+	// same absent-is-not-zero rule Live follows).
+	QueuePosition int
 }
 
 // runEntry is one run in the registry: what it is, where it got to, and the
@@ -163,9 +262,23 @@ type runEntry struct {
 	// from contents != nil on purpose: it is the question dispatch asks, and
 	// asking it by the presence of a field would tie the two together for no
 	// reason.
-	listed    bool
-	infoHash  string
-	err       error
+	listed   bool
+	infoHash string
+	err      error
+	// priority is the level this entry waits at (TOR-140), and queueSeq is
+	// its tiebreak within that level: a counter the server hands out every
+	// time this entry ENTERS the waiting list, never at creation.
+	//
+	// The counter rather than queuedAt, and that distinction is load-bearing
+	// rather than a micro-optimisation. A torrent that parked for a file
+	// selection and was then decided re-enters the queue behind everything
+	// waiting - that is what DecideRun has always done, by appending - but
+	// its queuedAt is from when it was first accepted, minutes or hours
+	// earlier. Ordering by queuedAt would silently promote every decided
+	// torrent to the front of its level; ordering by the moment it actually
+	// joined the queue reproduces today's behaviour exactly.
+	priority  Priority
+	queueSeq  uint64
 	queuedAt  time.Time
 	startedAt time.Time
 	endedAt   time.Time
@@ -176,12 +289,19 @@ type runEntry struct {
 }
 
 // info snapshots the entry. The caller must hold the server's lock.
-func (e *runEntry) info() RunInfo {
+//
+// queuePosition is passed in rather than read off the entry because it is
+// not a property of the entry at all - it is where this entry sits in the
+// server's waiting list, which only the server can answer
+// (Server.queuePositionLocked). Server.infoLocked is the one place the two
+// are joined, and every caller goes through it.
+func (e *runEntry) info(queuePosition int) RunInfo {
 	out := RunInfo{
 		ID: e.id, State: e.state, Source: e.source, InfoHash: e.infoHash,
 		Name:     e.name,
 		QueuedAt: e.queuedAt, StartedAt: e.startedAt, EndedAt: e.endedAt,
-		Live: e.live,
+		Live:     e.live,
+		Priority: e.priority, QueuePosition: queuePosition,
 	}
 	if e.err != nil {
 		out.Err = e.err.Error()

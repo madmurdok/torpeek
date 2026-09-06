@@ -89,6 +89,35 @@ type RunSummary struct {
 	// type's own doc for exactly which rows get one and why "having a
 	// client" is judged by more than State alone.
 	Live *Live `json:"live,omitempty"`
+
+	// Priority is the level this row waits at (runs.go's Priority, TOR-140),
+	// and QueuePosition its 1-based place in the queue as the server
+	// actually holds it.
+	//
+	// A POINTER for the level and a plain int for the position, and the
+	// difference is not an accident. PriorityNormal is zero and is a real
+	// answer, so omitempty on an int would erase exactly the commonest one -
+	// a client could not tell "normal" from "this row has no priority",
+	// which is the distinction that decides whether it draws a control at
+	// all. Zero is NOT a real position: the queue is 1-based and "not
+	// waiting" is the only thing zero can mean, so omitempty says it
+	// perfectly.
+	//
+	// Both are present for exactly the rows whose priority still decides
+	// something (RunState.queueable): queued, and parked waiting for a file
+	// selection - though a parked row holds no position while it waits, so
+	// it carries a level and no place. A running, finished or disk-only row
+	// carries neither. That is the same absent-is-not-zero line Live draws,
+	// for the same reason: a running torrent reported at "priority normal,
+	// position 0" would read as a standing in a queue it has already left.
+	//
+	// TOR-139's Queue column had to DERIVE this, ranking queued rows by
+	// their own reported queued time, because the queue was strict FIFO and
+	// no priority existed to report. Reporting it is what lets the derived
+	// version be deleted rather than kept alongside - the two would disagree
+	// the first time anybody reordered anything.
+	Priority      *int `json:"priority,omitempty"`
+	QueuePosition int  `json:"queue_position,omitempty"`
 }
 
 // Live is one row's most recent live reading: peers, seeds, both speeds and
@@ -264,6 +293,14 @@ func (s *Server) listRuns() []RunSummary {
 			// run's own record. A merged row's Live is still the run's own
 			// live reading, exactly as before the merge.
 			Live: info.Live,
+		}
+		// TOR-140: the queue's own two fields, on exactly the rows the queue
+		// still has something to say about - see RunSummary.Priority for why
+		// one of them is a pointer and the other is not.
+		if info.State.queueable() {
+			level := int(info.Priority)
+			row.Priority = &level
+			row.QueuePosition = info.QueuePosition
 		}
 		if info.State.final() && info.InfoHash != "" {
 			if idxs := byHash[info.InfoHash]; len(idxs) == 1 {
