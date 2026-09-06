@@ -134,19 +134,19 @@ type Session struct {
 	// left its piece-completion database open for the life of the process,
 	// and a client that failed to start leaked one outright.
 	//
-	// This is also the whole of TOR-59's "couldn't open piece completion db:
-	// timeout". That db is bbolt, held under an exclusive flock with a
+	// This was also the whole of TOR-59's "couldn't open piece completion db:
+	// timeout". That db was bbolt, held under an exclusive flock with a
 	// one-second timeout, and a leaked storage held it for the life of the
 	// process - so the second client of a public-magnet restart, and the
 	// second run over one data dir, timed out on the lock and silently fell
-	// back to in-memory bookkeeping. completion_test.go pins both shapes, and
-	// they separate the arms cleanly: with this Close removed every run warns
-	// and the db stays held; with it, none of 126 runs did, 120 of them at
-	// load averages between 84 and 265. It looked unexplained only because
-	// bbolt is the default piece completion solely when cgo is off - the
-	// shipped build - while a bare `go test` has cgo on and gets sqlite,
-	// which shares the file and never warns. Build with CGO_ENABLED=0 (make
-	// check) to see any of it.
+	// back to in-memory bookkeeping.
+	//
+	// As of TOR-155 there is no flock to leak: pieceStorage hands the client
+	// an in-memory piece completion on purpose, for reasons measured and
+	// written down there. So closing the storage is no longer what stands
+	// between a run and that warning - it is now just the ordinary courtesy
+	// of closing what we opened, which is reason enough on its own and would
+	// have to be done again the day persistence is worth having.
 	store storage.ClientImplCloser
 	// lease is this session's claim on a port out of Config.Ports, held for
 	// the client's whole life and handed back by Close. Nil when the caller
@@ -324,6 +324,95 @@ func (s *Session) UsesDHT() bool {
 // anacrolix's own tests keep a DHT-enabled client offline.
 var tuneClientForTest func(*torrent.ClientConfig)
 
+// pieceStorage builds the storage every client here is handed: one directory
+// per torrent under dataDir, and piece completion kept in memory on purpose.
+//
+// # Why completion is in memory, and why that is a decision rather than a fallback
+//
+// It used to be persistent by accident. storage.NewFileByInfoHash builds its
+// own piece completion by way of the package-private pieceCompletionForDir,
+// which opens a bbolt database at <dataDir>/.torrent.bolt.db under an
+// exclusive flock with a one-second timeout - one database per data
+// DIRECTORY, not per client and not per torrent. One client at a time made
+// that invisible. A pool that keeps a long-lived shared client and starts
+// others beside it (a private torrent's own client, a magnet's tracker probe,
+// a blind magnet - see Pool) made every client after the first wait out that
+// second, fail, and fall back to storage.NewMapPieceCompletion with a WARN on
+// the process-wide slog default. Nothing in torpeek configures an slog
+// handler and the per-client filter above is anacrolix/log, not slog, so that
+// warning reached a terminal's stderr and nowhere else (TOR-155).
+//
+// What the fallback actually cost was then measured rather than argued, and it
+// turned out to be two quite different things:
+//
+//   - The completion itself: nothing. A second run over a data dir whose
+//     pieces were still on disk downloaded 0 bytes and read back the right
+//     bytes both with the persistent database and with it held away by
+//     another opener. What recovers those pieces is anacrolix's initial hash
+//     check (Torrent.queueInitialPieceCheck, entered for any piece whose
+//     completion is unknown), not the database - and it cannot be the
+//     database, because part files are on by default, so
+//     fileTorrentImpl.setCompletionFromPartFiles runs at every OpenTorrent
+//     and demotes every stored "complete" to unknown for any file not present
+//     at its full length. torpeek only ever holds slivers of a file, so that
+//     is every file of every torrent, every time. On top of which a run
+//     discards its own pieces the moment it ends (REQUIREMENTS.md 2.9;
+//     DiscardPieces, Attachment.Detach), so there is nothing left on disk for
+//     a stored "complete" to describe. 2.9's "a re-run does not go to the
+//     network" is kept by the OUTPUT tree - manifests and frames - and never
+//     by the piece cache.
+//
+//   - The wait: a whole second per degraded client start. Measured with the
+//     database held by another opener, three reps each: newSession took
+//     963ms, 962ms and 958ms, against 24ms, 1ms and 0s with it free. That is
+//     bbolt's own flock timeout, and it is the part a person actually felt -
+//     the three warnings seen in one UI session were three seconds added to
+//     attaching a torrent.
+//
+// So the persistent database bought this workload nothing and charged a second
+// for the privilege of being contended. Passing the completion in explicitly
+// is what makes it ours: there is no lock left to lose, no fallback left to
+// take, and nothing left for the library to warn about. It is also where
+// anacrolix itself has gone - NewFileOpts defaults to NewMapPieceCompletion
+// when part files are on, and NewFileByInfoHash reaches its bbolt database
+// through NewFileWithCustomPathMaker, which upstream marks Deprecated.
+//
+// # What would make persistence worth having again
+//
+// A run that keeps its pieces. If 2.9 ever stops discarding them - a real
+// seeding mode, or a resume that reads the piece cache instead of the output
+// tree - then completion across runs starts to mean something and this has to
+// be decided again. The constraint to design against then is the one that
+// caused all of this: the database is per data DIRECTORY, so several live
+// clients over one data dir cannot each have their own.
+//
+// # The layout, which DiscardPieces depends on
+//
+// infoHashDir is a copy of anacrolix's own unexported infoHashPathMaker
+// (storage/file-paths.go), because NewFileOpts is the only constructor that
+// takes a piece completion and the path maker that used to come with it is
+// not exported. Every other field is left exactly as NewFileByInfoHash left
+// it - default FilePathMaker, part files on, default logger - so the only
+// thing that changed is the completion. What must not drift is the directory
+// shape: DiscardPieces removes <dataDir>/<infohash>/ by name, and its whole
+// safety argument is that the subtree belongs to one torrent. The test helper
+// requireOneDirectoryPerTorrent pins it, and every test below that runs a
+// client over a data dir calls it.
+func pieceStorage(dataDir string) storage.ClientImplCloser {
+	return storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir:   dataDir,
+		TorrentDirMaker: infoHashDir,
+		PieceCompletion: storage.NewMapPieceCompletion(),
+	})
+}
+
+// infoHashDir namespaces one torrent's pieces under the data directory. It is
+// what storage.NewFileByInfoHash produced, path for path; see pieceStorage for
+// why torpeek spells it out itself now.
+func infoHashDir(baseDir string, _ *metainfo.Info, infoHash metainfo.Hash) string {
+	return filepath.Join(baseDir, infoHash.HexString())
+}
+
 func newSession(cfg Config, dht bool) (*Session, error) {
 	tc := torrent.NewDefaultClientConfig()
 	// The library logs read failures to stderr, including the ones we cause
@@ -331,7 +420,7 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// stays silent and its clients decide what a person sees, so nothing below
 	// Critical is allowed through.
 	tc.Logger = alog.Default.FilterLevel(alog.Critical)
-	store := storage.NewFileByInfoHash(cfg.DataDir)
+	store := pieceStorage(cfg.DataDir)
 	tc.DefaultStorage = store
 	tc.NoUpload = !cfg.Upload
 	tc.NoDHT = !dht
@@ -392,10 +481,11 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
 		// The storage was opened before the client and nothing else will
-		// close it now. Left behind, its flock on .torrent.bolt.db outlives
-		// the failure for the life of the process, so the next attempt -
-		// after a pinned port frees up, say - would be the one that silently
-		// falls back to in-memory bookkeeping.
+		// close it now. It no longer holds a lock anyone else waits on
+		// (pieceStorage), so this is no longer the difference between a
+		// working next attempt and a degraded one - but it is still the only
+		// thing that releases what this call allocated, and a client that
+		// failed to start should leave nothing behind.
 		store.Close()
 		return nil, fmt.Errorf("start torrent session: %w", err)
 	}
@@ -725,10 +815,11 @@ func portBusy(network, addr string) bool {
 // the data directory itself (REQUIREMENTS.md 2.9: raw pieces are staging
 // data, not a result worth keeping).
 //
-// storage.NewFileByInfoHash, which newSession always configures as the
-// client's storage, namespaces every torrent under <DataDir>/<infohash>/ -
-// see anacrolix's storage/file-paths.go infoHashPathMaker. That is exactly
-// what makes dropping one run's own subtree safe: it cannot reach a sibling
+// pieceStorage, which newSession always configures as the client's storage,
+// namespaces every torrent under <DataDir>/<infohash>/ - see infoHashDir,
+// which is anacrolix's own storage/file-paths.go infoHashPathMaker spelled
+// out here. That is exactly what makes dropping one run's own subtree safe:
+// it is one torrent's directory, so the removal cannot reach a sibling
 // torrent's pieces, and a directory the caller named with -data keeps
 // existing, only lighter.
 //

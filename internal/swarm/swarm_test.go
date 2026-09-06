@@ -1,6 +1,7 @@
 package swarm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -984,4 +985,170 @@ func TestWebseedsAreDisabled(t *testing.T) {
 			"panic the whole process on anacrolix's webseed timer, taking every other " +
 			"fetching torrent and the queue with it")
 	}
+}
+
+// requireOneDirectoryPerTorrent asserts that the data dir holds exactly one
+// entry per torrent, each a directory named by that torrent's infohash, and
+// nothing else at all.
+//
+// It pins two separate things at once, which is why it is worth a helper.
+//
+// The first is the layout DiscardPieces removes by name. torpeek supplies its
+// own TorrentDirMaker now (session.go's infoHashDir), because NewFileOpts is
+// the only anacrolix constructor that takes a piece completion and the
+// infohash path maker that used to come with NewFileByInfoHash is not
+// exported. Owning that function means owning the risk of it drifting, and
+// DiscardPieces' safety argument - the subtree belongs to one torrent -
+// drifts with it.
+//
+// The second is TOR-155 itself, and this is the half that can fail in every
+// build. A client that opens a PERSISTENT piece completion leaves its
+// database in the top level of the data dir: `.torrent.bolt.db` for bbolt
+// (CGO_ENABLED=0, the shipped build) and `.torrent.db` for sqlite (cgo on,
+// a bare `go test`). Neither is an infohash, so either one fails this. That
+// matters because the actual TOR-155 symptom - the WARN and the second's
+// wait on the flock - only ever appears in the bbolt build, and a test that
+// could only fail there would be silently vacuous in the build most people
+// run.
+func requireOneDirectoryPerTorrent(t *testing.T, dataDir string, infoHashes ...string) {
+	t.Helper()
+
+	entries, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatalf("read the data dir: %v", err)
+	}
+
+	want := make(map[string]bool, len(infoHashes))
+	for _, h := range infoHashes {
+		want[h] = true
+	}
+
+	got := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			t.Errorf("the data dir holds %q, which is not a torrent's directory; "+
+				"a piece completion database here means a client opened the persistent "+
+				"one (see pieceStorage)", e.Name())
+			continue
+		}
+		if !want[e.Name()] {
+			t.Errorf("the data dir holds a directory %q that is not any of these torrents' infohashes %v; "+
+				"DiscardPieces removes <DataDir>/<infohash>/ by name and needs that shape exactly",
+				e.Name(), infoHashes)
+		}
+		got[e.Name()] = true
+	}
+	for _, h := range infoHashes {
+		if !got[h] {
+			t.Errorf("the data dir has no directory for torrent %s", h)
+		}
+	}
+}
+
+// completionWarningsFor is the piece-completion warnings naming one data dir,
+// and it is scoped to that dir for a reason worth reading before trusting
+// either test that calls it.
+//
+// torrenttest's seeder leaves ClientConfig.DefaultStorage nil, so anacrolix
+// builds it a storage.NewFile(cfg.DataDir) - persistent piece completion and
+// all - and StartSeeder points a seeder at the PARENT of its fixture
+// directory, which for two fixtures built in one test is the same t.TempDir()
+// root. So any test running two seeders already warns once, from the second
+// seeder, over the scaffolding's own directory. Measured: two StartSeeder
+// calls and no torpeek client at all produce exactly one
+// "couldn't open piece completion db dir=<test temp root> err=timeout".
+//
+// An unfiltered check would report that as torpeek's, and worse, would report
+// it whether torpeek's own clients were fine or not. Scoping to the data dir
+// under test is what makes a warning here mean what the test says it means.
+// (The seeder's own second-long stall is real but is test scaffolding's cost,
+// not the product's.)
+func completionWarningsFor(logs *slogCapture, dataDir string) []string {
+	var out []string
+	for _, m := range logs.matching(pieceCompletionWarning) {
+		if strings.Contains(m, " dir="+dataDir+" ") || strings.HasSuffix(m, " dir="+dataDir) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// TestTwoSessionsAliveAtOnceOverOneDataDir is TOR-155 at the level the
+// problem lives at: not two runs one after the other (completion_test.go's
+// TestSessionsOverOneDataDirKeepPersistentPieceCompletion has that shape),
+// but two clients up at the same time, both pointed at one data dir. Since
+// TOR-128 that is the ordinary case rather than an edge one - a pool holds a
+// long-lived shared client and starts more beside it.
+//
+// It is deliberately below the pool, on Open, because every client torpeek
+// ever starts is built by newSession and any direct caller of Open has the
+// same exposure. TestPoolClientsAliveAtOnceKeepTheirPieceCompletion covers
+// the production topology on top of this.
+//
+// What it would catch, and did: with the storage built by
+// storage.NewFileByInfoHash the second session's bbolt open waits out its
+// one-second flock timeout, warns on the process-wide slog default, and
+// silently degrades. Both halves are checked - the warning, and the database
+// file the open leaves behind - because only the second can fail in a cgo
+// build, where sqlite shares the file and never warns.
+func TestTwoSessionsAliveAtOnceOverOneDataDir(t *testing.T) {
+	logs := captureSlog(t)
+
+	first := torrenttest.Build(t, "first.mkv", poolPayloadSize, poolPieceLength)
+	second := torrenttest.Build(t, "second.mkv", poolPayloadSize, poolPieceLength)
+
+	dataDir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	const readLength = 64 << 10
+
+	open := func(f torrenttest.Fixture) (*Session, *Torrent) {
+		t.Helper()
+
+		src, err := ParseSource(f.TorrentPath)
+		if err != nil {
+			t.Fatalf("parse source: %v", err)
+		}
+		cfg := DefaultConfig(dataDir)
+		cfg.DHT = false
+		cfg.MetadataTimeout = 20 * time.Second
+		cfg.Peers = []string{f.StartSeeder(t)}
+
+		s, tor, err := Open(ctx, cfg, src)
+		if err != nil {
+			t.Fatalf("open %s: %v", f.FileName, err)
+		}
+		return s, tor
+	}
+
+	// Both up at the same time, and both stay up: the second is opened
+	// before the first is closed, which is the whole point.
+	firstSession, firstTorrent := open(first)
+	defer firstSession.Close()
+	secondSession, secondTorrent := open(second)
+	defer secondSession.Close()
+
+	for _, c := range []struct {
+		name    string
+		torrent *Torrent
+		want    []byte
+	}{
+		{first.FileName, firstTorrent, first.Payload[:readLength]},
+		{second.FileName, secondTorrent, second.Payload[:readLength]},
+	} {
+		got, err := c.torrent.ReadRange(ctx, 0, 0, readLength, MinTraffic)
+		if err != nil {
+			t.Fatalf("read %s while both clients are up: %v", c.name, err)
+		}
+		if !bytes.Equal(got, c.want) {
+			t.Errorf("%s read back %d wrong bytes while both clients are up", c.name, len(got))
+		}
+	}
+
+	if got := completionWarningsFor(logs, dataDir); len(got) != 0 {
+		t.Errorf("two clients over one data dir produced %d piece completion warning(s): %q",
+			len(got), got)
+	}
+	requireOneDirectoryPerTorrent(t, dataDir, firstTorrent.InfoHash(), secondTorrent.InfoHash())
 }
