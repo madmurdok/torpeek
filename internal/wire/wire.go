@@ -144,6 +144,27 @@ func event(ev core.Event) map[string]any {
 				"pieces":           e.Swarm.NumPieces,
 			}
 		}
+		// stall is TOR-141's own reading: which of the distinct "nothing
+		// is landing" causes explains THIS file right now, and how long
+		// - continuously, not merely "as of ever" - it has been true
+		// (core.Progress.Stall's own doc has the rule that keeps the
+		// duration honest across a changing cause). Absent under the
+		// same "absent, not zero" discipline every other optional key on
+		// this event already follows: it means the run IS progressing at
+		// this heartbeat, never that nothing is known.
+		//
+		// code is one of core's own ErrorCode strings (CodeNoPeers,
+		// CodeUnavailable, CodeNoMetadata, CodeReadStalled) - the same
+		// vocabulary "code" already carries on frame_skipped and failed,
+		// so a client that already reads those needs no second lookup
+		// table for this one. since_ms, not a bare "since", to match
+		// every other duration this vocabulary carries (elapsed_ms,
+		// requested_ms, duration_ms).
+		if e.Stall != nil {
+			m["stall"] = map[string]any{
+				"code": string(e.Stall.Code), "since_ms": e.Stall.Since.Milliseconds(),
+			}
+		}
 		return m
 	case core.BudgetWarning:
 		// scope says whether spent/limit are this run's or the whole

@@ -146,6 +146,152 @@ type Progress struct {
 	// has no client to read from, which already reports unknown for free by
 	// never setting this field.
 	Swarm *SwarmAvailability
+
+	// Stall is which of the distinct "nothing is landing" causes currently
+	// explains it, and how long it has continuously been true (TOR-141) -
+	// the answer to the user's own complaint, in their own words: "если
+	// возникнет ситуация что сидов нету - то мы никак не показываем и
+	// пользователь может ждать годами". Concurrency does not fix this on its
+	// own (several torrents at once only stops a stalled one blocking the
+	// others; a torrent with no seeds still has no seeds), and neither does
+	// a bigger buffer of Peers/Seeds/Swarm above - those already say WHAT
+	// the swarm looks like right now, but not whether "right now" has been
+	// true for two seconds (normal) or four minutes (the answer).
+	//
+	// Nil means the run IS progressing at this heartbeat - not "unknown",
+	// the one field on this event where that distinction does not apply,
+	// because a heartbeat is never published without something to report:
+	// see this heartbeat's own two sources (engine.go's stall-classifying
+	// helpers and startFileHeartbeat) for exactly when each is nil.
+	//
+	// It rides on THIS heartbeat's own File the same way Peers/Seeds/Swarm
+	// do, which is deliberately not "run-wide" the way DownloadRate/
+	// UploadRate are documented to be: two files worked on in parallel can
+	// be stalled for two different reasons at once (one file's pieces
+	// unavailable while another's read is timing out), and folding both
+	// into one run-wide verdict would report whichever happened to be
+	// observed last as if it were the whole run's condition.
+	Stall *Stall
+}
+
+// Stall is one heartbeat's stall verdict: which ErrorCode currently explains
+// no progress, and how long - continuously, not merely "as of ever" - that
+// has been true. It deliberately reuses ErrorCode rather than a parallel
+// vocabulary: CodeNoPeers, CodeUnavailable, CodeNoMetadata and CodeReadStalled
+// already have their own doc comments (errors.go) explaining why each is
+// distinct, and a client that already reads those needs nothing new to read
+// this.
+type Stall struct {
+	Code  ErrorCode
+	Since time.Duration
+}
+
+// stallClock is one run's own account of how long the SAME cause has
+// continuously explained no progress - not a raw stopwatch, because the
+// duration this ticket calls "the load-bearing part" has to reset the
+// instant something better happens (a frame lands) or the cause itself
+// changes (peers arrive mid-read, turning a no_peers wait into an
+// unavailable one), and must not restart merely because a fresh heartbeat
+// repeats the same finding: a duration that quietly restarts on every
+// heartbeat would look like a fresh problem forever, which is precisely the
+// bug this exists to avoid.
+//
+// Zero value is a clock that has never seen a cause, matching a run that has
+// never stalled - the same zero-value-is-usable shape rateSample already
+// uses, for the same reason (no explicit constructor needed at every call
+// site).
+type stallClock struct {
+	code    ErrorCode
+	startAt time.Time
+}
+
+// observe folds in a DEFINITIVE verdict at moment now: code == "" is
+// evidence that something just went right (a frame landed, a point failed
+// for a reason that says data DID flow), which clears the clock outright;
+// any other code is evidence that THIS cause is true right now, which starts
+// the clock the moment it is first seen and lets it keep running while the
+// same code keeps being reported, but restarts it - a fresh start, a fresh
+// duration - the moment a DIFFERENT code takes its place. Two different
+// answers to "why", one after another, are not one four-minute wait; they
+// are two shorter ones.
+func (c *stallClock) observe(now time.Time, code ErrorCode) *Stall {
+	if code == "" {
+		c.code = ""
+		return nil
+	}
+	if code != c.code || c.startAt.IsZero() {
+		c.code = code
+		c.startAt = now
+	}
+	return &Stall{Code: c.code, Since: now.Sub(c.startAt)}
+}
+
+// peek reports the clock's current reading without new evidence of its own -
+// what a heartbeat that has nothing definitive to add (engine.go's
+// startFileHeartbeat, ticking while a single slow read is still in flight and
+// has not yet timed out to say why) can still honestly say: whatever cause is
+// already running keeps the start time observe gave it, so a tick that finds
+// nothing new does not fabricate progress by staying silent about the clock,
+// and does not restart a clock it did not itself witness starting.
+func (c *stallClock) peek(now time.Time) *Stall {
+	if c.code == "" {
+		return nil
+	}
+	return &Stall{Code: c.code, Since: now.Sub(c.startAt)}
+}
+
+// classifyPointFailure turns one capture point's own failure code into the
+// stall verdict a heartbeat reports, folding in the one fact the point-level
+// code cannot see for itself: whether ANY peer is connected at all.
+//
+// CodeUnavailable's own doc is specific - "the pieces needed are not held by
+// any connected peer" - which presumes there IS a connected peer to ask; when
+// peers is zero that presumption is false, and reporting CodeUnavailable
+// would say a swarm was consulted when there was nobody there to consult.
+// The same correction applies to CodeReadStalled: a read that timed out with
+// zero peers connected timed out for the most basic possible reason, and
+// CodeNoPeers - declared in errors.go but, before this, never actually
+// assigned to anything - says that plainly instead of blaming the bridge for
+// a wait nothing was ever going to fill.
+//
+// Every other outcome returns "": CodeSeekFailed and a successful frame both
+// mean data arrived and was read - the run IS making progress, just not
+// always landing where asked - so neither belongs in a stall summary, and the
+// caller's own clock treats an empty return as "clear it, this point was not
+// a case of nothing happening".
+func classifyPointFailure(code ErrorCode, peers int) ErrorCode {
+	if code != CodeUnavailable && code != CodeReadStalled {
+		return ""
+	}
+	if peers == 0 {
+		return CodeNoPeers
+	}
+	return code
+}
+
+// classifyLiveStall is the same question asked BETWEEN point attempts, from
+// torrent-level facts alone - no attempt has failed yet to ask about, because
+// one may still be in flight (engine.go's startFileHeartbeat exists exactly
+// for that window). Both signals are trusted only when they are KNOWN, per
+// swarm.Availability's own "a connected peer is not yet a peer that has said
+// what it holds" rule (newSwarmAvailability's own doc): an availability
+// reading that has not arrived yet says nothing, and reporting CodeUnavailable
+// from it would be exactly the "absent read as zero" mistake this project has
+// now avoided six times running (TOR-119, TOR-111, TOR-135, TOR-134, wire.go's
+// progress event, listing.go's Live).
+//
+// Returning "" here is not "not stalled" - it is "nothing definitive to add
+// this tick" - which is why the caller peeks the clock rather than clearing
+// it on this alone; only classifyPointFailure's "" (an attempt that actually
+// succeeded or read data) is entitled to clear it.
+func classifyLiveStall(peers int, swarm *SwarmAvailability) ErrorCode {
+	if peers == 0 {
+		return CodeNoPeers
+	}
+	if swarm != nil && swarm.NumPieces > 0 && swarm.Unavailable >= swarm.NumPieces {
+		return CodeUnavailable
+	}
+	return ""
 }
 
 // SwarmAvailability is a live copies-per-piece reading, built from

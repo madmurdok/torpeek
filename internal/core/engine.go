@@ -539,6 +539,96 @@ func (s *runSpeed) sample(downloadedByte, uploadedByte int64, elapsed time.Durat
 	return s.down.next(downloadedByte, elapsed), s.up.next(uploadedByte, elapsed)
 }
 
+// fileStallClock pairs a stallClock (events.go) with the mutex its two
+// callers both need: this file's own capture loop, which has definitive
+// evidence every time a point finishes, and this file's own heartbeat
+// ticker (startFileHeartbeat), which has none while a single point is still
+// in flight and only peeks the clock meanwhile. One instance per FILE, not
+// per run - Progress.Stall's own doc explains why a shared, run-wide clock
+// would be wrong here even though Peers/Seeds/DownloadRate are run-wide:
+// two files worked on in parallel (cfg.Parallelism) can be stalled for two
+// different reasons at once, and a single clock would report whichever was
+// observed most recently as if it explained both.
+type fileStallClock struct {
+	mu    sync.Mutex
+	clock stallClock
+}
+
+func (f *fileStallClock) observe(now time.Time, code ErrorCode) *Stall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.clock.observe(now, code)
+}
+
+func (f *fileStallClock) peek(now time.Time) *Stall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.clock.peek(now)
+}
+
+// stallHeartbeatInterval is how often startFileHeartbeat reports peers,
+// seeds, the swarm's own availability reading and the current stall verdict
+// while a file is being worked on - independent of whether any capture
+// point has succeeded, failed, or even finished being attempted yet.
+//
+// Five seconds, chosen against the thing it has to beat: bridge.RequestTimeout
+// defaults to sixty seconds, and BOTH probe.Inspect (before FileStarted even
+// fires) and a single capture point's KeyframeAt/Frame read can block for the
+// whole of it without producing any other event - a torrent nobody seeds
+// fails every such read that way, so without this heartbeat a row goes
+// silent for up to a minute at a time, repeatedly, which is this ticket's own
+// complaint restated. Five seconds is frequent enough that "no peers" or "no
+// seeds" is recognisable well inside one metadata timeout (sixty seconds,
+// the OLD worst case this replaces) and infrequent enough not to flood the
+// bus with a heartbeat nobody asked to see that often.
+const stallHeartbeatInterval = 5 * time.Second
+
+// startFileHeartbeat runs a ticker for as long as done is open, publishing a
+// Progress reading of this file's current peers/seeds/availability/rates and
+// stall verdict on every tick. FramesDone and FramesTotal are left at zero,
+// which a client must read as "this heartbeat has nothing to say about the
+// capture plan" rather than as a real 0-of-0 (frames.Plan.Validate rejects
+// an empty plan, so a real per-point heartbeat never reports that) - see
+// wire.go's progress rendering and app.js's own handling of frames_total.
+//
+// Reads only local, already-computed state (torrent.Peers/Availability,
+// the shared rate tracker, the budget tracker's own counters) - never a new
+// network request - so it costs nothing to run alongside a slow read rather
+// than instead of one, which is the whole point: it keeps reporting while
+// something else is still blocked.
+func (e *Engine) startFileHeartbeat(deps fileDeps, file int, stall *fileStallClock, done <-chan struct{}) {
+	ticker := time.NewTicker(stallHeartbeatInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-ticker.C:
+				connected, seeds := deps.torrent.Peers()
+				swarm := newSwarmAvailability(deps.torrent.Availability())
+				spent, elapsed := deps.tracker.Spent()
+				uploaded := deps.torrent.Uploaded()
+				downloadRate, uploadRate := deps.speed.sample(spent, uploaded, elapsed)
+
+				var reading *Stall
+				if code := classifyLiveStall(connected, swarm); code != "" {
+					reading = stall.observe(now, code)
+				} else {
+					reading = stall.peek(now)
+				}
+
+				deps.bus.Publish(Progress{
+					File: file, DownloadedByte: spent, UploadedByte: uploaded,
+					Elapsed: elapsed, Peers: connected, Seeds: seeds,
+					DownloadRate: downloadRate, UploadRate: uploadRate,
+					Swarm: swarm, Stall: reading,
+				})
+			}
+		}
+	}()
+}
+
 // fileDeps groups what processing one file needs, so the signature does not
 // grow a parameter per collaborator.
 type fileDeps struct {
@@ -580,6 +670,23 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		return 0, false, err
 	}
 	defer withdraw()
+
+	// TOR-141: a heartbeat for the whole of this file's own processing, not
+	// gated on anything below succeeding - see startFileHeartbeat's own doc
+	// for why that has to run concurrently with, rather than only between,
+	// the blocking calls beneath it (Inspect included: a torrent nobody
+	// seeds can stall THAT before FileStarted has even fired). Stopped by
+	// closing done, deferred immediately so it cannot outlive this file's
+	// own torrent/bridge, which stay open only until this function returns.
+	//
+	// Named fileStall rather than stall: this function already shadows that
+	// name locally, below, for stallSince's own per-attempt bridge reading -
+	// a different, narrower question (did THIS ONE read time out) than the
+	// clock's own (how long has the SAME cause been true).
+	fileStall := &fileStallClock{}
+	heartbeatDone := make(chan struct{})
+	e.startFileHeartbeat(deps, file.Index, fileStall, heartbeatDone)
+	defer close(heartbeatDone)
 
 	stalls, _ := deps.bridge.Stalls(url)
 	info, err := deps.prober.Inspect(ctx, url)
@@ -694,18 +801,42 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 					at.Round(time.Second), stall, err)
 			}
 			skipped++
+			pointCode := CodeOf(err)
 			records = append(records, manifest.Frame{
 				Index:       i,
 				RequestedMS: at.Milliseconds(),
 				Shift:       manifest.ShiftFailed,
-				Error:       string(CodeOf(err)),
+				Error:       string(pointCode),
 			})
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
 				Index:     i,
 				Requested: at,
-				Code:      CodeOf(err),
+				Code:      pointCode,
 				Reason:    err.Error(),
+			})
+			// TOR-141: this point's own failure, reclassified against whether
+			// ANY peer is connected (classifyPointFailure's own doc) and
+			// folded into this file's stall clock - the row's answer to
+			// "why, and for how long" for exactly the two causes a failed
+			// point can mean (CodeUnavailable/CodeReadStalled, or CodeNoPeers
+			// when neither presumption those two make actually holds).
+			// FrameSkipped.Code above is untouched: TOR-45's own acceptance
+			// (stall_test.go) is about that field staying CodeReadStalled,
+			// and this is a second, additive reading alongside it, not a
+			// replacement.
+			now := time.Now()
+			connected, seeds := deps.torrent.Peers()
+			swarmNow := newSwarmAvailability(deps.torrent.Availability())
+			spentNow, elapsedNow := deps.tracker.Spent()
+			uploadedNow := deps.torrent.Uploaded()
+			downloadRate, uploadRate := deps.speed.sample(spentNow, uploadedNow, elapsedNow)
+			deps.bus.Publish(Progress{
+				File: file.Index, FramesDone: produced, FramesTotal: len(points),
+				DownloadedByte: spentNow, UploadedByte: uploadedNow, Elapsed: elapsedNow,
+				Peers: connected, Seeds: seeds,
+				DownloadRate: downloadRate, UploadRate: uploadRate, Swarm: swarmNow,
+				Stall: fileStall.observe(now, classifyPointFailure(pointCode, connected)),
 			})
 			continue
 		}
@@ -737,6 +868,14 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 					shot.actual.Round(time.Second), (shot.asked - shot.actual).Abs().Round(time.Second),
 					shot.asked.Round(time.Second)),
 			})
+			// TOR-141: a seek landing wide of its mark still means a read
+			// went through and a container got decoded - the swarm is
+			// plainly not the problem here, so this clears the stall clock
+			// (classifyPointFailure's own "every other outcome" rule)
+			// rather than leaving a stale cause reading behind it. The next
+			// heartbeat (startFileHeartbeat, at most stallHeartbeatInterval
+			// away) carries the cleared reading to the row.
+			fileStall.observe(time.Now(), "")
 			continue
 		}
 
@@ -805,6 +944,11 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			// when the client has not learned it yet - which is a real state
 			// and not zero copies (newSwarmAvailability, Progress.Swarm).
 			Swarm: newSwarmAvailability(deps.torrent.Availability()),
+			// TOR-141: a frame just landed, which is the clearest possible
+			// evidence this file is NOT a case of nothing happening - so this
+			// clears the stall clock (classifyPointFailure's own "" rule)
+			// rather than leaving whatever an earlier failed point set.
+			Stall: fileStall.observe(time.Now(), ""),
 		})
 	}
 

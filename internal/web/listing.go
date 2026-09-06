@@ -158,6 +158,55 @@ type Live struct {
 	// core.Progress.Swarm's own doc, wire.go's identical "swarm" key on the
 	// progress event added by TOR-147).
 	Swarm *Availability `json:"swarm,omitempty"`
+
+	// Stall mirrors wire.go's "stall" object on the progress event
+	// (core.Progress.Stall, TOR-141) field for field: which of the distinct
+	// "nothing is landing" causes explains this row right now, and how long
+	// it has continuously been true. Nil means progressing, the same
+	// "absent, not zero" rule Swarm above already follows.
+	//
+	// NOT YET SET by this package's own live snapshot (runEntry.applyProgress,
+	// internal/web/runs.go) - that file was explicitly out of this task's
+	// scope (the same seam TOR-136 left for TOR-139/140 to close: see
+	// runEntry.applyProgress's own doc for that precedent). It needs exactly
+	// one more line there, mirroring the existing Swarm one:
+	//
+	//	Stall: renderStall(p.Stall),
+	//
+	// Until that lands, a row's Stall reading reaches a page only through
+	// the WebSocket progress event (app.js reads ev.stall directly, the same
+	// way it already reads ev.swarm before GET /runs ever taught Live about
+	// Availability) - which every live run keeps refreshing on its own clock
+	// regardless (engine.go's stallHeartbeatInterval), so a page that loaded
+	// before this field existed is never more than one heartbeat behind.
+	Stall *Stall `json:"stall,omitempty"`
+}
+
+// Stall mirrors wire.go's "stall" object on the progress event (TOR-141)
+// field for field, the same way Availability mirrors "swarm" - so a client
+// reads a stall reading the same way whichever endpoint it came from.
+type Stall struct {
+	// Code is one of core's own ErrorCode strings (CodeNoPeers,
+	// CodeUnavailable, CodeNoMetadata, CodeReadStalled) - the same
+	// vocabulary Err above already carries for a failed run, so a client
+	// reading this needs no second lookup table.
+	Code string `json:"code"`
+	// SinceMS is how long - continuously, not merely "as of ever" - this
+	// exact code has explained no progress. See core.Progress.Stall's own
+	// doc for the rule that keeps it from restarting on every heartbeat that
+	// merely repeats the same finding.
+	SinceMS int64 `json:"since_ms"`
+}
+
+// renderStall turns a core reading into the wire shape, or nil when the run
+// is progressing - core.Progress.Stall's own "absent, not zero" rule,
+// carried through rather than re-decided here, the same way
+// renderAvailability carries Progress.Swarm's identical rule.
+func renderStall(s *core.Stall) *Stall {
+	if s == nil {
+		return nil
+	}
+	return &Stall{Code: string(s.Code), SinceMS: s.Since.Milliseconds()}
 }
 
 // Availability mirrors wire.go's "swarm" object on the progress event
