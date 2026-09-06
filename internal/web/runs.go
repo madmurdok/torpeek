@@ -108,6 +108,13 @@ type RunInfo struct {
 	QueuedAt  time.Time
 	StartedAt time.Time
 	EndedAt   time.Time
+
+	// Live is this entry's most recent core.Progress reading, kept by
+	// runEntry.applyProgress as heartbeats stream past - see that method's
+	// own doc, and Live's own doc (listing.go) for exactly which entries
+	// get one. Nil for a queued or needs-action entry, which has no client
+	// yet, and for a running entry before its first heartbeat.
+	Live *Live
 }
 
 // runEntry is one run in the registry: what it is, where it got to, and the
@@ -162,6 +169,10 @@ type runEntry struct {
 	queuedAt  time.Time
 	startedAt time.Time
 	endedAt   time.Time
+	// live is this run's most recent core.Progress reading, kept up to date
+	// by applyProgress rather than anywhere else - see that method's own
+	// doc. Nil until the run's first heartbeat.
+	live *Live
 }
 
 // info snapshots the entry. The caller must hold the server's lock.
@@ -170,11 +181,47 @@ func (e *runEntry) info() RunInfo {
 		ID: e.id, State: e.state, Source: e.source, InfoHash: e.infoHash,
 		Name:     e.name,
 		QueuedAt: e.queuedAt, StartedAt: e.startedAt, EndedAt: e.endedAt,
+		Live: e.live,
 	}
 	if e.err != nil {
 		out.Err = e.err.Error()
 	}
 	return out
+}
+
+// applyProgress folds one core.Progress heartbeat into the entry's live
+// reading - peers, seeds, both rates and the availability reading. This is
+// the registry's own answer to "keep the latest reading as it streams past"
+// (TOR-136): the entry that already absorbs core.MetadataReady into
+// infoHash/name (pump's event switch, server.go) is where a Progress
+// reading belongs too, rather than a second place this state is kept.
+//
+// The caller must hold s.mu, the same rule every other entry mutation here
+// follows.
+//
+// A whole new *Live replaces the old one rather than being edited field by
+// field: info() hands its pointer to a reader running outside the lock, and
+// replacing the pointer wholesale - never mutating what it already points
+// to - is what keeps that snapshot honest even while a later heartbeat
+// moves the entry on to a newer reading.
+//
+// pump's event switch does not yet call this for a core.Progress event: the
+// one new case belongs in server.go, out of reach here (TOR-130 has that
+// file in flight for the queue widening, and touching it was explicitly out
+// of this task's scope). Everything downstream of the entry - info,
+// listRuns, the wire shape itself - is ready for it the moment that one case
+// is added:
+//
+//	case core.Progress:
+//	    s.mu.Lock()
+//	    entry.applyProgress(e)
+//	    s.mu.Unlock()
+func (e *runEntry) applyProgress(p core.Progress) {
+	e.live = &Live{
+		Peers: p.Peers, Seeds: p.Seeds,
+		DownloadBps: p.DownloadRate, UploadBps: p.UploadRate,
+		Swarm: renderAvailability(p.Swarm),
+	}
 }
 
 // newRunID names a run for as long as the process holds it.

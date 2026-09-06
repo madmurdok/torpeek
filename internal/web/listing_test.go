@@ -969,3 +969,191 @@ func TestLiveRunStateOmitsCountsWhenDiskRecordIsAmbiguous(t *testing.T) {
 		t.Errorf(`run_state carries "partial" = %#v for an ambiguous infohash, want it absent: %+v`, ev["partial"], ev)
 	}
 }
+
+// rawRuns is listRuns's counterpart for tests that need to see whether a key
+// is PRESENT, not merely what it decodes to once RunSummary has unmarshalled
+// it - a "live" key holding JSON null and a missing "live" key both decode
+// to a nil *Live, so only the raw map tells the two apart the way
+// TestListRunsWirePartialField's byHash already does for "partial".
+func rawRuns(t *testing.T, base string) []map[string]any {
+	t.Helper()
+
+	resp := get(t, base, "/runs")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /runs: status %d, want 200", resp.StatusCode)
+	}
+	var body struct {
+		Runs []map[string]any `json:"runs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode GET /runs as raw maps: %v", err)
+	}
+	return body.Runs
+}
+
+// byID is rawRuns's lookup, the raw-map counterpart of findByID.
+func byID(t *testing.T, rows []map[string]any, id string) map[string]any {
+	t.Helper()
+	for _, row := range rows {
+		if row["id"] == id {
+			return row
+		}
+	}
+	t.Fatalf("no row for id %s in %+v", id, rows)
+	return nil
+}
+
+// TestLiveRowCarriesLiveFigures is TOR-136's acceptance criterion for the
+// row that actually has a client: peers, seeds, both rates and availability
+// all reach GET /runs together once the registry has absorbed one
+// heartbeat.
+//
+// The heartbeat is folded into the registry directly via
+// entry.applyProgress rather than sent through fake.send: pump's event
+// switch (server.go) does not yet call applyProgress for a core.Progress
+// event - that one remaining case belongs to server.go, which this task was
+// scoped to leave untouched (TOR-130 has it in flight). This test is the
+// registry-and-listing half of TOR-136: it proves a reading, once folded
+// in, reaches GET /runs in the right shape - applyProgress's own doc
+// (runs.go) carries the one-case wiring pump still needs.
+func TestLiveRowCarriesLiveFigures(t *testing.T) {
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	run := startRun(t, ts.URL, "magnet:?xt=urn:btih:eeee000000000000000000000000000000000e")
+
+	dl, ul := 1234.5, 678.9
+	srv.mu.Lock()
+	entry, ok := srv.runs[run.id]
+	if !ok {
+		srv.mu.Unlock()
+		t.Fatalf("run %s is not in the registry", run.id)
+	}
+	entry.applyProgress(core.Progress{
+		Peers: 7, Seeds: 2,
+		DownloadRate: &dl, UploadRate: &ul,
+		Swarm: &core.SwarmAvailability{CopiesPerPiece: 2.4, Unavailable: 3, NumPieces: 100},
+	})
+	srv.mu.Unlock()
+
+	row := findByID(t, listRuns(t, ts.URL), run.id)
+	if row.Live == nil {
+		t.Fatalf("live row carries no live figures: %+v", row)
+	}
+	if row.Live.Peers != 7 || row.Live.Seeds != 2 {
+		t.Errorf("live.peers/seeds = %d/%d, want 7/2", row.Live.Peers, row.Live.Seeds)
+	}
+	if row.Live.DownloadBps == nil || *row.Live.DownloadBps != dl {
+		t.Errorf("live.download_bps = %v, want %v", row.Live.DownloadBps, dl)
+	}
+	if row.Live.UploadBps == nil || *row.Live.UploadBps != ul {
+		t.Errorf("live.upload_bps = %v, want %v", row.Live.UploadBps, ul)
+	}
+	if row.Live.Swarm == nil {
+		t.Fatalf("live.swarm is nil, want a reading")
+	}
+	if row.Live.Swarm.CopiesPerPiece != 2.4 || row.Live.Swarm.Unavailable != 3 || row.Live.Swarm.Pieces != 100 {
+		t.Errorf("live.swarm = %+v, want {2.4 3 100}", row.Live.Swarm)
+	}
+}
+
+// TestQueuedAndDiskRowsCarryNoLiveFigures is TOR-136's other half: a row with
+// no client at all must not merely show zeros, its "live" key must be
+// entirely absent from the wire - the raw map is what proves that, since a
+// decoded *Live is nil either way whether the key was missing or null.
+func TestQueuedAndDiskRowsCarryNoLiveFigures(t *testing.T) {
+	root := t.TempDir()
+	const diskHash = "ffff000000000000000000000000000000000f"
+
+	writeRun(t, root, diskHash, "deadbeef", cache.Run{
+		Version: cache.Version, InfoHash: diskHash, Name: "Disk Only",
+		Videos: []cache.File{{Index: 0, Path: "a.mkv"}}, Complete: []int{0},
+	})
+
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	// The slot is held by a first run so the second one asked for here stays
+	// queued - a queued entry has no client, and it never will until it
+	// starts.
+	first := startRun(t, ts.URL, "magnet:?xt=urn:btih:0000")
+	if first.state != "running" {
+		t.Fatalf("first run is %q, want running - the slot was free", first.state)
+	}
+	queued := startRun(t, ts.URL, "magnet:?xt=urn:btih:1111")
+	if queued.state != "queued" {
+		t.Fatalf("second run is %q, want queued", queued.state)
+	}
+
+	rows := rawRuns(t, ts.URL)
+
+	queuedRow := byID(t, rows, queued.id)
+	if _, has := queuedRow["live"]; has {
+		t.Errorf(`queued row carries a "live" key, want it absent: %+v`, queuedRow)
+	}
+
+	var diskRow map[string]any
+	for _, row := range rows {
+		if row["infohash"] == diskHash {
+			diskRow = row
+		}
+	}
+	if diskRow == nil {
+		t.Fatalf("no row for disk-only infohash %s in %+v", diskHash, rows)
+	}
+	if _, has := diskRow["live"]; has {
+		t.Errorf(`disk-only row carries a "live" key, want it absent: %+v`, diskRow)
+	}
+}
+
+// TestLiveRowMeasuringZeroPeersStillCarriesLiveFigures is the sharpest edge
+// of TOR-136's acceptance criterion: a live row whose first heartbeat found
+// nobody must still carry a "live" key, with peers and seeds genuinely 0 -
+// distinguishable, at the wire, from the queued/disk rows above that carry
+// no such key at all. Collapsing the two into the same absent shape is
+// exactly the bug TOR-136 exists to prevent: a queued torrent and a running
+// torrent that found nobody are opposite situations.
+func TestLiveRowMeasuringZeroPeersStillCarriesLiveFigures(t *testing.T) {
+	fake := newFakeRuns()
+	cfg := DefaultConfig()
+	srv, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	run := startRun(t, ts.URL, "magnet:?xt=urn:btih:2222")
+
+	srv.mu.Lock()
+	entry, ok := srv.runs[run.id]
+	if !ok {
+		srv.mu.Unlock()
+		t.Fatalf("run %s is not in the registry", run.id)
+	}
+	// No rate, no swarm reading yet - only the first heartbeat, which found
+	// nobody. Peers/Seeds are genuine measurements, not sentinels: unlike
+	// DownloadRate/UploadRate/Swarm they are plain ints on core.Progress,
+	// always sent, so 0 here means "checked, found nobody" from the very
+	// first heartbeat on.
+	entry.applyProgress(core.Progress{Peers: 0, Seeds: 0})
+	srv.mu.Unlock()
+
+	rows := rawRuns(t, ts.URL)
+	row := byID(t, rows, run.id)
+
+	live, has := row["live"].(map[string]any)
+	if !has {
+		t.Fatalf(`live row with a zero-peer heartbeat carries no "live" key, want one present: %+v`, row)
+	}
+	if live["peers"] != float64(0) || live["seeds"] != float64(0) {
+		t.Errorf(`live = %+v, want peers=0 seeds=0`, live)
+	}
+	if _, has := live["download_bps"]; has {
+		t.Errorf(`live carries "download_bps" before a second heartbeat: %+v`, live)
+	}
+	if _, has := live["upload_bps"]; has {
+		t.Errorf(`live carries "upload_bps" before a second heartbeat: %+v`, live)
+	}
+	if _, has := live["swarm"]; has {
+		t.Errorf(`live carries "swarm" before the availability reading is known: %+v`, live)
+	}
+}
