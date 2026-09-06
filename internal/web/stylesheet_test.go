@@ -1,7 +1,10 @@
 package web
 
 import (
+	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -133,6 +136,14 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 //     control rather than a decoration
 //   - .thumb-pending, .thumb-failed        the thumbnail cell states (TOR-110)
 //   - .run-detail::before                  the detail panel's corner brackets
+//   - .lightbox-view                        the full-size panel's clipped
+//     window (TOR-172), added here because
+//     it is the one selector in that block
+//     whose absence is not cosmetic: it is
+//     what clips the picture to the panel
+//     (rule 4) and what app.js measures to
+//     decide the fit, so losing it loses
+//     both halves at once
 //
 // This is a presence check, not a rule-by-rule one: .thumb-pending,
 // .thumb-failed and .run-detail::before each appear in more than one
@@ -158,6 +169,7 @@ func TestTheLoadBearingSelectorsSurvive(t *testing.T) {
 		".thumb-pending",
 		".thumb-failed",
 		".run-detail::before",
+		".lightbox-view",
 	} {
 		if !hasSelector(live, sel) {
 			t.Errorf("app.css has no %q rule outside a comment - it was "+
@@ -359,5 +371,440 @@ func TestDropzoneFrameIsHardCorneredAndUsesEdge(t *testing.T) {
 		t.Errorf("--edge (%s) against --bg (%s), .dropzone's own ground, is %.2f:1, "+
 			"want >= 3.0 (the floor for a UI part to be distinguishable at all)",
 			edge, bg, ratio)
+	}
+}
+
+// ---- TOR-172: the frame's full-size panel, its chrome, and its clamp. ----
+//
+// Everything below belongs to one ticket and would sit better in a
+// lightbox_test.go of its own; it is here because this file is the only test
+// file that ticket owns, and splitting a ticket's guards across a file it was
+// not given would be worse than the misfiled name.
+//
+// What these can and cannot do. The CSS half is real: it reads the rules that
+// ship and computes the contrast claims rather than restating them. The
+// app.js half reads the SERVED SCRIPT AS TEXT, because this repository has no
+// JS runner (see columns_test.go's own note on that precedent) - so it can
+// catch a rule deleted, a function renamed and an accent spent where it was
+// forbidden, and it cannot catch a wrong answer. Nothing here proves the
+// clamp holds at an edge; only a browser can, and TOR-172's own report says
+// what a browser showed.
+
+// jsFunc returns the source of the named top-level function, up to its
+// closing brace at column zero - the same shape block() uses for a CSS rule,
+// and it relies on the same convention: nothing in app.js is indented at
+// column zero inside a function body.
+func jsFunc(t *testing.T, js, name string) string {
+	t.Helper()
+	head := "function " + name + "("
+	i := strings.Index(js, head)
+	if i < 0 {
+		t.Fatalf("app.js has no %s function", head+")")
+	}
+	end := strings.Index(js[i:], "\n}\n")
+	if end < 0 {
+		t.Fatalf("app.js's %s is never closed", name)
+	}
+	return js[i : i+end]
+}
+
+// jsListener returns the source of the first listener registered with the
+// given prefix, up to the "});" that closes the call.
+func jsListener(t *testing.T, js, prefix string) string {
+	t.Helper()
+	i := strings.Index(js, prefix)
+	if i < 0 {
+		t.Fatalf("app.js registers no listener matching %q", prefix)
+	}
+	end := strings.Index(js[i:], "\n});")
+	if end < 0 {
+		t.Fatalf("app.js's %q listener is never closed", prefix)
+	}
+	return js[i : i+end]
+}
+
+// rgbaOverWhite composites an rgba() token over pure white and returns the
+// result as a hex literal contrastRatio can score. White is the worst ground
+// a video frame can hand a control: TOR-122's near-invisible close button was
+// on the bright top edge of a snow shot.
+func rgbaOverWhite(t *testing.T, root map[string]string, name string) string {
+	t.Helper()
+	v, ok := root[name]
+	if !ok {
+		t.Fatalf(":root declares no %s", name)
+	}
+	m := regexp.MustCompile(`^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\.?\d+(?:\.\d+)?)\s*\)$`).
+		FindStringSubmatch(strings.TrimSpace(v))
+	if m == nil {
+		t.Fatalf("%s is %q, want an rgba(r, g, b, a) literal so the composite can be computed", name, v)
+	}
+	alpha, err := strconv.ParseFloat("0"+strings.TrimPrefix(m[4], "0"), 64)
+	if err != nil {
+		t.Fatalf("%s has an alpha this cannot read (%q): %v", name, m[4], err)
+	}
+	out := "#"
+	for _, ch := range m[1:4] {
+		c, _ := strconv.ParseFloat(ch, 64)
+		over := alpha*c + (1-alpha)*255
+		out += fmt.Sprintf("%02X", int(math.Round(over)))
+	}
+	return out
+}
+
+// TestLightboxChromeIsHudAndKeepsTheAccentForTheZoomState is the palette
+// decision, made checkable. The reference sheet TOR-172 was given wears its
+// accent decoratively and everywhere; :root reserves --accent for "this is
+// live or this is where you are" and says nothing decorative may wear it,
+// which is a rule that exists because before TOR-113 one green served as both
+// the accent and "done". The panel resolves that by NOT being an exception:
+// the whole of its resting chrome is --edge, and the accent is spent on the
+// zoom state alone - the one thing here that carries meaning, since at 100%
+// the panel is a window onto a bigger picture and where you are inside it is
+// the fact the chrome has to tell you.
+//
+// So: hard corners, a notch, brackets in --edge with no glow and no
+// box-shadow at rest (box-shadow paints a glowing rectangle over a
+// stroke-drawn shape - .run-detail::before's own comment records what that
+// cost), and exactly one place reaching for --accent, keyed on the zoom
+// state.
+func TestLightboxChromeIsHudAndKeepsTheAccentForTheZoomState(t *testing.T) {
+	css := stylesheet(t)
+
+	panel := block(t, css, ".lightbox {")
+	if v, ok := panel["border-radius"]; !ok || v != "0" {
+		t.Errorf(".lightbox border-radius is %q (present: %v) - the reference sheet has no radii "+
+			"anywhere, and this panel used to be border-radius: .5rem", v, ok)
+	}
+	if v, ok := panel["clip-path"]; !ok || !strings.Contains(v, "polygon(") {
+		t.Errorf(".lightbox clip-path is %q (present: %v) - the notched corner is one of the "+
+			"motifs the acceptance criteria names, and a polygon() is what cuts it", v, ok)
+	}
+
+	// The resting chrome: every bracket, and the stroke along the chamfer.
+	for _, rawSel := range []string{
+		"\n.lightbox::before {",
+		"\n.lightbox::after {",
+		"\n.lightbox-marks::before {",
+		"\n.lightbox-marks::after {",
+	} {
+		sel := strings.TrimSpace(rawSel)
+		b := block(t, css, rawSel)
+		sawEdge := false
+		for prop, val := range b {
+			if !strings.Contains(prop, "border") && prop != "background" {
+				continue
+			}
+			if strings.Contains(val, "var(--edge)") {
+				sawEdge = true
+			}
+			if strings.Contains(val, "var(--accent") {
+				t.Errorf("%s %s is %q - resting chrome must not spend --accent; the zoom "+
+					"state is what this panel spends it on", sel, prop, val)
+			}
+		}
+		if !sawEdge {
+			t.Errorf("%s draws nothing in var(--edge) - the panel's chrome is built from the "+
+				"token TOR-159 measured for exactly this job", sel)
+		}
+		if v, ok := b["box-shadow"]; ok {
+			t.Errorf("%s declares box-shadow: %q - box-shadow follows an element's BOX and "+
+				"paints a glowing rectangle over a shape drawn from strokes; filter: "+
+				"var(--stroke-glow) is the one that follows the painted pixels "+
+				"(.run-detail::before's own comment)", sel, v)
+		}
+		if v, ok := b["filter"]; ok {
+			t.Errorf("%s declares filter: %q at rest - --stroke-glow is accent-tinted, and a "+
+				"permanently glowing panel is the furniture-spending --accent's rule exists "+
+				"to stop", sel, v)
+		}
+	}
+
+	// And the state that does wear it, keyed on the zoom being at 100%.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	lit := regexp.MustCompile(`\.lightbox\[data-zoom="full"\][^{]*\{[^}]*\}`)
+	states := lit.FindAllString(live, -1)
+	if len(states) == 0 {
+		t.Fatal(`app.css has no .lightbox[data-zoom="full"] rule - the accent has nowhere to be ` +
+			"spent, and the panel cannot look different at 100% than at fit")
+	}
+	all := strings.Join(states, "\n")
+	for _, want := range []string{"var(--accent)", "var(--stroke-glow)", "var(--glow)"} {
+		if !strings.Contains(all, want) {
+			t.Errorf(`no .lightbox[data-zoom="full"] rule reaches for %s - the brackets are `+
+				"stroke-drawn (--stroke-glow) and the state pill is a filled box (--glow); "+
+				"both glows belong to this state and neither to the resting one", want)
+		}
+	}
+	if !strings.Contains(all, "border-top-color") {
+		t.Error(`the .lightbox[data-zoom="full"] bracket rule does not use border-*-color ` +
+			"longhands - a border shorthand elsewhere resets the colour a rule like this " +
+			"sets, silently, which is how .run-detail::before painted in the wrong colour " +
+			"from TOR-113 until somebody looked")
+	}
+
+	// The cursor is the state's other half, and all three states need one:
+	// zoom-in at fit, zoom-out at 100%, and neither on a picture that
+	// already fits, where a click has nothing to do.
+	for _, want := range []string{`[data-zoom="fit"]`, `[data-zoom="full"]`, `[data-zoom="none"]`} {
+		re := regexp.MustCompile(`\.lightbox` + regexp.QuoteMeta(want) + ` \.lightbox-view \{[^}]*cursor:`)
+		if !re.MatchString(live) {
+			t.Errorf("no cursor declared for .lightbox%s .lightbox-view - the zoom state has to "+
+				"be legible from the cursor, in every state it can be in", want)
+		}
+	}
+}
+
+// TestLightboxControlsOverThePictureCarryTheirOwnGround computes TOR-122's
+// finding rather than restating it. That ticket measured that no single
+// colour is legible against every frame - the close button sat near-invisible
+// on the bright top edge of a snow shot - and the answer was a scrim under
+// the control. TOR-172 keeps both controls over the picture (the close at its
+// corner, the caption naming what you are looking at) and makes it harder,
+// because the picture can now pan beneath them. So the scrim has to hold
+// against the worst ground a frame can be: pure white.
+func TestLightboxControlsOverThePictureCarryTheirOwnGround(t *testing.T) {
+	css := stylesheet(t)
+	root := block(t, css, ":root {")
+	ink := hexToken(t, root, "--ink")
+
+	for _, c := range []struct {
+		sel, scrim string
+	}{
+		{".lightbox-close {", "--scrim"},
+		{".lightbox-caption {", "--scrim-strong"},
+	} {
+		b := block(t, css, c.sel)
+		got := b["background"]
+		if !strings.Contains(got, "var("+c.scrim+")") {
+			t.Errorf("%s background is %q, want var(%s) - it is laid over arbitrary picture "+
+				"content, and TOR-122 measured that no flat colour is legible on every frame",
+				strings.TrimSuffix(c.sel, " {"), got, c.scrim)
+		}
+		if v, ok := b["opacity"]; ok {
+			t.Errorf("%s declares opacity: %q on top of its own colour - opacity multiplies "+
+				"against whatever the token already measures, and the pair reads dimmer than "+
+				"either (.compare-keys' own comment, TOR-158). This rule used to carry "+
+				"opacity: .8", strings.TrimSuffix(c.sel, " {"), v)
+		}
+		ground := rgbaOverWhite(t, root, c.scrim)
+		if ratio := contrastRatio(ink, ground); ratio < 4.5 {
+			t.Errorf("--ink (%s) over %s composited on a blown-out white frame (%s) is %.2f:1, "+
+				"want >= 4.5 - which is the whole reason the control carries a ground at all",
+				ink, c.scrim, ground, ratio)
+		}
+	}
+}
+
+// TestLightboxViewIsTheClippedWindowBoundedByThePanelsOwnTokens is rule 4's
+// structural half and the one place the panel's arithmetic lives.
+//
+// overflow: hidden is what makes "the picture must never spill outside the
+// popup" true whatever app.js computes - it cannot be got wrong by a bad
+// clamp, only by deleting this declaration. And the maximum the picture may
+// be drawn at is stated here, in terms of the panel's own padding, strips and
+// gaps, because app.js reads the resolved number back off the element: a
+// maximum written as a bare 88vw (which is what .lightbox img carried before
+// this ticket) would drift out of step with the panel around it the first
+// time the padding changed.
+func TestLightboxViewIsTheClippedWindowBoundedByThePanelsOwnTokens(t *testing.T) {
+	css := stylesheet(t)
+
+	view := block(t, css, ".lightbox-view {")
+	if got := view["overflow"]; got != "hidden" {
+		t.Errorf(".lightbox-view overflow is %q, want hidden - it is what makes rule 4 "+
+			"structural rather than a promise about app.js's arithmetic", got)
+	}
+	panel := block(t, css, ".lightbox {")
+	for _, axis := range []struct{ prop, viewport string }{
+		{"max-width", "92vw"},
+		{"max-height", "92vh"},
+	} {
+		got, ok := view[axis.prop]
+		if !ok {
+			t.Errorf(".lightbox-view declares no %s - app.js measures this to decide the fit, "+
+				"so with no ceiling the panel would size itself to the picture's own pixels",
+				axis.prop)
+			continue
+		}
+		if !strings.Contains(got, axis.viewport) {
+			t.Errorf(".lightbox-view %s is %q, want it bounded by %s like the panel itself",
+				axis.prop, got, axis.viewport)
+		}
+		// Every token the panel declares for its own chrome on this axis has
+		// to be subtracted here, or the panel overflows its own max and
+		// drops a label strip onto the backdrop.
+		for _, tok := range []string{"--lb-pad", "--lb-bar", "--lb-keys", "--lb-gap"} {
+			if _, declared := panel[tok]; !declared {
+				t.Errorf(".lightbox declares no %s - .lightbox-view's %s subtracts it, and "+
+					"app.js reads the result off the element", tok, axis.prop)
+				continue
+			}
+			if axis.prop == "max-width" && tok != "--lb-pad" {
+				continue // only the ring costs width; the strips are full-width rows
+			}
+			if !strings.Contains(got, "var("+tok+")") {
+				t.Errorf(".lightbox-view %s is %q and never subtracts var(%s) - the panel's "+
+					"own arithmetic and this ceiling have to be the same arithmetic",
+					axis.prop, got, tok)
+			}
+		}
+	}
+	// The old ceiling, gone: it capped the picture at 88vw/80vh, which at
+	// 100% would silently crop a 2048-wide frame down to something else.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	if regexp.MustCompile(`\.lightbox img \{[^}]*max-width:\s*88vw`).MatchString(live) {
+		t.Error(".lightbox img still carries max-width: 88vw - the picture's drawn size is " +
+			"computed now (app.js), and a leftover viewport cap would quietly override the " +
+			"100% state")
+	}
+}
+
+// TestLightboxScalingAndPanAreWiredInTheServedScript reads app.js as served
+// text - there is no JS runner here (columns_test.go's note explains the
+// precedent) - so what it guards is that each of the four rules still has
+// code answering for it, and that the two things easiest to lose in an edit
+// are still there: the clamp's far bound, and the arrow keys' preventDefault.
+//
+// It cannot tell whether the clamp is CORRECT. Only a browser can, by panning
+// to each edge and looking for a gutter.
+func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
+	js := appJS(t)
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
+	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
+
+	// RULES 1 AND 2: one expression, and the 1 is the whole of "never
+	// upscale". Without it a 320-wide frame is blown up to fill the panel.
+	layout := jsFunc(t, live, "layoutLightbox")
+	if !strings.Contains(layout, "Math.min(1, avail.w / lb.natW, avail.h / lb.natH)") {
+		t.Error("layoutLightbox no longer caps the fit factor at 1 alongside the two axis " +
+			"ratios - the cap is rule 1 (a picture that fits is drawn at 100%, and a small " +
+			"frame is never upscaled) and the ratios are rule 2")
+	}
+	if !strings.Contains(layout, "clampPan();") {
+		t.Error("layoutLightbox does not re-clamp the pan - a window resize changes the " +
+			"window's size, and an offset that was legal at the old size shows a gutter at " +
+			"the new one")
+	}
+
+	// RULE 4's second half. Both bounds, on both axes, or an edge leaks.
+	clamp := jsFunc(t, live, "clampPan")
+	for _, want := range []string{
+		"Math.min(0, lb.boxW - lb.drawW)",
+		"Math.min(0, lb.boxH - lb.drawH)",
+		"lb.x = Math.min(0, Math.max(minX, lb.x));",
+		"lb.y = Math.min(0, Math.max(minY, lb.y));",
+	} {
+		if !strings.Contains(clamp, want) {
+			t.Errorf("clampPan does not contain %q - the pan offset has to be held to "+
+				"[box - drawn, 0] on BOTH axes, and the Math.min(0, ...) on the far bound is "+
+				"what stops a picture drawn narrower than the window from panning positive "+
+				"and opening a gutter down the left edge", want)
+		}
+	}
+
+	// Nothing may move the picture without coming through the clamp.
+	for _, fn := range []string{"panFromPointer", "panBySteps", "toggleLightboxZoom"} {
+		body := jsFunc(t, live, fn)
+		if !strings.Contains(body, "clampPan()") && !strings.Contains(body, "layoutLightbox()") {
+			t.Errorf("%s writes the pan without going through clampPan() - rule 4 has one "+
+				"enforcement point on purpose", fn)
+		}
+	}
+
+	// RULE 3, both halves: the mouse's position maps to the offset, and the
+	// arrow keys step it.
+	if !strings.Contains(live, `el.lightboxView.addEventListener("pointermove", panFromPointer)`) {
+		t.Error(`app.js does not map pointermove to the pan - "moving the mouse" pans the ` +
+			"picture, with no button held, which is what the rules asked for")
+	}
+	if !strings.Contains(live, `el.lightboxImg.addEventListener("click", toggleLightboxZoom)`) {
+		t.Error("app.js does not zoom on a click on the picture - and it has to be the " +
+			"picture, not the panel: the close button and the caption sit over it, and a " +
+			"handler on the panel would turn a click aimed at either into a zoom")
+	}
+	keys := jsListener(t, live, `el.lightbox.addEventListener("keydown"`)
+	if !strings.Contains(keys, "LIGHTBOX_ARROWS[event.key]") {
+		t.Error("the lightbox's keydown handler no longer reads LIGHTBOX_ARROWS - the arrow " +
+			"keys are how this pans without a mouse")
+	}
+	if !strings.Contains(keys, "event.preventDefault();") {
+		t.Error("the lightbox's keydown handler does not preventDefault - a modal <dialog> " +
+			"does NOT stop the document behind it from scrolling, so an arrow key it " +
+			"declines scrolls the page under the backdrop")
+	}
+	if strings.Contains(keys, "Escape") {
+		t.Error("the lightbox's keydown handler mentions Escape - the dialog closes itself " +
+			"on Escape for free, and a handler that touches it is how that gets lost")
+	}
+	if !strings.Contains(live, `el.lightboxZoom.textContent`) {
+		t.Error("app.js never writes el.lightboxZoom.textContent - the readout is where the " +
+			"zoom state is said in words, next to the cursor that says it in shape")
+	}
+	if !strings.Contains(live, "dataset.zoom") {
+		t.Error("app.js never sets the panel's dataset.zoom - every chrome rule that changes " +
+			"with the zoom is keyed on that attribute")
+	}
+
+	// The panel's arithmetic has ONE home, and it is app.css: availableBox
+	// asks the browser what the stylesheet's own maximum came to rather than
+	// keeping a second copy of the numbers here.
+	avail := jsFunc(t, live, "availableBox")
+	if !strings.Contains(avail, "getBoundingClientRect()") {
+		t.Error("availableBox no longer measures the element - it exists so the panel's " +
+			"padding and strips are stated once, in app.css, instead of twice")
+	}
+	if strings.Contains(live, "innerWidth") || strings.Contains(live, "innerHeight") {
+		t.Error("app.js computes the viewport itself - that is the copy of app.css's " +
+			"arithmetic availableBox exists to avoid, and the two drift apart silently")
+	}
+}
+
+// TestLightboxMarkupHoldsTheWindowAndItsChrome guards the shape app.css and
+// app.js both assume: the clipped window exists, the picture and both
+// controls laid over it are INSIDE it (so the controls stay put while the
+// picture pans beneath them, and the clip catches everything), and the label
+// tab with its zoom readout is above it in the panel's own strip.
+func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+	page := string(html)
+
+	for _, needle := range []string{
+		`id="lightbox-view"`,
+		`class="lightbox-view"`,
+		`id="lightbox-zoom"`,
+		`class="lightbox-tab"`,
+		`class="lightbox-marks"`,
+		`class="lightbox-keys"`,
+	} {
+		if !strings.Contains(page, needle) {
+			t.Errorf("index.html has no %s - app.css styles it and app.js reaches for it", needle)
+		}
+	}
+
+	view := strings.Index(page, `id="lightbox-view"`)
+	if view < 0 {
+		t.Fatal("index.html has no #lightbox-view to check the order of")
+	}
+	end := strings.Index(page[view:], "</div>")
+	if end < 0 {
+		t.Fatal("#lightbox-view is never closed")
+	}
+	inside := page[view : view+end]
+	for _, needle := range []string{`id="lightbox-img"`, `id="lightbox-close"`, `id="lightbox-caption"`} {
+		if !strings.Contains(inside, needle) {
+			t.Errorf("%s is not inside #lightbox-view - the window is what clips the picture "+
+				"and what the controls laid over it are positioned against; outside it they "+
+				"drift as the panel resizes", needle)
+		}
+	}
+	// The tab rides the panel's top strip, above the window - on the panel's
+	// own ground, where its contrast is a number app.css can be held to,
+	// rather than over footage where nothing can be.
+	if tab := strings.Index(page, `class="lightbox-tab"`); tab < 0 || tab > view {
+		t.Errorf("the label tab is not above #lightbox-view in the markup (tab=%d view=%d) - "+
+			"it belongs in the panel's top strip, off the picture", tab, view)
 	}
 }
