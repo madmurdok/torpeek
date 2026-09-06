@@ -211,10 +211,26 @@ func TestTopUpStatesWhatItWillSpendBeforeItIsSpent(t *testing.T) {
 		t.Fatalf("offer_bytes is %d, so the page has no figure to show before the "+
 			"traffic is spent", offer.OfferBytes)
 	}
-	if offer.OfferBytes >= stoppedCeiling {
-		t.Errorf("offer_bytes is %d, not less than the %d ceiling this run stopped "+
-			"at - four points in twenty must not be priced like twenty",
-			offer.OfferBytes, stoppedCeiling)
+	// TOR-166 replaced the assertion that used to sit here, which required
+	// the figure to come in UNDER the 300 MB ceiling this run stopped at.
+	// Both files are still short, so a plain re-run of them - MaxBytes unset,
+	// core.budgetFor scaling to the file count - gets exactly that ceiling
+	// again, and an offer under it would hand the run less than pressing
+	// nothing. What is asserted instead is that the raise is neither below
+	// what doing nothing gives nor above it, since this set's own receipt
+	// prices the remaining eight points far under a two-file run's allowance.
+	ordinary := core.DefaultBudget(2).MaxBytes
+	if offer.OfferBytes < ordinary {
+		t.Errorf("offer_bytes is %d, under the %d a plain re-run of the same two "+
+			"still-short files is given - a raise that lowers the ceiling is not "+
+			"a raise", offer.OfferBytes, ordinary)
+	}
+	if offer.OfferBytes > ordinary {
+		t.Errorf("offer_bytes is %d, over the %d a plain re-run of those two files "+
+			"would be allowed, though the set's own receipt prices the eight "+
+			"remaining points at %d - a ceiling, not a blank cheque",
+			offer.OfferBytes, ordinary,
+			stoppedSpent*int64(2*(askedPerFile-takenPerFile))/int64(2*takenPerFile))
 	}
 	if offer.RoofCapped || offer.RoofBytes != 0 {
 		t.Errorf("offer reports roof %d capped=%v on a server with no roof",
@@ -428,6 +444,13 @@ func TestTopUpFallsBackToTheElapsedComparisonForAPreTOR161Record(t *testing.T) {
 // the roof at runtime whatever this says (BudgetTracker.Exhausted asks the
 // roof first), and what this test is about is that the FIGURE ON SCREEN never
 // promises more than the roof would allow either.
+//
+// The roof here sits ABOVE what finishing costs at the very least (81145856,
+// eight points at the set's own measured average) and below the offer. That
+// is the band where clamping is honest: the run can still finish, it simply
+// may not have the whole two-file allowance to do it in.
+// TestTopUpSaysSoWhenTheRoofCannotCoverFinishing is the other side of that
+// line, where clamping would be a promise nothing can keep (TOR-166).
 func TestTopUpIsCappedByTheClientWideRoof(t *testing.T) {
 	root := t.TempDir()
 	hash := "ff11bb22cc33dd44ee55ff66aa77bb88cc99dd00"
@@ -435,7 +458,7 @@ func TestTopUpIsCappedByTheClientWideRoof(t *testing.T) {
 	writePartialSet(t, root, hash, "deadbeefdeadbeef", source,
 		budgetCost(), takenPerFile, takenPerFile)
 
-	const roof = 8 << 20
+	const roof = 100 << 20
 	fake, _, base := serverOver(t, root, roof)
 
 	offer, _ := getTopUp(t, base, hash, "")
@@ -677,8 +700,13 @@ func TestTheServedPageOffersToppingUpAndRetrying(t *testing.T) {
 		// The invariant itself is checked at the source by
 		// TestATopUpInFlightIsStillOneRow.
 		//
-		// The figure, before it is spent.
+		// The figure, before it is spent - and since TOR-166, what kind of
+		// figure it is. It is sized so one press finishes (core.TopUpBytes),
+		// which makes it deliberately larger than the work: a page that
+		// presented it as the cost would have a person refusing a top-up over
+		// a number nothing is going to spend.
 		"more traffic",
+		"not an estimate of what it will cost",
 		// Pieces are discarded after every run (REQUIREMENTS.md 2.9), so a
 		// top-up re-fetches piece data for the points it still needs. Only
 		// the frames are reused, and the page has to say so.
@@ -703,4 +731,172 @@ func stateOf(t *testing.T, srv *Server, id string) RunState {
 		}
 	}
 	return ""
+}
+
+// ---- TOR-166: one press, priced off the two manifests that recorded a miss. ----
+//
+// The set these numbers come from is the one in the ticket: two files, twenty
+// frames asked of each, and two rounds of finishing it that left two
+// receipts.
+//
+//	file 00: limit_bytes 8388608 (8 MiB), downloaded_bytes 20971520 (20 MiB), limit_hit "budget"
+//	file 01: limit_bytes 81788928 (78 MiB), downloaded_bytes 79396864 (75.7 MiB), limit_hit ""
+//
+// core's own budget_test.go works the arithmetic on them. What is checked
+// here is the whole path a person meets: the offer GET /runs/{ih}/topup
+// states, and the ceiling POST /runs/topup then hands the engine.
+const (
+	// missedSpent is what this set's receipt said when the round that missed
+	// was priced, and missedCeiling the 8 MiB it was handed for the single
+	// point still owed.
+	missedSpent   = int64(79396864)
+	missedCeiling = int64(81788928)
+	// missedCost is what that round then downloaded. It is 2.5x the ceiling
+	// it was given, and it is the number any honest offer has to cover.
+	missedCost = int64(20971520)
+)
+
+// nearlyDoneCost is the receipt this set carried when the miss was priced:
+// stopped on its own traffic ceiling, nowhere near its clock.
+func nearlyDoneCost() manifest.Cost {
+	return manifest.Cost{
+		DownloadedBytes: missedSpent, ElapsedMS: stoppedElapsed,
+		LimitBytes: missedCeiling, LimitMS: stoppedLimitMS,
+		LimitHit: string(core.StopBudget),
+	}
+}
+
+// TestTopUpFinishesTheRecordedSetInOnePress is the ticket's acceptance
+// criterion on the ticket's own set: one point of forty still missing, one
+// file still short, and the round that followed cost 20971520 bytes.
+//
+// It is an arms-apart test twice over. The offer must COVER 20971520, which
+// the 8388608 the manifest records does not; and it must not exceed what a
+// plain run of the one still-short file would be allowed, which the cap
+// (2 GiB) does. A pricing that changed nothing fails the first, and one that
+// answered "as much as a run can ever have" fails the second.
+func TestTopUpFinishesTheRecordedSetInOnePress(t *testing.T) {
+	root := t.TempDir()
+	hash := "6666bb22cc33dd44ee55ff66aa77bb88cc99dd00"
+	source := "magnet:?xt=urn:btih:" + hash
+	// File 0 is one point short; file 1 came out whole.
+	writePartialSet(t, root, hash, "deadbeefdeadbeef", source,
+		nearlyDoneCost(), askedPerFile-1, askedPerFile)
+
+	fake, _, base := serverOver(t, root, 0)
+
+	offer, status := getTopUp(t, base, hash, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET the top-up offer: status %d, want 200", status)
+	}
+	if offer.Remaining != 1 || offer.Captured != 2*askedPerFile-1 {
+		t.Fatalf("the set reads as %d captured / %d remaining, want %d / 1 - this is "+
+			"not the state the recorded ceiling was priced from",
+			offer.Captured, offer.Remaining, 2*askedPerFile-1)
+	}
+
+	if offer.OfferBytes < missedCost {
+		t.Errorf("offer_bytes is %d for a round that went on to download %d. That is "+
+			"the recorded miss: the ceiling was under the work, the round stopped on "+
+			"it, and finishing took another press", offer.OfferBytes, missedCost)
+	}
+	// A raise below the ordinary ceiling is not a raise. Zero MaxBytes on the
+	// request means core.budgetFor scales to the file count, so an offer under
+	// DefaultBudget(1) hands the run LESS than never pressing the button.
+	ordinary := core.DefaultBudget(1).MaxBytes
+	if offer.OfferBytes < ordinary {
+		t.Errorf("offer_bytes is %d, under the %d the same one-file run gets with no "+
+			"raise at all - the button labelled more traffic gives it less",
+			offer.OfferBytes, ordinary)
+	}
+	if offer.OfferBytes > ordinary {
+		t.Errorf("offer_bytes is %d, over the %d a plain run of the one still-short "+
+			"file would be allowed, though this set's own receipt prices the "+
+			"remaining point far under that - a ceiling, not a blank cheque",
+			offer.OfferBytes, ordinary)
+	}
+
+	// And the figure is what the engine is actually handed, not a number the
+	// page was shown and the run then ignored.
+	resp := post(t, base, "/runs/topup", `{"infohash":"`+hash+`"}`)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("POST /runs/topup: status %d, want 202: %s", resp.StatusCode, readAll(t, resp))
+	}
+	waitFor(t, func() bool { return fake.started(source) })
+	req := fake.stream(t, source).req
+
+	if req.MaxBytes != offer.OfferBytes {
+		t.Errorf("the run was given %d, want the %d the page was shown",
+			req.MaxBytes, offer.OfferBytes)
+	}
+	if req.MaxBytes < missedCost {
+		t.Errorf("the run was given %d for work the manifests record at %d, so it "+
+			"stops where the last one did and the owner presses again",
+			req.MaxBytes, missedCost)
+	}
+	if len(req.Files) != 1 || req.Files[0] != "0" {
+		t.Errorf("the top-up asked for files %v, want only [\"0\"]", req.Files)
+	}
+}
+
+// TestTopUpSaysSoWhenTheRoofCannotCoverFinishing is the last clause of the
+// criterion, and the one thing a top-up must never do quietly.
+//
+// Clamping the figure to the roof is right when the roof can still cover the
+// work - the run finishes and the page never promised more than the roof
+// allows. It is a LIE when the roof is under what finishing costs at the very
+// least: the run is then guaranteed to stop short, and offering it is
+// offering another instalment of an allowance that can never reach the end.
+// So the least the work can cost is computed from the set's own receipt - the
+// prorated average, which the recorded miss proves is an UNDER-estimate and
+// therefore a sound floor - and a roof beneath it is said out loud instead.
+func TestTopUpSaysSoWhenTheRoofCannotCoverFinishing(t *testing.T) {
+	root := t.TempDir()
+	hash := "7777bb22cc33dd44ee55ff66aa77bb88cc99dd00"
+	source := "magnet:?xt=urn:btih:" + hash
+	writePartialSet(t, root, hash, "deadbeefdeadbeef", source,
+		budgetCost(), takenPerFile, takenPerFile)
+
+	// Eight points still owed off a receipt of 324583424 over 32 captured:
+	// finishing costs at least 81145856, and this roof is a tenth of that.
+	const roof = 8 << 20
+	fake, _, base := serverOver(t, root, roof)
+
+	offer, status := getTopUp(t, base, hash, "")
+	if status != http.StatusOK {
+		t.Fatalf("GET the top-up offer: status %d, want 200", status)
+	}
+	if offer.Refused == "" {
+		t.Errorf("a set whose remaining points cost at least %d was offered a top-up "+
+			"under a client-wide roof of %d. Every press of it stops on the roof "+
+			"having spent, and none of them ever finishes - that has to be said, "+
+			"not sold as another instalment",
+			stoppedSpent*int64(2*(askedPerFile-takenPerFile))/int64(2*takenPerFile), int64(roof))
+	}
+	if offer.OfferBytes != 0 {
+		t.Errorf("offer_bytes is %d on a set that cannot be finished at all; a figure "+
+			"here is a promise nothing can honour", offer.OfferBytes)
+	}
+	if offer.RoofBytes != roof {
+		t.Errorf("roof_bytes is %d, want %d - the roof is still reported", offer.RoofBytes, roof)
+	}
+	// Plainly said means both figures, and rounded so neither flatters the
+	// other: 8388608 bytes of roof is 8 MB and never 9, while 81145856 bytes
+	// of work is 82 MB and never 81. A sentence that rounded the roof up
+	// would hand the reader headroom nobody has.
+	if !strings.Contains(offer.Refused, "8 MB") || !strings.Contains(offer.Refused, "82 MB") {
+		t.Errorf("the refusal reads %q - it has to name the roof there actually is "+
+			"(8 MB, rounded down) and the least finishing costs (82 MB, rounded "+
+			"up), or a person cannot see why it cannot be done", offer.Refused)
+	}
+
+	resp := post(t, base, "/runs/topup", `{"infohash":"`+hash+`"}`)
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("POST /runs/topup on a set the roof cannot finish: status %d, want "+
+			"409 - starting it would spend the rest of the roof and stop short",
+			resp.StatusCode)
+	}
+	if fake.count() != 0 {
+		t.Errorf("%d run(s) were started for a set that cannot be finished", fake.count())
+	}
 }

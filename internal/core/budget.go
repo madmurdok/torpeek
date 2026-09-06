@@ -409,88 +409,120 @@ func (t *BudgetTracker) Context(parent context.Context) (context.Context, contex
 }
 
 // TopUpBytes is the traffic ceiling to give a run that is FINISHING an
-// earlier, stopped one: enough for the capture points still missing, and
-// deliberately not a byte more than that.
+// earlier, stopped one: enough that finishing takes ONE press, and never more
+// than a plain run of the same files would have been allowed anyway.
 //
-// # Why a computed absolute figure, and not the two obvious alternatives
+// # What this replaced, and the measurement that replaced it
 //
-// A person who accepts more traffic is not asking for "unlimited" - they are
-// asking for enough to finish. That rules out both of the shapes this could
-// have taken:
+// TOR-152 computed this by prorating the stopped run's own receipt - spent
+// bytes over the points that spending bought, times the points still owed -
+// taken as the larger of that and bytesPerFile's share of the remainder. Its
+// doc argued no fudge factor was needed, because spent already contains each
+// run's fixed overhead, so prorating it re-pays that overhead once.
 //
-//   - A MULTIPLIER ("run it again at twice the ceiling") multiplies a number
-//     the person does not have in their head. The ceiling a run actually met
-//     is DefaultBudget's - bytesPerFile TIMES the files selected, capped -
-//     not the per-file figure the flag's help mentions, which is exactly the
-//     trap TOR-50 named one level up. Doubling 300 MB to finish four points
-//     out of twenty asks for six times what the work costs, and it asks for
-//     it in units nobody can check.
-//   - A FRESH FIGURE TYPED BY HAND is the same guess moved onto the person.
-//     They have no way to price a capture point; torpeek does, because the
-//     run that stopped left the receipt on disk.
+// Two manifests off one real set falsify both halves of that (TOR-166):
 //
-// So the figure is computed from what the stopped run actually did, and it is
-// the LARGER of two independent estimates - never the sum, never an average:
+//	file 00: limit_bytes 8388608, downloaded_bytes 20971520, limit_hit "budget"
+//	file 01: limit_bytes 81788928, downloaded_bytes 79396864, limit_hit ""
 //
-//   - MEASURED. spent bytes divided by the points that spending bought, times
-//     the points still owed. This is the only estimate that knows anything
-//     about THIS torrent: its bitrate, its piece length, how far a seek has
-//     to reach in this container. Note that spent includes each run's fixed
-//     overhead - the container inspection and the keyframe index, re-read
-//     from scratch because pieces are discarded after every run
-//     (REQUIREMENTS.md 2.9) - so prorating it to the remaining points already
-//     re-pays that overhead once. That is why there is no fudge factor here:
-//     the average is not a per-point marginal cost, it is a per-point cost
-//     with the fixed part folded in, which is the conservative direction.
-//   - THE DEFAULT'S OWN SHARE. bytesPerFile is this project's measured figure
-//     for one file's worth of frames (section 7); one point of a plan of
-//     planned is therefore worth bytesPerFile/planned of it. This is the
-//     floor, and it is what answers a run that stopped so early its measured
-//     average is meaningless - two points captured off a cold swarm, say.
+// The 8388608 is bytesPerFile/20 rounded up to a MiB - the share arm, for a
+// single missing point of a twenty-point plan, since two points already price
+// at 15 MiB. That round then downloaded 20971520: two and a half times the
+// ceiling it was handed, and 2.67x what the plan's own per-point figure
+// claims a point is worth. The round that DID finish cleared its ceiling by
+// 2392064 bytes, 2.9% - on a torrent whose other receipt has one point
+// costing 20971520.
+//
+// The prorating argument fails as arithmetic, not just in measurement. With
+// spent = F + c*captured for a fixed overhead F, prorating gives
+// F*remaining/captured + c*remaining, so the overhead arrives SCALED BY
+// remaining/captured - a fraction of one copy whenever fewer points are owed
+// than were taken, which is the ordinary top-up. Pieces are discarded after
+// every run (REQUIREMENTS.md 2.9), so the next round re-reads the container
+// and the keyframe index IN FULL. And the points still owed are not average
+// points: a run stops at its ceiling having taken the cheap ones, so the
+// average under-prices what is left, twice over.
+//
+// # Why the ordinary ceiling is the floor, and not a fudge factor
+//
+// The deciding fact is not the size of the error but its DIRECTION against
+// doing nothing. This figure travels as RunRequest.MaxBytes, and zero there
+// is not "no traffic" - it is budgetFor scaling the ceiling to the file
+// count, DefaultBudget(files). So 8388608 was not a raise at all: the same
+// run, started by pressing nothing, would have had 157286400. A control
+// labelled "more traffic" was handing out nineteen twentieths LESS.
+//
+// So the floor is what those files get anyway: DefaultBudget(short).MaxBytes,
+// for the files still short, which is exactly the set request() narrows the
+// run to. That number is not invented and not padded - it is this project's
+// own measured figure for a file's worth of frames (REQUIREMENTS.md section
+// 7), overhead included, and it DOMINATES what a top-up needs by an argument
+// rather than by a margin: the top-up runs the same files at the same plan,
+// pays the same fixed overhead, and fetches strictly FEWER points, because
+// the frames already on disk are reused for free (core.reusableFrames). If a
+// fresh run of these files could finish inside that ceiling, a top-up of them
+// certainly can.
+//
+// It also means pressing the button can never cost more than not pressing it,
+// which is the property that makes the figure safe to state and safe to
+// consent to. It needs no receipt, so a run that stopped too early to have a
+// meaningful average - two points off a cold swarm - is priced the same way
+// as any other. And it is STABLE: the same set offers the same figure every
+// time, instead of a number that wanders with each round's receipt.
+//
+// # The receipt, kept for the one thing it can still do
+//
+// A torrent genuinely dearer than the project's 150 MB per file is the case
+// the ordinary ceiling does not cover, and the set's own receipt is the only
+// thing that knows about it. So the measured estimate is kept as a RAISE
+// ABOVE that floor and never as a reduction below it: when the receipt says
+// the remaining points cost more than a whole fresh run of these files would
+// be allowed, the offer follows the receipt.
+//
+// It prices remaining+1 points rather than remaining. Exhausted is polled
+// BETWEEN capture points, never inside one, so a round always overshoots its
+// ceiling by as much as the point in flight costs - which means an offer
+// sized to the work exactly is met ON the last point instead of after it, and
+// gets recorded as a budget stop for work it actually completed. One point's
+// worth of headroom is the size of that overshoot, taken from the mechanism
+// rather than picked.
 //
 // Rounded UP to a whole MiB, because this number is shown to a person and
 // consented to before it is spent, and a ceiling is not a measurement. Capped
 // at maxRunBytes for the reason DefaultBudget caps there: a top-up is still
-// one run, and no run may be allowed more than the most a fresh one could
-// ever ask for. That cap is also what stops a pathological receipt (a run
-// that spent a gigabyte on one frame) from turning a top-up into a blank
-// cheque.
+// one run, and that cap is what stops a pathological receipt from turning it
+// into a blank cheque.
 //
-// WHAT IT DOES NOT DO is bound itself by the CLIENT-WIDE ROOF. The roof is
-// not this run's to reason about - it is the ceiling over every run sharing
-// one client, its figure lives on that client's own counter, and
-// BudgetTracker.Exhausted asks it FIRST and answers StopRoof rather than
-// StopBudget (see Roof). A top-up is held to it exactly as any other run is,
-// with no way around it, and a caller that also wants to SHOW the roof
-// alongside this figure should say so separately rather than fold the two
-// into one number a reader could not take apart again.
+// WHAT IT DOES NOT DO is bound itself by the CLIENT-WIDE ROOF, unchanged from
+// TOR-152: the roof is not this run's to reason about, it lives on the
+// client's own counter, and BudgetTracker.Exhausted asks it FIRST and answers
+// StopRoof. A caller that wants to show the roof alongside this figure should
+// say so separately - see TopUpFloor for the one question the roof does need
+// answering, and internal/web's TopUp.price for both.
 //
-// Zero out means there is nothing to top up: no points are missing, or the
-// caller has no plan to reason from.
-func TopUpBytes(remaining, planned int, spent int64, captured int) int64 {
-	if remaining <= 0 {
+// It does not know about an explicitly configured -max-bytes either. The
+// floor is what a run gets when that flag was left to scale (the default);
+// where an operator has named a smaller per-run ceiling by hand, a top-up
+// raises above it exactly as TOR-152's figure already could.
+//
+// Zero out means there is nothing to top up: no points are missing, or no
+// file is short enough to run.
+func TopUpBytes(remaining, short, captured int, spent int64) int64 {
+	if remaining <= 0 || short <= 0 {
 		return 0
 	}
 
-	var measured int64
+	// What these files get with no raise at all, which is the floor a raise
+	// may not go under.
+	want := DefaultBudget(short).MaxBytes
+
 	if captured > 0 && spent > 0 {
 		// One expression rather than a per-point figure multiplied back up:
 		// integer division twice would round a 10.9 MB point down to 10 and
 		// lose most of a megabyte per point on the way.
-		measured = spent * int64(remaining) / int64(captured)
-	}
-
-	var share int64
-	if planned > 0 {
-		share = bytesPerFile * int64(remaining) / int64(planned)
-	}
-
-	want := measured
-	if share > want {
-		want = share
-	}
-	if want <= 0 {
-		return 0
+		if measured := spent * int64(remaining+1) / int64(captured); measured > want {
+			want = measured
+		}
 	}
 
 	const mib = 1 << 20
@@ -499,4 +531,32 @@ func TopUpBytes(remaining, planned int, spent int64, captured int) int64 {
 		want = maxRunBytes
 	}
 	return want
+}
+
+// TopUpFloor is the LEAST finishing a stopped set can cost, for a caller that
+// has to decide whether it can be finished at all.
+//
+// It is the prorated average TOR-152 offered as a ceiling, and the whole
+// point of it is that TOR-166 measured that figure coming in far under what
+// the round then spent: 8388608 offered against 20971520 downloaded. A number
+// proven to under-price the work is a bad ceiling and a SOUND FLOOR, and it
+// is sound for reasons rather than by luck - the remaining points are the
+// expensive tail an average under-prices, and a full copy of the run's fixed
+// overhead is owed on top of it, so the true cost is above this and not
+// below.
+//
+// The one caller is internal/web's TopUp.price, deciding what to do about a
+// client-wide roof smaller than the offer. Clamping to the roof is honest
+// while the roof can still cover the work. Below this figure it is not: the
+// run is then guaranteed to stop short, and a clamped offer would be another
+// instalment of an allowance that can never reach the end. That case is said
+// plainly instead.
+//
+// Zero means there is nothing to say: nothing missing, or no receipt to
+// reason from - which is not a claim that finishing is free.
+func TopUpFloor(remaining, captured int, spent int64) int64 {
+	if remaining <= 0 || captured <= 0 || spent <= 0 {
+		return 0
+	}
+	return spent * int64(remaining) / int64(captured)
 }

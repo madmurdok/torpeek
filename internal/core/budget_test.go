@@ -453,42 +453,55 @@ func TestRoofAndRunWarningsAreToldApart(t *testing.T) {
 
 // ---- TOR-152: pricing what is left of a stopped run. ----
 
-// TestTopUpBytesPricesWhatIsLeftFromWhatWasSpent is the measured case, and
-// the numbers are the ones the ticket was filed from: a run over two selected
-// files, twenty frames asked of each, sixteen taken of each, stopped at a
-// 300 MB ceiling having received 324583424 bytes.
+// TestTopUpBytesPricesAStoppedSetFromWhatItsFilesStillOwe is the measured
+// case, and the numbers are the ones TOR-152 was filed from: a run over two
+// selected files, twenty frames asked of each, sixteen taken of each, stopped
+// at a 300 MB ceiling having received 324583424 bytes.
 //
-// The property being asserted is not one number but the whole argument for a
-// computed figure over a multiplier: what is left costs a FRACTION of what
-// the run already spent, so a top-up must ask for far less than the ceiling
-// it stopped at - where doubling that ceiling (the multiplier this rejects)
-// would have asked for six times the work.
-func TestTopUpBytesPricesWhatIsLeftFromWhatWasSpent(t *testing.T) {
+// TOR-152 asserted the opposite of what this asserts now, and the change is
+// the whole of TOR-166. It required the figure to come in UNDER the ceiling
+// the run had stopped at, on the reasoning that four points in twenty must
+// not be priced like twenty. The premise is sound and the conclusion was
+// wrong, because the two numbers are not the same kind of thing: what four
+// points COST is indeed a fraction of what twenty cost, but what a run is
+// ALLOWED is a ceiling, and a ceiling under the ordinary one is not a raise -
+// it hands the run less than pressing nothing would. Both files here are
+// still short, so the ordinary ceiling for this top-up is a two-file run's,
+// which is the 300 MB ceiling the stopped run met. Equal, and that is the
+// right answer rather than a coincidence: the top-up runs the same two files
+// at the same plan, and reuses thirty-two of their frames off disk.
+func TestTopUpBytesPricesAStoppedSetFromWhatItsFilesStillOwe(t *testing.T) {
 	const (
-		planned   = 20
+		short     = 2                // both files still owe points
 		captured  = 32               // sixteen of each of two files
 		spent     = int64(324583424) // manifest cost, downloaded_bytes
-		ceiling   = int64(314572800) // manifest cost, limit_bytes
 		remaining = 8                // four points still owed on each file
 	)
 
-	got := TopUpBytes(remaining, planned, spent, captured)
+	got := TopUpBytes(remaining, short, captured, spent)
 
-	// The measured estimate: what a point cost this torrent, times the points
-	// still owed, rounded up to a whole MiB.
+	// The measured estimate is the floor of what the work costs, so an offer
+	// under it stops the top-up before it finishes.
 	perPoint := spent / captured
 	if got < remaining*perPoint {
 		t.Errorf("TopUpBytes = %d, which is under the %d the eight remaining points "+
 			"measured at %d each; a ceiling below what the work costs stops the "+
 			"top-up before it finishes", got, remaining*perPoint, perPoint)
 	}
-	// And it must be a fraction of the ceiling that stopped the run, or the
-	// whole argument for pricing this rather than multiplying the old ceiling
-	// falls over.
-	if got >= ceiling {
-		t.Errorf("TopUpBytes = %d, which is not less than the %d ceiling the run "+
-			"stopped at - finishing four points in twenty must not cost what "+
-			"twenty cost", got, ceiling)
+	// And never under what these two files get with no raise at all, nor over
+	// it, since this receipt prices the remaining work well inside it.
+	ordinary := DefaultBudget(short).MaxBytes
+	if got < ordinary {
+		t.Errorf("TopUpBytes = %d, under the %d a plain run of the same %d files is "+
+			"given (MaxBytes unset -> budgetFor -> DefaultBudget) - a raise that "+
+			"lowers the ceiling is not a raise", got, ordinary, short)
+	}
+	if got > ordinary {
+		t.Errorf("TopUpBytes = %d, over the %d a plain run of those %d files is given, "+
+			"though this set's receipt prices the eight remaining points at %d - "+
+			"handing out more than a fresh run could ask for makes the figure a "+
+			"blank cheque rather than a ceiling",
+			got, ordinary, short, remaining*perPoint)
 	}
 	if got%(1<<20) != 0 {
 		t.Errorf("TopUpBytes = %d, which is not a whole number of MiB - a figure a "+
@@ -496,25 +509,33 @@ func TestTopUpBytesPricesWhatIsLeftFromWhatWasSpent(t *testing.T) {
 	}
 }
 
-// TestTopUpBytesFallsBackOnTheDefaultsOwnShare is the floor. A run stopped
-// so early that its own average is meaningless - two points off a cold swarm
-// - must still be offered enough to work with, and the only non-invented
-// number available is the project's own measured per-file figure (section 7)
-// prorated to the points still missing.
-func TestTopUpBytesFallsBackOnTheDefaultsOwnShare(t *testing.T) {
+// TestTopUpBytesNeedsNoReceiptAtAll is the floor, and TOR-166 widened what
+// it covers. A run stopped so early that its own average is meaningless - two
+// points off a cold swarm - was already the case TOR-152 kept a fallback for.
+// Now the fallback IS the answer in every ordinary case, so a set with no
+// usable receipt is not a special case at all: it gets what a plain run of
+// its still-short files gets, which is the only non-invented number here
+// (REQUIREMENTS.md section 7).
+func TestTopUpBytesNeedsNoReceiptAtAll(t *testing.T) {
 	const (
-		planned   = 20
+		short     = 1
 		captured  = 2
 		remaining = 18
 	)
 	// A thousand bytes for two points is not a per-point cost, it is noise.
-	got := TopUpBytes(remaining, planned, 1000, captured)
+	noisy := TopUpBytes(remaining, short, captured, 1000)
+	// And no receipt whatsoever is the same answer rather than a smaller one.
+	none := TopUpBytes(remaining, short, 0, 0)
 
-	want := int64(bytesPerFile) * remaining / planned
-	if got < want {
-		t.Errorf("TopUpBytes = %d, want at least %d - the default's own share of "+
-			"%d per file, prorated to %d of %d points. A measured average off two "+
-			"points cannot be the whole answer", got, want, bytesPerFile, remaining, planned)
+	want := DefaultBudget(short).MaxBytes
+	if noisy < want {
+		t.Errorf("TopUpBytes = %d off a receipt of 1000 bytes for two points, want at "+
+			"least the %d a plain run of that one file gets - a measured average "+
+			"off two points must not be allowed to lower the ceiling", noisy, want)
+	}
+	if none != want {
+		t.Errorf("TopUpBytes with no receipt at all = %d, want %d - the figure that "+
+			"needs no receipt is the same one either way", none, want)
 	}
 }
 
@@ -524,7 +545,7 @@ func TestTopUpBytesFallsBackOnTheDefaultsOwnShare(t *testing.T) {
 // nineteen at nineteen gigabytes. DefaultBudget caps every run at
 // maxRunBytes; a top-up is still one run.
 func TestTopUpBytesNeverExceedsWhatAFreshRunCouldSpend(t *testing.T) {
-	got := TopUpBytes(19, 20, 1<<30, 1)
+	got := TopUpBytes(19, 1, 1, 1<<30)
 
 	if got > maxRunBytes {
 		t.Errorf("TopUpBytes = %d, over the %d ceiling a run can ever be given "+
@@ -538,13 +559,244 @@ func TestTopUpBytesNeverExceedsWhatAFreshRunCouldSpend(t *testing.T) {
 }
 
 // TestTopUpBytesOffersNothingWhenNothingIsMissing keeps the zero meaningful:
-// no points owed is no traffic to ask for, and a caller with no plan to
-// reason from gets the same answer rather than a guess.
+// no points owed is no traffic to ask for, and a caller with no file short
+// enough to run gets the same answer rather than a guess.
 func TestTopUpBytesOffersNothingWhenNothingIsMissing(t *testing.T) {
-	if got := TopUpBytes(0, 20, 324583424, 40); got != 0 {
+	if got := TopUpBytes(0, 2, 40, 324583424); got != 0 {
 		t.Errorf("TopUpBytes with nothing missing = %d, want 0", got)
 	}
 	if got := TopUpBytes(8, 0, 0, 0); got != 0 {
-		t.Errorf("TopUpBytes with no plan and no receipt = %d, want 0", got)
+		t.Errorf("TopUpBytes with no file short enough to run = %d, want 0", got)
+	}
+}
+
+// ---- TOR-166: the two rounds the manifests recorded, and what they cost. ----
+//
+// These are not invented numbers. They are the two manifest.Cost records the
+// ticket was filed from, off one result set of TWO files at twenty frames
+// each, and between them they falsify TOR-152's claim that prorating a
+// receipt is the conservative direction:
+//
+//	file 00: limit_bytes 8388608 (8 MiB), downloaded_bytes 20971520 (20 MiB), limit_hit "budget"
+//	file 01: limit_bytes 81788928 (78 MiB), downloaded_bytes 79396864 (75.7 MiB), limit_hit ""
+//
+// The 8 MiB ceiling identifies its own arithmetic exactly: it is the DEFAULT'S
+// OWN SHARE for ONE missing point of a twenty-point plan, bytesPerFile/20 =
+// 7864320 rounded up to a whole MiB. No other remainder can produce it - two
+// points already price at 15 MiB - so that round was priced for a single
+// point, and it spent 20971520 bytes on it: 2.5x the ceiling it was handed,
+// and 2.67x what the plan's own per-point figure says a point is worth.
+//
+// The round that DID finish is the control, and it is thinner than it looks:
+// 79396864 of 81788928 is 97.1% of its ceiling, 2392064 bytes of headroom, on
+// a torrent whose other receipt shows a single point costing 20971520. It
+// finished, but not with any margin the formula earned.
+const (
+	// plannedPerFile is the plan's frames per file, from the set both
+	// receipts belong to.
+	plannedPerFile = 20
+
+	// Round A is file 00's receipt: one point still owed, priced at the
+	// default's share, and what that round actually downloaded.
+	roundACeiling  = int64(8388608)
+	roundACost     = int64(20971520)
+	roundARemain   = 1
+	roundACaptured = 39 // 20 of file 01, 19 of file 00
+	roundAShort    = 1
+
+	// Round B is file 01's receipt: ten points still owed, priced off the
+	// measured average, and what that round actually downloaded.
+	roundBCeiling  = int64(81788928)
+	roundBCost     = int64(79396864)
+	roundBRemain   = 10
+	roundBCaptured = 30 // 20 of file 00, 10 of file 01
+	roundBShort    = 1
+
+	// roundASpent is what the set's receipt said when round A was priced -
+	// the other recorded round's own spending, this set's only other
+	// measurement. roundBSpent is the figure that makes round B's measured
+	// arm land on the ceiling it was actually handed.
+	roundASpent = roundBCost
+	roundBSpent = int64(245366784)
+)
+
+// pricedRound is one recorded round: the state the offer was priced from, the
+// ceiling that was actually handed out, and what the round then cost.
+type pricedRound struct {
+	name                         string
+	remaining, captured, short   int
+	spent                        int64
+	recordedCeiling, recordedRun int64
+}
+
+// recordedRounds is the two receipts as states to re-price.
+func recordedRounds() []pricedRound {
+	return []pricedRound{
+		{
+			name:      "file 00: one point left, priced at the default's share",
+			remaining: roundARemain, captured: roundACaptured, short: roundAShort,
+			spent: roundASpent, recordedCeiling: roundACeiling, recordedRun: roundACost,
+		},
+		{
+			name:      "file 01: ten points left, priced off the measured average",
+			remaining: roundBRemain, captured: roundBCaptured, short: roundBShort,
+			spent: roundBSpent, recordedCeiling: roundBCeiling, recordedRun: roundBCost,
+		},
+	}
+}
+
+// offerFor is the ONE place these cases touch the pricing API, so the
+// assertions below stay byte-identical across a change of its shape.
+func offerFor(r pricedRound) int64 {
+	return TopUpBytes(r.remaining, r.short, r.captured, r.spent)
+}
+
+// TestTheRecordedRoundsRepriceToTheCeilingsTheyWereHanded is the fidelity
+// anchor for every case below: if these states did not reproduce the ceilings
+// the manifests actually recorded, they would be numbers somebody made up
+// rather than the measurement, and nothing built on them would mean anything.
+//
+// It is deliberately an assertion about the OLD arithmetic, kept after the
+// fix: 8388608 is bytesPerFile/20 rounded up to a MiB, and 81788928 is
+// 245366784 x 10 / 30 rounded up to a MiB. That is how the two rounds were
+// identified in the first place, and it is what makes the states below the
+// ticket's own measurement instead of a plausible-looking fixture.
+func TestTheRecordedRoundsRepriceToTheCeilingsTheyWereHanded(t *testing.T) {
+	const mib = 1 << 20
+	roundUp := func(v int64) int64 { return (v + mib - 1) / mib * mib }
+
+	share := roundUp(int64(bytesPerFile) * roundARemain / plannedPerFile)
+	if share != roundACeiling {
+		t.Errorf("the default's share of %d for %d of %d points is %d, but the "+
+			"manifest recorded a ceiling of %d - round A is not the state that "+
+			"produced that receipt", bytesPerFile, roundARemain, plannedPerFile,
+			share, roundACeiling)
+	}
+
+	measured := roundUp(roundBSpent * roundBRemain / roundBCaptured)
+	if measured != roundBCeiling {
+		t.Errorf("the measured average of %d over %d points, prorated to %d, is %d, "+
+			"but the manifest recorded a ceiling of %d - round B is not the state "+
+			"that produced that receipt", roundBSpent, roundBCaptured, roundBRemain,
+			measured, roundBCeiling)
+	}
+}
+
+// TestTopUpCoversWhatTheRecordedRoundsActuallyCost is the falsification, run
+// as an assertion. An offer is only worth stating if the round it authorises
+// can finish under it, so each recorded round is re-priced from the state it
+// was priced from and the offer is held against what that round then spent.
+//
+// The two arms are demonstrably different, which is what stops this passing
+// for any figure at all: round B's recorded ceiling COVERS its recorded cost
+// (81788928 >= 79396864) and round A's does not (8388608 < 20971520). A
+// pricing that changed nothing fails exactly one of them; one that answered
+// maxRunBytes to everything passes both and fails the ceiling assertion
+// below instead.
+func TestTopUpCoversWhatTheRecordedRoundsActuallyCost(t *testing.T) {
+	for _, r := range recordedRounds() {
+		t.Run(r.name, func(t *testing.T) {
+			got := offerFor(r)
+
+			if got < r.recordedRun {
+				t.Errorf("offered %d to finish %d point(s), and that round went on to "+
+					"download %d - a ceiling under what the work costs stops the "+
+					"top-up short and asks for another press. The manifest recorded "+
+					"the offer as %d",
+					got, r.remaining, r.recordedRun, r.recordedCeiling)
+			}
+
+			// The other direction, so this cannot be satisfied by handing out
+			// the cap: a top-up may never be allowed more than a plain run of
+			// the same files would be, unless the set's own receipt says the
+			// remaining work costs more than that.
+			ordinary := DefaultBudget(r.short).MaxBytes
+			measured := r.spent * int64(r.remaining) / int64(r.captured)
+			if got > ordinary && measured <= ordinary {
+				t.Errorf("offered %d for %d file(s) whose own receipt prices the "+
+					"remaining work at %d - over the %d a plain run of those files "+
+					"gets, which makes the figure a blank cheque rather than a "+
+					"ceiling", got, r.short, measured, ordinary)
+			}
+		})
+	}
+}
+
+// TestTopUpIsNeverLessThanNotPressingItAtAll is the root cause, stated as the
+// property that closes it.
+//
+// A top-up's raise travels as RunRequest.MaxBytes, and zero there is not
+// "nothing" - it is core.budgetFor scaling the ceiling to the file count,
+// DefaultBudget(files). So an offer BELOW that number is not a raise at all:
+// it hands the run a TIGHTER ceiling than it would have had if the button had
+// never been pressed. Round A is exactly that: 8388608 offered where doing
+// nothing gives 157286400, a button labelled "more traffic" that took away
+// nineteen twentieths of it.
+func TestTopUpIsNeverLessThanNotPressingItAtAll(t *testing.T) {
+	for _, r := range recordedRounds() {
+		t.Run(r.name, func(t *testing.T) {
+			ordinary := DefaultBudget(r.short).MaxBytes
+			if got := offerFor(r); got < ordinary {
+				t.Errorf("offered %d as a RAISE, under the %d the same run gets with "+
+					"no raise at all (MaxBytes unset -> budgetFor -> DefaultBudget(%d)) "+
+					"- pressing the button makes the ceiling smaller than leaving it "+
+					"alone", got, ordinary, r.short)
+			}
+		})
+	}
+}
+
+// pressesToFinish counts how many times a person has to press "top up" before
+// the set is done, given what one round of finishing it actually costs.
+//
+// The model is the observed one and nothing more: a round is offered a
+// ceiling, and it finishes only if that ceiling covers what the round costs.
+// A round that does not finish still spends - the manifest for round A
+// records 20971520 downloaded against an 8388608 ceiling - and leaves the set
+// exactly as short as it found it, which is what the owner reported and what
+// the next offer is then priced from.
+//
+// limit caps the loop, because a formula can have a FIXED POINT below the
+// true cost and then no number of presses ever finishes.
+func pressesToFinish(r pricedRound, limit int) int {
+	for n := 1; n <= limit; n++ {
+		if offerFor(r) >= r.recordedRun {
+			return n
+		}
+		if r.spent < r.recordedRun {
+			r.spent = r.recordedRun
+		}
+	}
+	return limit + 1
+}
+
+// TestFinishingTakesOnePress is the acceptance criterion, demonstrated rather
+// than argued. Both recorded rounds must be finishable by pressing once.
+//
+// The two arms are again demonstrably different under the pricing that
+// shipped: round B finishes on the first press, and round A never finishes at
+// all. Its offer does not merely fall short once - once the round's own
+// 20971520 is on the receipt, the measured arm reads 20971520/39 = 537731 per
+// point, still under the default's share, so the next offer is 8388608 again,
+// and the one after that, for ever. That is what "pressed it a second time"
+// looks like when it is followed to its end: not a formula that needs a
+// bigger multiplier, but one with a fixed point below the cost of the work.
+func TestFinishingTakesOnePress(t *testing.T) {
+	const limit = 5
+
+	for _, r := range recordedRounds() {
+		t.Run(r.name, func(t *testing.T) {
+			switch presses := pressesToFinish(r, limit); {
+			case presses > limit:
+				t.Errorf("still not finished after %d presses, each one spending %d "+
+					"and stopping on the ceiling - the offer has a fixed point below "+
+					"what finishing costs, so no number of presses ever gets there",
+					limit, r.recordedRun)
+			case presses != 1:
+				t.Errorf("finishing took %d presses, want 1 - a control that has to be "+
+					"pressed repeatedly spends the allowance in instalments and makes "+
+					"the owner supervise it", presses)
+			}
+		})
 	}
 }

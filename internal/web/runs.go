@@ -698,8 +698,22 @@ func (t *TopUp) absorbCost(c manifest.Cost) {
 	}
 }
 
-// price fills in what a top-up would be allowed to spend, and whether
-// raising this run's own ceiling is the right lever at all.
+// shortFiles counts the files this set still owes points on - the ones
+// request() narrows the run to, and therefore the file count the ceiling that
+// run gets is scaled to (core.budgetFor, core.DefaultBudget).
+func (t TopUp) shortFiles() int {
+	n := 0
+	for _, f := range t.Files {
+		if f.Short() {
+			n++
+		}
+	}
+	return n
+}
+
+// price fills in what a top-up would be allowed to spend, whether raising
+// this run's own ceiling is the right lever at all, and whether finishing is
+// possible under the client-wide roof at all.
 //
 // The raise is withheld in exactly the two cases where it would be a lie: a
 // run the CLOCK stopped, and one the CLIENT-WIDE ROOF stopped. Neither is
@@ -712,13 +726,28 @@ func (t *TopUp) absorbCost(c manifest.Cost) {
 // ceiling is what every other run gets, the frames already taken are still
 // reused, and whatever was in the way - a full roof on a process since
 // restarted, a swarm that was slow that afternoon - may simply have moved.
+//
+// THE ROOF IS ASKED FIRST, and it is the one question that can end this
+// before any of that (TOR-166). A roof under the very least finishing can
+// cost is not a figure to clamp to - it is a run that cannot be completed,
+// and offering it anyway would be selling one more instalment of an allowance
+// that never reaches the end. See core.TopUpFloor for why the prorated
+// average is a sound floor precisely because it was a bad ceiling.
 func (t *TopUp) price(roofBytes int64) {
+	if floor := core.TopUpFloor(t.Remaining, t.Captured, t.SpentBytes); roofBytes > 0 && floor > roofBytes {
+		t.Refused = "the client-wide traffic roof of " + mbAtMost(roofBytes) +
+			" is below the " + mbAtLeast(floor) + " finishing this would cost at " +
+			"the very least, so no run can complete it however often it is " +
+			"started - raise -max-client-bytes, or ask for fewer frames"
+		return
+	}
+
 	t.RaiseHelps = t.Limit == LimitTraffic || t.Limit == ""
 	if !t.RaiseHelps {
 		return
 	}
 
-	t.OfferBytes = core.TopUpBytes(t.Remaining, t.Count, t.SpentBytes, t.Captured)
+	t.OfferBytes = core.TopUpBytes(t.Remaining, t.shortFiles(), t.Captured, t.SpentBytes)
 	if roofBytes > 0 && t.OfferBytes > roofBytes {
 		// Not a way around the roof, and not pretending to be: the run would
 		// be stopped at the roof anyway (BudgetTracker.Exhausted asks it
@@ -728,9 +757,33 @@ func (t *TopUp) price(roofBytes int64) {
 		// package has no handle on - so this bounds the offer by the whole
 		// roof rather than by its headroom, and the page says the roof
 		// applies rather than that this much is available.
+		//
+		// Safe to clamp only because the check above already established the
+		// roof can cover what finishing costs at the very least; below that
+		// this is a refusal, not a smaller offer.
 		t.OfferBytes = roofBytes
 		t.RoofCapped = true
 	}
+}
+
+// mbAtLeast and mbAtMost write a byte figure the way a sentence a person
+// reads wants it, in megabytes rather than mebibytes to match the units the
+// flags and the page's own cost lines already use.
+//
+// They round in OPPOSITE directions, and which one a caller wants is decided
+// by what a reader would be misled into believing. A cost rounds UP, so the
+// sentence never names a smaller bill than the one that arrives; an allowance
+// rounds DOWN, so it never names more headroom than there is. Rounding both
+// the same way would let "8 MB is below 82 MB" print as "9 MB is below 82 MB"
+// and quietly hand the reader a roof they do not have.
+func mbAtLeast(bytes int64) string {
+	const mb = 1000 * 1000
+	return strconv.FormatInt((bytes+mb-1)/mb, 10) + " MB"
+}
+
+func mbAtMost(bytes int64) string {
+	const mb = 1000 * 1000
+	return strconv.FormatInt(bytes/mb, 10) + " MB"
 }
 
 // request turns a priced top-up into the run that fills its gaps.
