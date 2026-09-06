@@ -157,12 +157,48 @@
      a panel does not make it look like a panel of its own */
   --hover: #16232B;
 
-  /* three levels of ink */
+  /* TWO levels of ink carry text (TOR-158). There were three; --ink-3
+     measured 4.14 / 3.87 / 3.54 / 3.14 / 3.28 against --bg / --s1 / --s2 /
+     --s3 / --hover, and AA for text is 4.5, so it failed on every surface it
+     was actually painted on - every muted caption, the copies/piece line,
+     the magnet field's placeholder, and the em dash every absent cell
+     renders. Lifting it to 4.5 would have put it within a ~1.2-1.3 contrast
+     step of --ink-2 (compare the two rows below), close enough that the
+     third level would stop reading as a third level - so rather than ship
+     two tokens a person cannot tell apart, every point of use that is text
+     folded into --ink-2, which already cleared AA everywhere. Recomputed
+     after that fold, both remaining ink tokens read: */
+  /*                     --bg    --s1    --s2    --s3   --hover  */
+  /* --ink   (#DCEFF3):  17.02   15.91   14.57   12.91   13.51   */
+  /* --ink-2 (#8CA6AF):   7.88    7.37    6.75    5.98    6.25   */
   --ink:   #DCEFF3;
   --ink-2: #8CA6AF;
+  /* --ink-3 is no longer spent on text anywhere in this file - the one place
+     that still reads it is .avail-swarm-dot's neutral/unknown fill (a small
+     circular indicator, not text), where the applicable floor is 3.0 for a
+     UI part rather than 4.5, and this value already clears it (3.87 against
+     --s1, its only background). Left at its original value on purpose:
+     nothing needed it to move, only text needed to stop using it. */
   --ink-3: #5C757E;
 
   --rule: #1A2F38;
+
+  /* --edge (TOR-159): the resting border of an interactive control - #source,
+     the frame-count number field, the mode select. Their old border was
+     1px solid var(--rule) on var(--s1)/var(--s2), and --rule measures 1.36
+     against --s1 - not a faint edge, no edge, since 3.0 is the floor for a
+     UI part to be distinguishable at all. --rule itself is left untouched:
+     it keeps doing its quiet, deliberately-near-invisible job separating
+     table rows and panels elsewhere, and lifting it globally would draw
+     visible lines through the whole table. --edge is a separate token for
+     the different job an interactive control's edge has to do - visible at
+     rest, not the accent (see --accent's own comment: nothing decorative
+     wears it, and an idle input is decorative furniture, not "live" or
+     "where you are"). Measured: --edge (#42778D) against --s1 is 3.83,
+     against --s2 (button/select's own background) is 3.51 - both clear the
+     3.0 floor with room. Focus is where the accent belongs instead: see
+     the :focus-visible rules on #source, input[type="number"] and select. */
+  --edge: #42778D;
 
   /* One accent, and it means "this is live or this is where you are" -
      nothing decorative wears it. */
@@ -233,12 +269,12 @@ h3 {
   margin: .6rem 0 .2rem;
   font-family: var(--mono);
   font-weight: 600;
-  color: var(--ink-3);
+  color: var(--ink-2);
   text-transform: uppercase;
   letter-spacing: var(--track);
 }
 
-.status { font-family: var(--mono); font-size: .74rem; color: var(--ink-3); letter-spacing: .04em; }
+.status { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); letter-spacing: .04em; }
 .status[data-state="live"] { color: var(--accent); opacity: 1; }
 .status[data-state="lost"] { color: var(--warn); opacity: 1; }
 
@@ -342,7 +378,7 @@ h3 {
   font-size: .72rem;
   font-family: var(--mono);
   font-weight: 600;
-  color: var(--ink-3);
+  color: var(--ink-2);
   text-transform: uppercase;
   letter-spacing: var(--track);
   margin: 0 0 .5rem;
@@ -372,12 +408,25 @@ form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
   padding: .45rem .6rem;
   font-family: var(--mono);
   font-size: .82rem;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   border-radius: 0;
   background: var(--s1);
   color: var(--ink);
 }
-#source::placeholder { color: var(--ink-3); }
+#source::placeholder { color: var(--ink-2); }
+/* Focus is where the accent belongs (see --accent's own comment in :root):
+   the resting edge is --edge, deliberately not the accent, so focus has to
+   say so itself rather than borrowing whatever the border already wears -
+   otherwise a focused field and an idle one would look the same. Shared by
+   the whole intake row, so tabbing through it reads as one consistent
+   control set rather than the magnet field getting special treatment. */
+#source:focus-visible,
+input[type="number"]:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
 
 .browse { font-size: .85rem; opacity: .8; cursor: pointer; white-space: nowrap; }
 .browse .link { text-decoration: underline; }
@@ -392,7 +441,7 @@ input[type="number"] {
   padding: .45rem .6rem;
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
   border-radius: 0;
   background: var(--s1);
   color: var(--ink);
@@ -404,7 +453,7 @@ select, button {
   border-radius: 0;
   background: var(--s2);
   color: var(--ink);
-  border: 1px solid var(--rule);
+  border: 1px solid var(--edge);
 }
 /* Take frames is the one filled control on the page: it is the thing that
    spends traffic, and it should look like it. */
@@ -421,7 +470,7 @@ button[type="submit"] {
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .5; }
 
-.hint { font-size: .78rem; color: var(--ink-3); margin: .6rem 0 0; }
+.hint { font-size: .78rem; color: var(--ink-2); margin: .6rem 0 0; }
 .error { color: var(--bad); }
 
 .torrent-summary { opacity: .85; font-weight: 500; }
@@ -446,7 +495,12 @@ button:disabled { opacity: .5; }
    wraps, ellipsises or has a min-width of a pixel per block, so the measured
    min-content of a detail row stays under the columns' own. */
 .run-table-wrap { overflow-x: auto; }
-.run-list-empty { font-size: .82rem; opacity: .6; margin: 0; }
+/* TOR-158: was opacity: .6 on the inherited full-strength --ink, dimming a
+   sentence a person needs to read (it is the only thing on the page telling
+   them nothing is loaded yet) rather than the muted --ink-2 it is meant to
+   read as. An explicit token instead of an opacity guess: legible at a
+   known, measured strength. */
+.run-list-empty { font-size: .82rem; color: var(--ink-2); margin: 0; }
 
 .run-table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .run-table th, .run-table td { padding: .4rem .3rem; text-align: left; vertical-align: middle; }
@@ -476,7 +530,7 @@ button:disabled { opacity: .5; }
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: var(--track);
-  color: var(--ink-3);
+  color: var(--ink-2);
   white-space: nowrap;
   border-bottom: 1px solid var(--rule);
   cursor: pointer;
@@ -551,7 +605,7 @@ button:disabled { opacity: .5; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.run-meta { display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: -.01em; color: var(--ink-3); overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
+.run-meta { display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: -.01em; color: var(--ink-2); overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
 
 /* TOR-141: a run that is going nowhere reads differently from one that is
    merely slow - that distinction is the ticket's own acceptance criterion,
@@ -559,7 +613,7 @@ button:disabled { opacity: .5; }
    careful reading. --warn is the same amber "queued"/"needs-action"/
    "partial" already wear (see .run-badge below) for the same reason: this
    is a row that wants attention, not a row that is broken (--bad) or a row
-   quietly working (the plain --ink-3 every other .run-meta line uses). */
+   quietly working (the plain --ink-2 every other .run-meta line uses). */
 .run-meta[data-stall="true"] { color: var(--warn); font-weight: 600; }
 
 /* TOR-117: a name read off a magnet's own dn= is not confirmed - anyone can
@@ -568,9 +622,9 @@ button:disabled { opacity: .5; }
    still reads as "not settled yet"; the title attribute (app.js) carries the
    rest of the explanation. Shared by .run-name and .run-detail-title, the
    only two places a name is shown. */
-.run-name-provisional { font-style: italic; color: var(--ink-3); }
+.run-name-provisional { font-style: italic; color: var(--ink-2); }
 
-.run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .run-cell-status { white-space: nowrap; }
 /* Deliberately NOT nowrap-with-a-max-width, which is what this was first and
    why TOR-121 exists: a cell that will not shrink has to take its width from
@@ -600,16 +654,20 @@ button:disabled { opacity: .5; }
   text-align: right;
   font-family: var(--mono);
   font-size: .72rem;
-  color: var(--ink-2);
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 /* ABSENT IS NOT ZERO (app.js's ABSENT constant, and this ticket's own
    opening argument). The placeholder em dash reads a step dimmer than the
-   figures themselves - down at --ink-3, the same muted level a provisional
-   name or a disk-only badge already use for "not settled/not live" - so "no
-   reading" cannot be mistaken for a merely small or zero number at a glance,
-   even before anyone reads the digit. */
-.run-table td.run-cell-metric[data-absent="true"] { color: var(--ink-3); }
+   figures themselves - down at --ink-2 now (TOR-158): the base rule above
+   used to be --ink-2 and this override --ink-3, which put the dimmer of the
+   two below AA on every surface it rendered on. Lifting --ink-3 to AA would
+   have landed it within a contrast step of --ink-2 - indistinguishable, not
+   fixed - so instead the base figure moved up to full --ink and the absent
+   state kept --ink-2, the same two tokens, swapped, both already clearing
+   AA everywhere. The em dash's own shape still carries the rest of the
+   signal: it cannot be mistaken for a digit regardless of colour. */
+.run-table td.run-cell-metric[data-absent="true"] { color: var(--ink-2); }
 
 .run-cell-availability { width: 5.4rem; }
 /* Two lines, the same shape .run-cell-status gives a badge and its .run-meta
@@ -669,7 +727,7 @@ button:disabled { opacity: .5; }
   font-weight: 400;
   text-transform: none;
   letter-spacing: 0;
-  color: var(--ink-3);
+  color: var(--ink-2);
   margin-top: .05rem;
 }
 
@@ -727,7 +785,7 @@ button:disabled { opacity: .5; }
    rather than done's green (TOR-72). */
 .run-badge[data-state="partial"] { background: var(--warn-dim); color: var(--warn); }
 .run-badge[data-state="needs-action"] { background: var(--warn-dim); color: var(--warn); font-weight: 600; }
-.run-badge[data-state="cancelled"] { background: var(--s3); color: var(--ink-3); }
+.run-badge[data-state="cancelled"] { background: var(--s3); color: var(--ink-2); }
 .run-badge[data-state="disk"] { background: var(--s3); color: var(--ink-2); }
 
 /* THE EXPANDED ROW (TOR-138). One detail per torrent, in its own <tr> under
@@ -855,7 +913,7 @@ button:disabled { opacity: .5; }
 }
 .picker-file:hover { background: var(--hover); }
 .picker-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.picker-size { flex: 0 0 auto; font-family: var(--mono); font-size: .76rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.picker-size { flex: 0 0 auto; font-family: var(--mono); font-size: .76rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
 .picker-foot { display: flex; align-items: center; gap: .6rem; margin: .6rem 0 0; }
 /* The cost of pressing the button, shown before it is spent: frames are per
@@ -911,7 +969,7 @@ button:disabled { opacity: .5; }
 
 .file-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
 
-.file-summary { flex: 0 0 auto; font-family: var(--mono); font-size: .74rem; color: var(--ink-3); }
+.file-summary { flex: 0 0 auto; font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
 
 .file-body { padding: .5rem .35rem 0; }
 
@@ -967,7 +1025,7 @@ button:disabled { opacity: .5; }
   font-size: .8rem;
   font-variant-numeric: tabular-nums;
 }
-.specs dt { color: var(--ink-3); text-transform: uppercase; letter-spacing: .06em; font-size: .7rem; }
+.specs dt { color: var(--ink-2); text-transform: uppercase; letter-spacing: .06em; font-size: .7rem; }
 .specs dd { margin: 0; color: var(--ink); }
 
 .tracks { display: flex; gap: 2rem; flex-wrap: wrap; }
@@ -1104,7 +1162,7 @@ button:disabled { opacity: .5; }
 .avail-swarm[data-health="unknown"] .avail-swarm-dot { background: var(--ink-3); }
 .avail-note {
   font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
-  color: var(--ink-3); margin-top: .3rem;
+  color: var(--ink-2); margin-top: .3rem;
 }
 
 /* THE PIECE STRIP (TOR-111). How much of the file the run actually ordered,
@@ -1142,7 +1200,7 @@ button:disabled { opacity: .5; }
 }
 .reach-note {
   font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
-  color: var(--ink-3); margin-top: .3rem;
+  color: var(--ink-2); margin-top: .3rem;
 }
 
 /* THE GRID'S FOUR STATES (TOR-110). A cell is one capture point, and the
@@ -1179,7 +1237,16 @@ button:disabled { opacity: .5; }
   background: var(--s2);
   box-shadow: inset 0 0 0 1px var(--rule);
 }
-.thumb-pending figcaption { color: var(--ink-3); }
+/* No figcaption override here any more (TOR-158): both used to read
+   --ink-3, a step dimmer than the base .thumb figcaption's --ink-2, as one
+   more quiet signal on top of the surface/hairline the comment above
+   describes. --ink-3 failed AA on every surface it painted text on, and
+   folding it into --ink-2 made these two rules identical to the base rule
+   they were overriding - so they were removed rather than kept as a no-op
+   that would mislead the next person into thinking a distinction still
+   lives here. The state is still carried by the box (surface+hairline for
+   pending, the dashed --bad border for failed), same as the design
+   comment above always said. */
 
 .thumb-failed .thumb-box {
   background: var(--bad-dim);
@@ -1190,7 +1257,6 @@ button:disabled { opacity: .5; }
   color: var(--bad); text-align: center; padding: 0 .4rem;
   overflow-wrap: anywhere;
 }
-.thumb-failed figcaption { color: var(--ink-3); }
 
 /* The hairline every frame carries (see .thumb img) plus a foot, so the mark
    is added to the cell rather than replacing what is already true of it. */
@@ -1340,7 +1406,7 @@ button:disabled { opacity: .5; }
   place-content: center;
   border-radius: .3rem;
   background: var(--s3);
-  color: var(--ink-3);
+  color: var(--ink-2);
   font-family: var(--mono);
   font-size: .74rem;
 }
@@ -1476,7 +1542,7 @@ button:disabled { opacity: .5; }
   font-family: var(--mono);
   font-size: .76rem;
   font-variant-numeric: tabular-nums;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 .compare-times .compare-live { color: var(--accent); }
 
@@ -1487,9 +1553,16 @@ button:disabled { opacity: .5; }
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: .76rem;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
-.compare-keys { font-family: var(--mono); font-size: .72rem; opacity: .8; }
+/* No opacity here on top of the .compare-note/.compare-keys rule's own
+   color: var(--ink-2) above (TOR-158) - opacity multiplies against
+   whatever the token already measures, and .compare-keys used to stack
+   opacity: .8 on what was --ink-3, which is exactly the invisible-failure
+   shape that ticket warned about: the token alone read fine, the two
+   together read dimmer than either. --ink-2's own margin does not need
+   the help. */
+.compare-keys { font-family: var(--mono); font-size: .72rem; }
 
 /* Drag-and-drop feedback, shown while a file is dragged over the page. */
 .drop-overlay {
