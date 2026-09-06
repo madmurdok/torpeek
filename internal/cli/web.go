@@ -40,6 +40,14 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// separately. Deferred before the server's own Close so it runs after it:
 	// the server cancels what is running, and only then does the client go
 	// down.
+	//
+	// base.Roof is the ceiling over this one client, and it arrives already
+	// set, from Options.config: it is a flag, like every other default a run
+	// starts from. What matters here is that it must not be set anywhere
+	// ELSE. runConfig below copies base per request, and a request that
+	// varied the roof would be a second opinion about one client, of which
+	// the larger silently wins - so the roof travels with the pool, decided
+	// once, by whoever decided there is one client (core.Config.Roof).
 	pool := swarm.NewPool(base.Swarm)
 	defer pool.Close()
 	base.Torrents = pool
@@ -130,6 +138,18 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	defer server.Close()
 
 	fmt.Fprintf(stdout, "torpeek: serving the UI at %s\n", server.URL())
+
+	// Said out loud at startup rather than left to be discovered. A server
+	// that stays up for hours can spend a great deal of somebody's
+	// allowance, the default is no roof at all (core.DefaultRoof), and a
+	// lever nobody knows about is not a lever. Received bytes only - nothing
+	// caps upload (swarm.Torrent.Uploaded).
+	if base.Roof.MaxBytes > 0 {
+		fmt.Fprintf(stdout, "torpeek: client-wide traffic roof: %d bytes received, across every run together\n",
+			base.Roof.MaxBytes)
+	} else {
+		fmt.Fprintln(stdout, "torpeek: client-wide traffic roof: none; -max-client-bytes sets one")
+	}
 
 	// A source on the command line starts straight away; without one the page
 	// waits for someone to paste a link.

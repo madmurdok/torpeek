@@ -2317,7 +2317,16 @@ function apply(ev) {
     }
 
     case "budget_warning":
-      logFor(entry, "warning: " + ev.spent + " of " + ev.limit + " bytes used");
+      // Two sentences rather than one with the numbers swapped in. At scope
+      // "client" the figures are every run's together and this run may have
+      // spent almost none of them, so the run-scoped wording would read as
+      // an accusation of the wrong run (core.LimitScope).
+      if (ev.scope === "client") {
+        logFor(entry, "warning: " + ev.spent + " of the client-wide traffic roof of " +
+            ev.limit + " bytes used, by every run together; all runs stop when it is reached");
+      } else {
+        logFor(entry, "warning: " + ev.spent + " of " + ev.limit + " bytes used");
+      }
       break;
 
     case "file_done":
@@ -2334,6 +2343,17 @@ function apply(ev) {
       syncEntry(entry);
       logFor(entry, "done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
           " file(s), " + ev.downloaded + " bytes in " + seconds(ev.elapsed_ms));
+      // The reason spelled out, for the two that are not self-explanatory
+      // from a word. A run that hit the client-wide roof must not read like
+      // a run that hit its own ceiling: the first is about traffic this run
+      // may not have caused and cannot narrow its way out of, the second is
+      // about this run's own spending (core.StopRoof against StopBudget).
+      if (ev.reason === "traffic_roof") {
+        logFor(entry, "stopped at the client-wide traffic roof, not at this run's own limit; " +
+            "what was produced is kept");
+      } else if (ev.reason === "budget") {
+        logFor(entry, "stopped at this run's own limit; what was produced is kept");
+      }
       // A run that finished and still left something out says so here rather
       // than by reading as failed, which is what it used to do when its
       // .torrent could not be written (TOR-79). The badge stays "done"

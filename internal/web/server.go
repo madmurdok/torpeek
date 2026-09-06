@@ -275,14 +275,24 @@ const keepFinishedRuns = 10
 // It holds a registry of runs and exactly one slot to run them in. One at a
 // time is still the rule, but since TOR-128 it is a policy rather than a
 // limit of the machinery: every public torrent shares one long-lived client
-// on one port (swarm.Pool), so a second concurrent run could now start. What
-// keeps the slot at one is that two runs would each carry their own traffic
-// budget with no roof over the pair, on a host whose fair-use guidance is one
-// to three active downloads (REQUIREMENTS.md 4.1). Widening it, and the roof
-// that has to come with it, are their own decisions.
+// on one port (swarm.Pool), so a second concurrent run could now start.
 //
-// What changed before that, and still holds: a second request waits its turn
-// instead of being refused.
+// What used to keep the slot at one was that two runs would each carry their
+// own traffic budget with no roof over the pair, on a host whose fair-use
+// guidance is one to three active downloads (REQUIREMENTS.md 4.1). That gap
+// is closed: core.Roof is a client-wide traffic ceiling that does not
+// multiply by the number of runs, and every run this server starts is held to
+// it (core.Config.Roof, set once beside the pool in cli/web.go).
+//
+// The slot stays at one because widening it is TOR-130's decision, not
+// because nothing bounds the pair any more. What that decision now owes is
+// smaller and concrete: the roof SHIPS UNLIMITED (core.DefaultRoof says why
+// torpeek will not guess a person's allowance), so a queue wider than one
+// slot must arrive with `-max-client-bytes` set, or N runs multiply the
+// per-run ceiling by N exactly as before.
+//
+// What changed before all of that, and still holds: a second request waits
+// its turn instead of being refused.
 type Server struct {
 	cfg      Config
 	runner   Runner
@@ -499,11 +509,17 @@ func mountRoot(next http.Handler) http.Handler {
 // took the slot or is waiting for it.
 //
 // It never refuses because another run is going. Only one runs at a time -
-// two runs would each carry their own traffic budget with no roof over the
-// pair - but that is kept by making the second request wait rather than by
-// turning it away. The error
+// see the type's own comment for what that is now about, and what the
+// client-wide roof over every run changed - but that is kept by making the
+// second request wait rather than by turning it away. The error
 // it can still return is about the request or the server, not about traffic:
 // a blank source, or a server that has closed.
+//
+// It does not refuse a full traffic roof either, and deliberately: a queued
+// run reaches the engine minutes later, and a roof read here would be the
+// wrong number by then. core.Engine checks it at the moment the run actually
+// starts, and a run refused there arrives on its own stream as a failed run
+// with core.CodeTrafficRoof, exactly as an unopenable source does.
 //
 // A failure of the run itself - a source that does not parse, a torrent that
 // cannot be opened - is not returned here. The runner is only ever called

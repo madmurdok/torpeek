@@ -23,6 +23,14 @@ type Contents struct {
 // Choosing which file to look at should not cost what looking at it costs, so
 // this fetches the metadata and detaches again without opening the bridge or
 // touching a piece of payload.
+//
+// The client-wide traffic roof does NOT refuse a listing, and that is a
+// decision rather than an oversight (Config.Roof). A listing touches no
+// payload, so it adds nothing to the figure the roof is read against
+// (BytesReadUsefulData counts piece data; metadata chunks are counted
+// separately by anacrolix and are not in it). Refusing one would therefore
+// cost a person the ability to LOOK at a torrent without saving them a byte -
+// and looking is how somebody with a full roof decides what to raise it for.
 func (e *Engine) List(ctx context.Context, cfg Config) (Contents, error) {
 	src, err := swarm.ParseSource(cfg.Source)
 	if err != nil {

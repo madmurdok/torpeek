@@ -81,7 +81,7 @@ func TestDefaultBudgetScalesWithFiles(t *testing.T) {
 func TestExhaustedOnTraffic(t *testing.T) {
 	meter := &fakeMeter{}
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{MaxBytes: 1000}, meter, clock.Now)
+	tracker := newBudgetTracker(Budget{MaxBytes: 1000}, meter, Roof{}, nil, clock.Now)
 
 	if done, _ := tracker.Exhausted(); done {
 		t.Fatal("exhausted before spending anything")
@@ -104,7 +104,7 @@ func TestExhaustedOnTraffic(t *testing.T) {
 
 func TestExhaustedOnTime(t *testing.T) {
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{MaxTime: time.Minute}, &fakeMeter{}, clock.Now)
+	tracker := newBudgetTracker(Budget{MaxTime: time.Minute}, &fakeMeter{}, Roof{}, nil, clock.Now)
 
 	clock.advance(59 * time.Second)
 	if done, _ := tracker.Exhausted(); done {
@@ -121,7 +121,7 @@ func TestExhaustedOnTime(t *testing.T) {
 func TestUnlimitedBudgetNeverExhausts(t *testing.T) {
 	meter := &fakeMeter{bytes: 1 << 40}
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{}, meter, clock.Now)
+	tracker := newBudgetTracker(Budget{}, meter, Roof{}, nil, clock.Now)
 
 	clock.advance(24 * time.Hour)
 	if done, _ := tracker.Exhausted(); done {
@@ -134,7 +134,7 @@ func TestUnlimitedBudgetNeverExhausts(t *testing.T) {
 func TestWarningFiresOnce(t *testing.T) {
 	meter := &fakeMeter{}
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{MaxBytes: 1000, WarnAt: 0.8}, meter, clock.Now)
+	tracker := newBudgetTracker(Budget{MaxBytes: 1000, WarnAt: 0.8}, meter, Roof{}, nil, clock.Now)
 
 	meter.set(700)
 	if w := tracker.Warning(); w != nil {
@@ -158,7 +158,7 @@ func TestWarningFiresOnce(t *testing.T) {
 
 func TestWarningOnTimeAlone(t *testing.T) {
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{MaxTime: 10 * time.Minute, WarnAt: 0.8}, &fakeMeter{}, clock.Now)
+	tracker := newBudgetTracker(Budget{MaxTime: 10 * time.Minute, WarnAt: 0.8}, &fakeMeter{}, Roof{}, nil, clock.Now)
 
 	clock.advance(7 * time.Minute)
 	if w := tracker.Warning(); w != nil {
@@ -174,7 +174,7 @@ func TestWarningOnTimeAlone(t *testing.T) {
 func TestRemaining(t *testing.T) {
 	meter := &fakeMeter{bytes: 400}
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{MaxBytes: 1000, MaxTime: time.Minute}, meter, clock.Now)
+	tracker := newBudgetTracker(Budget{MaxBytes: 1000, MaxTime: time.Minute}, meter, Roof{}, nil, clock.Now)
 
 	clock.advance(20 * time.Second)
 	bytes, remaining := tracker.Remaining()
@@ -195,7 +195,7 @@ func TestRemaining(t *testing.T) {
 }
 
 func TestContextExpiresWithTheTimeBudget(t *testing.T) {
-	tracker := NewBudgetTracker(Budget{MaxTime: 150 * time.Millisecond}, &fakeMeter{})
+	tracker := NewBudgetTracker(Budget{MaxTime: 150 * time.Millisecond}, &fakeMeter{}, Roof{}, nil)
 
 	ctx, cancel := tracker.Context(context.Background())
 	defer cancel()
@@ -209,7 +209,7 @@ func TestContextExpiresWithTheTimeBudget(t *testing.T) {
 
 func TestContextAlreadyExpired(t *testing.T) {
 	clock := newFakeClock()
-	tracker := newBudgetTracker(Budget{MaxTime: time.Minute}, &fakeMeter{}, clock.Now)
+	tracker := newBudgetTracker(Budget{MaxTime: time.Minute}, &fakeMeter{}, Roof{}, nil, clock.Now)
 	clock.advance(2 * time.Minute)
 
 	ctx, cancel := tracker.Context(context.Background())
@@ -224,7 +224,7 @@ func TestContextAlreadyExpired(t *testing.T) {
 
 func TestTrackerIsSafeForConcurrentUse(t *testing.T) {
 	meter := &fakeMeter{}
-	tracker := NewBudgetTracker(Budget{MaxBytes: 1 << 20, WarnAt: 0.8}, meter)
+	tracker := NewBudgetTracker(Budget{MaxBytes: 1 << 20, WarnAt: 0.8}, meter, Roof{}, nil)
 
 	var wg sync.WaitGroup
 	warnings := make(chan *BudgetWarning, 32)
@@ -247,5 +247,141 @@ func TestTrackerIsSafeForConcurrentUse(t *testing.T) {
 
 	if got := len(warnings); got > 1 {
 		t.Errorf("%d goroutines each got a warning, want at most one overall", got)
+	}
+}
+
+// TestRoofStopsARunItsOwnBudgetWouldNot is the unit half of TOR-131: the two
+// ceilings are independent, and the roof stops a run that is nowhere near its
+// own limit.
+//
+// The second arm is what stops this being a tautology. The same run against
+// the same meters with no roof over it is not exhausted at all, so the stop is
+// the roof's doing and not the budget's.
+func TestRoofStopsARunItsOwnBudgetWouldNot(t *testing.T) {
+	const (
+		runSpent   = 100
+		runCeiling = 100_000 // a thousand times what this run has spent
+		clientRead = 9_000
+		roof       = 8_000
+	)
+
+	run := &fakeMeter{}
+	run.set(runSpent)
+	client := &fakeMeter{}
+	client.set(clientRead)
+
+	budget := Budget{MaxBytes: runCeiling, MaxTime: time.Hour}
+
+	unroofed := NewBudgetTracker(budget, run, Roof{}, nil)
+	if exhausted, reason := unroofed.Exhausted(); exhausted {
+		t.Fatalf("with no roof the run is exhausted (%s); the arms are not different, "+
+			"so nothing below is about the roof", reason)
+	}
+
+	roofed := NewBudgetTracker(budget, run, Roof{MaxBytes: roof}, client)
+	exhausted, reason := roofed.Exhausted()
+	if !exhausted {
+		t.Fatalf("the client has received %d of a %d roof and the run carries on", clientRead, roof)
+	}
+	if reason != StopRoof {
+		t.Errorf("stopped for %q, want %q - a run stopped by the client's roof must not "+
+			"report the reason a run over its own ceiling reports", reason, StopRoof)
+	}
+
+	// The run's own figures are untouched by any of this: the roof is not a
+	// second way of spending its budget.
+	if spent, _ := roofed.Spent(); spent != runSpent {
+		t.Errorf("Spent() = %d, want this run's own %d", spent, runSpent)
+	}
+	if got := roofed.Received(); got != clientRead {
+		t.Errorf("Received() = %d, want the client's %d", got, clientRead)
+	}
+	if got := roofed.RoofLimit(); got != roof {
+		t.Errorf("RoofLimit() = %d, want %d", got, roof)
+	}
+}
+
+// TestUnlimitedRoofNeverStops covers DefaultRoof: shipping unlimited is the
+// decision, so a zero MaxBytes must not become a zero-byte ceiling.
+func TestUnlimitedRoofNeverStops(t *testing.T) {
+	client := &fakeMeter{}
+	client.set(1 << 40)
+
+	if DefaultRoof().Reached(1 << 40) {
+		t.Error("the default roof stopped a client, and the default is no roof")
+	}
+
+	tracker := NewBudgetTracker(Budget{MaxBytes: 1 << 20}, &fakeMeter{}, DefaultRoof(), client)
+	if exhausted, reason := tracker.Exhausted(); exhausted {
+		t.Errorf("exhausted (%s) under an unlimited roof with a run that has spent nothing", reason)
+	}
+	if tracker.RoofLimit() != 0 {
+		t.Errorf("RoofLimit() = %d, want 0 for no roof", tracker.RoofLimit())
+	}
+}
+
+// TestRoofAndRunWarningsAreToldApart: both ceilings warn, each once, and the
+// two warnings say whose numbers they carry.
+//
+// The scope is the whole point. Without it the client-scoped warning reports
+// the CLIENT's spending in the field a reader takes for the RUN's, which is
+// how a run that has spent 100 bytes comes to look like the one at fault.
+func TestRoofAndRunWarningsAreToldApart(t *testing.T) {
+	const (
+		runCeiling = 1_000
+		roof       = 10_000
+	)
+
+	run := &fakeMeter{}
+	client := &fakeMeter{}
+	tracker := NewBudgetTracker(
+		Budget{MaxBytes: runCeiling, WarnAt: 0.8}, run,
+		Roof{MaxBytes: roof, WarnAt: 0.8}, client)
+
+	if w := tracker.Warning(); w != nil {
+		t.Fatalf("warned at the start: %+v", w)
+	}
+
+	// The client fills up while this run has spent almost nothing.
+	run.set(100)
+	client.set(8_500)
+
+	w := tracker.Warning()
+	if w == nil {
+		t.Fatal("the client crossed its warning fraction and nothing was said")
+	}
+	if w.Scope != LimitClient {
+		t.Errorf("scope is %q, want %q", w.Scope, LimitClient)
+	}
+	if w.SpentBytes != 8_500 || w.LimitBytes != roof {
+		t.Errorf("client warning carries %d of %d, want the client's %d of %d",
+			w.SpentBytes, w.LimitBytes, 8_500, roof)
+	}
+	if w.LimitTime != 0 {
+		t.Errorf("client warning carries a time ceiling of %s; the roof has none", w.LimitTime)
+	}
+
+	if again := tracker.Warning(); again != nil {
+		t.Errorf("the client warned twice: %+v", again)
+	}
+
+	// Now this run's own ceiling fills up too. A separate warning, separately
+	// latched, carrying this run's numbers.
+	run.set(900)
+
+	w = tracker.Warning()
+	if w == nil {
+		t.Fatal("the run crossed its own warning fraction and nothing was said")
+	}
+	if w.Scope != LimitRun {
+		t.Errorf("scope is %q, want %q", w.Scope, LimitRun)
+	}
+	if w.SpentBytes != 900 || w.LimitBytes != runCeiling {
+		t.Errorf("run warning carries %d of %d, want this run's %d of %d",
+			w.SpentBytes, w.LimitBytes, 900, runCeiling)
+	}
+
+	if again := tracker.Warning(); again != nil {
+		t.Errorf("warned a third time: %+v", again)
 	}
 }

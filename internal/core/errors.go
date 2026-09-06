@@ -67,6 +67,20 @@ const (
 	CodeToolMissing ErrorCode = "tool_missing"
 	// CodeBudgetExhausted: a time or traffic limit stopped the run.
 	CodeBudgetExhausted ErrorCode = "budget_exhausted"
+	// CodeTrafficRoof: the client-wide traffic roof was already full, so this
+	// run was refused before it opened a connection (core.Roof).
+	//
+	// Distinct from CodeBudgetExhausted, which is about this run's own
+	// ceiling, for the same reason StopRoof is distinct from StopBudget: what
+	// a person does about it - raise the roof, or wait for nothing, because
+	// waiting will not refill it - is nothing like narrowing a run.
+	//
+	// And distinct from a run that is STOPPED by the roof, which ends on
+	// Done{Reason: StopRoof} keeping the frames it made. This code is only
+	// ever the refusal of a run that never began, which is how
+	// CodeNoPortAvailable and CodeTorrentBusy report their refusals too: not
+	// a fault, a limit showing through.
+	CodeTrafficRoof ErrorCode = "traffic_roof"
 	// CodeCancelled: the caller stopped the run.
 	CodeCancelled ErrorCode = "cancelled"
 	// CodeStorage: writing results failed.

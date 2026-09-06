@@ -42,33 +42,37 @@ const (
 // A directory the caller named is theirs: keeping their pieces or removing
 // them is their decision, not ours.
 type Options struct {
-	Source      string
-	Output      string
-	DataDir     string
-	Count       int
-	Start       float64
-	End         float64
-	Profile     string
-	Format      string
-	MaxBytes    int64
-	MaxTime     time.Duration
-	Parallelism int
-	BridgePort  int
-	WebHost     string
-	WebPort     int
-	BasePath    string
-	Token       string
-	WatchDir    string
-	Headless    bool
-	Peers       []string
-	Upload      bool
-	DHT         bool
-	Sequential  bool
-	JSON        bool
-	Web         bool
-	Version     bool
-	List        bool
-	Files       []string
+	Source   string
+	Output   string
+	DataDir  string
+	Count    int
+	Start    float64
+	End      float64
+	Profile  string
+	Format   string
+	MaxBytes int64
+	MaxTime  time.Duration
+	// MaxClientBytes is the client-wide traffic roof, not a per-run ceiling
+	// (core.Roof). It bounds every run this process makes together, which is
+	// the only bound that survives the web UI running several at once.
+	MaxClientBytes int64
+	Parallelism    int
+	BridgePort     int
+	WebHost        string
+	WebPort        int
+	BasePath       string
+	Token          string
+	WatchDir       string
+	Headless       bool
+	Peers          []string
+	Upload         bool
+	DHT            bool
+	Sequential     bool
+	JSON           bool
+	Web            bool
+	Version        bool
+	List           bool
+	Files          []string
 
 	// TorrentPorts is -torrent-ports as typed, parsed by config() with
 	// swarm.ParsePortSet rather than here, the same way CacheMaxSize is.
@@ -209,6 +213,7 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.StringVar(&opts.Format, "format", string(frames.JPEG), "jpeg or png")
 	fs.Int64Var(&opts.MaxBytes, "max-bytes", 0, "traffic ceiling for the run (default: scaled to the file count)")
 	fs.DurationVar(&opts.MaxTime, "max-time", 0, "time ceiling for the run (default: 10m)")
+	fs.Int64Var(&opts.MaxClientBytes, "max-client-bytes", 0, "traffic ceiling for this whole process, across every run it makes together, counted on bytes actually received (default: no roof). A per-run -max-bytes multiplies by the number of runs going at once; this is the ceiling that does not (section 2.6). It does not cap upload, which nothing caps")
 	fs.IntVar(&opts.Parallelism, "parallel", core.DefaultParallelism, "video files to work on at once")
 	fs.Var(&opts.TorrentPorts, "torrent-ports", "BitTorrent listen ports, as one port, an inclusive range, a comma-separated list, or any mixture: 51413, 51000-51004, 51000-51002,51010. Each client binds one of them, and also pins its DHT and uTP to it (default: an OS-assigned port). Set it where a port range is allocated and going outside it is forbidden - and take the size seriously: every public torrent shares one client and one port, but a private torrent needs a client of its own, so this is what bounds how many private torrents can fetch at once (section 4.1)")
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge (default: an OS-assigned port; required where a port range is allocated)")
@@ -306,6 +311,12 @@ func (o *Options) config() (core.Config, error) {
 
 	// Zero means "decide once the file count is known", which the engine does.
 	cfg.Budget = core.Budget{MaxBytes: o.MaxBytes, MaxTime: o.MaxTime, WarnAt: 0.8}
+	// Zero means no roof, which is the documented default and a decision -
+	// core.DefaultRoof says why torpeek will not pick this number itself.
+	// WarnAt is the same fraction the run's budget uses: there is no argument
+	// for the two warning at different fullnesses, and a second flag for it
+	// would be a knob nobody has asked for.
+	cfg.Roof = core.Roof{MaxBytes: o.MaxClientBytes, WarnAt: 0.8}
 
 	ceiling, err := parseSize(o.CacheMaxSize)
 	if err != nil {
