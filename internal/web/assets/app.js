@@ -3962,8 +3962,16 @@ for (const th of el.sortHeaders) {
   handle.setAttribute("aria-hidden", "true");
   th.append(handle);
 
-  let colDragStartX = 0;
-  let colDragStartWidth = 0;
+  // drag holds this handle's own in-progress drag - { startX, startWidth } -
+  // or null when it isn't dragging. Keeping the start point and width in one
+  // object that is null between drags (instead of two bare variables that
+  // just keep whatever the last drag left in them) means there is one place
+  // that says whether THIS handle is dragging, instead of that fact living
+  // only in the "dragging" CSS class - which pointermove used to trust
+  // blindly. Scoped inside this loop iteration, so each handle already gets
+  // its own binding and one handle's drag can never read another's start
+  // point.
+  let drag = null;
 
   // stopPropagation on every one of the handle's own events, not just
   // pointerdown: the handle sits inside a <th> that is itself a sort
@@ -3976,33 +3984,55 @@ for (const th of el.sortHeaders) {
     if (event.button !== undefined && event.button !== 0) return;
     event.stopPropagation();
     event.preventDefault();
-    colDragStartX = event.clientX;
-    colDragStartWidth = th.getBoundingClientRect().width;
+    drag = { startX: event.clientX, startWidth: th.getBoundingClientRect().width };
     handle.classList.add("dragging");
     handle.setPointerCapture(event.pointerId);
   });
 
   handle.addEventListener("pointermove", (event) => {
-    if (!handle.classList.contains("dragging")) return;
+    if (!drag) return;
+    // A move with no button held is an ordinary hover, not a drag - the
+    // primary button bit (1) must still be set in event.buttons. Without
+    // this, any way the drag's pointerup/pointercancel never reaches the
+    // handle (lostpointercapture below covers the one this repo can name,
+    // but not necessarily every one a future browser or code change adds)
+    // leaves the next hover computing against a stale start point, which is
+    // exactly the "handle stays lit and dragging creeps on hover" bug.
+    if (!(event.buttons & 1)) {
+      endColumnDrag(event);
+      return;
+    }
     event.stopPropagation();
-    const width = clampColumnWidth(colDragStartWidth + (event.clientX - colDragStartX));
+    const width = clampColumnWidth(drag.startWidth + (event.clientX - drag.startX));
     columnWidths[key] = width;
     applyColumnWidth(key, width);
   });
 
   function endColumnDrag(event) {
-    if (!handle.classList.contains("dragging")) return;
+    if (!drag) return;
+    drag = null;
     event.stopPropagation();
     handle.classList.remove("dragging");
     try {
       handle.releasePointerCapture(event.pointerId);
     } catch (err) {
-      // Already released (e.g. on pointercancel) - nothing more to do.
+      // Already released (e.g. on pointercancel, or because capture was
+      // already lost - see lostpointercapture below) - nothing more to do.
     }
     saveColumnWidths(columnWidths);
   }
   handle.addEventListener("pointerup", endColumnDrag);
   handle.addEventListener("pointercancel", endColumnDrag);
+  // lostpointercapture fires whenever the capture set in pointerdown ends
+  // some way other than pointerup/pointercancel reaching the handle itself -
+  // per spec, at minimum whenever the captured element leaves the document.
+  // (buildLiveColumnHeaders() only builds this table's header once today, so
+  // that specific trigger is not a live path here yet - but a real drag can
+  // still lose capture other ways, e.g. an automated or synthetic pointer
+  // sequence, as TOR-165's own browser repro found without any header
+  // rebuild involved.) Nothing else here listens for it, so before this the
+  // "dragging" class - and the stale start point above - just stayed put.
+  handle.addEventListener("lostpointercapture", endColumnDrag);
   // A plain click - no drag, pointerdown and pointerup on the same spot -
   // still bubbles to the header's own click listener unless stopped here
   // too; pointerdown's stopPropagation only stops the pointerdown event
