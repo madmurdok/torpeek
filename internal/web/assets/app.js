@@ -1565,7 +1565,8 @@ function renderAgain(entry) {
     // is the same promise: this is what pressing the button spends.
     entry.againCost.textContent = t.raise_helps
       ? "up to " + bytesLabel(t.offer_bytes) + " more traffic" +
-          (t.roof_capped ? " (all the client-wide roof allows)" : "")
+          (t.roof_capped ? " (all the client-wide roof allows)" : "") +
+          " — a ceiling sized to finish in one press, not an estimate of what it will cost"
       : "at the ordinary ceiling — no raise would help";
     entry.againCost.title = t.files
       .map((f) => f.path + ": " + f.captured + "/" + f.planned)
