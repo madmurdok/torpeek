@@ -2,7 +2,9 @@ package web
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -129,5 +131,84 @@ func TestEveryColourComesFromAToken(t *testing.T) {
 	if len(found) > 0 {
 		t.Errorf("colour literals outside the :root token rule, where nothing can "+
 			"reach them:\n  %s", strings.Join(found, "\n  "))
+	}
+}
+
+// ---- TOR-158: measured legibility, not asserted. ----
+//
+// WCAG 2.x relative luminance and contrast ratio, computed the same way the
+// numbers in the ticket's own description were: sRGB channels linearised,
+// then the standard 0.2126/0.7152/0.0722 weighting. AA for body text is
+// 4.5:1. A ratio recomputed here is worth more than one asserted in a
+// comment, because a comment does not fail the build when a later edit
+// invalidates it.
+
+func relLuminance(hex string) float64 {
+	hex = strings.TrimPrefix(hex, "#")
+	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
+	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
+	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
+	lin := func(c int64) float64 {
+		v := float64(c) / 255
+		if v <= 0.03928 {
+			return v / 12.92
+		}
+		return math.Pow((v+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+func contrastRatio(hexA, hexB string) float64 {
+	la, lb := relLuminance(hexA), relLuminance(hexB)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+// hexToken reads a :root token's value as a plain 6-digit hex literal, the
+// only shape this test knows how to score - rgba()/hsla() tokens (--scrim,
+// the glows) are not colours this ticket touches.
+func hexToken(t *testing.T, root map[string]string, name string) string {
+	t.Helper()
+	v, ok := root[name]
+	if !ok {
+		t.Fatalf(":root declares no %s", name)
+	}
+	v = strings.TrimSpace(v)
+	if !regexp.MustCompile(`^#[0-9a-fA-F]{6}$`).MatchString(v) {
+		t.Fatalf("%s is %q, want a plain 6-digit hex literal so contrast can be computed", name, v)
+	}
+	return v
+}
+
+// TestInkTokensReachAAOnEverySurface is TOR-158. Measured before the fix:
+// --ink-3 scored 4.14 / 3.87 / 3.54 / 3.14 / 3.28 against --bg / --s1 / --s2
+// / --s3 / --hover - AA for text is 4.5, so it failed on every surface it
+// was actually painted on (every muted caption, the copies/piece line, the
+// magnet field's placeholder, and the em dash every absent cell renders).
+//
+// The fix folds that third ink level into --ink-2 at every point of use
+// that is text: two ink levels now carry all of the page's prose, both held
+// to AA here. --ink-3 still exists - see its own comment in :root for the
+// one non-text use it keeps (the swarm-health dot's neutral fill, which
+// only needs the 3.0 a UI part needs, not the 4.5 text needs) - which is
+// why it is deliberately not one of the tokens this test scores.
+func TestInkTokensReachAAOnEverySurface(t *testing.T) {
+	css := stylesheet(t)
+	root := block(t, css, ":root {")
+
+	surfaces := []string{"--bg", "--s1", "--s2", "--s3", "--hover"}
+	inks := []string{"--ink", "--ink-2"}
+
+	for _, ink := range inks {
+		inkHex := hexToken(t, root, ink)
+		for _, surf := range surfaces {
+			surfHex := hexToken(t, root, surf)
+			if ratio := contrastRatio(inkHex, surfHex); ratio < 4.5 {
+				t.Errorf("%s (%s) against %s (%s) is %.2f:1, want >= 4.5 (AA for text)",
+					ink, inkHex, surf, surfHex, ratio)
+			}
+		}
 	}
 }
