@@ -2,27 +2,40 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
 
-// TestMaxActiveTorrentsDefaultsToOneWithABareConfig proves
-// DefaultMaxActiveTorrents applies even to a Config{} nobody touched -
-// exactly what most of this package's own tests build a Server from
-// (newTestServer -> DefaultConfig(), or a bare Config{} elsewhere) - so
-// every existing test's single-run-at-a-time assumption keeps holding
-// without any of them having to opt in.
-func TestMaxActiveTorrentsDefaultsToOneWithABareConfig(t *testing.T) {
+// TestMaxActiveTorrentsDefaultsToTheShippedWidth proves
+// DefaultMaxActiveTorrents applies even to a Config{} nobody touched, and
+// pins what that default IS - which is a product decision (5, TOR-149), not
+// an implementation detail. Several of this package's own tests are about
+// queueing and therefore set the width to 1 themselves rather than leaning
+// on whatever this happens to be; that is deliberate, so that changing the
+// default again breaks this test alone and not thirty others.
+func TestMaxActiveTorrentsDefaultsToTheShippedWidth(t *testing.T) {
 	runs := newFakeRuns()
 	_, ts := newTestServerWithConfig(t, Config{}, runs.runner)
 
-	first := startRun(t, ts.URL, "magnet:?xt=urn:btih:aaa")
-	second := startRun(t, ts.URL, "magnet:?xt=urn:btih:bbb")
-
-	if first.state != "running" {
-		t.Fatalf("the first run is %q, want running", first.state)
+	if DefaultMaxActiveTorrents < 2 {
+		t.Fatalf("DefaultMaxActiveTorrents = %d; this test assumes the shipped default is a widened queue",
+			DefaultMaxActiveTorrents)
 	}
-	if second.state != "queued" {
-		t.Fatalf("the second run is %q, want queued - a bare Config{} must still default the width to 1", second.state)
+
+	states := make([]string, 0, DefaultMaxActiveTorrents+1)
+	for i := 0; i <= DefaultMaxActiveTorrents; i++ {
+		states = append(states, startRun(t, ts.URL,
+			fmt.Sprintf("magnet:?xt=urn:btih:%040d", i)).state)
+	}
+
+	for i := 0; i < DefaultMaxActiveTorrents; i++ {
+		if states[i] != "running" {
+			t.Errorf("run %d of %d is %q, want running - a bare Config{} must take the shipped width",
+				i+1, DefaultMaxActiveTorrents, states[i])
+		}
+	}
+	if last := states[DefaultMaxActiveTorrents]; last != "queued" {
+		t.Errorf("the run past the width is %q, want queued", last)
 	}
 }
 

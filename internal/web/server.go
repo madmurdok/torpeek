@@ -41,19 +41,25 @@ const (
 )
 
 // DefaultMaxActiveTorrents is how many torrents this server fetches at once
-// when nothing says otherwise: the width the queue has always had.
+// when nothing says otherwise.
 //
-// It has to sit inside REQUIREMENTS.md 4.1's own number for the platform
-// this targets - 1 to 3 active downloads, because high IO on a shared-HDD
-// plan hits neighbours - without exceeding it, and 1 is the value that keeps
-// every existing deployment's behaviour exactly what it already was: no flag
-// starts a widened queue by accident, and none needs -max-client-bytes
-// suddenly set just to keep serving (see Server's own doc, and
-// core.DefaultRoof, for why a queue wider than one slot must not ship
-// without one). Raising it past 1 - what serveWeb calls "widening the
-// queue" - is an operator's explicit choice, made with
-// -max-active-torrents, and it is the one choice that also obliges a roof.
-const DefaultMaxActiveTorrents = 1
+// Five, which is a LOCAL default and deliberately not the number
+// REQUIREMENTS.md 4.1 gives. That section's 1 to 3 is fair-use guidance for a
+// shared-HDD seedbox plan, where high IO hits neighbours, and it counts
+// ACTIVE DOWNLOADS rather than torrents - so five of these at Config's
+// per-file parallelism is well past it. On the machine a person is sitting
+// in front of, the disk and the link are their own and the queue being one
+// slot wide was the complaint this width answers; on a managed host the
+// number to set is 1, and 4.1 says so.
+//
+// What five costs, said here because nothing refuses it any more: a per-run
+// traffic ceiling multiplies by the number of runs, so five runs is five
+// times one run's ceiling and there is no client-wide roof by default to
+// stop it (core.Roof, core.DefaultRoof). serveWeb prints that arithmetic at
+// startup rather than leaving it to be discovered. The roof still exists and
+// is still the answer wherever the quota is somebody else's; it is simply
+// not required to widen the queue.
+const DefaultMaxActiveTorrents = 5
 
 // Config configures the UI server.
 type Config struct {
@@ -324,14 +330,18 @@ const keepFinishedRuns = 10
 // held to it (core.Config.Roof, set once beside the pool in cli/web.go).
 //
 // So the width is now a number, s.maxActive, defaulting to
-// DefaultMaxActiveTorrents (1 - unchanged behaviour) and settable past that
-// by an operator (-max-active-torrents) or live (SetMaxActiveTorrents). The
-// roof still ships UNLIMITED by default (core.DefaultRoof says why torpeek
-// will not guess a person's allowance), so raising the width past 1 without
-// one configured would let N runs multiply the per-run ceiling by N exactly
-// as before TOR-131 - which is why serveWeb (cli/web.go) refuses to start a
-// process asked to do that, rather than silently allowing it or only
-// logging a warning nobody attending an unattended systemd unit would read.
+// DefaultMaxActiveTorrents (5) and settable by an operator
+// (-max-active-torrents) or live (SetMaxActiveTorrents).
+//
+// The roof still ships UNLIMITED by default (core.DefaultRoof says why
+// torpeek will not guess a person's allowance), so the shipped pair - width
+// 5, no roof - does let five runs ask for five times one run's own ceiling.
+// That is a decision, not an oversight: the default targets a machine its
+// owner is sitting at, and serveWeb states the arithmetic at startup
+// (cli/web.go, queueWidthNotice) rather than refusing to run, which is what
+// TOR-130 originally did and what made the feature cost two flags to reach.
+// See DefaultMaxActiveTorrents for the width's own argument, and
+// REQUIREMENTS.md 4.1 for why a managed host wants 1 and a roof instead.
 //
 // Lowering the width later, including below however many are already
 // running, cancels nothing: dispatch only ever consults it to decide whether

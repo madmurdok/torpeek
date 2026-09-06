@@ -69,6 +69,9 @@ func TestListsRunsFromDiskAndTheLiveQueue(t *testing.T) {
 	fake := newFakeRuns()
 	cfg := DefaultConfig()
 	cfg.OutputRoot = root
+	// One slot, so a queue actually forms: the shipped width is 5
+	// (DefaultMaxActiveTorrents, TOR-149).
+	cfg.MaxActiveTorrents = 1
 	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
 
 	running := startRun(t, ts.URL, "magnet:?xt=urn:btih:bbbb")
@@ -635,6 +638,9 @@ func TestQueuedAndRunningRowsCarryProvisionalNameFromMagnetDn(t *testing.T) {
 	fake := newFakeRuns()
 	cfg := DefaultConfig()
 	cfg.OutputRoot = root
+	// One slot, so a queue actually forms: the shipped width is 5
+	// (DefaultMaxActiveTorrents, TOR-149).
+	cfg.MaxActiveTorrents = 1
 	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
 
 	running := startRun(t, ts.URL, runningSource)
@@ -1074,6 +1080,9 @@ func TestQueuedAndDiskRowsCarryNoLiveFigures(t *testing.T) {
 	fake := newFakeRuns()
 	cfg := DefaultConfig()
 	cfg.OutputRoot = root
+	// One slot, so a queue actually forms: the shipped width is 5
+	// (DefaultMaxActiveTorrents, TOR-149).
+	cfg.MaxActiveTorrents = 1
 	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
 
 	// The slot is held by a first run so the second one asked for here stays

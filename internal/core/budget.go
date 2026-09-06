@@ -86,18 +86,23 @@ func (r Roof) Reached(received int64) bool {
 // config-and-flags route section 2.6 gives the per-run ceilings - and the
 // mechanism ships set to unlimited.
 //
-// This was safe by default only while the web UI's queue was one slot wide
-// (REQUIREMENTS.md 3.3), where there was exactly one run and its own ceiling
-// WAS the client's. TOR-130 is the change that widened it: web.Config's
-// MaxActiveTorrents can now be more than one, and its default (1) still
-// keeps that same safety - but raising it past 1 without a roof configured
-// would let that many runs multiply one run's own ceiling by that many,
-// exactly the gap this type exists to close. That is why serveWeb
-// (cli/web.go, via queueWidthError) now refuses to start a process asked to
-// widen the queue with no roof set, rather than starting it and letting the
-// gap reopen silently: this type existing is what makes that refusal
-// possible to write, and the refusal is what makes widening the queue safe
-// in practice rather than merely documented as needing to be.
+// So it is unset in the shipped default, and the shipped default is also a
+// WIDENED queue: web.DefaultMaxActiveTorrents is 5 (REQUIREMENTS.md 3.3).
+// Those two facts together mean five runs can each spend up to one run's own
+// ceiling with nothing over the client to stop them - the multiplication
+// this type exists to close, left open on purpose.
+//
+// It is left open because the default targets a machine its owner is sitting
+// at, where the link and the quota are theirs to spend, and because the
+// alternative that was tried is worse: TOR-130 shipped a width of 1 that
+// refused to start when widened without a roof, and that made the release's
+// own feature cost two flags to reach. What replaced the refusal is
+// disclosure - serveWeb prints what the width multiplies to
+// (cli/web.go, queueWidthNotice), once, at the moment it becomes true.
+//
+// Where the quota is somebody else's, this is still the answer, and it is
+// still the only ceiling that does not multiply. On a managed host the
+// numbers to set are a roof here and a width of 1 (REQUIREMENTS.md 4.1).
 func DefaultRoof() Roof {
 	return Roof{WarnAt: defaultWarnAt}
 }
@@ -106,7 +111,10 @@ func DefaultRoof() Roof {
 const (
 	// bytesPerFile is what one file's worth of frames is expected to cost.
 	bytesPerFile = 150 << 20
-	// maxRunBytes caps the total however many files there are.
+	// maxRunBytes caps the total however many files there are. Exported as
+	// MaxRunBytes below, because it is the per-run ceiling a caller has to
+	// name when it multiplies by the number of concurrent runs (cli's own
+	// startup line, TOR-149).
 	maxRunBytes = 2 << 30
 	// defaultRunTime is the wall-clock ceiling for a run.
 	defaultRunTime = 10 * time.Minute
@@ -136,6 +144,13 @@ func DefaultBudget(files int) Budget {
 		WarnAt:   defaultWarnAt,
 	}
 }
+
+// MaxRunBytes is the traffic ceiling one run is capped at when -max-bytes was
+// left to scale with the file count. Exported so a caller can state what
+// several concurrent runs add up to without writing the number itself
+// (internal/cli's queue-width line, TOR-149); the scaling and the cap stay
+// DefaultBudget's own business.
+const MaxRunBytes = maxRunBytes
 
 // Meter reports how much traffic a run has spent. swarm.Torrent satisfies it.
 type Meter interface {
