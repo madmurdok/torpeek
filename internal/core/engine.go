@@ -756,6 +756,10 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			Elapsed:        elapsed,
 			Peers:          connected,
 			Seeds:          seeds,
+			// What the SWARM holds, read fresh on every heartbeat, and nil
+			// when the client has not learned it yet - which is a real state
+			// and not zero copies (newSwarmAvailability, Progress.Swarm).
+			Swarm: newSwarmAvailability(deps.torrent.Availability()),
 		})
 	}
 
