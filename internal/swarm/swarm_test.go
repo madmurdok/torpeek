@@ -3,7 +3,6 @@ package swarm
 import (
 	"context"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,20 +12,18 @@ import (
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+
+	"github.com/madmurdok/torpeek/internal/torrenttest"
 )
 
-// freePort asks the OS for a port nothing is listening on, then releases it -
-// good enough for a test that immediately rebinds it itself; a real race
-// against another process grabbing it first is not a concern here.
+// freePort is a port nothing is listening on, on any of the four sockets a
+// client binds. See torrenttest.FreePort for why the obvious one-line version
+// is not enough - it is the difference between this package's port-pinning
+// tests passing and failing about one run in three.
 func freePort(t *testing.T) int {
 	t.Helper()
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	defer ln.Close()
-	return ln.Addr().(*net.TCPAddr).Port
+	return torrenttest.FreePort(t)
 }
 
 // writeTorrentFile builds a real .torrent over a small payload directory.
@@ -523,24 +520,15 @@ func TestProfilesDifferInWhatTheyClaim(t *testing.T) {
 }
 
 // freePortSet asks the OS for n ports nothing is listening on and returns
-// them as a PortSet, the way an operator would have typed the range their
-// host allocated. All n are held open at once before any is released, so they
-// are guaranteed distinct.
+// them as a PortSet, the way an operator would have typed the list their host
+// allocated. They are distinct, and free on every socket a client binds - see
+// torrenttest.FreePorts for why the second half is not a precaution.
 func freePortSet(t *testing.T, n int) PortSet {
 	t.Helper()
 
-	held := make([]net.Listener, 0, n)
 	spec := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("find free port %d of %d: %v", i+1, n, err)
-		}
-		held = append(held, ln)
-		spec = append(spec, strconv.Itoa(ln.Addr().(*net.TCPAddr).Port))
-	}
-	for _, ln := range held {
-		ln.Close()
+	for _, port := range torrenttest.FreePorts(t, n) {
+		spec = append(spec, strconv.Itoa(port))
 	}
 
 	set, err := ParsePortSet(strings.Join(spec, ","))

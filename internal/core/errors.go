@@ -34,6 +34,12 @@ const (
 	// what a person does about it - allocate more ports, or wait for a
 	// private torrent to finish - is nothing like what they do about a bug.
 	CodeNoPortAvailable ErrorCode = "no_port_available"
+	// CodeTorrentBusy: this torrent is already attached to another run.
+	// Distinct from CodeInternal for the same reason CodeNoPortAvailable is:
+	// it is not a fault but a refusal, and what a person does about it -
+	// wait for the other run, or cancel it - is nothing like what they do
+	// about a bug.
+	CodeTorrentBusy ErrorCode = "torrent_busy"
 	// CodeNoVideo: the torrent holds nothing worth taking frames from.
 	CodeNoVideo ErrorCode = "no_video_files"
 	// CodeNoFileMatch: the file selection named something the torrent does
@@ -112,6 +118,8 @@ func CodeOf(err error) ErrorCode {
 		return CodePrivacyUnresolvable
 	case errors.Is(err, swarm.ErrNoPortAvailable):
 		return CodeNoPortAvailable
+	case errors.Is(err, swarm.ErrTorrentBusy):
+		return CodeTorrentBusy
 	case errors.Is(err, swarm.ErrNoFileMatch):
 		return CodeNoFileMatch
 	case errors.Is(err, probe.ErrNoIndex):

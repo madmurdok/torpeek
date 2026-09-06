@@ -25,10 +25,16 @@ Nothing below needs privileges. What you end up with is one static binary in
   client and therefore one port, however many of them are running, but a
   private torrent needs a client of its own with DHT off, and so a port of
   its own. **The number of BitTorrent ports you give torpeek is the number of
-  private torrents that can fetch at once.** One is enough if you only ever
-  look at one thing at a time; `51000-51004` gives you five. Run out and the
-  next private torrent is refused, with a message naming the range — never
-  quietly put on a port outside it.
+  private torrents that can fetch at once.** `51000-51004` gives you five. Run
+  out and the next private torrent is refused, with a message naming the range
+  — never quietly put on a port outside it.
+
+  **Give it at least two, even for one torrent at a time.** A magnet does not
+  say whether its torrent is private, and torpeek will not guess: it fetches
+  the metadata on a temporary client with DHT off, and only a torrent the
+  metadata says is public is moved into the shared client. That temporary
+  client holds a port of its own while it runs. So a single-port allocation
+  can open a `.torrent`, but not a magnet once the public client is up.
 - **Your nginx `proxy.d` directory**, usually `~/.apps/nginx/proxy.d/`. The UI
   is served under a subdirectory, e.g. `https://user.host.usbx.me/torpeek`.
 

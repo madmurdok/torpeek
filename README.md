@@ -65,12 +65,13 @@ result cache that serves a repeat run from disk without touching the network,
 the CLI with NDJSON output, and a web UI with its real screens, sitting on the
 same `core.Engine` library the CLI drives.
 
-The UI also queues a second torrent instead of refusing it — the client can
-only run one torrent's networking at a time (one BitTorrent port, one
-client-wide DHT switch), so the second waits for the first's slot — and lists
-every torrent it knows about, live ones from memory and finished ones found on
-disk, so the list survives a restart. Opening a finished one from that list
-replays it from disk: no queue slot, no network request.
+The UI also queues a second torrent instead of refusing it — every public
+torrent shares one long-lived BitTorrent client on one port, so one run at a
+time is now a policy about traffic rather than something the client could not
+do, and the second waits for the first's slot — and lists every torrent it
+knows about, live ones from memory and finished ones found on disk, so the
+list survives a restart. Opening a finished one from that list replays it from
+disk: no queue slot, no network request.
 
 Release archives now assemble for all four targets: `make archives` builds one
 folder per platform holding torpeek, ffmpeg, ffprobe and their licence
@@ -236,15 +237,22 @@ link or drop a `.torrent` onto the page: it receives the same events `-json`
 writes, over a WebSocket, and fills a live grid of frames as they land, next
 to a summary panel of tracks and quality.
 
-The client can only run one torrent's networking at a time — a pinned
-BitTorrent port can't be bound twice, and DHT is a client-wide switch, so a
-public and a private torrent can't share it either. A second torrent handed
-to the UI while the first is still going is not refused: it queues, and starts
-as soon as the slot is free. A panel lists every torrent the server knows
-about — the live one, queued or running, and every finished run found by
-walking the output directory — so the list survives a restart. Opening a
-finished run from that panel replays it from its saved frames and manifest:
-no queue slot, no network request.
+Every public torrent shares one long-lived BitTorrent client, on one port,
+and that client outlives any single run: a run attaches to a torrent and
+detaches from it again, and the server is what closes the client — so a run
+that fails, or is cancelled, takes nothing down with it. A private torrent
+still gets a client of its own, with DHT off, because DHT is a client-wide
+switch and BEP 27 is not negotiable; nothing joins the shared client until
+it is known to be public.
+
+One run at a time is still what the UI does, but that is now a policy about
+traffic and a shared host's fair-use limits, not something the client could
+not do. A second torrent handed to the UI while the first is still going is
+not refused: it queues, and starts as soon as the slot is free. A panel lists
+every torrent the server knows about — the live one, queued or running, and
+every finished run found by walking the output directory — so the list
+survives a restart. Opening a finished run from that panel replays it from its
+saved frames and manifest: no queue slot, no network request.
 
 The page's cancel button stops whatever is in the slot, or drops a queued run,
 and keeps what was produced. If no browser can be opened — a headless

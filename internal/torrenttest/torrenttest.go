@@ -13,10 +13,14 @@
 package torrenttest
 
 import (
+	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -304,4 +308,95 @@ func (f Fixture) Magnet(t *testing.T) string {
 	}
 	return "magnet:?xt=urn:btih:" + mi.HashInfoBytes().HexString() +
 		"&tr=http://127.0.0.1:1/announce"
+}
+
+// FreePort returns a port nothing is listening on, on any of the four sockets
+// a torrent client binds.
+func FreePort(t *testing.T) int {
+	t.Helper()
+
+	return FreePorts(t, 1)[0]
+}
+
+// FreePorts returns n distinct such ports.
+//
+// The obvious version - listen on 127.0.0.1:0, read the port, close, repeat -
+// is not enough, and the difference is a real flake rather than a precaution.
+// A port the OS offers for a 127.0.0.1 tcp4 listener can still be held on
+// tcp6, or on udp, by something else in the same test binary; anacrolix binds
+// tcp4, tcp6, udp4 and udp6 to one port and fails the whole client on the
+// first of them that is taken, with "subsequent listen: listen tcp6 :p: bind:
+// address already in use". Measured on release-1.2.0, before anything here
+// changed: two of three `go test -race ./internal/swarm/` runs failed exactly
+// that way, in tests that pin a port picked exactly like that.
+//
+// So each candidate is probed on the other three families while this still
+// holds its own tcp4 listener on it - which is also what keeps the n ports
+// distinct, since the OS will not offer a port it can see is in use. Every
+// listener is released before the ports are handed over. It is still a
+// moment-in-time answer for the three families this cannot hold, but the
+// window is a scheduling gap rather than a whole category of port.
+func FreePorts(t *testing.T, n int) []int {
+	t.Helper()
+
+	held := make([]net.Listener, 0, n)
+	defer func() {
+		for _, ln := range held {
+			ln.Close()
+		}
+	}()
+
+	ports := make([]int, 0, n)
+	for attempt := 0; len(ports) < n; attempt++ {
+		if attempt >= 50*n {
+			t.Fatalf("no %d candidate ports came back free on all four sockets a client binds", n)
+		}
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("find free port %d of %d: %v", len(ports)+1, n, err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+
+		if !otherSocketsFree(port) {
+			ln.Close()
+			continue
+		}
+		held = append(held, ln)
+		ports = append(ports, port)
+	}
+	return ports
+}
+
+// otherSocketsFree reports whether port is bindable as tcp6, udp4 and udp6.
+// Not tcp4: the caller is holding that one itself, which is the point.
+//
+// Each family is probed by name rather than through a wildcard "tcp"/"udp"
+// listen: on darwin net.Listen("tcp", ":p") binds v4 only, so a wildcard probe
+// calls a port free while something is still on its tcp6.
+//
+// A family that refuses for a reason other than the address being in use - a
+// host with IPv6 switched off - is not counted against the port, or every
+// candidate on such a host would be rejected for ever.
+func otherSocketsFree(port int) bool {
+	addr := net.JoinHostPort("", strconv.Itoa(port))
+	for _, network := range []string{"tcp6", "udp4", "udp6"} {
+		var (
+			closer io.Closer
+			err    error
+		)
+		if strings.HasPrefix(network, "udp") {
+			closer, err = net.ListenPacket(network, addr)
+		} else {
+			closer, err = net.Listen(network, addr)
+		}
+		if err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				return false
+			}
+			continue
+		}
+		closer.Close()
+	}
+	return true
 }

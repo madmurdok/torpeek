@@ -62,6 +62,24 @@ type Config struct {
 
 	Swarm  swarm.Config
 	Bridge bridge.Config
+
+	// Torrents is where this run gets its torrent from: a pool that outlives
+	// it, holding one long-lived client for every public torrent.
+	//
+	// A run no longer configures a client - it attaches to a torrent and
+	// detaches from it, and the pool decides whether that torrent shares the
+	// public client or needs one of its own (swarm.Pool). Swarm above is
+	// still what a pool is built FROM: the data directory, the DHT and upload
+	// switches, the port set, the known peers.
+	//
+	// Nil means this run owns the whole arrangement: it builds a pool over
+	// Swarm for itself and closes it when the run ends, which is exactly what
+	// a one-shot CLI run wants and exactly what every run did before pools
+	// existed. A process that stays up - the web server - builds one pool and
+	// puts it here, so the client is the server's to close and never a run's.
+	// A pointer is what survives cfg being copied per run, the same way
+	// Swarm.Ports is.
+	Torrents *swarm.Pool
 }
 
 // DefaultConfig fills in the defaults from REQUIREMENTS.md section 7.
@@ -77,6 +95,21 @@ func DefaultConfig(source, outputRoot, dataDir string) Config {
 		Swarm:       swarm.DefaultConfig(dataDir),
 		Bridge:      bridge.DefaultConfig(),
 	}
+}
+
+// poolFor settles where this run's torrent comes from, and reports whether
+// the run has to close what it was given.
+//
+// The nil case builds a pool for this run alone rather than falling back to
+// some other way of opening a torrent, so there is exactly one path through
+// swarm however a run was configured. It costs nothing: a pool starts no
+// client until a torrent is attached, and closing one that never started is
+// a no-op.
+func poolFor(cfg Config) (pool *swarm.Pool, owned bool) {
+	if cfg.Torrents != nil {
+		return cfg.Torrents, false
+	}
+	return swarm.NewPool(cfg.Swarm), true
 }
 
 // DefaultParallelism is how many files a desktop run works on at once.
@@ -134,29 +167,37 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		return
 	}
 
-	session, torrent, err := swarm.Open(ctx, cfg.Swarm, src)
+	pool, ownPool := poolFor(cfg)
+	if ownPool {
+		// Registered before the attachment's own defer, so it runs after it:
+		// the torrent is detached first, and only then is the client this run
+		// brought into being for itself taken down. When the pool came from
+		// the caller there is nothing here to close - a run must never take
+		// the pool down, which is the whole point of Config.Torrents.
+		defer pool.Close()
+	}
+
+	attachment, err := pool.Attach(ctx, src, cfg.Swarm.Peers...)
 	if err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeOf(err), Err: err})
 		return
 	}
-	defer func() {
-		// Order matters: DiscardPieces is only safe to call once Close has
-		// returned (see its doc comment on why that is the real boundary,
-		// not merely a convenient one).
-		session.Close()
+	torrent := attachment.Torrent()
 
-		// Every exit from here down goes through this defer - completed,
-		// budget-stopped or cancelled alike - and discards this run's own
-		// pieces every time. A run that was cut short still gets to keep
-		// what matters: resume (serveFromCache and reusableFrames, both in
-		// this package) reads only the output directory's manifests and
-		// frames, never the swarm's piece cache, so a stopped run loses
-		// nothing a later run could have reused by leaving pieces in place.
-		// This is what makes a long-lived web session, not just a one-shot
-		// CLI run, actually drop pieces after every torrent instead of
-		// piling them up for however long the process stays up.
-		_ = session.DiscardPieces(torrent.InfoHash())
-	}()
+	// Every exit from here down goes through this defer - completed,
+	// budget-stopped, cancelled or failed alike - and lets this run's torrent
+	// go every time, discarding its pieces with it. Detaching is not closing:
+	// the shared public client carries on holding whatever else is attached
+	// to it, and a run that fails takes nothing down with it.
+	//
+	// A run that was cut short still gets to keep what matters: resume
+	// (serveFromCache and reusableFrames, both in this package) reads only
+	// the output directory's manifests and frames, never the swarm's piece
+	// cache, so a stopped run loses nothing a later run could have reused by
+	// leaving pieces in place. This is what makes a long-lived web session,
+	// not just a one-shot CLI run, actually drop pieces after every torrent
+	// instead of piling them up for however long the process stays up.
+	defer attachment.Detach()
 
 	videos := torrent.Videos()
 
@@ -171,7 +212,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		Private:  torrent.Private(),
 		Videos:   videos,
 		Selected: indicesOf(selected),
-		BlindDHT: session.WentOnlineBlind(),
+		BlindDHT: attachment.WentOnlineBlind(),
 	})
 
 	if len(videos) == 0 {
