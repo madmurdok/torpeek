@@ -349,6 +349,41 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// "nothing else is listening" (TOR-28's acceptance criterion): these
 	// probes bind their own ephemeral port each time, unpinned by design.
 	tc.NoDefaultPortForwarding = true
+	// Webseeds off, and this is a bug workaround rather than a preference -
+	// read the whole reason before turning them back on.
+	//
+	// updateWebseedRequests opens with an assertion that the webseed requests
+	// collected from the CLIENT equal the same set recomputed per torrent
+	// (webseed-requesting.go, panicif.False(maps.Equal(...))). That is a
+	// consistency check on bookkeeping spanning every torrent a client holds,
+	// and it fires as a PANIC on the library's own timer goroutine, where no
+	// recover of ours can reach it - so there is nothing to defend against,
+	// only a trigger to remove.
+	//
+	// It did not fire while a client held one torrent for one run. It fires
+	// now because a single long-lived client holds every public torrent while
+	// they attach and detach underneath it (Pool), which is exactly what that
+	// assertion is about. Measured, not inferred: this pinned revision is the
+	// one 1.1.0 shipped and its acceptance run passed all seven criteria on
+	// the same archive.org torrent with webseeds enabled; 1.2.0's acceptance
+	// died inside criterion 1 in 41 seconds. So this release exposed a latent
+	// library bug rather than importing a new one, and the blast radius is
+	// bigger than it was: the panic takes the process down, and the process
+	// now holds several fetching torrents and a queue that survives nothing
+	// (REQUIREMENTS.md 3.3).
+	//
+	// Upstream has not fixed it. Master at 20260906115345 - six days newer
+	// than this pin - carries that assertion byte for byte, so a later pin
+	// bump must not quietly assume webseeds are safe again: check that line
+	// before deleting this one.
+	//
+	// What it costs: an HTTP mirror as a second source for torrents that
+	// publish one. torpeek is about what a SWARM will give up (section 2.6
+	// counts what peers send), so losing it costs reach on some public
+	// torrents rather than correctness - and it makes every traffic figure
+	// purely swarm traffic, which is what section 2.6 always claimed to be
+	// measuring.
+	tc.DisableWebseeds = true
 
 	if tuneClientForTest != nil {
 		tuneClientForTest(tc)

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 
@@ -938,5 +939,49 @@ func TestABlindMagnetIsRefusedOnlyWhenItTurnsOutPrivate(t *testing.T) {
 				t.Errorf("the refused torrent left %s behind (%v)", staged, err)
 			}
 		})
+	}
+}
+
+// TestWebseedsAreDisabled guards a workaround that looks like a preference and
+// would be deleted as one.
+//
+// anacrolix's updateWebseedRequests asserts that the webseed requests it
+// collects from the client equal the same set recomputed per torrent, and
+// panics when they differ - on its own timer goroutine, so no recover of ours
+// can catch it. That never bit while one client held one torrent for one run;
+// it killed 1.2.0's acceptance run inside criterion 1 once a single long-lived
+// client began holding every public torrent (Pool). Upstream still ships the
+// assertion, so this is not a line to remove after a pin bump without reading
+// webseed-requesting.go first.
+//
+// Asserted on the config rather than by provoking the panic, because a test
+// that provokes it takes the test binary down with it.
+func TestWebseedsAreDisabled(t *testing.T) {
+	var got *torrent.ClientConfig
+
+	prev := tuneClientForTest
+	tuneClientForTest = func(tc *torrent.ClientConfig) {
+		got = tc
+		if prev != nil {
+			prev(tc)
+		}
+	}
+	t.Cleanup(func() { tuneClientForTest = prev })
+
+	cfg := DefaultConfig(t.TempDir())
+	cfg.DHT = false
+	session, err := newSession(cfg, false)
+	if err != nil {
+		t.Fatalf("newSession: %v", err)
+	}
+	t.Cleanup(func() { session.Close() })
+
+	if got == nil {
+		t.Fatal("the test hook never saw a client config")
+	}
+	if !got.DisableWebseeds {
+		t.Error("DisableWebseeds is false: a torrent publishing an HTTP mirror can now " +
+			"panic the whole process on anacrolix's webseed timer, taking every other " +
+			"fetching torrent and the queue with it")
 	}
 }
