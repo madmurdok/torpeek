@@ -83,6 +83,83 @@ type Progress struct {
 	Elapsed        time.Duration
 	Peers          int
 	Seeds          int
+
+	// Swarm is this heartbeat's live availability reading - what the SWARM
+	// HOLDS right now, never what this run has ordered from it. That other
+	// question is Done.ClaimedByte/ClaimedPieces/ClaimedRanges, answered once
+	// at the end rather than per heartbeat; two figures of the same shape
+	// meaning opposite things is the trap to avoid wherever both reach a
+	// reader (TOR-111), so a client must keep the two visually apart.
+	//
+	// Nil means unknown, never zero copies. That is true for two different
+	// reasons a client must not conflate: swarm.Torrent.Availability's own
+	// doc records that a client does not dial anyone until something asks
+	// for bytes - measured, "PeerConns stayed empty for twenty seconds after
+	// adding a live seeder, and filled the moment a range was asked for" -
+	// so a torrent that has not started fetching yet has nothing here even
+	// while running; and a queued run publishes no Progress at all, since it
+	// has no client to read from, which already reports unknown for free by
+	// never setting this field.
+	Swarm *SwarmAvailability
+}
+
+// SwarmAvailability is a live copies-per-piece reading, built from
+// swarm.Torrent.Availability(). See newSwarmAvailability for how the two
+// unknown-vs-zero cases above are told apart.
+//
+// CopiesPerPiece is the mean number of connected peers holding each piece,
+// which is swarm.Availability's own unit - NOT a percentage, and it commonly
+// exceeds 1.0. 0.8 means pieces are missing from the swarm; 3.2 means it is
+// healthy. A client must label it as a copy count rather than let a bare
+// number be misread as a fraction.
+//
+// Unavailable is how many of NumPieces no connected peer holds at all - zero
+// on a healthy swarm, and what makes a capture point need shifting when it
+// is not.
+type SwarmAvailability struct {
+	CopiesPerPiece float64
+	Unavailable    int
+	NumPieces      int
+}
+
+// swarmSnapshot is the part of swarm.Availability newSwarmAvailability needs.
+// Named here rather than taken concretely so the conversion can be tested
+// without standing up a swarm - the same reasoning engine.go's own
+// availabilityMap interface uses, and swarm.Availability satisfies both
+// without change.
+type swarmSnapshot interface {
+	Known() bool
+	NumPieces() int
+	Unavailable() int
+	At(piece int) int
+}
+
+// newSwarmAvailability turns one swarm.Availability sample into the shape a
+// live reader gets, or nil when the sample is not yet known.
+//
+// Known() is swarm.Availability's own line between ignorance and a fact - "a
+// connected peer is not the same as a peer that has said what it holds" - and
+// this defers to it entirely rather than re-deciding the question from peer
+// or piece counts here.
+func newSwarmAvailability(a swarmSnapshot) *SwarmAvailability {
+	if !a.Known() {
+		return nil
+	}
+	n := a.NumPieces()
+	if n == 0 {
+		return nil
+	}
+
+	sum := 0
+	for piece := 0; piece < n; piece++ {
+		sum += a.At(piece)
+	}
+
+	return &SwarmAvailability{
+		CopiesPerPiece: float64(sum) / float64(n),
+		Unavailable:    a.Unavailable(),
+		NumPieces:      n,
+	}
 }
 
 // BudgetWarning means a limit is close enough that the run may not finish.
