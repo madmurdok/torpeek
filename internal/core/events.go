@@ -85,12 +85,38 @@ type Progress struct {
 	Seeds          int
 }
 
+// LimitScope says WHOSE ceiling a warning is about. The two are easy to
+// confuse and mean opposite things to the person reading them: one says this
+// run is spending a lot, the other says the client is, which may be entirely
+// the doing of the runs beside it.
+type LimitScope string
+
+const (
+	// LimitRun is the run's own budget (REQUIREMENTS.md 2.6, Budget).
+	LimitRun LimitScope = "run"
+	// LimitClient is the roof over every run sharing a client (Roof). A
+	// warning at this scope is about traffic this run did not necessarily
+	// cause and cannot stop, and the stop that follows it is StopRoof.
+	LimitClient LimitScope = "client"
+)
+
 // BudgetWarning means a limit is close enough that the run may not finish.
 type BudgetWarning struct {
+	// Scope is whose ceiling this is. SpentBytes and LimitBytes are read
+	// against it: at LimitRun they are this run's, at LimitClient they are
+	// the whole client's, and a client that ignored this field would report
+	// the second set as the first.
+	Scope LimitScope
+	// SpentBytes and LimitBytes are the traffic figure and its ceiling, at
+	// Scope.
 	SpentBytes int64
 	LimitBytes int64
-	Elapsed    time.Duration
-	LimitTime  time.Duration
+	// Elapsed is always this run's, at either scope: a run is the only thing
+	// here with a start.
+	Elapsed time.Duration
+	// LimitTime is the time ceiling, and is zero at LimitClient - the roof
+	// has none (see Roof).
+	LimitTime time.Duration
 }
 
 // FileDone means one video file's frames, contact sheet and manifest are
@@ -216,6 +242,19 @@ type StopReason string
 
 const (
 	StopCompleted StopReason = "completed"
-	StopBudget    StopReason = "budget"
+	// StopBudget means this run reached a ceiling of its OWN - the traffic or
+	// wall-clock limit sized for it (Budget, REQUIREMENTS.md 2.6).
+	StopBudget StopReason = "budget"
+	// StopRoof means the CLIENT reached the traffic roof over every run
+	// sharing it (Roof), so this run stopped along with all of them.
+	//
+	// A separate reason rather than a second flavour of StopBudget, because
+	// the difference is the only thing a person can act on. A run stopped for
+	// StopBudget asked for too much and its own numbers say so; a run stopped
+	// for StopRoof may have spent almost nothing and been stopped by its
+	// neighbours, and its own limits are no explanation at all. Telling a
+	// person to narrow a run that was already narrow is the wrong advice, and
+	// one reason for both is how it would be given.
+	StopRoof      StopReason = "traffic_roof"
 	StopCancelled StopReason = "cancelled"
 )

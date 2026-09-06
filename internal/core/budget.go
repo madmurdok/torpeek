@@ -19,6 +19,81 @@ type Budget struct {
 	WarnAt float64
 }
 
+// Roof caps what a whole CLIENT may receive, across every run sharing it.
+//
+// Budget above is per run, and a per-run ceiling multiplies by the number of
+// runs - which is the very thing Budget's own comment rejects one level down
+// ("a season pack should not multiply the limit by twenty"). Since TOR-128 one
+// long-lived client holds every public torrent, so runs can genuinely overlap,
+// and four runs at 2 GB each are eight gigabytes of somebody's allowance
+// however carefully each one was capped. The roof is the ceiling that does not
+// multiply (REQUIREMENTS.md 2.6).
+//
+// It is a second ceiling, not a replacement: a run is held to its own budget
+// AND to the roof over the client it shares, and the two stop it for
+// different, separately reported reasons (StopBudget against StopRoof).
+//
+// # What it counts
+//
+// Received bytes, off the client-wide counter (swarm.Pool.Downloaded), for
+// exactly the reason 2.6 gives for the per-run ceiling: a limit protects a
+// link and a quota, and bytes already on the wire do not care who asked for
+// them. It is therefore NOT acceptance criterion 2's figure, which judges what
+// was ORDERED and is deliberately the opposite choice (section 8); the two
+// must not be run together. Nor does it count what was UPLOADED - nothing does
+// (swarm.Torrent.Uploaded), and the roof does not quietly change that.
+//
+// # What it does not have
+//
+// A time ceiling. A run has one because a run is a piece of work that should
+// finish; a client is a process that stays up for hours, and a wall clock over
+// that would only ever say "you have been running a while".
+type Roof struct {
+	// MaxBytes is the client-wide traffic ceiling, over the whole life of the
+	// client. Zero means unlimited, and is the default - see
+	// DefaultRoof for why torpeek does not pick a number here.
+	MaxBytes int64
+	// WarnAt is the fraction of the roof that triggers a warning, so a person
+	// hears "everything is about to stop" before it does. Zero disables it.
+	//
+	// It matters more here than at the run level, and that is the whole
+	// argument for the roof having one: a run that hits its own ceiling was
+	// stopped by its own spending, while a run stopped by the roof may have
+	// been stopped by the three runs beside it. Nobody should meet that for
+	// the first time as four runs ending at once.
+	WarnAt float64
+}
+
+// Reached reports whether received bytes have met the roof. An unlimited roof
+// is never reached.
+func (r Roof) Reached(received int64) bool {
+	return r.MaxBytes > 0 && received >= r.MaxBytes
+}
+
+// DefaultRoof is no roof at all, and that is a decision rather than an
+// omission.
+//
+// torpeek can estimate what a preview COSTS - 150 MB per file is a measured
+// number, which is why section 7 can default a per-run ceiling and be right
+// about it. It cannot estimate what a person's LINK OR QUOTA can afford: that
+// is a fact about their connection and their month, and no number here would
+// be derived from anything. The two failures are not symmetric either. A
+// per-run ceiling guessed too low costs one incomplete preview, reported as
+// such; a roof guessed too low stops every run on the client, including ones
+// that had barely started, and reads as the tool being broken.
+//
+// So the roof is a number the person supplies - `-max-client-bytes`, the same
+// config-and-flags route section 2.6 gives the per-run ceilings - and the
+// mechanism ships set to unlimited.
+//
+// This is safe today only because the web UI's queue is one slot wide
+// (REQUIREMENTS.md 3.3), so there is exactly one run and its own ceiling IS
+// the client's. Whoever widens that queue (TOR-130) is the change that has to
+// arrive with a roof configured; this type existing is what lets it.
+func DefaultRoof() Roof {
+	return Roof{WarnAt: defaultWarnAt}
+}
+
 // Budget defaults from REQUIREMENTS.md section 7.
 const (
 	// bytesPerFile is what one file's worth of frames is expected to cost.
@@ -59,7 +134,18 @@ type Meter interface {
 	Downloaded() int64
 }
 
-// BudgetTracker watches a run against its budget.
+// BudgetTracker watches a run against both ceilings it is held to: its own
+// budget, and the roof over the client it shares with every other run.
+//
+// Both live here rather than in two objects a caller would have to remember to
+// ask separately, because "must this run stop, and why" is one question with
+// one answer, and every place that asks it - the file loop, each capture
+// point, the manifest - has to get the same answer for the same reason.
+//
+// The roof's state is not in here: it is the client's counter, which every
+// run's tracker reads. So runs sharing a client agree about the roof without
+// sharing anything, and the only per-tracker roof state is whether THIS run
+// has already said its piece about it (each run warns its own client once).
 //
 // It reports rather than enforces: stopping is the orchestrator's job, since
 // only it knows what "finish the frame in flight, then stop" means. The
@@ -68,26 +154,52 @@ type Meter interface {
 type BudgetTracker struct {
 	budget Budget
 	meter  Meter
+	// roof and client are the second ceiling and the client-wide counter it
+	// is read from. A nil client, or a zero Roof, is a tracker with no roof
+	// over it - which is every caller that has no client to speak of.
+	roof   Roof
+	client Meter
 	clock  func() time.Time
 	start  time.Time
 
-	mu     sync.Mutex
-	warned bool
+	mu          sync.Mutex
+	warned      bool
+	warnedAbove bool
 }
 
-// NewBudgetTracker starts tracking now.
-func NewBudgetTracker(budget Budget, meter Meter) *BudgetTracker {
-	return newBudgetTracker(budget, meter, time.Now)
+// NewBudgetTracker starts tracking now, against the run's own budget and the
+// roof over the client its torrent came out of.
+//
+// client is where the roof's figure comes from - the swarm.Pool this run
+// attached to, whose Downloaded is every byte every client it owns has
+// received. Nil means there is no roof to hold this run to, which is what a
+// caller with no client passes; so does a zero Roof.
+func NewBudgetTracker(budget Budget, meter Meter, roof Roof, client Meter) *BudgetTracker {
+	return newBudgetTracker(budget, meter, roof, client, time.Now)
 }
 
 // newBudgetTracker takes a clock so time limits are testable without waiting.
-func newBudgetTracker(budget Budget, meter Meter, clock func() time.Time) *BudgetTracker {
+func newBudgetTracker(budget Budget, meter Meter, roof Roof, client Meter,
+	clock func() time.Time) *BudgetTracker {
+
 	return &BudgetTracker{
 		budget: budget,
 		meter:  meter,
+		roof:   roof,
+		client: client,
 		clock:  clock,
 		start:  clock(),
 	}
+}
+
+// Received is what the whole client has taken off the wire, or zero when this
+// run is under no roof. It is not this run's spending and is never comparable
+// with Spent - see Roof.
+func (t *BudgetTracker) Received() int64 {
+	if t.client == nil {
+		return 0
+	}
+	return t.client.Downloaded()
 }
 
 // Spent reports traffic and elapsed time so far.
@@ -104,7 +216,27 @@ func (t *BudgetTracker) Limits() (bytes int64, wall time.Duration) {
 	return t.budget.MaxBytes, t.budget.MaxTime
 }
 
+// RoofLimit is the client-wide ceiling this run is held to, zero when there is
+// none, for a record of it to name beside the run's own.
+func (t *BudgetTracker) RoofLimit() int64 {
+	if t.client == nil {
+		return 0
+	}
+	return t.roof.MaxBytes
+}
+
+// Exhausted reports whether a ceiling has been reached, and which one.
+//
+// The roof is asked FIRST, and the answer it gives is StopRoof rather than
+// StopBudget. A run that crossed both at the same moment is reported as
+// stopped by the roof on purpose: the roof is the ceiling that also stopped
+// every other run on the client, and that is the fact the person needs. The
+// two reasons never blur into one - see StopRoof.
 func (t *BudgetTracker) Exhausted() (bool, StopReason) {
+	if t.client != nil && t.roof.Reached(t.client.Downloaded()) {
+		return true, StopRoof
+	}
+
 	bytes, elapsed := t.Spent()
 
 	if t.budget.MaxBytes > 0 && bytes >= t.budget.MaxBytes {
@@ -116,10 +248,58 @@ func (t *BudgetTracker) Exhausted() (bool, StopReason) {
 	return false, StopCompleted
 }
 
-// Warning returns a BudgetWarning the first time the run crosses WarnAt on
-// either ceiling, and nil afterwards - a warning repeated every tick is noise
-// a client would have to de-duplicate itself.
+// Warning returns a BudgetWarning the first time the run crosses WarnAt on a
+// ceiling, and nil afterwards - a warning repeated every tick is noise a
+// client would have to de-duplicate itself.
+//
+// The two ceilings latch separately, so a run hears about each of them once,
+// and one call returns at most one warning: the roof's when it is due, because
+// "everything on this client is about to stop" is the news that outranks "this
+// run is about to stop", and the run's own on a later tick if it is still due.
+// They are told apart by Scope, which every warning carries - a client that
+// showed them the same way would be saying a run overspent when its neighbours
+// did.
 func (t *BudgetTracker) Warning() *BudgetWarning {
+	if warning := t.roofWarning(); warning != nil {
+		return warning
+	}
+	return t.runWarning()
+}
+
+// roofWarning is the client-wide half: this run's one notice that the roof
+// over every run is filling up.
+func (t *BudgetTracker) roofWarning() *BudgetWarning {
+	if t.client == nil || t.roof.MaxBytes <= 0 || t.roof.WarnAt <= 0 {
+		return nil
+	}
+
+	received := t.client.Downloaded()
+	if float64(received) < float64(t.roof.MaxBytes)*t.roof.WarnAt {
+		return nil
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.warnedAbove {
+		return nil
+	}
+	t.warnedAbove = true
+
+	// Elapsed is this run's, and LimitTime is zero because the roof has no
+	// time ceiling to be a fraction of (see Roof). The bytes are the whole
+	// client's, which is exactly why Scope has to travel with them: read as
+	// this run's spending they would be a lie.
+	_, elapsed := t.Spent()
+	return &BudgetWarning{
+		Scope:      LimitClient,
+		SpentBytes: received,
+		LimitBytes: t.roof.MaxBytes,
+		Elapsed:    elapsed,
+	}
+}
+
+// runWarning is the per-run half, unchanged in what it says or when.
+func (t *BudgetTracker) runWarning() *BudgetWarning {
 	if t.budget.WarnAt <= 0 {
 		return nil
 	}
@@ -145,6 +325,7 @@ func (t *BudgetTracker) Warning() *BudgetWarning {
 	t.warned = true
 
 	return &BudgetWarning{
+		Scope:      LimitRun,
 		SpentBytes: bytes,
 		LimitBytes: t.budget.MaxBytes,
 		Elapsed:    elapsed,

@@ -186,6 +186,7 @@ make clean-ffmpeg # third_party/ffmpeg/ - about 750 MB, and a ~220 MB download t
 | `-format` | `jpeg` | `jpeg` or `png` |
 | `-max-bytes` | 150 MiB per file, capped at 2 GiB | traffic ceiling for the run |
 | `-max-time` | `10m` | time ceiling for the run |
+| `-max-client-bytes` | no roof | traffic ceiling for the whole process, across every run it makes together. `-max-bytes` is per run and multiplies by the number of runs going at once; this is the ceiling that does not. Counted on bytes actually received, and it caps nothing that is uploaded |
 | `-file` | all of them | which video files to process: torrent index or path pattern, comma-separated |
 | `-list` | `false` | list the torrent's video files and exit, without taking frames |
 | `-parallel` | `4` | video files to work on at once |

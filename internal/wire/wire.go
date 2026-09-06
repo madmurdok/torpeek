@@ -108,8 +108,14 @@ func event(ev core.Event) map[string]any {
 			"elapsed_ms": e.Elapsed.Milliseconds(), "peers": e.Peers, "seeds": e.Seeds,
 		}
 	case core.BudgetWarning:
+		// scope says whether spent/limit are this run's or the whole
+		// client's, and is the difference between "you asked for a lot" and
+		// "the machine is nearly out" (core.LimitScope). Always present, so
+		// a consumer reads one key rather than inferring the scope from
+		// limit_ms happening to be zero.
 		return map[string]any{
-			"type": "budget_warning", "spent": e.SpentBytes, "limit": e.LimitBytes,
+			"type": "budget_warning", "scope": string(e.Scope),
+			"spent": e.SpentBytes, "limit": e.LimitBytes,
 			"elapsed_ms": e.Elapsed.Milliseconds(), "limit_ms": e.LimitTime.Milliseconds(),
 		}
 	case core.FileDone:

@@ -427,6 +427,38 @@ func (s *Session) ListenPort() int {
 // surface this rather than hide it.
 func (s *Session) WentOnlineBlind() bool { return s.blindly }
 
+// Received is the useful data this CLIENT has taken off the wire since it
+// started, in bytes: the same BytesReadUsefulData Torrent.Downloaded reports,
+// accumulated by anacrolix at the client level rather than the torrent level
+// (every chunk that reaches a torrent's ConnStats reaches the client's too -
+// peer.go's modifyRelevantConnStats walks both).
+//
+// It is NOT the sum of Downloaded over the torrents attached right now, and
+// the difference is the point. A torrent's counter goes when the torrent goes,
+// so a sum over live torrents forgets everything a detached run received -
+// including the chunks that kept arriving from several peers after its last
+// claim was released, measured between 1.5 and 10.6 MiB per run on the
+// acceptance torrent (docs/tor-88-min-traffic-spread.md). Those bytes crossed
+// the link. A ceiling that protects a link and a quota (REQUIREMENTS.md 2.6)
+// must not be reset by tidying up, so the client-wide roof is read from here.
+//
+// Received data only, in keeping with 2.6: BytesWrittenData - what this client
+// SENT, which Torrent.Uploaded reports and nothing caps - is not in it.
+//
+// Cumulative and monotonic for the life of the client, and zero once Close
+// has run: Close drops the client reference, and the counters go with it. A
+// caller that needs a closed client's final figure - Pool, folding it into
+// the total behind its roof - must take it BEFORE closing. Measured, not
+// assumed: reading it afterwards returned 0 where the client had received a
+// megabyte.
+func (s *Session) Received() int64 {
+	if s.cl == nil {
+		return 0
+	}
+	stats := s.cl.ConnStats()
+	return stats.BytesReadUsefulData.Int64()
+}
+
 // Close shuts the client down.
 func (s *Session) Close() error {
 	if s.cl == nil {

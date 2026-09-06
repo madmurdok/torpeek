@@ -177,6 +177,13 @@ type Cost struct {
 	LimitBytes      int64 `json:"limit_bytes"`
 	LimitMS         int64 `json:"limit_ms"`
 	// LimitHit names the ceiling that stopped the run, empty if none did.
+	//
+	// "budget" is one of the run's own two, above; "traffic_roof" is the
+	// client-wide roof over every run at once, which is NOT bounded by
+	// LimitBytes here and may have been filled by other runs entirely
+	// (core.StopRoof). Recording them under one name would leave a reader of
+	// this file comparing DownloadedBytes against LimitBytes and finding the
+	// run stopped nowhere near its ceiling, with nothing here to say why.
 	LimitHit string `json:"limit_hit"`
 	// Sequential marks a run that degraded to sequential reading from the
 	// start because the container carried no duration (REQUIREMENTS.md

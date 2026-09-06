@@ -76,8 +76,20 @@ type Pool struct {
 	// what makes ErrTorrentBusy possible, and it is keyed by the hash the
 	// SOURCE names, which is known before anything goes online - so a second
 	// attach is refused before it has cost a port or a connection.
-	held   map[string]struct{}
-	closed bool
+	held map[string]struct{}
+	// alone is every client the pool started for a torrent that could not
+	// join the shared one, keyed the same way held is. It exists so
+	// Downloaded can see their traffic: a private torrent's client is still
+	// this pool's client, spending this pool's link.
+	alone map[string]*Session
+	// retired is the received-bytes total of every client this pool has
+	// already closed. A client's counters go when its client reference does
+	// (Session.Received reports zero after Close), so each one's figure is
+	// taken just before it is closed and added here - otherwise detaching a
+	// torrent, or shutting the pool down, would hand its traffic back and the
+	// roof would bound nothing.
+	retired int64
+	closed  bool
 }
 
 // NewPool returns a pool whose clients are built from cfg.
@@ -86,7 +98,11 @@ type Pool struct {
 // the whole reason a pool takes a Config rather than each run bringing its
 // own: two clients must never be handed the same port.
 func NewPool(cfg Config) *Pool {
-	return &Pool{cfg: cfg, held: make(map[string]struct{})}
+	return &Pool{
+		cfg:   cfg,
+		held:  make(map[string]struct{}),
+		alone: make(map[string]*Session),
+	}
 }
 
 // Attach brings src online and hands back the torrent, out of the shared
@@ -135,6 +151,14 @@ func (p *Pool) Close() error {
 	p.closed = true
 	sess := p.sess
 	p.sess = nil
+	// Under the same lock that drops the client, and before it is closed:
+	// Session.Received goes to zero once Close has run, and taking the figure
+	// here means no reader of Downloaded ever sees the shared client's
+	// traffic vanish. What it misses is whatever arrives during the teardown
+	// itself, which is a closing socket's worth.
+	if sess != nil {
+		p.retired += sess.Received()
+	}
 	p.mu.Unlock()
 
 	// Outside the lock on purpose: Session.Close polls for its port to come
@@ -143,6 +167,37 @@ func (p *Pool) Close() error {
 		return nil
 	}
 	return sess.Close()
+}
+
+// Downloaded is the useful data every client this pool has run has received,
+// in bytes - the figure a client-wide traffic roof is held against
+// (REQUIREMENTS.md 2.6).
+//
+// It satisfies the same one-method interface core's budget meters do, and
+// deliberately carries the same name as Torrent.Downloaded, because the two
+// are the same measurement at two scales: one torrent's arrivals, and every
+// arrival on every client the pool owns. What separates them is what a run's
+// ceiling and a client's roof are each protecting - see Session.Received for
+// why the roof cannot be a sum of the per-torrent figures.
+//
+// Cumulative over the pool's whole life. Detaching a torrent does not give
+// its traffic back and neither does closing the client that carried it; a
+// quota that fell as work finished would not be a quota.
+//
+// Received bytes only. Nothing here counts what was UPLOADED - see
+// Torrent.Uploaded, which says the same thing about the per-run ceiling.
+func (p *Pool) Downloaded() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	total := p.retired
+	if p.sess != nil {
+		total += p.sess.Received()
+	}
+	for _, sess := range p.alone {
+		total += sess.Received()
+	}
+	return total
 }
 
 // Up reports whether the shared public client is running. False before the
@@ -199,6 +254,48 @@ func (p *Pool) release(key string) {
 	delete(p.held, key)
 }
 
+// aloneOn builds the attachment for a torrent that got a client to itself,
+// and registers that client so Downloaded can see its traffic. Every
+// attachment carrying a Session of its own is built here, so there is one
+// place where "this client is the pool's too" is said.
+func (p *Pool) aloneOn(key string, t *Torrent, sess *Session) *Attachment {
+	p.mu.Lock()
+	p.alone[key] = sess
+	p.mu.Unlock()
+	return &Attachment{pool: p, key: key, t: t, sess: sess}
+}
+
+// retire folds a client's received-bytes figure into the pool's running total
+// and forgets the client. Called just BEFORE that client is closed, because
+// Session.Received reports zero once it has been.
+//
+// Both steps under one lock, which is what stops the figure being counted
+// twice (a Downloaded between them would see the client in alone AND its bytes
+// in retired) or not at all (a Downloaded between them the other way round
+// would see neither). Holding p.mu is also what makes reading the session
+// safe: Downloaded is the only other reader, and it holds the same lock.
+func (p *Pool) retire(key string, sess *Session) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retired += sess.Received()
+	delete(p.alone, key)
+}
+
+// retireClient is retire for a client that was never registered under a key:
+// the tracker probe of a magnet whose privacy is not yet known, which is
+// started and thrown away inside a single attach.
+//
+// It is very nearly nothing - a probe fetches metadata, and metadata chunks
+// are counted by anacrolix as MetadataChunksRead rather than as the useful
+// piece data Received reports. It is folded in anyway, because "every client
+// this pool has run" is the claim Downloaded makes, and a claim with an
+// unstated exception in it is worse than a slightly smaller number.
+func (p *Pool) retireClient(sess *Session) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.retired += sess.Received()
+}
+
 func (p *Pool) attach(ctx context.Context, src Source, key string, peers []string) (*Attachment, error) {
 	route := routeFor(p.cfg, src)
 	if route.err != nil {
@@ -228,7 +325,7 @@ func (p *Pool) attachAlone(ctx context.Context, src Source, key string, peers []
 	if err != nil {
 		return nil, err
 	}
-	return &Attachment{pool: p, key: key, t: t, sess: sess}, nil
+	return p.aloneOn(key, t, sess), nil
 }
 
 // probeThenAttach handles a magnet with trackers: fetch the metadata with DHT
@@ -268,6 +365,7 @@ func (p *Pool) probeThenAttach(ctx context.Context, src Source, key string, peer
 		// The trackers stayed silent, so DHT is the only way left - and we
 		// still do not know whether this torrent is private. It therefore
 		// keeps a client of its own, as it always has.
+		p.retireClient(probe)
 		probe.Close()
 
 		blind, bt, berr := openBlind(ctx, cfg, src)
@@ -276,20 +374,21 @@ func (p *Pool) probeThenAttach(ctx context.Context, src Source, key string, peer
 			return nil, berr
 		}
 		blind.lease = claim.lease
-		return &Attachment{pool: p, key: key, t: bt, sess: blind}, nil
+		return p.aloneOn(key, bt, blind), nil
 	}
 
 	if t.Private() {
 		// DHT was never on for this client, which is exactly what a private
 		// torrent needs, so it stays where it is.
 		probe.lease = claim.lease
-		return &Attachment{pool: p, key: key, t: t, sess: probe}, nil
+		return p.aloneOn(key, t, probe), nil
 	}
 
 	// Public: hand the metadata already in hand to the shared client so
 	// nothing is fetched twice, and close the probe before anything binds
 	// its port again (Session.Close waits for that).
 	mi := carriedOverMetainfo(t.t.Metainfo())
+	p.retireClient(probe)
 	probe.Close()
 
 	return p.attachShared(ctx, src, key, &mi, peers, &claim)
@@ -459,6 +558,12 @@ func (a *Attachment) detach() error {
 	infoHash := a.t.InfoHash()
 
 	if a.sess != nil {
+		// Before the close, not after: Session.Received reports zero once the
+		// client reference is gone, and the pool's roof is owed these bytes
+		// whether the torrent that spent them is still here or not
+		// (Pool.Downloaded). Only the teardown's own traffic is missed.
+		a.pool.retire(a.key, a.sess)
+
 		err := a.sess.Close()
 		if discardErr := a.sess.DiscardPieces(infoHash); err == nil {
 			err = discardErr

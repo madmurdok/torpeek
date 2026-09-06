@@ -42,6 +42,22 @@ type Config struct {
 	Profile swarm.Profile
 	Budget  Budget
 
+	// Roof is the ceiling over the whole CLIENT this run's torrent comes out
+	// of - Torrents below, or the pool this run builds for itself - rather
+	// than over this run. Zero MaxBytes, the default, means unlimited; see
+	// Roof and DefaultRoof.
+	//
+	// A value rather than a pointer, unlike Torrents, and the difference is
+	// worth reading. Torrents has to be shared because it holds state; a roof
+	// holds none - its figure lives on the client's own counter, which every
+	// run over that client reads - so copies of this number all enforce the
+	// same ceiling against the same total. What that does NOT excuse is
+	// setting it per run: it describes the client, so the one place that
+	// builds the pool is the one place that should set it (cli/web.go), and
+	// two runs given different numbers would be two opinions about one
+	// client, of which the larger silently wins.
+	Roof Roof
+
 	// Sequential opts into degrading to sequential reading from the start
 	// when a container states no duration to plan capture points across
 	// (REQUIREMENTS.md 2.7). Off by default: a container with no index gets
@@ -90,6 +106,7 @@ func DefaultConfig(source, outputRoot, dataDir string) Config {
 		Plan:        frames.DefaultPlan(),
 		Profile:     swarm.MinTime,
 		Budget:      DefaultBudget(1),
+		Roof:        DefaultRoof(),
 		Parallelism: 4,
 		Format:      frames.JPEG,
 		Swarm:       swarm.DefaultConfig(dataDir),
@@ -177,6 +194,23 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		defer pool.Close()
 	}
 
+	// Before the attach, not after: a full roof means this client has already
+	// received everything it was allowed to, and going online to find that
+	// out would spend more of it. A refusal rather than a Done, for the same
+	// reason ErrTorrentBusy is one - the run never happened, and there are no
+	// frames to keep. A run that is stopped BY the roof after it has begun is
+	// the other case, and ends on Done{Reason: StopRoof} below.
+	//
+	// And after serveFromCache above, deliberately: a run served from disk
+	// goes nowhere and receives nothing, so a full roof is no reason to
+	// refuse it. The roof bounds traffic, not work.
+	if cfg.Roof.Reached(pool.Downloaded()) {
+		err := fmt.Errorf("the client-wide traffic roof of %d bytes is used up; "+
+			"raise -max-client-bytes or restart", cfg.Roof.MaxBytes)
+		bus.Publish(Failed{File: -1, Code: CodeTrafficRoof, Err: err})
+		return
+	}
+
 	attachment, err := pool.Attach(ctx, src, cfg.Swarm.Peers...)
 	if err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeOf(err), Err: err})
@@ -233,7 +267,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// selection earlier, into cfg.Files before swarm.Select runs above;
 	// narrowing the file list after this point would leave the budget sized
 	// for files no longer being fetched.
-	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent)
+	//
+	// The pool is handed in as the roof's meter, not the torrent: the roof is
+	// the client's ceiling and is read off the client's own counter, which
+	// keeps the traffic of torrents this pool has already let go
+	// (swarm.Pool.Downloaded). Summing what the live runs report would forget
+	// exactly the arrivals section 2.6 insists on counting.
+	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent, cfg.Roof, pool)
 
 	runCtx, cancel := tracker.Context(ctx)
 	defer cancel()

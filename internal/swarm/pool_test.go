@@ -389,3 +389,86 @@ func TestAFailedAttachLeavesThePoolServingEverythingElse(t *testing.T) {
 		t.Error("the surviving torrent read the wrong bytes")
 	}
 }
+
+// TestPoolKeepsTheTrafficOfEveryTorrentItHasLetGo is the measurement half of
+// TOR-131: what a client-wide traffic roof is read from.
+//
+// A roof could be summed from the live torrents' own Downloaded figures
+// instead, and this is the test that says why it must not be. Both torrents
+// here are detached before the last read - one out of the shared client, one a
+// private torrent that had a client of its own and was closed with it - and
+// after that the sum over live torrents is zero, because there are none.
+// Pool.Downloaded still reports everything they received. Those bytes crossed
+// the person's link; a quota that gave them back when the work finished would
+// bound nothing at all (REQUIREMENTS.md 2.6).
+func TestPoolKeepsTheTrafficOfEveryTorrentItHasLetGo(t *testing.T) {
+	public := torrenttest.Build(t, "public.mkv", poolPayloadSize, poolPieceLength)
+	private := torrenttest.BuildPrivate(t, "private.mkv", poolPayloadSize, poolPieceLength)
+	publicSeeder := public.StartSeeder(t)
+	privateSeeder := private.StartSeeder(t)
+
+	pool := NewPool(poolConfig(t))
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	if got := pool.Downloaded(); got != 0 {
+		t.Fatalf("a pool that has attached nothing has received %d bytes", got)
+	}
+
+	const (
+		readOffset = 1 << 20
+		readLength = 256 << 10
+	)
+
+	var spent int64
+	for _, c := range []struct {
+		name   string
+		path   string
+		seeder string
+		pooled bool
+	}{
+		{"public", public.TorrentPath, publicSeeder, true},
+		{"private", private.TorrentPath, privateSeeder, false},
+	} {
+		att, err := pool.Attach(ctx, poolSource(t, c.path), c.seeder)
+		if err != nil {
+			t.Fatalf("attach the %s torrent: %v", c.name, err)
+		}
+		if att.Pooled() != c.pooled {
+			t.Fatalf("the %s torrent's Pooled() is %v; this test needs one torrent on the shared "+
+				"client and one on a client of its own, or it only covers half the accounting",
+				c.name, att.Pooled())
+		}
+
+		if _, err := att.Torrent().ReadRange(ctx, 0, readOffset, readLength, MinTraffic); err != nil {
+			t.Fatalf("read from the %s torrent: %v", c.name, err)
+		}
+
+		got := att.Torrent().Downloaded()
+		if got <= 0 {
+			t.Fatalf("the %s torrent reports %d bytes received after a %d byte read",
+				c.name, got, readLength)
+		}
+		spent += got
+
+		if err := att.Detach(); err != nil {
+			t.Fatalf("detach the %s torrent: %v", c.name, err)
+		}
+	}
+
+	if got := pool.Attached(); got != 0 {
+		t.Fatalf("%d torrents are still attached, so nothing here is about letting go", got)
+	}
+
+	// The claim, in one line: everything both of them received, after both of
+	// them are gone and one of their clients has been closed.
+	if got := pool.Downloaded(); got < spent {
+		t.Errorf("the pool reports %d bytes received; the two torrents received %d between them "+
+			"before they were detached, and detaching does not give traffic back", got, spent)
+	}
+
+	t.Logf("two torrents received %d bytes and were let go; the pool still reports %d",
+		spent, pool.Downloaded())
+}
