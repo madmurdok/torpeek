@@ -197,3 +197,167 @@ func isIdentByte(b byte) bool {
 	return b == '-' || b == '_' ||
 		(b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
+
+// TestLeftPanelArtifactsAreFullyRemoved is TOR-168's own guard against the
+// thing its acceptance criteria explicitly warns about: dead CSS and a dead
+// localStorage key left behind after the feature they served is gone. The
+// ticket's own description records the panel in enough detail to rebuild it,
+// so nothing here needs to guess what "gone" means - it checks each artefact
+// the description names by name: the --panel-width token, the .runs-panel
+// and .panel-header rules, the .resizer divider (not .col-resizer, the
+// unrelated per-column handle TOR-157 added, which must survive), and every
+// one of app.js's panel functions and element lookups, plus the
+// torpeek.panelWidth localStorage key and the markup that held them.
+func TestLeftPanelArtifactsAreFullyRemoved(t *testing.T) {
+	css := stylesheet(t)
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+
+	for _, sel := range []string{".runs-panel", ".panel-header", ".resizer"} {
+		if hasSelector(live, sel) {
+			t.Errorf("app.css still has a %q rule - TOR-168 removed the left panel "+
+				"and its divider; leaving dead CSS behind is worse than either keeping "+
+				"or removing the feature", sel)
+		}
+	}
+	if !hasSelector(live, ".col-resizer") {
+		t.Errorf("app.css has lost .col-resizer along the way - that is TOR-157's " +
+			"per-column drag handle, unrelated to the left panel's own .resizer, and " +
+			"must survive this ticket")
+	}
+	if strings.Contains(live, "--panel-width") {
+		t.Errorf("app.css still declares or reads --panel-width - the panel it sized " +
+			"is gone (TOR-168)")
+	}
+
+	js, err := embedded.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatalf("reading the embedded app.js: %v", err)
+	}
+	jsLive := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(string(js), "")
+	jsLive = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(jsLive, "")
+
+	for _, name := range []string{
+		"runsPanel", "PANEL_WIDTH_KEY", "PANEL_MIN_WIDTH", "PANEL_MAX_WIDTH",
+		"PANEL_RIGHT_MARGIN", "clampPanelWidth", "loadPanelWidth", "savePanelWidth",
+		"applyPanelWidth", "endPanelDrag", "torpeek.panelWidth",
+		`"runs-panel"`, `"resizer"`,
+	} {
+		if strings.Contains(jsLive, name) {
+			t.Errorf("app.js still references %q - every panel function and element "+
+				"lookup was meant to go with the panel (TOR-168)", name)
+		}
+	}
+
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+	page := string(html)
+	for _, needle := range []string{
+		`id="runs-panel"`, `class="runs-panel"`, `class="panel-header"`, `id="resizer"`,
+	} {
+		if strings.Contains(page, needle) {
+			t.Errorf("index.html still has %q - the left panel and its divider "+
+				"should be gone (TOR-168)", needle)
+		}
+	}
+
+	// What replaced them: the title and the status element move INTO the
+	// intake, ahead of the input row (the project owner's call, TOR-168's own
+	// handoff note) - #status keeps its id, since app.js still reaches it by
+	// id as the page's only live-connection indicator.
+	intakeIdx := strings.Index(page, `id="intake"`)
+	h1Idx := strings.Index(page, "<h1>torpeek</h1>")
+	statusIdx := strings.Index(page, `id="status"`)
+	formIdx := strings.Index(page, `id="start"`)
+	if intakeIdx < 0 || h1Idx < 0 || statusIdx < 0 || formIdx < 0 {
+		t.Fatalf("index.html is missing one of #intake, <h1>, #status or #start "+
+			"entirely (intake=%d h1=%d status=%d form=%d)", intakeIdx, h1Idx, statusIdx, formIdx)
+	}
+	if !(intakeIdx < h1Idx && h1Idx < formIdx) {
+		t.Errorf("<h1>torpeek</h1> is not between #intake and the #start form - "+
+			"it belongs inside the intake, before the input row (intake=%d h1=%d form=%d)",
+			intakeIdx, h1Idx, formIdx)
+	}
+	if !(intakeIdx < statusIdx && statusIdx < formIdx) {
+		t.Errorf("#status is not between #intake and the #start form - it belongs "+
+			"inside the intake, before the input row, and still reachable by id "+
+			"(intake=%d status=%d form=%d)", intakeIdx, statusIdx, formIdx)
+	}
+}
+
+// TestDropzoneFrameIsHardCorneredAndUsesEdge is TOR-173's guard. .dropzone
+// used to be `border: 1px dashed var(--rule)` (1.36 against --s1, no edge at
+// all by the 3.0 floor --edge's own comment sets) with rounded corners - the
+// opposite of both decisions that ticket makes: the dash implied a narrower
+// drop target than the truth (the handler is on `document`, with a
+// page-wide #drop-overlay doing that job instead), and the reference sheet's
+// corners are hard, with brackets set just inside them, reusing
+// .run-detail::before's own corner-bracket technique rather than a
+// rectangle. Neither may spend --accent: app.css reserves that for "this is
+// live or this is where you are", and a permanently accented resting frame
+// would be exactly the furniture-spending that rule exists to prevent.
+func TestDropzoneFrameIsHardCorneredAndUsesEdge(t *testing.T) {
+	css := stylesheet(t)
+
+	dz := block(t, css, ".dropzone {")
+	if v, ok := dz["border-radius"]; ok && v != "0" {
+		t.Errorf(".dropzone declares border-radius: %q - TOR-173 wants hard corners, "+
+			"matching the reference sheet's vocabulary, not the old rounded box", v)
+	}
+	if v, ok := dz["border"]; ok {
+		t.Errorf(".dropzone still declares its own border (%q) - TOR-173 replaces the "+
+			"dashed --rule box with corner brackets drawn by ::before/::after, not a "+
+			"rectangle border", v)
+	}
+
+	// Both selectors are searched with a leading "\n": .dropzone::after {" is
+	// also, verbatim, the tail of the combined ".dropzone::before,
+	// .dropzone::after {" rule just above (the one that only sets content/
+	// position/width/height), so a bare substring search finds that one
+	// first and silently reads the wrong block. Anchoring on the newline
+	// that starts the dedicated single-selector rule's own line is what
+	// finds the one that actually declares the border colours.
+	for _, rawSel := range []string{"\n.dropzone::before {", "\n.dropzone::after {"} {
+		sel := strings.TrimSpace(rawSel)
+		b := block(t, css, rawSel)
+		sawEdge := false
+		for prop, val := range b {
+			if !strings.Contains(prop, "border") {
+				continue
+			}
+			if strings.Contains(val, "var(--edge)") {
+				sawEdge = true
+			}
+			if strings.Contains(val, "var(--accent") {
+				t.Errorf("%s %s is %q - a resting frame must not spend --accent; focus "+
+					"is where TOR-159 already put it", sel, prop, val)
+			}
+		}
+		if !sawEdge {
+			t.Errorf("%s draws no var(--edge) border - TOR-173 takes --edge, the token "+
+				"TOR-159 measured for exactly this job", sel)
+		}
+		if _, ok := b["filter"]; ok {
+			t.Errorf("%s declares filter (a glow) - that glow is accent-tinted "+
+				"(--stroke-glow) and this is a resting frame, not a live one", sel)
+		}
+		if _, ok := b["box-shadow"]; ok {
+			t.Errorf("%s declares box-shadow - box-shadow paints a glowing rectangle "+
+				"over a stroke-drawn shape (see .run-detail::before's own comment); this "+
+				"frame is stroke-drawn corners, not a box", sel)
+		}
+	}
+
+	// The contrast claim itself, computed rather than trusted: .dropzone has
+	// no background of its own, so its real ground is --bg, painted by the
+	// sticky .intake it sits inside.
+	root := block(t, css, ":root {")
+	edge := hexToken(t, root, "--edge")
+	bg := hexToken(t, root, "--bg")
+	if ratio := contrastRatio(edge, bg); ratio < 3.0 {
+		t.Errorf("--edge (%s) against --bg (%s), .dropzone's own ground, is %.2f:1, "+
+			"want >= 3.0 (the floor for a UI part to be distinguishable at all)",
+			edge, bg, ratio)
+	}
+}
