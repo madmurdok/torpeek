@@ -203,9 +203,9 @@ type Deleter func(infoHash, params string, fileIndex, frameIndex int) error
 //
 // It is injected for the same reason Runner is: this package does not build
 // a run configuration, and a listing has to start from the very same one a
-// run does, or the two would disagree about the pinned port, the DHT switch
-// and the known peers while looking at the same torrent (cli/web.go's
-// serveWeb builds both from one base config). It takes only a source,
+// run does, or the two would disagree about which client pool, DHT switch and
+// known peers to reach the same torrent by (cli/web.go's serveWeb builds both
+// from one base config, carrying one shared swarm.Pool). It takes only a source,
 // because nothing else about a request can change what a torrent contains.
 //
 // Unlike Replayer and Deleter it takes a context, and that difference is the
@@ -273,11 +273,16 @@ const keepFinishedRuns = 10
 // Server serves the embedded UI and the event streams of the runs it holds.
 //
 // It holds a registry of runs and exactly one slot to run them in. One at a
-// time is the same rule as before, and for the same reason: two runs must not
-// quietly compete for the same output directory and traffic budget, and a
-// torrent client binds one pinned port and one client-wide DHT switch, so a
-// second concurrent run could not even start. What changed is what happens to
-// the second request - it waits its turn instead of being refused.
+// time is still the rule, but since TOR-128 it is a policy rather than a
+// limit of the machinery: every public torrent shares one long-lived client
+// on one port (swarm.Pool), so a second concurrent run could now start. What
+// keeps the slot at one is that two runs would each carry their own traffic
+// budget with no roof over the pair, on a host whose fair-use guidance is one
+// to three active downloads (REQUIREMENTS.md 4.1). Widening it, and the roof
+// that has to come with it, are their own decisions.
+//
+// What changed before that, and still holds: a second request waits its turn
+// instead of being refused.
 type Server struct {
 	cfg      Config
 	runner   Runner
@@ -494,9 +499,9 @@ func mountRoot(next http.Handler) http.Handler {
 // took the slot or is waiting for it.
 //
 // It never refuses because another run is going. Only one runs at a time -
-// two runs must not compete for the same output directory and traffic budget,
-// and a pinned BitTorrent port cannot be bound twice - but that is now kept
-// by making the second request wait rather than by turning it away. The error
+// two runs would each carry their own traffic budget with no roof over the
+// pair - but that is kept by making the second request wait rather than by
+// turning it away. The error
 // it can still return is about the request or the server, not about traffic:
 // a blank source, or a server that has closed.
 //
@@ -580,10 +585,10 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 // runs still waiting behind it.
 //
 // A run that still has to be told which files to capture takes the slot for
-// its metadata pass first (needsListingLocked, listThenRun). That pass costs
-// the same pinned BitTorrent port a run costs, which is why it happens here
-// rather than beside the queue: RunReplaying's exemption does not transfer -
-// a replay reads local files, a listing opens a swarm session.
+// its metadata pass first (needsListingLocked, listThenRun). That pass reaches
+// the swarm - it attaches the torrent to get its metadata - which is why it
+// happens here rather than beside the queue: RunReplaying's exemption does not
+// transfer, since a replay reads local files and a listing does not.
 func (s *Server) dispatch() {
 	for {
 		s.mu.Lock()
@@ -690,10 +695,10 @@ func (s *Server) beginRun(ctx context.Context, cancel context.CancelFunc, entry 
 // listThenRun is a run's first phase: find out what the torrent holds, then
 // either capture it or stop and ask.
 //
-// It runs inside the slot, because a listing opens a full swarm session on
-// the same pinned port a run uses, and it deliberately does not go through
-// pump - pump reads a stream that ends as a run that finished, which is the
-// one thing a metadata pass must not be mistaken for.
+// It runs inside the slot, because a listing attaches the very torrent the run
+// after it will attach, and it deliberately does not go through pump - pump
+// reads a stream that ends as a run that finished, which is the one thing a
+// metadata pass must not be mistaken for.
 //
 // Three ways out, and only one of them keeps the slot:
 //   - the listing failed, or a cancel or a Close overtook it: the entry ends
@@ -804,9 +809,9 @@ func (s *Server) listThenRun(ctx context.Context, cancel context.CancelFunc, ent
 // from keepFinishedRuns.
 //
 // It never touches s.waiting or s.running: a cache hit costs no network and
-// competes for neither the traffic budget nor the pinned port the queue
-// exists to protect, so making it wait behind a live download would defend
-// against a conflict that cannot happen. Unlike startRun, this runs
+// competes for none of the traffic the queue exists to ration, so making it
+// wait behind a live download would defend against a conflict that cannot
+// happen. Unlike startRun, this runs
 // pump synchronously rather than handing it to a goroutine - a replay is a
 // handful of local file reads, not a wait on the network, so there is
 // nothing to gain by returning before it is done, and the caller gets back

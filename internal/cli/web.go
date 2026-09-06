@@ -25,6 +25,25 @@ import (
 func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.Tools, stdout, stderr io.Writer) int {
 	engine := core.NewEngine(tools)
 
+	// One pool for the whole server, and the server is what closes it.
+	//
+	// This is the ownership the pool exists to state: every public torrent
+	// shares one long-lived client, so that client cannot belong to a run -
+	// a run that fails, or is cancelled, would take every other run's client
+	// down with it. It belongs here, next to the server whose lifetime it
+	// actually matches, and every run below is handed it through
+	// core.Config.Torrents rather than configuring a client of its own.
+	//
+	// Built from the same base every run is built from, so the pool, the
+	// listing and the run agree about the data directory, the DHT switch, the
+	// port set and the known peers without any of them deciding it
+	// separately. Deferred before the server's own Close so it runs after it:
+	// the server cancels what is running, and only then does the client go
+	// down.
+	pool := swarm.NewPool(base.Swarm)
+	defer pool.Close()
+	base.Torrents = pool
+
 	runner := func(ctx context.Context, req web.RunRequest) (<-chan core.Event, error) {
 		cfg, err := runConfig(base, req)
 		if err != nil {
@@ -53,10 +72,10 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 
 	// Listing a torrent's files before any of them is captured (TOR-67) is
 	// injected for the same reason again, and starts from the same base: the
-	// metadata pass and the run that follows it must share one cfg.Swarm -
-	// the same pinned port, the same DHT switch, the same known peers - or
-	// they would reach the same torrent by two different routes, and the
-	// second would be the first to find out. Only the source varies, which
+	// metadata pass and the run that follows it must share one pool - the
+	// same client, the same DHT switch, the same known peers - or they would
+	// reach the same torrent by two different routes, and the second would be
+	// the first to find out. Only the source varies, which
 	// is why this takes one rather than a whole web.RunRequest: no other
 	// field of a request can change what a torrent contains.
 	//

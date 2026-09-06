@@ -342,9 +342,27 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	return &Session{cl: cl, cfg: cfg, store: store, dhtOn: dht}, nil
 }
 
-// add attaches the source to this session's client and waits for metadata.
-// A non-nil mi short-circuits the wait by supplying the info bytes directly.
+// add attaches the source to this session's client and waits for metadata,
+// introducing the peers this session was configured with.
 func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*Torrent, error) {
+	return s.addTo(ctx, src, mi, s.cfg.Peers)
+}
+
+// addTo is add with the peer list given per call rather than taken from the
+// session's own config.
+//
+// The two differ only for the shared public client (see Pool): one client
+// holds many torrents, so "which peers to introduce" is a property of the
+// torrent being attached, not of the client it is attached to. Every
+// single-torrent caller goes through add and keeps the old behaviour exactly.
+//
+// A non-nil mi short-circuits the metadata wait by supplying the info bytes
+// directly.
+func (s *Session) addTo(ctx context.Context, src Source, mi *metainfo.MetaInfo, peers []string) (*Torrent, error) {
+	if s.cl == nil {
+		return nil, errors.New("swarm: session is closed")
+	}
+
 	var (
 		t   *torrent.Torrent
 		err error
@@ -377,8 +395,8 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 	// at construction - and here it is exactly what has not arrived yet. A
 	// magnet reaches this line with a nil Info, and building one crashed the
 	// run before it started (TOR-48). Introducing a peer needs none of that.
-	if len(s.cfg.Peers) > 0 {
-		addPeers(t, s.cfg.Peers...)
+	if len(peers) > 0 {
+		addPeers(t, peers...)
 	}
 
 	select {
@@ -397,7 +415,12 @@ func (s *Session) DHTEnabled() bool { return s.dhtOn }
 // what Config.ListenPort resolved to, whether it was pinned or left at zero
 // for the OS to assign. Exists so a caller (or a test) can observe the real
 // socket rather than trust the config that asked for it.
-func (s *Session) ListenPort() int { return s.cl.LocalPort() }
+func (s *Session) ListenPort() int {
+	if s.cl == nil {
+		return 0
+	}
+	return s.cl.LocalPort()
+}
 
 // WentOnlineBlind reports that DHT was used before the private flag could be
 // checked - only possible for a magnet carrying no trackers. Callers should
@@ -551,8 +574,22 @@ func portBusy(network, addr string) bool {
 // Close's wait to even need to cover - it is a genuine guarantee, not one
 // this happens to lean on without headroom.
 func (s *Session) DiscardPieces(infoHash string) error {
-	if s.cfg.DataDir == "" || infoHash == "" {
+	return discardPieces(s.cfg.DataDir, infoHash)
+}
+
+// discardPieces is DiscardPieces without a session, for the caller that drops
+// one torrent out of a client it does not own (Attachment.Detach). Everything
+// DiscardPieces documents applies here unchanged - it is the same removal,
+// under the same <DataDir>/<infohash>/ namespacing - except for what marks the
+// boundary it must not be called before. For a session that is Close; for one
+// torrent out of a shared client it is Torrent.Drop, which carries the same
+// guarantee at a narrower scope: Drop takes the client lock, calls the very
+// same Torrent.close(wg) that Client.Close calls for every torrent, and waits
+// on its own WaitGroup before returning - so this torrent's storage.Close has
+// already run, while every sibling torrent in the client is untouched.
+func discardPieces(dataDir, infoHash string) error {
+	if dataDir == "" || infoHash == "" {
 		return nil
 	}
-	return os.RemoveAll(filepath.Join(s.cfg.DataDir, infoHash))
+	return os.RemoveAll(filepath.Join(dataDir, infoHash))
 }
