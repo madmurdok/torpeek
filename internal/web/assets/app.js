@@ -1637,25 +1637,19 @@ function fileBlock(entry, index) {
         '<button type="button" class="file-compare">Compare…</button>' +
       "</p>" +
       '<p class="file-progress" hidden></p>' +
-      // The third strip (TOR-142): the file's own stretch of the torrent as
-      // the extent, the claimed pieces marked on it, and the swarm's live
-      // reading beside it - kept above the piece strip (TOR-111) it shares a
-      // measurement with, so the two read as related rather than as one
-      // strip repeated. See renderAvail's own doc for why the swarm reading
-      // is a chip, never a fill sharing the track's position axis.
-      '<figure class="avail" hidden>' +
-        '<div class="avail-body">' +
-          '<div class="avail-track" role="img"><div class="avail-points"></div></div>' +
+      // The picture of the product (TOR-111): how little of the file the run
+      // actually ordered. Above the grid because the grid is what those
+      // pieces bought. The swarm chip beside the strip is TOR-142's one
+      // surviving idea (TOR-153 merged its separate track into this row,
+      // once the two turned out to say "41 of 197" twice) - see renderReach's
+      // own doc for why the chip stays a separate shape rather than a fill
+      // sharing the strip's own axis.
+      '<figure class="reach" hidden>' +
+        '<div class="reach-body">' +
+          '<div class="reach-strip" role="img"></div>' +
           '<div class="avail-swarm"><span class="avail-swarm-dot"></span>' +
             '<span class="avail-swarm-text"></span></div>' +
         "</div>" +
-        '<figcaption class="avail-note"></figcaption>' +
-      "</figure>" +
-      // The picture of the product (TOR-111): how little of the file the run
-      // actually ordered. Above the grid because the grid is what those
-      // pieces bought.
-      '<figure class="reach" hidden>' +
-        '<div class="reach-strip" role="img"></div>' +
         '<figcaption class="reach-note"></figcaption>' +
       "</figure>" +
       '<div class="grid"></div>' +
@@ -1677,12 +1671,8 @@ function fileBlock(entry, index) {
     regenGo: article.querySelector(".file-regen-go"),
     compareGo: article.querySelector(".file-compare"),
     progress: article.querySelector(".file-progress"),
-    avail: article.querySelector(".avail"),
-    availTrack: article.querySelector(".avail-track"),
-    availPoints: article.querySelector(".avail-points"),
     availSwarm: article.querySelector(".avail-swarm"),
     availSwarmText: article.querySelector(".avail-swarm-text"),
-    availNote: article.querySelector(".avail-note"),
     reach: article.querySelector(".reach"),
     reachStrip: article.querySelector(".reach-strip"),
     reachNote: article.querySelector(".reach-note"),
@@ -1710,11 +1700,6 @@ function fileBlock(entry, index) {
     // accounts for (see frames above). Once nothing is arriving there is
     // also nothing left to reflow, so the truthful view costs nothing.
     plan: [],
-    // reachData is the Reach renderReach picked for this file (or null),
-    // stashed here so renderAvail draws its own capture-point marks from the
-    // exact same measurement rather than re-deriving or re-fetching it - the
-    // two strips would otherwise be two places one fact could drift apart in.
-    reachData: null,
     // skipped is what the engine reported as unreachable, by plan index -
     // frame_skipped's code and reason. Without it a point that failed live
     // leaves its reserved cell looking like a frame still on its way, which
@@ -1927,41 +1912,62 @@ function renderFrames(fentry) {
 
 // renderReach draws how much of the file a run actually ordered from the
 // swarm (TOR-111): a strip of blocks along the file with the claimed stretches
-// marked. 44 of 270 pieces is the argument of the whole product and we could
-// only state it as a sentence.
+// marked, plus the swarm chip TOR-142 added and TOR-153 moved onto this row.
+// 44 of 270 pieces is the argument of the whole product and we could only
+// state it as a sentence.
 //
 // WHICH SET. A claim belongs to a run, so the strip is one set's, not the
 // merged grid's - and the set drawn is the one with the most capture points,
 // which is the set the grid is mostly showing. Stated in the caption rather
 // than left for the reader to wonder about.
 //
-// WHAT IS NOT DRAWN, and this is a deliberate refusal. The ticket asks for the
-// capture points marked above the strip. They are not, because the strip's
-// axis is BYTES and a capture point is a TIME, and mapping one to the other
-// needs an assumption of constant bitrate that no container owes us - a tick
-// placed that way would be a guess drawn to look like a measurement. It is
-// also unnecessary: each claimed stretch IS a capture point's footprint in
-// pieces, which is the same fact without the invention.
+// WHAT IS NOT DRAWN, and this is a deliberate refusal, twice over now.
+// TOR-111 already refused to mark capture points as TIMES on this BYTES
+// axis - that needs an assumption of constant bitrate no container owes us,
+// a tick that would be a guess drawn to look like a measurement. TOR-142
+// then drew a second, separate row of ticks instead, positioned from these
+// same claimed piece ranges rather than from a timecode - honest on its own,
+// but a second drawing of a fact this strip's blocks already carry. TOR-153
+// removes that row rather than reconciling it: a filled block already IS a
+// capture point's footprint, at the same resolution the ordering density is
+// shown at, so nothing further is added here for "where captures came from".
+//
+// THE SWARM CHIP is the one part of TOR-142 that answered a genuinely
+// different question - not "where did this run reach" but "what does the
+// swarm currently hold, torrent-wide" (core.Progress.Swarm's own doc) - so it
+// stays its own box in a SEMANTIC colour (ok/warn/bad/unknown), never the
+// accent and never a fill on the strip's own axis: entry.live.swarm is one
+// mean copies-per-piece figure for the WHOLE TORRENT, not a per-position
+// reading, so painting it along this file's span would claim a resolution it
+// does not have. Its title carries the exact figure, in the identical
+// sentence the six live columns already show (availabilityCellTitle) - not a
+// second, independently-worded copy of it.
 function renderReach(fentry, sets) {
   const el = fentry.reach;
   if (!el) return;
 
-  // Absent is not zero. A run recorded before the claims were kept has
-  // nothing to say here (TOR-119 added them without bumping cache.Version),
-  // and a strip of untouched blocks would assert that it touched nothing.
+  // ABSENT IS NOT ZERO. A run recorded before the claims were kept (TOR-119
+  // added them without bumping cache.Version), or one that simply hasn't
+  // claimed anything yet, has nothing to say about WHERE it reached - so the
+  // strip hatches instead of rendering full or empty, neither of which would
+  // be true, and the row stays visible rather than hiding outright (as it
+  // did before TOR-153) because the swarm chip beside it doesn't depend on
+  // this file's own claims and has its own reading to show regardless.
   const withReach = (sets || []).filter((s) => s.reach && s.reach.pieces > 0);
-  if (withReach.length === 0) {
-    el.hidden = true;
-    // renderAvail's own capture-point marks come from this same field - see
-    // its own doc for why that is reuse rather than a second measurement.
-    fentry.reachData = null;
+  const known = withReach.length > 0;
+  fentry.reachStrip.dataset.known = String(known);
+  if (!known) {
+    fentry.reachStrip.replaceChildren();
+    fentry.reachStrip.setAttribute("aria-label",
+      "This file's span of the torrent is not known yet - no claim has been recorded for it");
+    fentry.reachNote.textContent = "capture points not recorded for this file yet";
+    el.hidden = false;
     renderAvail(fentry);
     return;
   }
   withReach.sort((a, b) => (b.count || 0) - (a.count || 0));
   const set = withReach[0];
   const reach = set.reach;
-  fentry.reachData = reach;
 
   // How many blocks the strip holds: one per piece until there are more
   // pieces than blocks worth drawing, then one block per several pieces.
@@ -2047,104 +2053,34 @@ const MAX_BLOCKS = 96;
 // height; small enough that a full block still reads as clearly fuller.
 const REACH_FLOOR = 0.22;
 
-// AVAIL_POINT_FLOOR is renderAvail's own version of REACH_FLOOR: the least a
-// claimed stretch is ever drawn as, in fractions of the track's own width. A
-// single claimed piece in a ten-thousand-piece file is a fraction of a pixel
-// and would simply not render, which is a worse untruth than a mark slightly
-// wider than the piece it stands for - it still answers WHERE, which is the
-// one thing this axis exists to show (the same argument reach-block's own
-// floor makes, drawn as a width here rather than a height because these marks
-// sit on a continuous track rather than in per-block columns).
-const AVAIL_POINT_FLOOR = 0.006;
-
-// renderAvail draws the third strip (TOR-142): this file's own stretch of the
-// torrent as the extent, the claimed pieces marked on it, and the swarm's
-// live reading beside it - three views of one span, kept visually apart from
-// the piece strip above (TOR-111, a DENSITY of what THIS RUN ordered, in
-// segmented blocks) and the run's own progress bar (TOR-123, frames against
-// the plan, in the panel row only): this strip is a single continuous track,
-// its claimed marks are thin position ticks rather than filled blocks, and
-// the swarm reading is a coloured chip beside it rather than anything sharing
-// the track's own axis.
+// renderAvail updates the swarm chip beside the reach strip (TOR-142's one
+// surviving idea, moved onto that row by TOR-153 - see renderReach's own doc
+// for the shapes-must-stay-different reasoning and for why nothing here
+// draws capture-point marks any more). It is a plain function of
+// entry.live.swarm, independent of this file's own reach: renderReach calls
+// it after every redraw of the strip, known or not, and refreshAvailForEntry
+// below calls it on its own for a heartbeat that only moved the swarm
+// reading and touched no file's claims at all.
 //
-// WHY THE SWARM READING IS A CHIP, NEVER A FILL ON THE TRACK. entry.live.swarm
-// is one number for the WHOLE TORRENT - core.SwarmAvailability sums every
-// piece the swarm tracks, not this file's own span (core.Progress.Swarm's own
-// doc: "what the SWARM HOLDS right now") - so there is no per-position
-// reading to paint onto this file's stretch, and tinting the track as if
-// there were would assert a resolution this reading does not have. A mean
-// copy count is also not a fraction of anything the way a claimed piece is,
-// so it is never drawn as a proportional fill either; the chip's colour says
-// the SHAPE of the news (healthy, scarce, or pieces genuinely unavailable)
-// and its title carries the exact figure, in the identical sentence the six
-// live columns already show (availabilityCellTitle) - not a second,
-// independently-worded copy of it.
-//
-// WHERE THE CAPTURE POINTS COME FROM. fentry.reachData is exactly the Reach
-// renderReach picked for this file, reused rather than re-fetched or
-// re-derived - the same claimed ranges swarm.ClaimedRanges measured, in the
-// same file-relative piece numbering reachOf computed, so this strip and the
-// piece strip above it can never disagree about where a claim sits. Nowhere
-// here converts a timecode to a byte offset - that conversion needs an
-// assumption of constant bitrate no container owes us, which is exactly what
-// TOR-111 refused and this ticket does not reopen.
-//
-// ABSENT IS NOT ZERO, told the way this data actually splits in two. The
-// extent is unknown, not empty, until a claim exists for this file at all
-// (reachOf returns nil for a pre-TOR-119 record or a run that has claimed
-// nothing yet) - drawn as a hatched track rather than a full or a blank one,
-// either of which would assert a span nobody has measured. The swarm reading
-// is whatever availabilityReading/availabilityCellTitle already say for this
-// entry - reused rather than re-derived, so this strip can never answer "no
-// reading" differently than the six live columns do for the identical row.
+// ok/warn/bad is the same three-way health judgement a reader already has to
+// make from the number itself (SwarmAvailability's own doc: below 1.0 means
+// pieces are missing, unavailable means some are held by nobody at all) -
+// drawn here so it can be read at a glance, with the exact figure a hover
+// away (availabilityCellTitle, the identical sentence the six live columns
+// show) rather than lost by being reduced to a colour.
 function renderAvail(fentry) {
-  const el = fentry.avail;
+  const el = fentry.availSwarm;
   if (!el) return;
   const entry = fentry.entry;
-  const reach = fentry.reachData;
   const swarm = availabilityReading(entry);
 
-  fentry.availTrack.dataset.known = String(!!reach);
-  const frag = document.createDocumentFragment();
-  if (reach && reach.pieces > 0) {
-    for (const [begin, end] of reach.claimed || []) {
-      const from = Math.max(0, begin) / reach.pieces;
-      const span = (Math.min(reach.pieces, end) - Math.max(0, begin)) / reach.pieces;
-      if (span <= 0) continue;
-      const point = document.createElement("span");
-      point.className = "avail-point";
-      point.style.setProperty("--from", from.toFixed(4));
-      point.style.setProperty("--span", Math.max(span, AVAIL_POINT_FLOOR).toFixed(4));
-      frag.append(point);
-    }
-  }
-  fentry.availPoints.replaceChildren(frag);
-  fentry.availTrack.setAttribute("aria-label", reach
-    ? "This file's span of the torrent; " + reach.claimed_pieces + " of " + reach.pieces + " pieces claimed"
-    : "This file's span of the torrent is not known yet - no claim has been recorded for it");
-
-  // ok/warn/bad is the same three-way health judgement a reader already has
-  // to make from the number itself (SwarmAvailability's own doc: below 1.0
-  // means pieces are missing, unavailable means some are held by nobody at
-  // all) - drawn here so it can be read at a glance, with the exact figure a
-  // hover away rather than lost by being reduced to a colour.
   const health = !swarm ? "unknown" : swarm.unavailable > 0 ? "bad" : swarm.copies_per_piece < 1 ? "warn" : "ok";
-  fentry.availSwarm.dataset.health = health;
-  fentry.availSwarm.title = availabilityCellTitle(entry);
+  el.dataset.health = health;
+  el.title = availabilityCellTitle(entry);
   fentry.availSwarmText.textContent = swarm ? swarm.copies_per_piece.toFixed(2) + "×" : ABSENT;
-
-  const parts = [
-    reach ? reach.claimed_pieces + " of " + reach.pieces + " pieces claimed"
-      : "capture points not recorded for this file yet",
-    "swarm " + (swarm
-      ? swarm.copies_per_piece.toFixed(2) + "× (" + swarm.unavailable + " of " + swarm.pieces + " pieces unavailable)"
-      : "unknown"),
-  ];
-  fentry.availNote.textContent = parts.join(" · ");
-  el.hidden = false;
 }
 
-// refreshAvailForEntry re-draws every one of this entry's open file strips
+// refreshAvailForEntry re-draws every one of this entry's open file chips
 // with a fresh swarm reading (the "progress" case in apply(), below). The
 // reading is torrent-wide, not per-file (renderAvail's own doc), so every
 // file card shares the identical figure and all of them redraw together

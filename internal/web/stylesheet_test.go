@@ -115,13 +115,13 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 //   - .intake                              the pinned upload bar (TOR-137)
 //   - .run-progress, .run-progress-seg     the run's progress bar (TOR-123)
 //   - .reach-block                         the piece-strip blocks (TOR-111)
-//   - .avail-track, .avail-point,
-//     .avail-swarm-dot                     the third strip's extent, its
-//     capture-point ticks and the swarm
-//     chip (TOR-142) - three selectors
-//     rather than one because the whole
-//     point of that strip is that the
-//     three facts stay separate elements
+//   - .reach-strip, .avail-swarm-dot       the piece strip's own extent and
+//     the swarm chip TOR-142 added and
+//     TOR-153 moved onto this row - two
+//     selectors because the whole point
+//     of the merge is that the strip and
+//     the chip stay separate elements
+//     even sharing one row
 //   - .thumb-pending, .thumb-failed        the thumbnail cell states (TOR-110)
 //   - .run-detail::before                  the detail panel's corner brackets
 //
@@ -143,8 +143,7 @@ func TestTheLoadBearingSelectorsSurvive(t *testing.T) {
 		".run-progress",
 		".run-progress-seg",
 		".reach-block",
-		".avail-track",
-		".avail-point",
+		".reach-strip",
 		".avail-swarm-dot",
 		".thumb-pending",
 		".thumb-failed",

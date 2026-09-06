@@ -5,11 +5,20 @@ import (
 	"testing"
 )
 
-// TOR-142 added the third strip inside an expanded file: the file's own piece
-// span as a track, the claimed capture points as ticks on it, and the swarm's
-// availability as a chip beside it. These guard the two decisions that make
-// it honest rather than merely drawn, both of which a well-meaning edit would
-// undo without noticing.
+// TOR-142 added a third strip inside an expanded file, on its own row above
+// the piece strip TOR-111 already drew: the file's own piece span as a
+// track, the claimed capture points as ticks on it, and the swarm's
+// availability as a chip beside it. TOR-153 removed that row - the owner,
+// looking at the running UI, could not tell it apart from the piece strip
+// immediately below: "41 of 197 pieces claimed" and "41 of 197 pieces
+// ordered (21%)" are one fact in two words, drawn as two near-identical rows
+// of cyan marks. Only the swarm chip answered a genuinely different
+// question, so it is the only part that survives, moved onto the piece
+// strip's own row.
+//
+// These guard the two decisions that make the merged row honest rather than
+// merely drawn, both of which a well-meaning edit would undo without
+// noticing.
 //
 // Following this package's own precedent (columns_test.go says why): there is
 // no JS runner here, so these read the served source. That catches a deletion
@@ -17,26 +26,28 @@ import (
 // closing that gap. The drawing itself was checked in a browser, live and
 // reopened from disk, down to a ~250px pane.
 
-// TestTheSwarmReadingIsAChipAndNeverAFillOnTheTrack is the load-bearing one.
+// TestTheSwarmReadingIsAChipAndNeverAFillOnTheStrip is the load-bearing one,
+// carried over from TOR-142 and repointed at the strip the chip now sits on.
 //
 // entry.live.swarm is ONE mean copies-per-piece for the whole torrent
-// (core.Progress.Swarm's own doc), not a figure per position. The track is
-// the file's piece span, so anything painted along it claims to say something
-// about a POSITION. Painting the swarm reading there would therefore claim a
-// resolution the data does not have - and worse, it would put "what the swarm
-// holds" and "what this run ordered" on one axis in one colour, which is
-// exactly the conflation Progress.Swarm's doc warns a client against.
+// (core.Progress.Swarm's own doc), not a figure per position. The reach
+// strip is the file's piece span, so anything painted along it claims to say
+// something about a POSITION. Painting the swarm reading there would
+// therefore claim a resolution the data does not have - and worse, it would
+// put "what the swarm holds" and "what this run ordered" on one axis in one
+// colour, which is exactly the conflation Progress.Swarm's doc warns a
+// client against.
 //
-// So the shapes have to stay different: a track with ticks for the claims, a
-// chip for the swarm. This test fails if the chip stops being its own element
-// or starts sharing the track's position axis.
-func TestTheSwarmReadingIsAChipAndNeverAFillOnTheTrack(t *testing.T) {
+// So the shapes have to stay different: a strip of blocks for the claims, a
+// chip for the swarm. This test fails if the chip stops being its own
+// element or starts sharing the strip's own axis.
+func TestTheSwarmReadingIsAChipAndNeverAFillOnTheStrip(t *testing.T) {
 	css := stylesheet(t)
 
-	// The chip is its own box, outside the track.
-	for _, sel := range []string{".avail-swarm", ".avail-swarm-dot", ".avail-track", ".avail-point"} {
+	// The chip is its own box, outside the strip.
+	for _, sel := range []string{".avail-swarm", ".avail-swarm-dot", ".reach-strip", ".reach-block"} {
 		if !strings.Contains(css, sel) {
-			t.Errorf("app.css no longer has %s - the strip's parts must stay separate elements", sel)
+			t.Errorf("app.css no longer has %s - the row's parts must stay separate elements", sel)
 		}
 	}
 
@@ -52,46 +63,40 @@ func TestTheSwarmReadingIsAChipAndNeverAFillOnTheTrack(t *testing.T) {
 			t.Errorf("the swarm chip has no %q state", health)
 		}
 	}
-	if strings.Contains(css, ".avail-track[data-health") {
-		t.Error("the track carries a data-health attribute: the swarm reading has been " +
+	if strings.Contains(css, ".reach-block[data-health") {
+		t.Error("a reach block carries a data-health attribute: the swarm reading has been " +
 			"moved onto the position axis, where it claims a per-position resolution " +
 			"it does not have (core.Progress.Swarm)")
 	}
 }
 
-// TestTheCapturePointsComeFromClaimedPiecesNotATimecode guards the decision
-// TOR-111 made and this release was told to keep: where the frames came from
-// is drawn from the CLAIMED ranges, which are a measurement, never from
-// multiplying a timecode by a bitrate no container promises.
+// TestARunWithNoClaimsRecordedRendersAsNeitherFullNorEmpty carries over the
+// other half of TOR-142's guard. Before TOR-153, an unknown extent hatched
+// the now-removed track; the track is gone, but a run that hasn't recorded a
+// claim for a file yet still has nothing to say about WHERE it reached, and
+// the merged row must not lie about that by rendering full or empty.
 //
-// The tell is fentry.reachData - the same Reach the piece strip below already
-// uses, so the two strips cannot disagree about the same file. If the ticks
-// ever start being computed from a duration, this is what stops being true.
-func TestTheCapturePointsComeFromClaimedPiecesNotATimecode(t *testing.T) {
+// It also must not go back to hiding the whole row the way TOR-111's strip
+// used to when nothing had been claimed: the swarm chip now lives on this
+// row too, and that reading doesn't depend on this file's own claims, so the
+// row has to stay visible for the chip even while the strip itself is
+// hatched.
+func TestARunWithNoClaimsRecordedRendersAsNeitherFullNorEmpty(t *testing.T) {
 	js := appJS(t)
 
-	// fentry.reachData specifically, not the bare word: the field can exist
-	// on the entry while renderAvail has quietly stopped reading it, and a
-	// substring check for "reachData" alone passes in exactly that case -
-	// measured, when this guard was falsified by renaming only the reads.
-	if !strings.Contains(js, "fentry.reachData") {
-		t.Fatal("renderAvail no longer reads fentry.reachData - the capture-point ticks " +
-			"have stopped coming from the claimed ranges the piece strip uses")
+	if !strings.Contains(js, "function renderReach(") {
+		t.Fatal("renderReach is gone")
 	}
-	if strings.Count(js, "reachData") < 3 {
-		t.Errorf("reachData appears %d times: it is set where renderReach picks the "+
-			"Reach, cleared on reset, and read by renderAvail, so fewer than three "+
-			"means one of those three sites is gone", strings.Count(js, "reachData"))
-	}
-	if !strings.Contains(js, "function renderAvail(") {
-		t.Fatal("renderAvail is gone")
+	// The known/unknown toggle has to come from the measured data (whether
+	// any set actually carries a reach), not be a css-only claim with
+	// nothing in the JS actually setting it per file.
+	if !strings.Contains(js, "reachStrip.dataset.known") {
+		t.Error("renderReach no longer sets reachStrip's data-known - the not-known-yet " +
+			"state has stopped being computed from whether a claim was actually recorded")
 	}
 
-	// A track with no unknown state would have to render "no claims recorded"
-	// as either full or empty, and both are lies about a run that simply has
-	// not claimed anything yet.
-	if !strings.Contains(stylesheet(t), ".avail-track[data-known=\"false\"]") {
-		t.Error("the track has no not-known-yet state, so a run with no claims recorded " +
+	if !strings.Contains(stylesheet(t), ".reach-strip[data-known=\"false\"]") {
+		t.Error("the strip has no not-known-yet state, so a run with no claims recorded " +
 			"must render as full or as empty - absent is not zero")
 	}
 }
