@@ -9,6 +9,7 @@ import (
 
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/ffmpeg"
+	"github.com/madmurdok/torpeek/internal/frames"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/web"
 )
@@ -129,6 +130,13 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 	// one core.Config this closure already builds every run from, so the
 	// page and a run agree without web deciding anything.
 	cfg.DefaultCount = base.Plan.Count
+	// Same reason again, for the one number a top-up has to state before it
+	// is spent: the client-wide roof bounds what any run may receive
+	// (core.Roof), so an offer of extra traffic must never be a bigger
+	// figure than the roof would allow. web only ever REPORTS it - the roof
+	// is enforced in the engine, against the pool's own counter, whatever
+	// the UI says (web.Config.RoofBytes).
+	cfg.RoofBytes = base.Roof.MaxBytes
 	// -max-active-torrents is the queue's width (TOR-130); see
 	// web.Config.MaxActiveTorrents for what it governs and why raising it
 	// past 1 is checked below rather than left to newServer's own default.
@@ -252,6 +260,42 @@ func runConfig(base core.Config, req web.RunRequest) (core.Config, error) {
 	// quality variants costs six times this number (TOR-50).
 	if req.Count > 0 {
 		cfg.Plan.Count = req.Count
+	}
+
+	// TOR-152. A top-up is a run that has to land in the SAME result
+	// directory as the set it is finishing, or it reuses none of its frames
+	// and pays full price for a second set nobody asked for. core.ParamsKey
+	// hashes the count, the window, the profile, the format and the
+	// sequential switch; the first two of those already have their own
+	// request fields above, and this is the rest of them, read off the run
+	// record web is finishing rather than taken from whatever flags this
+	// process happens to be running with today.
+	//
+	// Nil for every ordinary run, which leaves -start/-end/-format and the
+	// sequential opt-in exactly as they were.
+	if w := req.Window; w != nil {
+		cfg.Plan.Start, cfg.Plan.End = w.Start, w.End
+		cfg.Sequential = w.Sequential
+		if w.Format != "" {
+			cfg.Format = frames.Format(w.Format)
+		}
+	}
+
+	// The raised traffic ceiling, and the ONE thing on a request that can
+	// spend more of somebody's allowance than the flags allowed for. It is
+	// never set from JSON (web.RunRequest.MaxBytes) - only by the server
+	// itself, for a partial set it read off disk and priced - and zero, the
+	// value every other run carries, leaves core.budgetFor to scale the
+	// ceiling to the file count exactly as it always has.
+	//
+	// What is NOT touched here is the roof. base.Roof arrives from the pool
+	// this closure built once, and a request that varied it would be a
+	// second opinion about one client, of which the larger silently wins
+	// (see the pool comment above, and core.Config.Roof). So a raised
+	// per-run ceiling is still held under the client-wide one, which is what
+	// stops a top-up from becoming a way around it.
+	if req.MaxBytes > 0 {
+		cfg.Budget.MaxBytes = req.MaxBytes
 	}
 
 	return cfg, nil

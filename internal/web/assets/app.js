@@ -950,6 +950,28 @@ function newRunEntry(id) {
       '<button type="button" class="torrent-send" hidden>Send to my client</button>' +
       '<span class="torrent-note"></span>' +
     '</p>' +
+    // RUNNING THIS ROW AGAIN (TOR-152), in the detail rather than in the
+    // row's own actions cell. Two reasons, and the first is the honest one:
+    // .run-cell-actions is 3.8rem wide and nowrap, sized for ✕ and the two
+    // queue arrows, so a fourth control there widens the column and squeezes
+    // the torrent's name - the same measurement .run-cell-queue's own rule
+    // records. The second is that this is where the run's other verbs
+    // already are (Save .torrent above, Regenerate and Compare per file
+    // below), and where there is room for the sentence that must be read
+    // before the button is pressed.
+    //
+    // It sits above the picker and the files for the same reason
+    // .torrent-actions does: it is about the RUN, not about any one video
+    // file in it.
+    '<section class="run-again" hidden>' +
+      '<p class="run-again-line"></p>' +
+      '<p class="run-again-foot">' +
+        '<button type="button" class="run-again-go" hidden>Top up</button>' +
+        '<button type="button" class="run-again-retry" hidden>Retry</button>' +
+        '<span class="run-again-cost"></span>' +
+      '</p>' +
+      '<p class="run-again-note"></p>' +
+    '</section>' +
     // The picker sits between the torrent's own summary line and its files:
     // the one gap in this pane, and both of its neighbours are already
     // scoped to this entry, so a second torrent's picker cannot land in it.
@@ -1022,6 +1044,24 @@ function newRunEntry(id) {
     // reports, for a row it already knows about at page load.
     when: Date.now(),
     reopening: false,
+    // TOR-152. topup is GET /runs/{infohash}/topup's own answer for this
+    // row - what finishing this result set would be allowed to spend, and
+    // which ceiling stopped it - or null for a row that has not been asked
+    // about (nothing has finished yet) or has nothing to finish. Null rather
+    // than a zeroed object, the same "absent, not zero" rule live and stall
+    // already follow: an offer of 0 bytes is a real answer (no raise would
+    // help) and must not read the same as "not asked".
+    topup: null,
+    // againKey is the (torrent, set, state, completeness) this row last
+    // asked about, so syncEntry can call refreshAgain on every event
+    // without the page re-fetching the same answer per frame.
+    againKey: "",
+    // claiming is reopening's counterpart for a run started FROM this row -
+    // a top-up or a retry. Both mint or re-arm a run whose id the socket may
+    // announce before the POST settles, and resolveIncomingRun folds that id
+    // into this row rather than spawning a second one for the same torrent
+    // (TOR-140: one torrent, one row).
+    claiming: false,
     fileEntries: new Map(),
     // videos is the file list a needs_action record brought, and picked the
     // indices ticked in it. Both are empty for every torrent that never
@@ -1058,6 +1098,12 @@ function newRunEntry(id) {
     torrentSave: detailEl.querySelector(".torrent-save"),
     torrentSend: detailEl.querySelector(".torrent-send"),
     torrentNote: detailEl.querySelector(".torrent-note"),
+    againEl: detailEl.querySelector(".run-again"),
+    againLine: detailEl.querySelector(".run-again-line"),
+    againGo: detailEl.querySelector(".run-again-go"),
+    againRetry: detailEl.querySelector(".run-again-retry"),
+    againCost: detailEl.querySelector(".run-again-cost"),
+    againNote: detailEl.querySelector(".run-again-note"),
     pickerEl: detailEl.querySelector(".picker"),
     pickerTitle: detailEl.querySelector(".picker-title"),
     pickerList: detailEl.querySelector(".picker-list"),
@@ -1102,6 +1148,8 @@ function newRunEntry(id) {
   entry.pickerNone.addEventListener("click", () => setAllPicked(entry, false));
   entry.pickerGo.addEventListener("click", () => decide(entry));
   entry.torrentSend.addEventListener("click", () => sendTorrent(entry));
+  entry.againGo.addEventListener("click", () => topUpRun(entry));
+  entry.againRetry.addEventListener("click", () => retryRun(entry));
 
   return entry;
 }
@@ -1246,6 +1294,236 @@ function syncEntry(entry) {
   // announces the parking, and the run_state that ends the parking (queued,
   // or cancelled) is what takes it away again.
   entry.pickerEl.hidden = !(entry.state === "needs-action" && entry.videos.length > 0);
+  // TOR-152, in this order on purpose: draw whatever answer this row already
+  // has, then ask for a newer one if the row has moved on. Drawing first is
+  // what keeps the section from flickering empty on every event between two
+  // answers.
+  renderAgain(entry);
+  refreshAgain(entry);
+}
+
+// ---------------------------------------------------------------------------
+// RUNNING A ROW AGAIN (TOR-152). Two jobs that look like one button and are
+// not: TOP UP finishes a run that produced something and stopped at a
+// ceiling, RETRY runs one that produced nothing again. Which of them a row
+// offers is decided by what the row actually is, never by asking the person
+// to know the difference.
+
+// FINAL is the three states a run never leaves - runs.go's RunState.final,
+// read here rather than re-derived, because "can this be run again" has to
+// mean the same thing on both sides of the wire.
+const FINAL = new Set(["done", "failed", "cancelled"]);
+
+// refreshAgain asks the server what finishing this row would cost, once per
+// answer worth having.
+//
+// ONLY FOR AN OPEN ROW, and that is the same rule loadFileDetail follows one
+// level down: the endpoint reads every selected file's manifest off disk -
+// which is exactly what GET /runs refuses to do for fifty rows at once (see
+// walkRuns) - so it is paid for the row a person is actually looking at, and
+// not before.
+//
+// againKey is what makes calling this from syncEntry safe: syncEntry runs on
+// every event, and without the key a run streaming twenty frames would ask
+// twenty times for an answer that cannot change until it finishes. The key
+// carries the completeness counts as well as the state, so the one moment
+// the answer DOES change - a run ending, having filled some gaps - asks
+// again.
+function refreshAgain(entry) {
+  if (!entry.expanded || !entry.infohash) return;
+  if (!entry.disk && !FINAL.has(entry.state)) return;
+
+  const key = [entry.infohash, entry.params, entry.state, entry.complete, entry.selected].join(":");
+  if (entry.againKey === key) return;
+  entry.againKey = key;
+
+  const target = url("runs/" + entry.infohash + "/topup");
+  // The set, when this row knows which one it is. A live row that finished
+  // while the page watched does not - run_state carries no params - and the
+  // server resolves it from the infohash instead (Server.TopUp), by the very
+  // rule that decides whether this row could have merged with a disk record
+  // at all.
+  if (entry.params) target.searchParams.set("params", entry.params);
+
+  fetch(target)
+    .then((response) => (response.ok ? response.json() : null))
+    .then((data) => {
+      // A 404 is a row with no record on disk - a failed run, most often,
+      // which is precisely the row that gets Retry and no top-up. Null
+      // rather than a zeroed answer, so renderAgain can tell "nothing to
+      // finish" from "nothing was asked".
+      entry.topup = (data && data.topup) || null;
+      if (entry.topup && entry.topup.params) entry.params = entry.topup.params;
+      syncEntry(entry);
+    })
+    .catch(() => {});
+}
+
+// LIMIT_LEVER is the sentence for each ceiling a run can stop at, and it is
+// the whole of this ticket's second question: which lever is the right one.
+//
+// A per-run traffic raise only ever helps the first of these. The other two
+// are recorded distinctly all the way from core (StopBudget against
+// StopRoof, and the clock recovered from the manifest's own elapsed figure -
+// see TopUp.Limit), so the page can say which one it was instead of offering
+// more traffic to a run that never ran out of any.
+const LIMIT_LEVER = {
+  traffic: "stopped at this run's own traffic ceiling",
+  time: "stopped at this run's own time limit",
+  roof: "stopped at the client-wide traffic roof",
+};
+
+const LIMIT_NOTE = {
+  time: "This run ran out of TIME, not traffic - a bigger traffic allowance would " +
+      "change nothing. The run's own clock is -max-time.",
+  roof: "The CLIENT-WIDE traffic roof stopped this, not this run's own ceiling, so " +
+      "raising this run's allowance would change nothing: the roof is shared with " +
+      "every other run and is set with -max-client-bytes. This runs again at the " +
+      "ordinary ceiling, which is worth doing if whatever filled the roof has since gone.",
+};
+
+// renderAgain draws whichever of the two verbs this row has, and - for a top
+// up - the traffic it will be allowed BEFORE it is spent.
+//
+// That last part is the requirement, not a nicety. TOR-50's trap is that n is
+// per video file, so the ceiling a person meets is the per-file figure times
+// the files selected rather than the number in the flag's help; this is the
+// second place that trap can bite, so the line states the multiplication
+// (frames × files) and the figure states bytes, both from the server's own
+// arithmetic rather than this page's.
+function renderAgain(entry) {
+  const t = entry.topup;
+  // Retry is offered for a run that ENDED WITHOUT A RESULT, which is what
+  // failed means (a run-scoped core.Failed) and what cancelled can mean. A
+  // disk row is never one: it exists because a run wrote a record, and it
+  // has no live entry to run again anyway.
+  const canRetry = !entry.disk && (entry.state === "failed" || entry.state === "cancelled");
+  // Only on a row that has SETTLED. A row mid-run is not a row with an offer
+  // on it: the figure this block states was priced off a manifest the run in
+  // flight is rewriting, and the button would ask the server to start a run
+  // that is already going (refused, correctly, by Server.again). The whole
+  // block goes rather than the buttons alone - what it says stops being true
+  // for as long as the run lasts, and refreshAgain brings it back the moment
+  // the run reaches a final state.
+  const settled = entry.disk || FINAL.has(entry.state);
+  const canTopUp = settled && !!t && !t.refused && t.remaining > 0;
+
+  entry.againRetry.hidden = !canRetry;
+  entry.againGo.hidden = !canTopUp;
+  entry.againEl.hidden = !canRetry && !canTopUp && !(settled && t && t.refused);
+
+  if (canTopUp) {
+    const short = t.files.filter((f) => f.captured < f.planned).length;
+    const asked = t.count * t.files.length;
+    const stopped = LIMIT_LEVER[t.limit];
+    entry.againLine.textContent =
+      t.captured + " of " + asked + " frames (" + t.count + " × " + t.files.length +
+      " file(s)) — " + t.remaining + " point(s) still missing across " + short + " file(s)" +
+      (stopped ? ", " + stopped +
+        (t.limit === "traffic" && t.ceiling_bytes ? " of " + bytesLabel(t.ceiling_bytes) : "") : "");
+    // The figure, in the accent the picker's own cost line wears, because it
+    // is the same promise: this is what pressing the button spends.
+    entry.againCost.textContent = t.raise_helps
+      ? "up to " + bytesLabel(t.offer_bytes) + " more traffic" +
+          (t.roof_capped ? " (all the client-wide roof allows)" : "")
+      : "at the ordinary ceiling — no raise would help";
+    entry.againCost.title = t.files
+      .map((f) => f.path + ": " + f.captured + "/" + f.planned)
+      .join("\n");
+    // Said rather than left to be discovered. Pieces are discarded after
+    // every run (REQUIREMENTS.md 2.9), so this is not a download resuming
+    // where it stopped: the frames come back for free off disk, and the
+    // piece data behind the points that are still missing is fetched again.
+    // That is what makes a top-up cheap despite the discard, and a person
+    // expecting a byte-for-byte continuation would be surprised twice - once
+    // by the cost, once by the wait.
+    entry.againNote.textContent =
+      (LIMIT_NOTE[t.limit] ? LIMIT_NOTE[t.limit] + " " : "") +
+      "The " + t.captured + " frame(s) already taken are reused off disk. The piece data " +
+      "for the " + t.remaining + " point(s) still missing is fetched again - pieces are " +
+      "discarded after every run, so only the frames survive, never the download.";
+    return;
+  }
+
+  if (t && t.refused) {
+    entry.againLine.textContent = t.refused;
+    entry.againCost.textContent = "";
+    entry.againCost.title = "";
+    entry.againNote.textContent = "";
+    return;
+  }
+
+  if (canRetry) {
+    entry.againLine.textContent = entry.state === "failed"
+      ? "This run produced nothing, so there is nothing to top up — retry asks for the " +
+          "same thing again: the same source, the same files, the same ceiling."
+      : "This run was cancelled — retry asks for the same thing again: the same source, " +
+          "the same files, the same ceiling.";
+    entry.againCost.textContent = "";
+    entry.againCost.title = "";
+    entry.againNote.textContent = "";
+  }
+}
+
+// topUpRun asks for the gaps in this row's own result set to be filled.
+//
+// It sends the SET, never a number: the extra traffic was computed by the
+// server, shown on this row, and is recomputed by the server when this lands
+// (Server.TopUpRun). A page that could name its own ceiling would be a page
+// that could spend somebody's allowance by asking.
+//
+// claiming is set before the request, not after it, because the socket races
+// the response: the run this starts can publish its first run_state before
+// the fetch settles, and resolveIncomingRun needs the flag already up to
+// fold that id into this row instead of opening a second one.
+async function topUpRun(entry) {
+  showError("");
+  entry.againGo.disabled = true;
+  entry.claiming = true;
+  try {
+    const info = await post("runs/topup", {
+      infohash: entry.infohash,
+      params: entry.params || undefined,
+      // The row's own live id, when it has one, so the server can re-arm
+      // this very entry rather than mint a second one for one torrent. A
+      // disk row sends none - nothing ever minted one for it.
+      id: entry.disk ? undefined : entry.id,
+    });
+    logFor(entry, "topping up: " + (entry.topup && entry.topup.remaining) + " point(s), up to " +
+        bytesLabel((entry.topup && entry.topup.offer_bytes) || 0) + " more traffic");
+    claimReopenedRun(entry, info.id);
+  } catch (err) {
+    entry.claiming = false;
+    showError(String(err.message || err));
+    logFor(entry, "could not top up: " + (err.message || err));
+  } finally {
+    entry.againGo.disabled = false;
+  }
+}
+
+// retryRun runs this row's own request again, unchanged.
+//
+// The question the owner actually asked of a torrent whose metadata never
+// arrived - "как теперь его заново запустить?" - had no answer on this page
+// at all: the row sat there and the only way back was to paste the magnet a
+// second time. This is that answer, and it deliberately raises nothing (see
+// Server.RetryRun): a run that never reached a ceiling is not one a bigger
+// ceiling helps.
+async function retryRun(entry) {
+  showError("");
+  entry.againRetry.disabled = true;
+  entry.claiming = true;
+  try {
+    const info = await post("runs/retry", { id: entry.id });
+    logFor(entry, "retrying");
+    claimReopenedRun(entry, info.id);
+  } catch (err) {
+    entry.claiming = false;
+    showError(String(err.message || err));
+    logFor(entry, "could not retry: " + (err.message || err));
+  } finally {
+    entry.againRetry.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1280,6 +1558,14 @@ function syncEntry(entry) {
 // and reversible with the same click.
 function setRunExpanded(entry, expanded) {
   entry.expanded = expanded;
+  // TOR-152: opening a row is when its top-up standing is worth reading off
+  // disk - here rather than in toggleRun, because this is the one function
+  // that may put a detail on screen (see this block's own heading) and
+  // several paths reach it: a click, and began() for a run just started.
+  // refreshAgain is a no-op for a row that is not settled, has no infohash,
+  // or was already asked this question, so calling it on every expansion
+  // costs a comparison.
+  if (expanded) refreshAgain(entry);
   // The row's `hidden` attribute and nothing else - no rule in app.css sets
   // display on .run-detail-row, so the UA rule wins uncontested.
   entry.detailRowEl.hidden = !expanded;
@@ -1354,9 +1640,16 @@ function claimReopenedRun(entry, newId) {
     entry.id = newId;
     entry.disk = false;
     entry.reopening = false;
+    entry.claiming = false;
     state.runs.set(entry.id, entry);
     syncEntry(entry);
+    return;
   }
+  // The id it already had. A top-up or retry the server RE-ARMED answers
+  // with the same id this row is keyed by (Server.again), so there is
+  // nothing to swap - but the flag still has to come down, or this row would
+  // go on claiming every other run's id that shares its infohash.
+  entry.claiming = false;
 }
 
 // resolveIncomingRun is ensureRun's counterpart for a run_state message: a
@@ -1373,7 +1666,12 @@ function resolveIncomingRun(id, infohash) {
 
   if (infohash) {
     for (const candidate of state.runs.values()) {
-      if (candidate.reopening && candidate.infohash === infohash) {
+      // reopening OR claiming: a disk row being replayed (TOR-55) and a row
+      // whose own run is being topped up or retried (TOR-152) are the same
+      // situation for this function - a row that is expecting an id it does
+      // not have yet - and folding the new id into the row that asked for it
+      // is what keeps one torrent on one row (TOR-140).
+      if ((candidate.reopening || candidate.claiming) && candidate.infohash === infohash) {
         claimReopenedRun(candidate, id);
         return candidate;
       }
@@ -3196,6 +3494,22 @@ async function loadRuns() {
 
   for (const row of data.runs || []) {
     const disk = !row.id;
+    // TOR-152: a disk row for a torrent this page is ALREADY showing as a
+    // live run is the same torrent, and drawing both would be two rows for
+    // one of them (TOR-140).
+    //
+    // GET /runs cannot merge them itself here, and that is not an oversight:
+    // listing.go merges a live entry with a disk record only once the entry
+    // has reached a FINAL state, because a queued or running entry has not
+    // written a record and must never be hidden behind a stale one. A
+    // top-up spends its whole life in exactly that non-final window - it is
+    // a run against a directory that already has a record - so a reload
+    // while one is going would list the set being filled beside the run
+    // filling it. Skipping it here is the client-side half of the same
+    // "one torrent, one row" rule, and it is safe for the same reason the
+    // server's version is: this only ever hides a row whose infohash and
+    // params a live entry on this page already names.
+    if (disk && liveRowFor(row)) continue;
     // A disk-only row has no run id to key on - nothing ever minted one for
     // it - so infohash+params, the same pair that addresses it for reopening,
     // stands in. TOR-54 documented that the same torrent captured under two
@@ -3271,6 +3585,29 @@ async function loadRuns() {
     }
     syncEntry(entry);
   }
+}
+
+// liveRowFor finds a live entry on this page already showing the torrent (and
+// the result set) a disk row names, or null.
+//
+// A FINAL live entry is deliberately not a match: listing.go merges those
+// itself, and one that it declined to merge was declined for a reason worth
+// keeping - an infohash naming two capture plans, which is the documented
+// case where the same torrent legitimately shows up twice (TOR-54). Only a
+// row that is mid-flight is hidden here, which is the case the server cannot
+// merge yet.
+//
+// The params match tolerates a live row that does not know its own set yet:
+// run_state carries no params, so a run that started on this page has none
+// until GET /runs or a top-up offer tells it one.
+function liveRowFor(row) {
+  for (const entry of state.runs.values()) {
+    if (entry.disk || !entry.infohash || entry.infohash !== row.infohash) continue;
+    if (FINAL.has(entry.state)) continue;
+    if (entry.params && row.params && entry.params !== row.params) continue;
+    return entry;
+  }
+  return null;
 }
 
 // A dropped .torrent is bytes, not a string, so it takes a different request

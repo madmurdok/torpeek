@@ -122,6 +122,15 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 //     of the merge is that the strip and
 //     the chip stay separate elements
 //     even sharing one row
+//   - .run-again                           the top-up / retry block (TOR-152),
+//     added to this list deliberately: it
+//     occurs exactly once as a bare
+//     selector (.run-again-line and its
+//     siblings fail the identifier-boundary
+//     check below), so the check is exact
+//     for it, and it is the one block whose
+//     absence would silently remove a
+//     control rather than a decoration
 //   - .thumb-pending, .thumb-failed        the thumbnail cell states (TOR-110)
 //   - .run-detail::before                  the detail panel's corner brackets
 //
@@ -145,6 +154,7 @@ func TestTheLoadBearingSelectorsSurvive(t *testing.T) {
 		".reach-block",
 		".reach-strip",
 		".avail-swarm-dot",
+		".run-again",
 		".thumb-pending",
 		".thumb-failed",
 		".run-detail::before",

@@ -15,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/wire"
 )
@@ -160,6 +162,26 @@ type Config struct {
 	// Lowering it, including below however many are already running, stops
 	// nothing already going - see Server.SetMaxActiveTorrents.
 	MaxActiveTorrents int
+
+	// RoofBytes is the client-wide traffic ceiling this process was started
+	// with (core.Roof, -max-client-bytes), zero meaning none - the shipped
+	// default (core.DefaultRoof).
+	//
+	// The server does not enforce it and could not: the roof is held
+	// against the pool's own received-bytes counter, inside the engine, and
+	// every run is stopped by it whatever this field says
+	// (core.BudgetTracker.Exhausted asks the roof first and answers
+	// StopRoof). This is the same kind of field DefaultCount above is - a
+	// number repeated here so a page can be told the truth before a button
+	// is pressed rather than after - and it exists for exactly one sentence:
+	// a top-up's offered traffic must never be a bigger figure than the roof
+	// would allow (TOR-152, TopUp.price).
+	//
+	// What it deliberately is NOT is how much of the roof is LEFT. That
+	// lives on the pool's counter, which this package holds no handle on, so
+	// a top-up's offer is bounded by the whole roof and the page says the
+	// roof applies - never that this much is still available.
+	RoofBytes int64
 }
 
 // DefaultConfig serves the desktop case: loopback, fixed port.
@@ -205,6 +227,61 @@ type RunRequest struct {
 	// .torrent). Never set from JSON: it only exists on requests the server
 	// itself builds.
 	Label string `json:"-"`
+
+	// MaxBytes raises this run's traffic ceiling above the one it would
+	// otherwise scale to (core.DefaultBudget). Zero - the default, and the
+	// value every ordinary run carries - leaves that scaling exactly as it
+	// was.
+	//
+	// NEVER SET FROM JSON, the same rule Label above follows, and here it is
+	// load-bearing rather than tidy. A ceiling is the one thing on a request
+	// that spends somebody's allowance, so the only thing allowed to raise
+	// it is the server itself, for a set it has just read off disk and
+	// priced (TopUp.request) - not a page, and not whatever else can reach
+	// POST /runs. What bounds it either way is the client-wide roof, which
+	// is not on this struct at all: it belongs to the pool, is set once by
+	// whoever built it (core.Config.Roof), and stops a run whatever this
+	// says.
+	MaxBytes int64 `json:"-"`
+
+	// Window is the part of a recorded capture plan a request has no other
+	// field to name, carried so a top-up reproduces the plan of the set it
+	// is finishing rather than this server's current flags. Nil - every
+	// ordinary run - leaves those flags alone.
+	//
+	// Never set from JSON either, for a plainer reason than MaxBytes: it is
+	// not a choice a person makes, it is a fact read back off a run.json.
+	Window *CaptureWindow `json:"-"`
+}
+
+// CaptureWindow is the part of a run's plan that decides WHERE its capture
+// points fall and what a frame is encoded as, minus the two pieces a
+// RunRequest can already say for itself (Count and Mode).
+//
+// It exists because of what core.ParamsKey hashes: the count, this window,
+// the profile, the format and the sequential switch, all five, into the
+// directory name a run's results live under. A run that is meant to FINISH
+// an earlier one has to reproduce every one of them or it writes a sibling
+// directory instead - a second result set, no frames reused, full price -
+// which is exactly the surprise a top-up exists to avoid. Count and Mode
+// travel on the request already; these four had nowhere to go.
+//
+// The web package does not interpret any of it. It reads the four values off
+// the run record it is finishing and hands them back to whoever builds run
+// configurations (internal/cli's runConfig), which is the same division of
+// labour Runner itself draws: this package is a consumer of events, never a
+// second place a run is decided.
+type CaptureWindow struct {
+	// Start and End are the fractions of the file the plan spreads its
+	// points across (frames.Plan).
+	Start float64
+	End   float64
+	// Format is the image encoding, as cache.Plan recorded it - the string
+	// form of frames.Format. Empty leaves the server's own.
+	Format string
+	// Sequential is the opt-in to sequential reading for a container with no
+	// duration (REQUIREMENTS.md 2.7), as the run was started with.
+	Sequential bool
 }
 
 // Runner starts a run and returns its event stream.
@@ -520,11 +597,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /defaults", s.authGuard(s.handleDefaults))
 	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("GET /runs/{infohash}/files/{index}", s.authGuard(s.handleFileDetail))
+	mux.HandleFunc("GET /runs/{infohash}/topup", s.authGuard(s.handleTopUp))
 	mux.HandleFunc("GET /compare", s.authGuard(s.handleCompare))
 	mux.HandleFunc("GET /compare/sets", s.authGuard(s.handleCompareSets))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
+	mux.HandleFunc("POST /runs/topup", s.authGuard(s.handleTopUpRun))
+	mux.HandleFunc("POST /runs/retry", s.authGuard(s.handleRetryRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
 	mux.HandleFunc("POST /runs/priority", s.authGuard(s.handleSetPriority))
@@ -989,6 +1069,209 @@ func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
 
 	events := s.replayer(infoHash, params)
 	s.pump(entry, events)
+
+	s.mu.Lock()
+	info := s.infoLocked(entry)
+	s.mu.Unlock()
+	return info, nil
+}
+
+// TopUp reads one result set off disk and prices finishing it, for a page to
+// show BEFORE anything is spent (TOR-152). ok=false is a 404: no such set.
+// A set that exists but cannot be finished comes back with TopUp.Refused
+// saying why - see topUpFor.
+//
+// params may be empty, and usually is. A row that finished while the page
+// was watching learns its infohash from its own metadata_ready, but nothing
+// tells it which params directory that run wrote - run_state carries no such
+// field, and the listing is the only place the two are joined. So the set is
+// resolved from the infohash alone whenever the caller cannot name it, by
+// exactly the rule listRuns uses to decide whether a live row may merge with
+// a disk record at all: one directory, or none of them (resolveSet).
+func (s *Server) TopUp(infoHash, params string) (TopUp, bool) {
+	infoHash, params = strings.TrimSpace(infoHash), strings.TrimSpace(params)
+	if params == "" {
+		resolved, ok := resolveSet(s.cfg.OutputRoot, infoHash)
+		if !ok {
+			return TopUp{}, false
+		}
+		params = resolved
+	}
+	return topUpFor(s.cfg.OutputRoot, infoHash, params, s.cfg.RoofBytes)
+}
+
+// TopUpRun finishes a partial result set: the same source, the same plan,
+// the files that are still short, and - when raising it is the right lever -
+// a traffic ceiling sized to the points still missing.
+//
+// EVERYTHING IT NEEDS COMES OFF DISK, which is what lets it work from a row
+// this process never ran: the record kept the source as a magnet (see
+// cache.Run.Source, which is deliberately not a path for exactly this
+// reason), so nothing has to be pasted back in and a torrent that arrived as
+// a dropped .torrent can be topped up too, long after its staged copy was
+// removed.
+//
+// THE CEILING IS PRICED HERE, NOT SENT. The request names a set, never a
+// number: a figure a client could choose would be a way to spend somebody's
+// allowance by asking, and the whole point of stating it in the UI first is
+// that the server and the page agree about a figure the server computed.
+// The page shows what GET .../topup answered; this recomputes it from the
+// same disk a moment later and runs with its own answer.
+//
+// id, when given, names the live registry entry this row is already showing.
+// A finished entry for this very torrent is RE-ARMED rather than left behind
+// beside a new one: a torrent is one row (TOR-140), and minting a second
+// entry would make GET /runs report two of them for one directory the moment
+// the second finished. An id that names nothing, names something still
+// going, or names another torrent is ignored rather than refused - the top-up
+// is about a set on disk, and the worst an unusable id can do is cost this
+// run a fresh entry, which the page folds into its existing row anyway.
+func (s *Server) TopUpRun(infoHash, params, id string) (RunInfo, error) {
+	infoHash, params = strings.TrimSpace(infoHash), strings.TrimSpace(params)
+
+	plan, ok := s.TopUp(infoHash, params)
+	if !ok {
+		return RunInfo{}, fmt.Errorf("%w: no single run on disk for %s", ErrNoSuchRun, infoHash)
+	}
+	// Never the params the caller sent: TopUp may have resolved it from the
+	// infohash, and the record has to be read from the set that was actually
+	// priced rather than from the one that was asked for.
+	params = plan.Params
+	if plan.Refused != "" {
+		// A conflict rather than a bad request: the address was understood
+		// and names a real set, that set simply cannot be finished.
+		return RunInfo{}, errors.New(plan.Refused)
+	}
+
+	record, loaded := cache.LoadRun(output.Layout{
+		Root: s.cfg.OutputRoot, InfoHash: infoHash, Params: params,
+	}.RunDir())
+	if !loaded {
+		return RunInfo{}, fmt.Errorf("%w: no run on disk at %s/%s", ErrNoSuchRun, infoHash, params)
+	}
+
+	return s.again(strings.TrimSpace(id), infoHash, plan.request(record))
+}
+
+// RetryRun runs a failed run's own request again, unchanged.
+//
+// A DIFFERENT JOB FROM TopUpRun, not a variation on it, and the difference is
+// what each one has to work from. A top-up finishes something: there is a
+// record on disk, frames to reuse, a measured cost to price the rest from.
+// A retry follows a run that produced NOTHING - the magnet whose metadata
+// never arrived is the case this exists for - so there is no record, no
+// plan to reproduce and nothing to price. What it has is the request the
+// registry still holds, and running that again is the whole of it.
+//
+// SO IT RAISES NOTHING. A run that never reached a ceiling is not one a
+// bigger ceiling helps, and offering one here would be a cost consented to
+// for no reason. Same source, same files, same count, same ordinary budget.
+//
+// The entry is re-armed in place, so the row keeps its id and its history
+// (TOR-140: one torrent, one row). Refused for a run that is still going -
+// there is nothing to retry yet, and cancelling is the button for that - and
+// for one whose source was a dropped .torrent, whose staged copy was removed
+// when that run ended (handleUploadTorrent, RunRequest.Label) and cannot be
+// read a second time. Re-pasting is the answer there, exactly as it is for
+// Regenerate.
+func (s *Server) RetryRun(id string) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+
+	s.mu.Lock()
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if entry.req.Label != "" {
+		s.mu.Unlock()
+		return RunInfo{}, fmt.Errorf("%w: this torrent was dropped onto the page as a file, "+
+			"and the staged copy was removed when its run ended - drop it again", errBadRequest)
+	}
+	req := entry.req
+	s.mu.Unlock()
+
+	// Deliberately reset rather than carried: a retry of a run that was
+	// itself a top-up must not inherit the raise. The frames a top-up left
+	// are still on disk and still reused, so a plain retry costs no more for
+	// having them; what it must not do is silently keep spending at a
+	// ceiling somebody consented to once, for a different question.
+	req.MaxBytes = 0
+
+	return s.again(id, "", req)
+}
+
+// again is the one path both TopUpRun and RetryRun end at: put this request
+// in the queue, on the row it belongs to.
+//
+// id names the entry the page is already showing, and infoHash - when the
+// caller knows one - is what proves the entry is really that torrent. An
+// entry that matches and has FINISHED is re-armed: same id, same history,
+// same row, its state replaced rather than a second row appended. Anything
+// else gets a fresh entry, which the page folds onto its row the way it
+// already folds a reopened disk row (app.js's claimReopenedRun).
+//
+// Re-arming clears exactly what belongs to the run that ended - its error,
+// its end time, its cancelled flag, its last live reading, and its cleanup,
+// which has already run and must not run twice - and keeps what belongs to
+// the TORRENT: its name, its infohash, the file list a metadata pass paid
+// for, and the fact that it listed at all, so a decided torrent does not pay
+// for a second listing to be told what it already knows.
+func (s *Server) again(id, infoHash string, req RunRequest) (RunInfo, error) {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	switch {
+	case entry == nil:
+	case !entry.state.final():
+		s.mu.Unlock()
+		info := RunInfo{ID: id, State: entry.state}
+		return info, fmt.Errorf("run %s is not finished, it is %s", id, info.State)
+	case infoHash != "" && entry.infoHash != "" && entry.infoHash != infoHash:
+		// The row this id names is a different torrent. Not an error - the
+		// set on disk is still there to be finished - so this falls through
+		// to a fresh entry below.
+		entry = nil
+	}
+
+	if entry == nil {
+		s.mu.Unlock()
+		return s.startRun(req, nil)
+	}
+
+	entry.req = req
+	entry.state = RunQueued
+	entry.err = nil
+	entry.cancelled = false
+	entry.endedAt = time.Time{}
+	entry.startedAt = time.Time{}
+	entry.live = nil
+	entry.cleanup = nil
+	s.enqueueWaitingLocked(entry)
+	// reset is false, and that is the row's answer to "what does a top-up
+	// show afterwards" (TOR-152). A reset tells a page to throw away
+	// everything it is showing for this run before the replay rebuilds it;
+	// here there is nothing to throw away and everything to keep - the
+	// frames on screen are the frames on disk, they are the very ones this
+	// run is about to reuse, and blanking the grid to redraw the same
+	// thumbnails would be the only visible sign that anything was lost.
+	rec := s.runStateRecordLocked(entry, false)
+	moved := s.queueRecordsLocked(entry)
+	s.mu.Unlock()
+
+	s.hub.publish(entry.id, rec)
+	s.publishQueueRecords(moved)
+	// In the caller's own goroutine, for the reason startRun and DecideRun
+	// both give: by the time this returns the run has either started or is
+	// behind one that has, so the state answered here is the truth.
+	s.dispatch()
 
 	s.mu.Lock()
 	info := s.infoLocked(entry)

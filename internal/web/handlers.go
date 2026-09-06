@@ -296,6 +296,96 @@ func (s *Server) handleReopenRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
 }
 
+// handleTopUp answers what finishing one result set would cost, and which
+// ceiling stopped it last time (TOR-152). A GET, because it changes nothing
+// and is the sentence a page shows before the button that does.
+//
+// 404 for an address that names no set on disk. A set that exists but cannot
+// be finished is a 200 carrying TopUp.Refused: the request was answerable,
+// and the answer is a sentence a person has to read.
+func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
+	// params is a query parameter rather than a path segment, the same shape
+	// the frame delete on the neighbouring path uses, and for a stronger
+	// reason here: it is OPTIONAL. A page watching a run that has just
+	// finished knows the torrent's infohash and nothing about which
+	// directory it wrote (run_state carries no params), so the commonest
+	// call omits it entirely and lets the server resolve it - see
+	// Server.TopUp.
+	plan, ok := s.TopUp(r.PathValue("infohash"),
+		strings.TrimSpace(r.URL.Query().Get("params")))
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such run on disk")
+		return
+	}
+
+	// Wrapped under a key like every other response here, so a field can be
+	// added beside it later without the body changing shape.
+	writeJSON(w, http.StatusOK, map[string]any{"topup": plan})
+}
+
+// topUpRequest addresses the result set to finish, and - when the page has
+// one - the live row it is already showing for that torrent.
+//
+// IT CARRIES NO CEILING, and that absence is the design. The extra traffic a
+// top-up may spend is computed by the server from the record on disk
+// (TopUp.price) and stated to the page beforehand by the GET above; a number
+// a client could put here would be a way to raise somebody's traffic
+// allowance by asking for it. The page consents to a figure it was shown; it
+// does not choose one.
+type topUpRequest struct {
+	InfoHash string `json:"infohash"`
+	Params   string `json:"params"`
+	// ID is optional: it names the registry entry this row already has, so a
+	// finished one can be re-armed instead of a second row appearing for one
+	// torrent (Server.TopUpRun). A disk-only row has none, which is exactly
+	// the case reopenRequest above also has to answer for.
+	ID string `json:"id,omitempty"`
+}
+
+// handleTopUpRun starts the run that fills a partial set's gaps. Same
+// {id, state} answer POST /runs gives, because that is what this is.
+func (s *Server) handleTopUpRun(w http.ResponseWriter, r *http.Request) {
+	var req topUpRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.TopUpRun(req.InfoHash, req.Params, req.ID)
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// retryRequest names the run to run again. By id and only by id: a run worth
+// retrying is one that produced nothing, so it left no record on disk for an
+// infohash and params to address (see Server.RetryRun).
+type retryRequest struct {
+	ID string `json:"id"`
+}
+
+// handleRetryRun runs a finished run's own request again, unchanged - the
+// control that did not exist for the torrent whose metadata never arrived,
+// where the only way back was to paste the magnet a second time.
+func (s *Server) handleRetryRun(w http.ResponseWriter, r *http.Request) {
+	var req retryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.RetryRun(strings.TrimSpace(req.ID))
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
 // cancelRequest names the run to stop. An absent id means the run in the
 // slot, which is what a page showing a single run asks for.
 type cancelRequest struct {

@@ -385,3 +385,101 @@ func TestRoofAndRunWarningsAreToldApart(t *testing.T) {
 		t.Errorf("warned a third time: %+v", again)
 	}
 }
+
+// ---- TOR-152: pricing what is left of a stopped run. ----
+
+// TestTopUpBytesPricesWhatIsLeftFromWhatWasSpent is the measured case, and
+// the numbers are the ones the ticket was filed from: a run over two selected
+// files, twenty frames asked of each, sixteen taken of each, stopped at a
+// 300 MB ceiling having received 324583424 bytes.
+//
+// The property being asserted is not one number but the whole argument for a
+// computed figure over a multiplier: what is left costs a FRACTION of what
+// the run already spent, so a top-up must ask for far less than the ceiling
+// it stopped at - where doubling that ceiling (the multiplier this rejects)
+// would have asked for six times the work.
+func TestTopUpBytesPricesWhatIsLeftFromWhatWasSpent(t *testing.T) {
+	const (
+		planned   = 20
+		captured  = 32               // sixteen of each of two files
+		spent     = int64(324583424) // manifest cost, downloaded_bytes
+		ceiling   = int64(314572800) // manifest cost, limit_bytes
+		remaining = 8                // four points still owed on each file
+	)
+
+	got := TopUpBytes(remaining, planned, spent, captured)
+
+	// The measured estimate: what a point cost this torrent, times the points
+	// still owed, rounded up to a whole MiB.
+	perPoint := spent / captured
+	if got < remaining*perPoint {
+		t.Errorf("TopUpBytes = %d, which is under the %d the eight remaining points "+
+			"measured at %d each; a ceiling below what the work costs stops the "+
+			"top-up before it finishes", got, remaining*perPoint, perPoint)
+	}
+	// And it must be a fraction of the ceiling that stopped the run, or the
+	// whole argument for pricing this rather than multiplying the old ceiling
+	// falls over.
+	if got >= ceiling {
+		t.Errorf("TopUpBytes = %d, which is not less than the %d ceiling the run "+
+			"stopped at - finishing four points in twenty must not cost what "+
+			"twenty cost", got, ceiling)
+	}
+	if got%(1<<20) != 0 {
+		t.Errorf("TopUpBytes = %d, which is not a whole number of MiB - a figure a "+
+			"person consents to before it is spent should be a round one", got)
+	}
+}
+
+// TestTopUpBytesFallsBackOnTheDefaultsOwnShare is the floor. A run stopped
+// so early that its own average is meaningless - two points off a cold swarm
+// - must still be offered enough to work with, and the only non-invented
+// number available is the project's own measured per-file figure (section 7)
+// prorated to the points still missing.
+func TestTopUpBytesFallsBackOnTheDefaultsOwnShare(t *testing.T) {
+	const (
+		planned   = 20
+		captured  = 2
+		remaining = 18
+	)
+	// A thousand bytes for two points is not a per-point cost, it is noise.
+	got := TopUpBytes(remaining, planned, 1000, captured)
+
+	want := int64(bytesPerFile) * remaining / planned
+	if got < want {
+		t.Errorf("TopUpBytes = %d, want at least %d - the default's own share of "+
+			"%d per file, prorated to %d of %d points. A measured average off two "+
+			"points cannot be the whole answer", got, want, bytesPerFile, remaining, planned)
+	}
+}
+
+// TestTopUpBytesNeverExceedsWhatAFreshRunCouldSpend is the cap, and it is
+// what keeps a pathological receipt from becoming a blank cheque: a run that
+// somehow spent a gigabyte on one frame would otherwise price its remaining
+// nineteen at nineteen gigabytes. DefaultBudget caps every run at
+// maxRunBytes; a top-up is still one run.
+func TestTopUpBytesNeverExceedsWhatAFreshRunCouldSpend(t *testing.T) {
+	got := TopUpBytes(19, 20, 1<<30, 1)
+
+	if got > maxRunBytes {
+		t.Errorf("TopUpBytes = %d, over the %d ceiling a run can ever be given "+
+			"(DefaultBudget's own cap) - no top-up may be allowed more than a "+
+			"fresh run could ask for", got, int64(maxRunBytes))
+	}
+	if got != maxRunBytes {
+		t.Errorf("TopUpBytes = %d, want exactly the cap %d for a run whose measured "+
+			"cost prices the rest above it", got, int64(maxRunBytes))
+	}
+}
+
+// TestTopUpBytesOffersNothingWhenNothingIsMissing keeps the zero meaningful:
+// no points owed is no traffic to ask for, and a caller with no plan to
+// reason from gets the same answer rather than a guess.
+func TestTopUpBytesOffersNothingWhenNothingIsMissing(t *testing.T) {
+	if got := TopUpBytes(0, 20, 324583424, 40); got != 0 {
+		t.Errorf("TopUpBytes with nothing missing = %d, want 0", got)
+	}
+	if got := TopUpBytes(8, 0, 0, 0); got != 0 {
+		t.Errorf("TopUpBytes with no plan and no receipt = %d, want 0", got)
+	}
+}

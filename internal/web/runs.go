@@ -4,9 +4,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strconv"
 	"time"
 
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/manifest"
+	"github.com/madmurdok/torpeek/internal/output"
 )
 
 // RunState is where a run is in its life.
@@ -361,4 +367,384 @@ func newRunID() string {
 	// fills b entirely or the program is already dead.
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+// ---------------------------------------------------------------------------
+// TOR-152: running a row again. Two jobs, and they are not the same one.
+//
+// TOP UP is for a run that PRODUCED something and stopped at a ceiling. The
+// frames it took are on disk and stay there; the next run over the same
+// parameters fills the gaps and pays only for them (core.reusableFrames,
+// core.serveFromCache). What was missing was never the plumbing - it was an
+// affordance on the row, and a way to say "with a bigger ceiling this time".
+// TopUp below is what a page is told BEFORE it presses that, and every field
+// in it exists so the sentence on screen is a fact off disk rather than a
+// promise.
+//
+// RETRY is for a run that produced NOTHING - a magnet whose metadata never
+// arrived. There is no record on disk to reason from, so there is nothing to
+// preview and nothing to raise: it is the same request again, at the same
+// ceiling. Server.RetryRun is that one, and it lives in server.go because it
+// needs the registry entry rather than the disk.
+
+// TopUp is what GET /runs/{infohash}/sets/{params}/topup answers: whether
+// this result set can be finished, what finishing it would be allowed to
+// spend, and which ceiling stopped it last time.
+//
+// It reads every selected file's manifest, which is exactly what walkRuns
+// refuses to do for the listing (see its doc: fifty runs would become fifty
+// times the file reads). That is affordable here for the same reason
+// fileDetail's frame-by-frame read is: this answers one row, once, when a
+// person is looking at it.
+type TopUp struct {
+	InfoHash string `json:"infohash"`
+	Params   string `json:"params"`
+
+	// Count is the plan's frames per file, from the record's own Plan - the
+	// denominator every Captured below is short of.
+	Count int `json:"count"`
+	// Files is one entry per file this set ever asked for, complete ones
+	// included, so a page can show the multiplication rather than a total
+	// that hides it (TOR-50: n is PER FILE).
+	Files []TopUpFile `json:"files"`
+	// Captured and Remaining are the totals across Files: points that have a
+	// frame on disk, and points that do not. Remaining is what a top-up is
+	// being priced for.
+	Captured  int `json:"captured"`
+	Remaining int `json:"remaining"`
+
+	// SpentBytes is what the run that last wrote these manifests had received
+	// by the time it finished each file (manifest.Cost.DownloadedBytes, taken
+	// at its largest across the set). CeilingBytes is the ceiling it was held
+	// to. Both are reported rather than derived on the page: the number a
+	// person met is not the number in the flag's help, and this is the place
+	// that can say so.
+	SpentBytes   int64 `json:"spent_bytes"`
+	CeilingBytes int64 `json:"ceiling_bytes,omitempty"`
+
+	// StoppedBy is manifest.Cost.LimitHit as recorded - "budget" for one of
+	// the run's own two ceilings, "traffic_roof" for the client-wide one,
+	// empty for a set nothing stopped. Limit is the same fact one notch
+	// finer, and it is the field a client should act on: "traffic", "time"
+	// or "roof". The distinction is the whole of this ticket's second
+	// question - a run stopped by the clock or by the roof is not one a
+	// bigger traffic allowance can help, and saying "budget" alone would
+	// hide the clock case inside the traffic case.
+	StoppedBy string `json:"stopped_by,omitempty"`
+	Limit     string `json:"limit,omitempty"`
+
+	// OfferBytes is the traffic ceiling a top-up started from here would run
+	// with, and ZERO MEANS THE ORDINARY CEILING rather than "nothing": a run
+	// with no raise is exactly RunRequest.MaxBytes left unset, which is what
+	// every other run on this server already does. RaiseHelps says which of
+	// the two a zero is - see its own doc.
+	OfferBytes int64 `json:"offer_bytes"`
+	// RaiseHelps reports whether raising THIS RUN's ceiling is the right
+	// lever at all. False for a set the clock stopped, and for one the
+	// client-wide roof stopped: in both cases a bigger per-run traffic
+	// allowance changes nothing, and offering one would be a lie a person
+	// only finds out by spending. A top-up is still allowed in both cases -
+	// the gaps may well fill under the ordinary ceiling if whatever was in
+	// the way has moved - it simply carries no raise.
+	RaiseHelps bool `json:"raise_helps"`
+
+	// RoofBytes is the client-wide ceiling this server was started with
+	// (core.Roof, -max-client-bytes), zero when there is none, and
+	// RoofCapped says the offer above was cut down to it. The roof is NOT
+	// something a top-up can walk around: every run is held to it at
+	// runtime whatever this says (core.BudgetTracker.Exhausted asks it
+	// first). Reporting it here only means the figure on screen never
+	// promises more than the roof would allow.
+	RoofBytes  int64 `json:"roof_bytes,omitempty"`
+	RoofCapped bool  `json:"roof_capped,omitempty"`
+
+	// Refused is why this set cannot be topped up at all, empty when it can.
+	// A sentence rather than a code: every one of these is a dead end a
+	// person has to read and act on themselves, and there is nothing for a
+	// client to branch on.
+	Refused string `json:"refused,omitempty"`
+}
+
+// TopUpFile is one video file's standing in the set: how many of the plan's
+// points have a frame on disk, and how many were asked for.
+type TopUpFile struct {
+	Index int    `json:"index"`
+	Path  string `json:"path"`
+	// Captured counts points with a FRAME, never points the manifest merely
+	// records - a failed point is recorded and has nothing to show, and
+	// counting it would report a holed run as whole (the same miscount
+	// TOR-110 and TOR-124 each fixed one level up).
+	Captured int `json:"captured"`
+	Planned  int `json:"planned"`
+}
+
+// Short reports whether this file still owes points.
+func (f TopUpFile) Short() bool { return f.Captured < f.Planned }
+
+// The three values TopUp.Limit takes, and the empty string for a set nothing
+// stopped. Named here rather than written as literals in three places,
+// because app.js branches on all three and the page's whole argument - which
+// lever is the right one - rests on telling them apart.
+const (
+	// LimitTraffic is the run's own byte ceiling: the one a top-up raises.
+	LimitTraffic = "traffic"
+	// LimitTime is the run's own wall clock. core records both under
+	// StopBudget (BudgetTracker.Exhausted returns the same reason for
+	// either), so this is recovered here by comparing the elapsed figure the
+	// manifest kept against the ceiling beside it.
+	LimitTime = "time"
+	// LimitRoof is the client-wide roof (core.StopRoof).
+	LimitRoof = "roof"
+)
+
+// topUpFor reads one result set off disk and prices finishing it.
+//
+// ok=false means there is no such set - a malformed address, or no run.json
+// where one was named - which is a 404 rather than a refusal. A set that
+// exists but cannot be topped up comes back ok=true with Refused set: the
+// difference matters to a page, which draws the sentence in the second case
+// and nothing at all in the first.
+//
+// roofBytes is Config.RoofBytes, the client-wide ceiling this server was
+// started with.
+func topUpFor(root, infoHash, params string, roofBytes int64) (TopUp, bool) {
+	if root == "" || !validInfoHash(infoHash) || !validParams(params) {
+		return TopUp{}, false
+	}
+
+	layout := output.Layout{Root: root, InfoHash: infoHash, Params: params}
+	record, ok := cache.LoadRun(layout.RunDir())
+	if !ok {
+		return TopUp{}, false
+	}
+
+	out := TopUp{InfoHash: infoHash, Params: params, Count: record.Plan.Count, RoofBytes: roofBytes}
+
+	// A record that cannot say what it was asked for cannot be finished
+	// either: the plan is what decides where the capture points fall, and a
+	// run at a guessed plan would write a DIFFERENT result set (its params
+	// key is a hash of exactly these fields) and reuse none of the frames
+	// this one already has. Both of these read back zero on a record written
+	// before the field existed - see cache.Run.Plan and cache.Run.Source.
+	switch {
+	case record.Plan.Count <= 0:
+		out.Refused = "this run was recorded before torpeek kept the capture plan, " +
+			"so there is no way to ask for the same frames again"
+		return out, true
+	case record.Source == "":
+		out.Refused = "this run was recorded before torpeek kept the source, " +
+			"so there is nothing to run again without pasting the link"
+		return out, true
+	case record.Selected == nil:
+		out.Refused = "this run was recorded before torpeek kept which files were asked for, " +
+			"so there is no way to tell a file that was never picked from one that failed"
+		return out, true
+	}
+
+	byIndex := make(map[int]cache.File, len(record.Videos))
+	for _, v := range record.Videos {
+		byIndex[v.Index] = v
+	}
+
+	for _, index := range record.Selected {
+		video, known := byIndex[index]
+		if !known {
+			// A selection naming a file the record does not list. Nothing
+			// here can price it and nothing can capture it either.
+			continue
+		}
+		file := TopUpFile{Index: index, Path: video.Path, Planned: record.Plan.Count}
+		if m, loaded := cache.LoadManifest(layout.FileDir(index, video.Path)); loaded {
+			file.Captured = capturedFrames(m)
+			out.absorbCost(m.Cost)
+		}
+		if file.Captured > file.Planned {
+			// A manifest holding more points than the plan asked for is a
+			// set whose run.json and manifests disagree. Believing the
+			// larger number would report a negative remainder.
+			file.Captured = file.Planned
+		}
+		out.Files = append(out.Files, file)
+		out.Captured += file.Captured
+		out.Remaining += file.Planned - file.Captured
+	}
+
+	if len(out.Files) == 0 {
+		out.Refused = "this run's record names no files that are still on disk"
+		return out, true
+	}
+	if out.Remaining == 0 {
+		out.Refused = "every frame this run asked for is already on disk"
+		return out, true
+	}
+
+	out.price(roofBytes)
+	return out, true
+}
+
+// capturedFrames counts the points of one manifest that actually have a
+// frame, which is not len(Frames): a failed point is recorded too, and
+// counting it would call a holed set whole (manifest.Frame.Shift).
+func capturedFrames(m manifest.Manifest) int {
+	n := 0
+	for _, f := range m.Frames {
+		if f.Shift != manifest.ShiftFailed && f.Path != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// absorbCost folds one file's recorded cost into the set's, keeping the
+// largest spending figure and the ceiling that goes with it.
+//
+// The LARGEST rather than the sum, and that is the whole reason this is a
+// method rather than three assignments. manifest.Cost is the RUN's cost at
+// the moment that file finished, not the file's own share of it (see its
+// doc), so a two-file set records the same run's spending twice, at two
+// moments. Summing would double it; the largest is the last honest reading
+// this set has of what its run had received.
+//
+// The stop reason is absorbed with the roof winning over the run's own two,
+// the same precedence BudgetTracker.Exhausted applies when both are true at
+// once: the roof also stopped every other run on the client, and that is the
+// fact a person needs first.
+func (t *TopUp) absorbCost(c manifest.Cost) {
+	if c.DownloadedBytes > t.SpentBytes {
+		t.SpentBytes = c.DownloadedBytes
+		t.CeilingBytes = c.LimitBytes
+	}
+	if c.LimitHit == "" {
+		return
+	}
+	if t.StoppedBy == string(core.StopRoof) {
+		return
+	}
+	t.StoppedBy = c.LimitHit
+	switch {
+	case c.LimitHit == string(core.StopRoof):
+		t.Limit = LimitRoof
+	case c.LimitMS > 0 && c.ElapsedMS >= c.LimitMS:
+		// core reports the clock and the byte ceiling under one reason
+		// (StopBudget covers both), so the two are told apart here, from the
+		// only place that kept the figures: the manifest's own cost.
+		t.Limit = LimitTime
+	default:
+		t.Limit = LimitTraffic
+	}
+}
+
+// price fills in what a top-up would be allowed to spend, and whether
+// raising this run's own ceiling is the right lever at all.
+//
+// The raise is withheld in exactly the two cases where it would be a lie: a
+// run the CLOCK stopped, and one the CLIENT-WIDE ROOF stopped. Neither is
+// this run's traffic ceiling, so neither moves when it moves - a person who
+// pressed a button labelled "more traffic" on either would have consented to
+// a cost for nothing (core.StopRoof's own doc makes this distinction, and it
+// is carried end to end precisely so a client can act on it).
+//
+// A top-up is still offered in both cases, with no raise: the ordinary
+// ceiling is what every other run gets, the frames already taken are still
+// reused, and whatever was in the way - a full roof on a process since
+// restarted, a swarm that was slow that afternoon - may simply have moved.
+func (t *TopUp) price(roofBytes int64) {
+	t.RaiseHelps = t.Limit == LimitTraffic || t.Limit == ""
+	if !t.RaiseHelps {
+		return
+	}
+
+	t.OfferBytes = core.TopUpBytes(t.Remaining, t.Count, t.SpentBytes, t.Captured)
+	if roofBytes > 0 && t.OfferBytes > roofBytes {
+		// Not a way around the roof, and not pretending to be: the run would
+		// be stopped at the roof anyway (BudgetTracker.Exhausted asks it
+		// first), so promising more than it on the screen would be a figure
+		// nothing could honour. What the roof still has LEFT is not knowable
+		// from here - that lives on the pool's own counter, which this
+		// package has no handle on - so this bounds the offer by the whole
+		// roof rather than by its headroom, and the page says the roof
+		// applies rather than that this much is available.
+		t.OfferBytes = roofBytes
+		t.RoofCapped = true
+	}
+}
+
+// request turns a priced top-up into the run that fills its gaps.
+//
+// Three things travel that a fresh request does not carry, and each is why
+// this is built here rather than by the page:
+//
+//   - FILES narrowed to the ones still short. A file that came out whole
+//     would be re-inspected for nothing: its container would be read again
+//     (pieces are discarded after every run, REQUIREMENTS.md 2.9) to reuse
+//     frames that were never in doubt.
+//   - WINDOW, the part of the recorded plan a request has no other field
+//     for. core.ParamsKey hashes the count, the window, the profile, the
+//     format and the sequential switch, so a top-up that took this server's
+//     current flags instead would write a SIBLING result set - a new
+//     directory, no frames reused, full price - which is the one outcome
+//     this whole feature exists to avoid. Reproducing the record's own plan
+//     is what guarantees the run lands in the same directory.
+//   - MAXBYTES, the raise itself, which is zero for a set no raise would
+//     help (see price).
+func (t TopUp) request(record cache.Run) RunRequest {
+	files := make([]string, 0, len(t.Files))
+	for _, f := range t.Files {
+		if f.Short() {
+			files = append(files, strconv.Itoa(f.Index))
+		}
+	}
+
+	return RunRequest{
+		Source: record.Source,
+		Mode:   record.Plan.Profile,
+		Files:  files,
+		Count:  record.Plan.Count,
+		Window: &CaptureWindow{
+			Start:      record.Plan.Start,
+			End:        record.Plan.End,
+			Format:     record.Plan.Format,
+			Sequential: record.Plan.Sequential,
+		},
+		MaxBytes: t.OfferBytes,
+	}
+}
+
+// resolveSet answers which result set an infohash alone names, for a caller
+// that cannot name one itself.
+//
+// THE RULE IS listRuns' OWN, deliberately, and copying it here rather than
+// inventing a second one is the point: a live row merges with a disk record
+// only when its infohash names exactly ONE params directory, so that is
+// exactly when a page's row and a directory on disk are known to be the same
+// thing. An infohash naming two capture plans of one torrent is listed as two
+// rows there and is refused here, rather than one of them being picked - a
+// top-up that guessed would fill in the set the person was not looking at.
+//
+// It reads only directory entries and each run.json, the same cost walkRuns
+// pays per directory, and only for one infohash.
+func resolveSet(root, infoHash string) (string, bool) {
+	if root == "" || !validInfoHash(infoHash) {
+		return "", false
+	}
+
+	dirs, err := os.ReadDir(filepath.Join(root, infoHash))
+	if err != nil {
+		return "", false
+	}
+
+	found := ""
+	for _, dir := range dirs {
+		if !dir.IsDir() {
+			continue
+		}
+		if _, ok := cache.LoadRun(filepath.Join(root, infoHash, dir.Name())); !ok {
+			continue
+		}
+		if found != "" {
+			return "", false
+		}
+		found = dir.Name()
+	}
+	return found, found != ""
 }

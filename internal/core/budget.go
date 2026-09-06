@@ -394,3 +394,96 @@ func (t *BudgetTracker) Context(parent context.Context) (context.Context, contex
 	}
 	return context.WithTimeout(parent, remaining)
 }
+
+// TopUpBytes is the traffic ceiling to give a run that is FINISHING an
+// earlier, stopped one: enough for the capture points still missing, and
+// deliberately not a byte more than that.
+//
+// # Why a computed absolute figure, and not the two obvious alternatives
+//
+// A person who accepts more traffic is not asking for "unlimited" - they are
+// asking for enough to finish. That rules out both of the shapes this could
+// have taken:
+//
+//   - A MULTIPLIER ("run it again at twice the ceiling") multiplies a number
+//     the person does not have in their head. The ceiling a run actually met
+//     is DefaultBudget's - bytesPerFile TIMES the files selected, capped -
+//     not the per-file figure the flag's help mentions, which is exactly the
+//     trap TOR-50 named one level up. Doubling 300 MB to finish four points
+//     out of twenty asks for six times what the work costs, and it asks for
+//     it in units nobody can check.
+//   - A FRESH FIGURE TYPED BY HAND is the same guess moved onto the person.
+//     They have no way to price a capture point; torpeek does, because the
+//     run that stopped left the receipt on disk.
+//
+// So the figure is computed from what the stopped run actually did, and it is
+// the LARGER of two independent estimates - never the sum, never an average:
+//
+//   - MEASURED. spent bytes divided by the points that spending bought, times
+//     the points still owed. This is the only estimate that knows anything
+//     about THIS torrent: its bitrate, its piece length, how far a seek has
+//     to reach in this container. Note that spent includes each run's fixed
+//     overhead - the container inspection and the keyframe index, re-read
+//     from scratch because pieces are discarded after every run
+//     (REQUIREMENTS.md 2.9) - so prorating it to the remaining points already
+//     re-pays that overhead once. That is why there is no fudge factor here:
+//     the average is not a per-point marginal cost, it is a per-point cost
+//     with the fixed part folded in, which is the conservative direction.
+//   - THE DEFAULT'S OWN SHARE. bytesPerFile is this project's measured figure
+//     for one file's worth of frames (section 7); one point of a plan of
+//     planned is therefore worth bytesPerFile/planned of it. This is the
+//     floor, and it is what answers a run that stopped so early its measured
+//     average is meaningless - two points captured off a cold swarm, say.
+//
+// Rounded UP to a whole MiB, because this number is shown to a person and
+// consented to before it is spent, and a ceiling is not a measurement. Capped
+// at maxRunBytes for the reason DefaultBudget caps there: a top-up is still
+// one run, and no run may be allowed more than the most a fresh one could
+// ever ask for. That cap is also what stops a pathological receipt (a run
+// that spent a gigabyte on one frame) from turning a top-up into a blank
+// cheque.
+//
+// WHAT IT DOES NOT DO is bound itself by the CLIENT-WIDE ROOF. The roof is
+// not this run's to reason about - it is the ceiling over every run sharing
+// one client, its figure lives on that client's own counter, and
+// BudgetTracker.Exhausted asks it FIRST and answers StopRoof rather than
+// StopBudget (see Roof). A top-up is held to it exactly as any other run is,
+// with no way around it, and a caller that also wants to SHOW the roof
+// alongside this figure should say so separately rather than fold the two
+// into one number a reader could not take apart again.
+//
+// Zero out means there is nothing to top up: no points are missing, or the
+// caller has no plan to reason from.
+func TopUpBytes(remaining, planned int, spent int64, captured int) int64 {
+	if remaining <= 0 {
+		return 0
+	}
+
+	var measured int64
+	if captured > 0 && spent > 0 {
+		// One expression rather than a per-point figure multiplied back up:
+		// integer division twice would round a 10.9 MB point down to 10 and
+		// lose most of a megabyte per point on the way.
+		measured = spent * int64(remaining) / int64(captured)
+	}
+
+	var share int64
+	if planned > 0 {
+		share = bytesPerFile * int64(remaining) / int64(planned)
+	}
+
+	want := measured
+	if share > want {
+		want = share
+	}
+	if want <= 0 {
+		return 0
+	}
+
+	const mib = 1 << 20
+	want = (want + mib - 1) / mib * mib
+	if want > maxRunBytes {
+		want = maxRunBytes
+	}
+	return want
+}
