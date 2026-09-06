@@ -3180,7 +3180,12 @@ function onFileDone(entry, ev) {
 
   const links = [];
   if (ev.sheet_url) links.push(link(ev.sheet_url, "contact sheet"));
-  if (ev.manifest_url) links.push(link(ev.manifest_url, "manifest"));
+  // TOR-171: no manifest link here on purpose. ev.manifest_url still rides
+  // the NDJSON stream (server.go's record() keeps publishing it) - the page
+  // itself just has no use for the JSON manifest a person would open, only
+  // the contact sheet does. Something other than the page reading the
+  // stream might still want it, which is the whole reason the field is
+  // still there to read.
   if (links.length) {
     fentry.links.replaceChildren(...links);
     fentry.links.hidden = false;

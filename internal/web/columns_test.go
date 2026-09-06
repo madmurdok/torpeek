@@ -590,3 +590,42 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 //     row height unchanged, and the table still fit the pane.
 //
 // The console carried no errors or exceptions throughout.
+
+// TestFileDoneNoLongerLinksManifest is TOR-171: the page has no use for the
+// raw JSON manifest a finished file's event carries, so onFileDone must not
+// turn ev.manifest_url into a link the way it still does for ev.sheet_url -
+// unrelated to this file's own ticket, but placed here because app.js's
+// served-text tests all live in this one file. manifest_url itself stays on
+// the wire (server.go's record() is unchanged) for whatever else reads the
+// NDJSON stream - this test is only about what the page renders from it.
+func TestFileDoneNoLongerLinksManifest(t *testing.T) {
+	js := appJS(t)
+
+	if strings.Contains(js, `link(ev.manifest_url`) {
+		t.Error("app.js's onFileDone still turns ev.manifest_url into a link - the page should not offer a " +
+			"manifest link at all, live or reopened from disk")
+	}
+
+	// The contact sheet link is the one an end user does want, and must
+	// survive this change untouched.
+	if !strings.Contains(js, `link(ev.sheet_url, "contact sheet")`) {
+		t.Error("app.js's onFileDone no longer links ev.sheet_url as \"contact sheet\" - that link should stay")
+	}
+}
+
+// TOR-171's browser check, same session and binary as TOR-165's pass above:
+// no completed file was available to inspect through the real event path
+// (the one seeded run in this environment was FAILED, with no frames), so
+// the single-link-row rendering ("whatever separates two links must not
+// leave a dangling separator" once the manifest link is gone, since a
+// finished file usually offers only the contact sheet now) was checked
+// directly against app.css's actual rule for it - .file-links is `display:
+// flex; gap: 1rem` - by rendering one <a> inside a .file-links element on
+// the live page and reading its layout back: one child, and a zoomed
+// screenshot showing only "contact sheet" with nothing beside it. flex gap
+// only inserts space BETWEEN children, so a single child leaves nothing to
+// dangle by construction - confirmed rather than assumed.
+//
+// What this did not verify: manifest_url actually still arriving over a
+// live NDJSON stream end to end (server.go's record() is unchanged, so this
+// is read off the source, not observed on the wire, in this pass).
