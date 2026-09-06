@@ -125,10 +125,46 @@
   <p class="compare-keys">← → position · space, ↑ ↓ or click flips · 1 2 pick a set · esc closes</p>
 </dialog>
 
+<!-- The frame, full size (TOR-172). The panel is HUD chrome in the reference
+     sheet's language - hard corners, three L-brackets, one chamfered corner,
+     an uppercase label tab riding the top strip - and the picture inside it
+     obeys four rules: fits at 100% means drawn at 100% (never upscaled), does
+     not fit means scaled down to fit, a click goes to 100% and pans, and it
+     never spills out of the panel. app.css holds the chrome and the panel's
+     own arithmetic; app.js holds the scaling, the pan and its clamp.
+
+     #lightbox-view is the new element and it is load-bearing twice over: it
+     is the window the picture is clipped to (overflow: hidden, so "never
+     spills out" cannot be got wrong), and its box is what app.js measures to
+     decide the fit. The close button and the caption live INSIDE it on
+     purpose - both sit over the footage, both carry their own ground for it
+     (TOR-122), and both stay put while the picture pans beneath them. -->
 <dialog id="lightbox" class="lightbox">
-  <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
-  <img id="lightbox-img" alt="">
-  <p id="lightbox-caption" class="lightbox-caption"></p>
+  <p class="lightbox-bar">
+    <span class="lightbox-tab">
+      <span class="lightbox-chev" aria-hidden="true">&rsaquo;&rsaquo;</span>
+      frame
+      <!-- The zoom readout, and the one thing in this panel wearing --accent:
+           it is the state, not decoration. aria-live so a change announces
+           itself to anyone who cannot see the pill fill. -->
+      <span id="lightbox-zoom" class="lightbox-zoom" aria-live="polite">fit</span>
+    </span>
+    <span class="lightbox-ticks" aria-hidden="true"></span>
+  </p>
+  <div id="lightbox-view" class="lightbox-view" tabindex="0" role="button"
+       aria-label="The frame - press to zoom to 100%, then the arrow keys pan it">
+    <img id="lightbox-img" alt="">
+    <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
+    <p id="lightbox-caption" class="lightbox-caption"></p>
+  </div>
+  <p class="lightbox-keys">click zooms to 100% &middot; &larr; &uarr; &rarr; &darr; or the mouse pans &middot; esc closes</p>
+  <!-- The two corners the dialog's own ::before/::after cannot reach: a
+       bottom-left bracket and the stroke along the chamfer. A direct child of
+       the dialog, NOT of the view - every bracket sits in one of the panel's
+       label strips, off the footage, because a hairline in a single colour
+       over arbitrary picture content is TOR-122's problem with no scrim
+       available to solve it. -->
+  <span class="lightbox-marks" aria-hidden="true"></span>
 </dialog>
 
 <script src="app.js"></script>
