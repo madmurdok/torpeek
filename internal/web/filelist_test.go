@@ -76,19 +76,30 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 			"hide it", hidden[1])
 	}
 
-	// And the gating that DID survive must be about the controls, not the
-	// list: a decision can only be taken while the torrent is parked.
+	// And the gating that DID survive must be about the frame, not the list:
+	// a --warn border says "nothing happens until you act", which is only
+	// true of a parked torrent.
 	if !strings.Contains(fn, `entry.state === "needs-action"`) {
-		t.Error("syncFileList never asks whether the row is parked - the controls that " +
-			"stage and send a decision (Select all/none, Take frames) only mean " +
-			"anything there, and the server refuses a decision in any other state")
+		t.Error("syncFileList never asks whether the row is parked - the amber frame " +
+			"belongs to the one state where nothing at all happens until somebody acts")
 	}
-	for _, control := range []string{"pickerAll", "pickerNone", "pickerFoot"} {
-		if !regexp.MustCompile(`entry\.` + control + `\.hidden = !parked`).MatchString(fn) {
-			t.Errorf("syncFileList does not hide entry.%s outside the parked state - a "+
-				"\"Take frames\" beside a run that is already fetching is a control that "+
-				"either does nothing or is refused", control)
-		}
+	// TOR-181 rewrote what this used to check. Select none and the foot's
+	// "Take frames" are gone with the staged selection they served (see
+	// TestTheButtonUnderTheFileListIsGone), and whether a TICK works is no
+	// longer read off the state here at all - it is the server's own verdict,
+	// carried on run_state (entry.tickable, runEntry.refuseTick). What is
+	// still parked-only is Select all, and it says so in its own function.
+	all := jsFunc(t, js, "syncSelectAll")
+	if !strings.Contains(all, `entry.state === "needs-action"`) ||
+		!strings.Contains(all, "entry.pickerAll.hidden") {
+		t.Error("syncSelectAll does not gate Select all on the parked state - \"all of " +
+			"it\" answers a torrent whose whole list is undecided, and on a row already " +
+			"fetching it would undo, in one press, the choice not to take the rest")
+	}
+	if strings.Contains(fn, "entry.tickable = ") {
+		t.Error("syncFileList decides tickability for itself - it is the server's answer " +
+			"(refuseTick, run_state's \"tickable\"), and a second copy of that rule is " +
+			"how the page comes to offer a live box the server then refuses")
 	}
 }
 
@@ -247,22 +258,67 @@ func TestTheAmberFrameIsOnlyForARowThatIsBlocking(t *testing.T) {
 	}
 }
 
-// TestTheFootIsHiddenByARuleThatBeatsTheUAsOwn is a trap this file has
-// already paid for twice (see the note above .drop-overlay[hidden]) and which
-// this ticket walked straight into a third time: .picker-foot sets display,
-// and a class selector setting display beats the UA's rule for [hidden] at
-// equal specificity - so hiding the foot from JS alone leaves "Take frames"
-// on screen beside a run that is already fetching.
-func TestTheFootIsHiddenByARuleThatBeatsTheUAsOwn(t *testing.T) {
+// TestEverythingHiddenFromJSCanActuallyBeHidden is a trap this file has
+// already paid for three times (see the note above .drop-overlay[hidden]):
+// a class selector setting `display` beats the UA's rule for [hidden] at
+// equal specificity, so hiding such an element from JS alone does nothing at
+// all and the control stays on screen.
+//
+// It used to check one element, .picker-foot, which TOR-181 removed along
+// with the button in it. Rather than delete the guard with its subject, this
+// asks the general question for the whole file list: for EVERY element app.js
+// hides by setting `.hidden`, if that element's own class rule declares
+// display, there must be a [hidden] companion. A future ticket adding
+// `display: flex` to .picker or .picker-all - the two hidden today - walks
+// into the same trap, and now something says so.
+func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
+	js := servedScript(t)
 	css := stylesheet(t)
 
-	if !strings.Contains(cssRule(t, css, ".picker-foot {"), "display:") {
-		t.Skip("the foot no longer sets display, so the UA's [hidden] rule wins " +
-			"uncontested and this guard has nothing to protect")
+	// The picker's own elements app.js takes off screen, as the property
+	// assignments themselves - so an element that stops being hidden drops
+	// out of this list rather than failing it.
+	hidden := regexp.MustCompile(`entry\.(picker[A-Za-z]*)\.hidden = `).FindAllStringSubmatch(js, -1)
+	if len(hidden) == 0 {
+		t.Fatal("app.js hides nothing in the file list - this guard is anchored on it")
 	}
-	got := cssRule(t, css, ".picker-foot[hidden] {")
-	if !strings.Contains(got, "display: none") {
-		t.Errorf(".picker-foot[hidden] is %q, want display: none - without it the "+
-			"foot's own display beats the UA rule and app.js hiding it does nothing", got)
+
+	// The element behind each name, since the JS reads a property and the CSS
+	// a class. Kept as a table rather than derived, because the mapping is
+	// the one thing a rename would silently break.
+	selector := map[string]string{
+		"pickerEl":    ".picker",
+		"pickerAll":   ".picker-all",
+		"pickerArmed": ".picker-armed",
+	}
+
+	seen := map[string]bool{}
+	for _, m := range hidden {
+		name := m[1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+
+		sel, ok := selector[name]
+		if !ok {
+			t.Errorf("app.js hides entry.%s and this test does not know which class that "+
+				"is - add it to the table rather than leaving the display/[hidden] trap "+
+				"unguarded for it", name)
+			continue
+		}
+		if !strings.Contains(css, sel+" {") {
+			// No rule of its own: nothing can outrank the UA's [hidden].
+			continue
+		}
+		if !strings.Contains(cssRule(t, css, sel+" {"), "display:") {
+			continue
+		}
+		got := cssRule(t, css, sel+"[hidden] {")
+		if !strings.Contains(got, "display: none") {
+			t.Errorf("%s declares display but %s[hidden] is %q, want display: none - "+
+				"without it the class rule beats the UA's and app.js hiding it does "+
+				"nothing", sel, sel, got)
+		}
 	}
 }

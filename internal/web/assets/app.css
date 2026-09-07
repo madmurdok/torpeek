@@ -1209,22 +1209,74 @@ button:disabled { opacity: .5; }
   color: var(--ink-2);
 }
 
-.picker-foot { display: flex; align-items: center; gap: .6rem; margin: .6rem 0 0; }
-/* The foot is hidden for every row that is not parked (app.js's
-   syncFileList), and a class selector setting display beats the UA's rule
-   for [hidden] at equal specificity - the trap this file has already paid
-   for twice (see the note above .drop-overlay[hidden]). Without this line
-   "Take frames" stays on screen beside a run that is already fetching. */
-.picker-foot[hidden] { display: none; }
-/* The cost of pressing the button, shown before it is spent: frames are per
-   file, so this is the number that surprises people (TOR-50). */
+/* WHAT ONE TICK WILL SPEND, on that file's own row (TOR-181).
+
+   This was the foot's cost line, beside a "Take frames" button that no
+   longer exists. Both moved for one reason: a tick is now the decision, so
+   a figure sitting under the list was a price shown where nobody was
+   deciding anything. The count is per video file, which is the whole of
+   TOR-50's trap - a torrent of six quality variants costs six times the
+   intake's number - and this is the column where that multiplication is
+   about to be agreed to, one row at a time.
+
+   --warn, NOT --accent, and that is a change of meaning rather than of
+   taste. The accent means "this is live, or this is where you are" and
+   wears nothing else (:root); this is a caution about somebody's allowance,
+   which is exactly what .run-again-cost one section up already uses --warn
+   for. Six accented, glowing figures down a season pack would also have
+   read as six things happening. Contrast computed, not recalled: --warn
+   measures 11.77 against the --s1 this section actually draws on (the
+   detail cell's own background, .run-detail-cell) and 10.77 against --s2,
+   so it clears AA on either. */
 .picker-cost {
+  flex: 0 0 auto;
   font-family: var(--mono);
-  font-size: .82rem;
-  color: var(--accent);
-  text-shadow: var(--glow);
+  font-size: .76rem;
+  color: var(--warn);
   font-variant-numeric: tabular-nums;
 }
+/* The one thing a ticked row says in words: that this tick did NOT join the
+   pass in flight and starts when it ends (app.js's updateFileCosts). Quiet,
+   because the ticked box beside it already carries "asked for" - this span
+   only ever holds the exception. --ink-2 measures 7.37 against this
+   section's --s1 ground, 6.75 against --s2 - the same figures :root's ink
+   table gives, and the reason TOR-158 left --ink-2 on text while taking
+   --ink-3 off it. */
+.picker-state {
+  flex: 0 0 auto;
+  font-size: .76rem;
+  color: var(--ink-2);
+}
+/* Neither span costs its own gap when it has nothing to say, and exactly one
+   of the two is ever filled. */
+.picker-cost:empty,
+.picker-state:empty { display: none; }
+
+/* A ROW WHOSE BOX CANNOT BE CLICKED is not a row that should light up under
+   the pointer or wear one. Two of them: a file this row has already asked
+   for (the box is checked and disabled - un-ticking cannot un-start a
+   fetch), and a row the server would refuse a tick on at all, whose reason
+   is on the row's title (run_state's tick_refusal). The third,
+   [data-video="false"], has its own rule above and no data-tick at all. */
+.picker-item[data-tick="asked"] .picker-file,
+.picker-item[data-tick="closed"] .picker-file { cursor: default; }
+.picker-item[data-tick="asked"] .picker-file:hover,
+.picker-item[data-tick="closed"] .picker-file:hover { background: none; }
+
+/* SELECT ALL, ARMED: it has been pressed once, it is saying what it would
+   cost, and it is waiting for the press that spends it (app.js's
+   armSelectAll). --warn for the reason .picker-cost above wears it - this is
+   the largest sum on the page - and the colour is the THIRD carrier, never
+   the only one: the label changes to name the total, and .picker-armed
+   states the arithmetic and the ask beside it. */
+.picker-all[data-armed="true"] {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+/* The sentence: what the second press starts, and how to back out. It is the
+   new information, so it is not quiet - plain --ink at the head's own size. */
+.picker-armed { font-size: .8rem; }
+.picker-armed:empty { display: none; }
 
 /* One block per torrent file: its summary panel, its progress, its grid -
    collapsed to a single clickable row by default (TOR-63), except the first

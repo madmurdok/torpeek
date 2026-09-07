@@ -259,6 +259,56 @@ type runEntry struct {
 	// been open since yesterday sends. It is a handful of names and lengths;
 	// no payload, no session, nothing that has to be closed.
 	contents *core.Contents
+	// videos is every capturable file this torrent holds, by the torrent
+	// index a selection names it by - the only indices a tick may name
+	// (holdsFile), and the reason that check is no longer contents.Videos.
+	//
+	// TWO PATHS LEARN IT AND ONLY ONE OF THEM POPULATES contents. An entry
+	// that paid for a listing has both (listThenRun); an entry that skipped
+	// the listing because its request already named files - Regenerate, a
+	// top-up, a retry - gets its video list from the engine's own
+	// core.MetadataReady instead (pump), and contents stays nil there
+	// forever. Validating a tick against contents alone therefore refused
+	// every tick on exactly the rows whose file list the page was already
+	// showing, which reads as the control being broken rather than as the
+	// server not knowing (TOR-181).
+	//
+	// Indices rather than the swarm.FileInfo values: this field answers one
+	// question - "may a tick name this number" - and the names and lengths
+	// behind it are the page's business, already on the wire.
+	videos []int
+	// pending is what has been ticked and not yet handed to a pass: a tick
+	// that arrived while this entry's own run was already fetching, which
+	// cannot join a plan the engine is already working from.
+	//
+	// It is what makes a tick GROW THIS ROW'S RUN rather than start a second
+	// one beside it (TOR-181). pump empties it into req.Files when the pass
+	// in flight ends and re-arms this very entry, so a torrent's passes are
+	// strictly sequential: at most one per-run traffic budget is live for
+	// this torrent at any moment, each one scaled to the files that pass
+	// actually asks for (core.budgetFor). N separate runs would instead put
+	// N ceilings side by side, each free to reach core.MaxRunBytes, which is
+	// the multiplication core.Roof exists to bound (TOR-131).
+	//
+	// Empty for every entry that is not mid-pass, which is nearly all of
+	// them: a tick on a parked or queued entry grows req.Files directly,
+	// because nothing has read it yet.
+	pending []string
+	// asked is every file this row has EVER been asked to capture, and it
+	// never shrinks while the entry lives.
+	//
+	// req.Files cannot answer that question and must not be made to: a
+	// second pass replaces it with the files that pass alone is fetching, so
+	// a row whose first tick captured episode 1 and whose second tick
+	// started episode 3 would report only episode 3 - and the page would
+	// clear a tick beside a file it had already taken, which reads as the
+	// capture having been undone. tickedLocked unions the two (plus pending)
+	// for exactly this reason.
+	//
+	// It is only ever appended to by a tick. A run that named its files up
+	// front (Regenerate, a top-up, the command line) is covered by the union
+	// with req.Files instead, so nothing has to be seeded here at creation.
+	asked []string
 	// name is the torrent's own confirmed name, set the moment it is learned
 	// - by listThenRun from contents.Name, or by pump from a core.MetadataReady
 	// a run that skipped listing gets straight from the engine (TOR-117).
