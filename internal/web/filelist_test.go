@@ -266,30 +266,69 @@ func TestTheAmberFrameIsOnlyForARowThatIsBlocking(t *testing.T) {
 //
 // It used to check one element, .picker-foot, which TOR-181 removed along
 // with the button in it. Rather than delete the guard with its subject, this
-// asks the general question for the whole file list: for EVERY element app.js
-// hides by setting `.hidden`, if that element's own class rule declares
-// display, there must be a [hidden] companion. A future ticket adding
-// `display: flex` to .picker or .picker-all - the two hidden today - walks
-// into the same trap, and now something says so.
+// asks the general question: for EVERY element app.js hides by setting
+// `.hidden`, if any rule naming that element declares display, there must be
+// a [hidden] companion.
+//
+// TOR-182 WIDENED IT TWICE, and both widenings caught something standing.
+//
+// The scope was the file list; it is now every element in the run's detail
+// that app.js hides, per-file ones included - the file details moved inside
+// the list, so "the file list" and "the detail" are no longer two places. The
+// two elements that walked into the trap long ago and have been on screen
+// ever since are .file-links (an empty <p> plus its paragraph margins under
+// every file card since the rule was written) and .torrent-actions (the same,
+// under every torrent's summary). Both were invisible to a reader of the diff
+// that introduced them, because the CONTROL inside each - the contact-sheet
+// link, Send to my client - declares no display of its own and so was hidden
+// correctly, leaving only whitespace to notice.
+//
+// And it reads the rules by SELECTOR LIST rather than by `sel + " {"`, which
+// is what makes the answer trustworthy: `.run-cancel,\n.run-priority { ... }`
+// is one rule for two hidden elements, and the old form found neither of them
+// and silently passed. It happens to declare no display; the point is that
+// nothing was checking.
 func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	js := servedScript(t)
 	css := stylesheet(t)
 
-	// The picker's own elements app.js takes off screen, as the property
+	// The detail's own elements app.js takes off screen, as the property
 	// assignments themselves - so an element that stops being hidden drops
-	// out of this list rather than failing it.
-	hidden := regexp.MustCompile(`entry\.(picker[A-Za-z]*)\.hidden = `).FindAllStringSubmatch(js, -1)
+	// out of this list rather than failing it. Both receivers, because a
+	// per-file element is reached through its own fentry.
+	hidden := regexp.MustCompile(`(?:entry|fentry)\.([A-Za-z]+)\.hidden = `).FindAllStringSubmatch(js, -1)
 	if len(hidden) == 0 {
-		t.Fatal("app.js hides nothing in the file list - this guard is anchored on it")
+		t.Fatal("app.js hides nothing in a run's detail - this guard is anchored on it")
 	}
 
 	// The element behind each name, since the JS reads a property and the CSS
 	// a class. Kept as a table rather than derived, because the mapping is
-	// the one thing a rename would silently break.
+	// the one thing a rename would silently break. An empty string is an
+	// element whose class carries no rule at all in app.css, which is the
+	// one honest way to be exempt: nothing can outrank the UA's [hidden].
 	selector := map[string]string{
-		"pickerEl":    ".picker",
-		"pickerAll":   ".picker-all",
-		"pickerArmed": ".picker-armed",
+		"pickerEl":       ".picker",
+		"pickerAll":      ".picker-all",
+		"pickerArmed":    ".picker-armed",
+		"detailRowEl":    ".run-detail-row",
+		"detailError":    ".run-detail-error",
+		"torrentSummary": ".torrent-summary",
+		"torrentActions": ".torrent-actions",
+		"torrentSave":    ".torrent-save",
+		"torrentSend":    ".torrent-send",
+		"againEl":        ".run-again",
+		"againGo":        ".run-again-go",
+		"againRetry":     ".run-again-retry",
+		"rowCancel":      ".run-cancel",
+		"rowRaise":       ".run-priority-up",
+		"rowLower":       ".run-priority-down",
+		// Per file, and all three are inside the list's own rows since
+		// TOR-182: the detail slot the row opens onto, the metadata one
+		// level in, the contact-sheet link and the progress line.
+		"body":     ".file-detail",
+		"metaBody": ".meta-body",
+		"links":    ".file-links",
+		"progress": ".file-progress",
 	}
 
 	seen := map[string]bool{}
@@ -302,16 +341,19 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 
 		sel, ok := selector[name]
 		if !ok {
-			t.Errorf("app.js hides entry.%s and this test does not know which class that "+
+			t.Errorf("app.js hides %s and this test does not know which class that "+
 				"is - add it to the table rather than leaving the display/[hidden] trap "+
 				"unguarded for it", name)
 			continue
 		}
-		if !strings.Contains(css, sel+" {") {
-			// No rule of its own: nothing can outrank the UA's [hidden].
-			continue
+
+		declares := false
+		for _, body := range ruleBodiesNaming(css, sel) {
+			if strings.Contains(body, "display:") {
+				declares = true
+			}
 		}
-		if !strings.Contains(cssRule(t, css, sel+" {"), "display:") {
+		if !declares {
 			continue
 		}
 		got := cssRule(t, css, sel+"[hidden] {")
@@ -321,4 +363,85 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 				"nothing", sel, sel, got)
 		}
 	}
+	// The scan found the elements it was widened for, rather than quietly
+	// matching nothing after a rename.
+	for _, want := range []string{"links", "torrentActions", "body"} {
+		if !seen[want] {
+			t.Errorf("app.js no longer hides %q. If it was renamed, rename it in the "+
+				"table above too - this guard was widened to cover exactly this element, "+
+				"and it caught a live instance of the trap on it", want)
+		}
+	}
+
+	// AND THE ONES HIDDEN THROUGH A LOCAL ALIAS, which the scan above cannot
+	// see and which are therefore the likeliest place for this trap to sit
+	// unnoticed: two functions take a reference first (`const el =
+	// entry.rowProgress`) and then hide `el`, so there is no
+	// `entry.<name>.hidden` for a receiver-based scan to match.
+	//
+	// .run-progress is the live instance TOR-182 found here. It declares
+	// `display: flex`, so `el.hidden = true` on a finished run never took it
+	// off screen - and because renderRunProgress also sets role="progressbar"
+	// and the aria-value* attributes when it shows the bar, and removes none
+	// of them when it hides it, a done row kept announcing a progress bar
+	// stuck at its last reading. Nothing was VISIBLE (the bar is .28rem tall
+	// with no ground of its own and its segments are emptied), which is
+	// exactly why it lasted: the trap's usual symptom, a control still on
+	// screen, was missing.
+	//
+	// Kept as a small table of its own rather than folded above, because the
+	// two halves are found differently and a reader has to know which is
+	// which.
+	for fn, sel := range map[string]string{
+		"renderRunProgress": ".run-progress",
+		"renderReach":       ".reach",
+	} {
+		body := jsFunc(t, js, fn)
+		if !strings.Contains(body, "el.hidden") {
+			t.Errorf("%s no longer hides anything through a local alias. If the alias is "+
+				"gone the scan above covers it and this row should go; if the function "+
+				"is gone, so should the row", fn)
+			continue
+		}
+		declares := false
+		for _, rule := range ruleBodiesNaming(css, sel) {
+			if strings.Contains(rule, "display:") {
+				declares = true
+			}
+		}
+		if !declares {
+			continue
+		}
+		if got := cssRule(t, css, sel+"[hidden] {"); !strings.Contains(got, "display: none") {
+			t.Errorf("%s hides %s, which declares display, but %s[hidden] is %q, want "+
+				"display: none", fn, sel, sel, got)
+		}
+	}
+}
+
+// ruleBodiesNaming returns the declaration block of every rule whose selector
+// list names sel on a line of its own - `.x {` and the `.x,` of a grouped
+// selector both count. Comments are stripped first, so a brace inside one
+// cannot be mistaken for a rule's.
+//
+// It exists because `strings.Contains(css, sel + " {")` cannot see a grouped
+// rule at all, and a grouped rule declares just as much display as a lone
+// one. Deliberately no more than this: every selector it is asked about is a
+// plain class, and a rule reached only through a compound or a descendant
+// selector is not what the [hidden] question is about.
+func ruleBodiesNaming(css, sel string) []string {
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(sel) + `\s*(?:,|\{)`)
+
+	var out []string
+	for _, loc := range re.FindAllStringIndex(live, -1) {
+		rest := live[loc[0]:]
+		open := strings.Index(rest, "{")
+		end := strings.Index(rest, "}")
+		if open < 0 || end < open {
+			continue
+		}
+		out = append(out, rest[open+1:end])
+	}
+	return out
 }
