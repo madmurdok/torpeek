@@ -274,6 +274,63 @@ func TestCancellationKeepsWhatWasProduced(t *testing.T) {
 	t.Logf("cancelled after %d frames, all still on disk", len(paths))
 }
 
+// TestListReportsEveryFileNotOnlyTheVideos is TOR-180's foundation, checked
+// at the one place that is cheap enough to check it precisely: List fetches
+// metadata and stops, so this needs no ffmpeg, no seeder and no capture, and
+// it can therefore afford a fixture built to separate the two lists rather
+// than one built to be captured.
+//
+// THE SAMPLE IS THE CASE THAT MATTERS. Anyone would guess that a .nfo is not
+// a video; sample.mkv is, by extension, and swarm.SelectVideos still drops it
+// for being a fraction of the largest video beside it (looksLikeSample). So
+// "not in Videos" is a JUDGEMENT this program makes, not a fact about a file
+// name - which is exactly why the whole list has to travel beside the video
+// one instead of a client re-deriving it from an extension table of its own.
+func TestListReportsEveryFileNotOnlyTheVideos(t *testing.T) {
+	dir := t.TempDir()
+	// Never probed - List does not open a byte of payload - so the content
+	// only has to be the right SIZE for looksLikeSample to judge it.
+	for name, size := range map[string]int{
+		"episode-1.mkv": 200_000,
+		"sample.mkv":    1_000,
+		"readme.nfo":    13,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, size), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	fixture := torrenttest.BuildDir(t, dir, 64<<10)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	contents, err := NewEngine(ffmpeg.Tools{}).List(ctx, runConfig(t, fixture.TorrentPath, ""))
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	if len(contents.Files) != 3 {
+		t.Fatalf("Files = %+v, want all 3 the torrent holds", contents.Files)
+	}
+	held := map[string]bool{}
+	for _, f := range contents.Files {
+		held[filepath.Base(f.Path)] = true
+	}
+	for _, want := range []string{"episode-1.mkv", "sample.mkv", "readme.nfo"} {
+		if !held[want] {
+			t.Errorf("Files does not hold %s: %+v", want, contents.Files)
+		}
+	}
+
+	if len(contents.Videos) != 1 {
+		t.Fatalf("Videos = %+v, want only episode-1.mkv - the sample and the .nfo are "+
+			"listed above but cannot be captured", contents.Videos)
+	}
+	if got := filepath.Base(contents.Videos[0].Path); got != "episode-1.mkv" {
+		t.Errorf("Videos holds %q, want episode-1.mkv", got)
+	}
+}
+
 func TestRunRejectsATorrentWithNoVideo(t *testing.T) {
 	tools := locateTools(t)
 
@@ -1078,6 +1135,32 @@ func TestRerunIsServedFromDiskWithoutTheSwarm(t *testing.T) {
 	}
 	if record.Plan != wantPlan {
 		t.Errorf("record plan = %+v, want %+v", record.Plan, wantPlan)
+	}
+
+	// TOR-180: and the WHOLE file list beside the video one, which is what
+	// lets a page reopened months later show what the torrent actually held.
+	// This fixture is exactly the case that tells the two apart - two clips
+	// and a readme.nfo (multiFileTorrent) - so a record built from the video
+	// list by mistake is three files short of two and this notices.
+	if len(record.Videos) != 2 {
+		t.Errorf("record videos = %+v, want the 2 capturable clips", record.Videos)
+	}
+	if len(record.Files) != 3 {
+		t.Fatalf("record files = %+v, want all 3 of the torrent's files - the .nfo "+
+			"included, which is the difference between this list and Videos", record.Files)
+	}
+	var recordedNFO bool
+	for _, f := range record.Files {
+		if strings.HasSuffix(f.Path, "readme.nfo") {
+			recordedNFO = true
+			if f.Bytes != int64(len("release notes")) {
+				t.Errorf("the recorded .nfo is %d bytes, want %d - the size travels with "+
+					"the path or the list cannot be rendered", f.Bytes, len("release notes"))
+			}
+		}
+	}
+	if !recordedNFO {
+		t.Errorf("record files = %+v, want the .nfo among them", record.Files)
 	}
 }
 

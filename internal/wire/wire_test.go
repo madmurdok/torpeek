@@ -119,6 +119,88 @@ func TestMetadataReadyCarriesFileList(t *testing.T) {
 	}
 }
 
+// mixedTorrent is what a real release actually holds: two episodes, a sample
+// that swarm.SelectVideos drops for being tiny beside them despite its video
+// extension, and a .nfo. Videos is the capturable subset, Files the whole
+// thing - the pair TOR-180 needs on the wire.
+func mixedTorrent() core.MetadataReady {
+	all := []swarm.FileInfo{
+		{Index: 0, Path: "release/episode-1.mkv", Length: 1_000_000},
+		{Index: 1, Path: "release/episode-2.mkv", Length: 2_000_000, Offset: 1_000_000},
+		{Index: 2, Path: "release/sample.mkv", Length: 40_000, Offset: 3_000_000},
+		{Index: 3, Path: "release/release.nfo", Length: 3_000, Offset: 3_040_000},
+	}
+	return core.MetadataReady{
+		Name:     "Release",
+		InfoHash: "abc",
+		Videos:   all[:2],
+		Files:    all,
+		Selected: []int{0, 1},
+	}
+}
+
+// TestMetadataReadyCarriesEveryFileNotOnlyTheVideos is TOR-180's wire half.
+// Before it, the ONLY file list on this event was the video one, so a page
+// could not show what a torrent actually contains - and the two things a
+// person most needs in order to understand a disappointing torrent, the .nfo
+// and the sample, are exactly the two the video list is defined to exclude.
+//
+// Both keys, and both checked here: "videos" must NOT quietly widen into the
+// whole list, because a selection still names an index out of it and the
+// server validates a decision against nothing else (runEntry.holdsFile).
+func TestMetadataReadyCarriesEveryFileNotOnlyTheVideos(t *testing.T) {
+	m := Event("", mixedTorrent())
+
+	files, ok := m["files"].([]map[string]any)
+	if !ok || len(files) != 4 {
+		t.Fatalf("files = %#v, want all 4 of the torrent's files", m["files"])
+	}
+	if files[3]["path"] != "release/release.nfo" || files[3]["length"] != int64(3_000) {
+		t.Errorf("files[3] = %v, want the .nfo with its own size", files[3])
+	}
+	if files[2]["path"] != "release/sample.mkv" {
+		t.Errorf("files[2] = %v, want the sample - a video extension the engine "+
+			"still will not capture, which is why it has to be listed", files[2])
+	}
+
+	videos, ok := m["videos"].([]map[string]any)
+	if !ok || len(videos) != 2 {
+		t.Fatalf("videos = %#v, want only the 2 capturable files - widening this "+
+			"key would offer a tick the server refuses", m["videos"])
+	}
+	for _, v := range videos {
+		if v["path"] == "release/release.nfo" || v["path"] == "release/sample.mkv" {
+			t.Errorf("videos names %v, which swarm.SelectVideos excluded", v["path"])
+		}
+	}
+}
+
+// TestMetadataReadyWithNoFileListOmitsTheKey is the absent-is-not-zero half,
+// and the reason this key is added conditionally while "videos" never is.
+//
+// Nil Files is a state that really occurs: a replay rebuilds this event from
+// a run record on disk, and a record written before cache.Run.Files existed
+// carries no file list at all. Rendered as [] it would say "this torrent
+// holds no files", which is never true of any torrent - so the key goes
+// missing instead, and a client falls back to the video list. Eighth time
+// this project has drawn that line; the tally is in web/listing.go's Live.
+func TestMetadataReadyWithNoFileListOmitsTheKey(t *testing.T) {
+	ev := mixedTorrent()
+	ev.Files = nil
+
+	m := Event("", ev)
+
+	if _, has := m["files"]; has {
+		t.Errorf("files = %#v for an event that cannot say what the torrent holds; "+
+			"want the key absent, since an empty array claims a torrent with no "+
+			"files in it", m["files"])
+	}
+	// The fallback a client is expected to use has to still be there.
+	if videos, ok := m["videos"].([]map[string]any); !ok || len(videos) != 2 {
+		t.Errorf("videos = %#v, want the 2 the event does know about", m["videos"])
+	}
+}
+
 // TestMetadataReadyWithNoVideosIsEmptyNotNil keeps the JSON shape stable
 // the same way file_started's audio/subtitles arrays do: an empty array, not
 // a null field a client would have to special-case.

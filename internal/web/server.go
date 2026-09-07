@@ -2325,17 +2325,29 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 // backlog, so a page opened or reconnected an hour later replays it and
 // rebuilds the picker without asking the server for anything.
 //
-// The per-file shape is wire.VideoFiles, the same one metadata_ready uses,
-// so the page has exactly one notion of what a video file is.
+// The per-file shape is wire.FileList, the same one metadata_ready uses, so
+// the page has exactly one notion of what a file is.
+//
+// It carries BOTH lists metadata_ready carries (TOR-180): "videos" is what
+// can be captured and what a tick may name, "files" is everything the
+// torrent holds. A parked torrent is the one place a person is actually
+// choosing, so it is the last place that should show only part of what is
+// there - the .nfo and the sample are how they find out that the file they
+// wanted is not a film. Absent rather than empty when the listing could not
+// say, for wire.go's own reason on that key.
 //
 // The caller must hold s.mu: every field read here is written under it.
 func (s *Server) needsActionRecordLocked(entry *runEntry) record {
 	contents := entry.contents
-	return record{data: encode(map[string]any{
+	m := map[string]any{
 		"type": "needs_action", "run": entry.id,
 		"name": contents.Name, "infohash": contents.InfoHash,
-		"private": contents.Private, "videos": wire.VideoFiles(contents.Videos),
-	})}
+		"private": contents.Private, "videos": wire.FileList(contents.Videos),
+	}
+	if contents.Files != nil {
+		m["files"] = wire.FileList(contents.Files)
+	}
+	return record{data: encode(m)}
 }
 
 // connectRecord is the first thing any client is sent: an idle run_state

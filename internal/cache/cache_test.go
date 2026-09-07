@@ -598,6 +598,105 @@ func TestAnOlderRecordReadsBackWithNoClaim(t *testing.T) {
 	}
 }
 
+// TestSaveRunRoundTripsTheWholeFileList is TOR-180's record half. Videos has
+// always been "every video file the torrent holds"; Files is every file it
+// holds full stop, which is what lets a person opening a finished run see
+// that what they were after was a .nfo and a sample rather than only being
+// shown the part of the torrent this program will capture.
+//
+// The two are checked TOGETHER on purpose: they are different lists with
+// different jobs (a selection may only name an index out of Videos), and a
+// change that made one of them stand in for the other would be invisible in
+// a test that read either one alone.
+func TestSaveRunRoundTripsTheWholeFileList(t *testing.T) {
+	dir := t.TempDir()
+	want := populated()
+	want.Files = []File{
+		{Index: 0, Path: "Sintel/sintel.mp4", Bytes: 282738688, Offset: 0},
+		{Index: 1, Path: "Sintel/sintel.nfo", Bytes: 1024, Offset: 282738688},
+	}
+
+	if err := SaveRun(dir, want); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("a record just written was not a hit")
+	}
+
+	if len(got.Files) != 2 || got.Files[1].Path != "Sintel/sintel.nfo" || got.Files[1].Bytes != 1024 {
+		t.Errorf("files = %+v, want both entries including the .nfo", got.Files)
+	}
+	if len(got.Videos) != 1 || got.Videos[0].Path != "Sintel/sintel.mp4" {
+		t.Errorf("videos = %+v, want only the capturable file - the two lists are not "+
+			"interchangeable, and a selection may name an index out of this one alone",
+			got.Videos)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, Name))
+	if err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	if !strings.Contains(string(data), `"files"`) {
+		t.Errorf("the record on disk has no files key:\n%s", data)
+	}
+}
+
+// TestAnOlderRecordReadsBackWithNoFileList is the TOR-52 trap for Files, and
+// it is the same trap TestAnOlderRecordReadsBackWithNoClaim above guards for
+// Claimed: the field was added WITHOUT bumping Version, because LoadRun
+// treats a version it does not know as a miss, so a bump would turn every
+// run already on disk into "no cached run at all" rather than into an older
+// shape to read.
+//
+// NIL, NOT EMPTY, is the other half. A record from before the field cannot
+// say what the torrent held; it must not read as a torrent holding nothing,
+// because no torrent does. That distinction is what core.filesFromRecord
+// carries into MetadataReady.Files, and what lets a page fall back to the
+// video list instead of drawing an empty torrent.
+func TestAnOlderRecordReadsBackWithNoFileList(t *testing.T) {
+	if strings.Contains(run080Shape, `"files"`) {
+		t.Fatal("the 0.8.0 fixture has grown a files field; it must stay the captured record")
+	}
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, Name), []byte(run080Shape), 0o600); err != nil {
+		t.Fatalf("write the 0.8.0 record: %v", err)
+	}
+
+	got, ok := LoadRun(dir)
+	if !ok {
+		t.Fatal("a record written before Files existed became a miss - the field was " +
+			"added without bumping Version precisely so this could not happen (TOR-52)")
+	}
+	if got.Files != nil {
+		t.Errorf("an older record says the torrent held %v; it cannot know, and an "+
+			"empty list here would claim a torrent with no files in it", got.Files)
+	}
+	if len(got.Videos) != 1 || got.Plan.Count == 0 {
+		t.Errorf("adding Files cost the older record its other fields: %+v", got)
+	}
+}
+
+// TestARunWithNoFileListWritesNoFilesFieldAtAll is the writer's side of the
+// same rule, and Claimed's own test one section up is its precedent: a record
+// that cannot say must not write an empty array, or it becomes indistinguish-
+// able on disk from one saying the torrent is empty.
+func TestARunWithNoFileListWritesNoFilesFieldAtAll(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveRun(dir, Run{Version: Version}); err != nil {
+		t.Fatalf("SaveRun: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, Name))
+	if err != nil {
+		t.Fatalf("read the record: %v", err)
+	}
+	if strings.Contains(string(data), `"files"`) {
+		t.Errorf("a run that could not say what the torrent held still wrote a files "+
+			"field:\n%s", data)
+	}
+}
+
 // TOR-124: Usable asks about the disk, and only about the disk.
 
 // usableFixture writes n frames into dir and returns a manifest describing

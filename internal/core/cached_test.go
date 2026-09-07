@@ -147,6 +147,102 @@ func TestReplayServesARunWithNoRecordedSource(t *testing.T) {
 	}
 }
 
+// TestAReplayCarriesTheWholeFileListOffTheRecord is TOR-180 on the path a
+// finished torrent's row actually takes: nothing is running, nobody is
+// choosing anything, and the file list a page draws comes from the replayed
+// metadata_ready this produces. If the whole list did not survive the record,
+// the epic's file list would exist only while a run was live - which is the
+// opposite of "the row's ordinary content in every state".
+func TestAReplayCarriesTheWholeFileListOffTheRecord(t *testing.T) {
+	const (
+		infoHash = "2222222222222222222222222222222222dead"
+		params   = "deadbeef"
+	)
+	root := t.TempDir()
+
+	m := fileManifest(0, "release/movie.mkv", 2)
+	buildCachedRun(t, root, infoHash, params, cache.Run{
+		Version:  cache.Version,
+		Tool:     "test",
+		InfoHash: infoHash,
+		Name:     "Release",
+		Videos:   []cache.File{{Index: 0, Path: "release/movie.mkv", Bytes: 1 << 20}},
+		Files: []cache.File{
+			{Index: 0, Path: "release/movie.mkv", Bytes: 1 << 20},
+			{Index: 1, Path: "release/release.nfo", Bytes: 2048, Offset: 1 << 20},
+		},
+		Complete: []int{0},
+	}, map[int]manifest.Manifest{0: m})
+
+	var metadata *MetadataReady
+	for _, ev := range collect(t, NewEngine(ffmpeg.Tools{}).Replay(root, infoHash, params)) {
+		if e, ok := ev.(MetadataReady); ok {
+			metadata = &e
+		}
+	}
+	if metadata == nil {
+		t.Fatal("the replay published no MetadataReady")
+	}
+
+	if len(metadata.Files) != 2 {
+		t.Fatalf("Files = %+v, want both files the record holds", metadata.Files)
+	}
+	if metadata.Files[1].Path != "release/release.nfo" || metadata.Files[1].Length != 2048 {
+		t.Errorf("Files[1] = %+v, want the .nfo with its recorded size", metadata.Files[1])
+	}
+	if len(metadata.Videos) != 1 || metadata.Videos[0].Path != "release/movie.mkv" {
+		t.Errorf("Videos = %+v, want only the file frames were taken from", metadata.Videos)
+	}
+}
+
+// TestAReplayOfAnOlderRecordSaysNothingAboutTheFileList is the other half,
+// and it is the reason MetadataReady.Files is a nil-able list rather than one
+// that is always populated: a run recorded before cache.Run.Files existed
+// cannot say what the torrent held, and must not be made to say it held
+// nothing. Nil here becomes an ABSENT "files" key on the wire, which is what
+// lets app.js fall back to the video list instead of drawing an empty
+// torrent - the eighth absent-is-not-zero line in this project (the tally is
+// in web/listing.go's Live).
+func TestAReplayOfAnOlderRecordSaysNothingAboutTheFileList(t *testing.T) {
+	const (
+		infoHash = "3333333333333333333333333333333333dead"
+		params   = "deadbeef"
+	)
+	root := t.TempDir()
+
+	m := fileManifest(0, "release/movie.mkv", 2)
+	buildCachedRun(t, root, infoHash, params, cache.Run{
+		Version:  cache.Version,
+		Tool:     "1.2.0",
+		InfoHash: infoHash,
+		Name:     "Release",
+		Videos:   []cache.File{{Index: 0, Path: "release/movie.mkv", Bytes: 1 << 20}},
+		// Files deliberately absent: the shape every record written before
+		// TOR-180 has on disk.
+		Complete: []int{0},
+	}, map[int]manifest.Manifest{0: m})
+
+	var metadata *MetadataReady
+	for _, ev := range collect(t, NewEngine(ffmpeg.Tools{}).Replay(root, infoHash, params)) {
+		if e, ok := ev.(MetadataReady); ok {
+			metadata = &e
+		}
+	}
+	if metadata == nil {
+		t.Fatal("the replay published no MetadataReady")
+	}
+
+	if metadata.Files != nil {
+		t.Errorf("Files = %+v for a record that cannot say what the torrent held; want "+
+			"nil, since an empty list claims a torrent with no files in it",
+			metadata.Files)
+	}
+	if len(metadata.Videos) != 1 {
+		t.Errorf("Videos = %+v, want the one file the record does know about - it is "+
+			"what a client falls back to", metadata.Videos)
+	}
+}
+
 // TestReplayMissesWhenNoRunIsThere covers infoHash/params that name nothing
 // on disk at all - a typo, or a listing row from a directory since removed.
 // It must fail loudly as a run-scoped Failed, never silently produce an empty

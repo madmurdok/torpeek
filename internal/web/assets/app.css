@@ -1094,12 +1094,14 @@ button:disabled { opacity: .5; }
    (.run-cell-actions) and would squeeze the torrent's name to fit a fourth
    control - and it is where the run's other verbs already are.
 
-   One rung up from the detail's own --s1 ground rather than bordered like
-   the picker below: the picker is a BLOCKING state - nothing happens until
-   somebody ticks a box, which is what earns it a --warn frame - while this
-   is an offer on a finished row, and framing the two the same way would say
-   this row is waiting for something. --ink-2 on --s2 measures 6.75, well
-   clear of AA (see :root's ink table). */
+   One rung up from the detail's own --s1 ground rather than framed in
+   --warn like the file list below when that list is a BLOCKING state -
+   nothing happens there until somebody ticks a box, which is what earns
+   the amber frame - while this is an offer on a finished row, and framing
+   the two the same way would say this row is waiting for something. Since
+   TOR-180 the list itself is on screen in every state and only wears that
+   frame while parked, for exactly this reason. --ink-2 on --s2 measures
+   6.75, well clear of AA (see :root's ink table). */
 .run-again {
   margin: .7rem 0 0;
   border: 1px solid var(--rule);
@@ -1136,11 +1138,25 @@ button:disabled { opacity: .5; }
 .run-again-cost:empty,
 .run-again-note:empty { display: none; }
 
-/* The picker a multi-file torrent parks on (TOR-67): nothing has been
-   downloaded beyond the metadata, and nothing will be until someone ticks a
-   box here. It sits between the torrent's summary line and its (still
-   empty) file list. */
-.picker { margin-top: .8rem; border: 1px solid var(--warn); border-radius: .4rem; padding: .6rem .7rem; }
+/* WHAT THE TORRENT HOLDS (TOR-180). Since that ticket this is a row's
+   ordinary content in every state that knows a file list, not only the
+   screen a multi-file torrent parks on (TOR-67) - so the frame cannot be
+   the parked state's frame any more.
+
+   Quiet by default and --warn only while parked, which is the same
+   distinction .run-again's own comment draws one section up: a --warn frame
+   says "this is BLOCKING, nothing happens until somebody ticks a box", and
+   wearing it on a run that is already fetching would be an alarm about
+   nothing. data-parked is written by app.js's syncFileList from the run's
+   own state; the colours themselves stay here in the tokens, as
+   TestEveryColourComesFromAToken requires. */
+.picker {
+  margin-top: .8rem;
+  border: 1px solid var(--rule);
+  border-radius: .4rem;
+  padding: .6rem .7rem;
+}
+.picker[data-parked="true"] { border-color: var(--warn); }
 
 .picker-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .5rem; }
 .picker-title { font-weight: 500; margin-right: auto; }
@@ -1159,7 +1175,47 @@ button:disabled { opacity: .5; }
 .picker-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .picker-size { flex: 0 0 auto; font-family: var(--mono); font-size: .76rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
+/* A FILE NO FRAME CAN BE TAKEN FROM: the .nfo, the artwork, the subtitles,
+   and the sample swarm.SelectVideos drops on purpose. Listed because that is
+   how a person finds out what they actually downloaded, and not tickable
+   because the server validates a selection against the video list alone
+   (runEntry.holdsFile) - a tick here would be refused.
+
+   --ink-2, NEVER --ink-3: TOR-158 took the third ink level off text
+   altogether after measuring it at 3.14-4.14 against the surfaces it was
+   painted on, under AA's 4.5 on every one of them. --ink-2 measures 6.75
+   against --s2 and 7.37 against --s1 (see :root's ink table), so this row is
+   quieter than its siblings and still fully legible.
+
+   AND COLOUR IS NOT WHAT SAYS IT. Somebody who cannot separate the two greys
+   still has to know they cannot tick this, so two carriers that are not
+   colours do the saying: the checkbox is ABSENT (app.js builds a <span>
+   rather than a <label> with an input), and .picker-mark draws an em dash in
+   the column it would have occupied - the same mark every absent metric cell
+   in the run table already uses for "no reading here". The cursor is the
+   default arrow rather than a pointer for the same reason: nothing here
+   responds to a click. */
+.picker-item[data-video="false"] .picker-file { color: var(--ink-2); cursor: default; }
+/* No hover lift either: a row that lights up under the pointer is a row that
+   looks like it does something. */
+.picker-item[data-video="false"] .picker-file:hover { background: none; }
+/* Sized and centred to sit exactly where a checkbox sits, so the names below
+   a tickable row line up with the names below an untickable one and the
+   column reads as one column. */
+.picker-mark {
+  flex: 0 0 auto;
+  width: 1rem;
+  text-align: center;
+  color: var(--ink-2);
+}
+
 .picker-foot { display: flex; align-items: center; gap: .6rem; margin: .6rem 0 0; }
+/* The foot is hidden for every row that is not parked (app.js's
+   syncFileList), and a class selector setting display beats the UA's rule
+   for [hidden] at equal specificity - the trap this file has already paid
+   for twice (see the note above .drop-overlay[hidden]). Without this line
+   "Take frames" stays on screen beside a run that is already fetching. */
+.picker-foot[hidden] { display: none; }
 /* The cost of pressing the button, shown before it is spent: frames are per
    file, so this is the number that surprises people (TOR-50). */
 .picker-cost {

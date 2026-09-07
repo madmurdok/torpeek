@@ -50,6 +50,30 @@ func (f *fakeLister) holds(source string, n int) {
 	}
 }
 
+// holdsMixed says this source is a torrent with n video files in it AND the
+// extras named - a .nfo, a sample, whatever a real release carries beside the
+// episodes. The extras go into Files only, never Videos, which is exactly the
+// shape core.List produces (TOR-180): Videos is what swarm.SelectVideos would
+// keep, Files is everything the torrent holds.
+func (f *fakeLister) holdsMixed(source string, n int, extras ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	videos := fakeVideos(n)
+	all := append([]swarm.FileInfo(nil), videos...)
+	for i, path := range extras {
+		all = append(all, swarm.FileInfo{
+			Index: n + i, Path: path, Length: int64(i+1) << 10,
+		})
+	}
+	f.contents[source] = core.Contents{
+		Name:     "release for " + source,
+		InfoHash: fmt.Sprintf("%040x", len(source)),
+		Videos:   videos,
+		Files:    all,
+	}
+}
+
 // fails says listing this source does not work.
 func (f *fakeLister) fails(source string, err error) {
 	f.mu.Lock()
@@ -427,6 +451,74 @@ func TestAPageThatConnectsLaterReplaysTheFileList(t *testing.T) {
 	// been captured, and a page told otherwise would show a run in progress.
 	if files["selected"] != nil {
 		t.Errorf("the file list carries a \"selected\" list: %v", files)
+	}
+}
+
+// TestTheParkedFileListCarriesEveryFileNotOnlyTheVideos is TOR-180 at the one
+// screen where a person is actually deciding something, which is the last
+// place that should show only part of what the torrent holds: the .nfo and
+// the sample are how they find out that the file they were after is not a
+// film at all.
+//
+// Both keys, checked together, because the two lists do different jobs and
+// widening the wrong one is the failure that would look like success:
+// "videos" is what a tick may name and the only list a decision is validated
+// against (runEntry.holdsFile), so a non-video index appearing in it would be
+// a tick this server refuses.
+func TestTheParkedFileListCarriesEveryFileNotOnlyTheVideos(t *testing.T) {
+	lister := newFakeLister()
+	lister.holdsMixed(manySource, 2, "release/release.nfo", "release/sample.mkv")
+	srv, ts := newTestServerWithLister(t, newFakeRuns().runner, lister.list)
+
+	parked := parkOne(t, srv, ts.URL)
+
+	conn := dial(t, ts.URL)
+	if got := next(t, conn); got["type"] != "run_state" {
+		t.Fatalf("the replay opens with %v, want the connection marker", got)
+	}
+	var record map[string]any
+	for range 4 {
+		ev := next(t, conn)
+		if ev["type"] == "needs_action" && ev["run"] == parked.id {
+			record = ev
+			break
+		}
+	}
+	if record == nil {
+		t.Fatal("the parked run's history carries no needs_action record")
+	}
+
+	all, _ := record["files"].([]any)
+	if len(all) != 4 {
+		t.Fatalf("the record's files hold %d entries, want all 4 the torrent holds: %v",
+			len(all), record["files"])
+	}
+	paths := map[string]bool{}
+	for _, entry := range all {
+		f, _ := entry.(map[string]any)
+		path, _ := f["path"].(string)
+		paths[path] = true
+		if f["length"] == nil {
+			t.Errorf("a listed file carries no length: %v - the list shows a size per row", f)
+		}
+	}
+	for _, want := range []string{"release/release.nfo", "release/sample.mkv"} {
+		if !paths[want] {
+			t.Errorf("the record's files do not hold %s: %v", want, record["files"])
+		}
+	}
+
+	videos, _ := record["videos"].([]any)
+	if len(videos) != 2 {
+		t.Fatalf("the record's videos hold %d entries, want only the 2 capturable ones "+
+			"- a tick may name nothing else, and this server refuses anything else "+
+			"(runEntry.holdsFile): %v", len(videos), record["videos"])
+	}
+	for _, entry := range videos {
+		v, _ := entry.(map[string]any)
+		if v["path"] == "release/release.nfo" || v["path"] == "release/sample.mkv" {
+			t.Errorf("the videos list names %v, which cannot be captured", v["path"])
+		}
 	}
 }
 

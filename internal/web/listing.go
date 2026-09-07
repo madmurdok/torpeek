@@ -160,7 +160,22 @@ type RunSummary struct {
 // and wire.go's progress event itself (TOR-147) - this is the sixth, at the
 // listing rather than the event stream. TOR-179 makes seven, on
 // manifest.Frame.ByteRanges - the manifest side of the very field TOR-119
-// drew the line for in run.json.
+// drew the line for in run.json. TOR-180 makes EIGHT, on the torrent's whole
+// file list: cache.Run.Files, core.MetadataReady.Files and the "files" key
+// wire.go adds to metadata_ready and server.go to needs_action are all nil
+// or absent for "cannot say" and never rendered as an empty array, because a
+// replay of a run recorded before that field existed would otherwise report
+// a torrent holding no files at all - and no torrent does.
+//
+// THIS LISTING DELIBERATELY DOES NOT CARRY THAT LIST, which is worth saying
+// beside the tally so the next reader does not go looking. RunSummary is one
+// row of a fifty-row response and stops at "enough to show a run and open
+// it" (see its own doc, and walkRuns): fifty torrents' worth of paths is
+// exactly the per-run detail that is paid for on expansion instead. The
+// file list reaches a row's detail on the run's own event stream, which
+// every state that knows one already publishes - metadata_ready live, the
+// replayed metadata_ready a disk row's reopen produces, needs_action for a
+// parked one.
 //
 // Kept as one struct rather than five independent optional fields because
 // Peers/Seeds/DownloadBps/UploadBps/Swarm all arrive together on one

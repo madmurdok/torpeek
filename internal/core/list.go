@@ -14,11 +14,27 @@ type Contents struct {
 	// Videos are the video files in torrent order, with the indices a file
 	// selection names them by.
 	Videos []swarm.FileInfo
+	// Files is EVERY file the torrent holds, in torrent order - the .nfo, the
+	// artwork, the subtitles, and the sample that swarm.SelectVideos drops
+	// (TOR-180). Videos is the subset of it that can actually be captured, so
+	// the two are not interchangeable: a selection still names an index out
+	// of Videos, which is the only list runEntry.holdsFile validates a
+	// decision against.
+	//
+	// Why both, rather than this one plus a per-entry flag: "which files can
+	// be captured" is swarm's judgement, not a property of a path (a
+	// video-extension file small enough beside its siblings is a sample and
+	// is deliberately not in Videos), so a consumer must be told the answer
+	// rather than re-derive it from a name. Sending the two lists is how it
+	// is told - one is the whole truth about the torrent, the other is what
+	// this program will do with it.
+	Files []swarm.FileInfo
 	// Downloaded is what learning this cost, which should be metadata only.
 	Downloaded int64
 }
 
-// List reports a torrent's video files and stops there.
+// List reports what a torrent holds - every file, and which of them are
+// video - and stops there.
 //
 // Choosing which file to look at should not cost what looking at it costs, so
 // this fetches the metadata and detaches again without opening the bridge or
@@ -77,6 +93,7 @@ func (e *Engine) List(ctx context.Context, cfg Config) (Contents, error) {
 		InfoHash:   torrent.InfoHash(),
 		Private:    torrent.Private(),
 		Videos:     torrent.Videos(),
+		Files:      torrent.Files(),
 		Downloaded: downloaded,
 	}, nil
 }
