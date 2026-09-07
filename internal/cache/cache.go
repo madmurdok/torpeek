@@ -111,6 +111,28 @@ type Run struct {
 	// union across reruns would report a spread no single run achieved -
 	// exactly the wrong answer for a picture of what one run cost. It follows
 	// Plan, which is likewise simply overwritten by whichever run wrote last.
+	//
+	// NOTHING RENDERS THIS ANY MORE, and that is a correction rather than a
+	// deprecation (TOR-179). The piece strip was drawn from it (TOR-111 by
+	// way of web.reachOf) and could not be, for a reason the paragraph above
+	// states without noticing the consequence: a top-up (TOR-152) works only
+	// the points an earlier run missed, so the last writer's traversal is the
+	// two pieces it needed while twenty frames sit on disk describing the
+	// whole file. The strip stood beside a frame grid that IS cumulative, and
+	// the two disagreed by construction. It now draws from
+	// manifest.Frame.ByteRanges instead - a record on each frame, which
+	// accumulates because the frames do and survives the pieces being
+	// discarded.
+	//
+	// WHAT IT IS STILL FOR, and why it is kept rather than deleted along with
+	// its one reader: it is the only durable record of what ONE traversal
+	// ordered, torrent-wide, and that includes every read no frame owns - the
+	// container inspection at the start of each file, and anything the bridge
+	// served between capture points. The per-frame ranges cannot express that
+	// and should not try to; they are file-scoped and frame-scoped by
+	// definition. The two are not two answers to one question, and a reader
+	// choosing between them has this rule: what did this run cost, here; and
+	// where did this frame come from, on the frame.
 	Claimed [][2]int `json:"claimed,omitempty"`
 }
 

@@ -2431,16 +2431,27 @@ function renderFrames(fentry) {
   fentry.grid.replaceChildren(...gridCells(fentry).map((cell) => frameFigure(cell, fentry)));
 }
 
-// renderReach draws how much of the file a run actually ordered from the
-// swarm (TOR-111): a strip of blocks along the file with the claimed stretches
+// renderReach draws where in the file this set's frames were actually taken
+// from (TOR-111): a strip of blocks along the file with those stretches
 // marked, plus the swarm chip TOR-142 added and TOR-153 moved onto this row.
 // 44 of 270 pieces is the argument of the whole product and we could only
 // state it as a sentence.
 //
-// WHICH SET. A claim belongs to a run, so the strip is one set's, not the
-// merged grid's - and the set drawn is the one with the most capture points,
-// which is the set the grid is mostly showing. Stated in the caption rather
-// than left for the reader to wonder about.
+// WHERE THE DATA COMES FROM, which TOR-179 changed under this function
+// without changing its shape. It used to be the last run's own claim log
+// (cache.Run.Claimed): one traversal, overwritten by whichever run wrote
+// last. A top-up (TOR-152) works only the points an earlier run missed, so
+// that log said "a couple of blocks at the end" while twenty frames on disk
+// covered the whole file - the strip and the frame grid beside it disagreed
+// by construction, which is the bug the owner reported. Each frame now
+// records its own byte ranges in the manifest (manifest.Frame.ByteRanges),
+// and reach.claimed is the union of them: cumulative because the frames are,
+// durable because the manifest is.
+//
+// WHICH SET. The ranges belong to the frames of one set, so the strip is one
+// set's, not the merged grid's - and the set drawn is the one with the most
+// capture points, which is the set the grid is mostly showing. Stated in the
+// caption rather than left for the reader to wonder about.
 //
 // WHAT IS NOT DRAWN, and this is a deliberate refusal, twice over now.
 // TOR-111 already refused to mark capture points as TIMES on this BYTES
@@ -2467,21 +2478,24 @@ function renderReach(fentry, sets) {
   const el = fentry.reach;
   if (!el) return;
 
-  // ABSENT IS NOT ZERO. A run recorded before the claims were kept (TOR-119
-  // added them without bumping cache.Version), or one that simply hasn't
-  // claimed anything yet, has nothing to say about WHERE it reached - so the
-  // strip hatches instead of rendering full or empty, neither of which would
-  // be true, and the row stays visible rather than hiding outright (as it
-  // did before TOR-153) because the swarm chip beside it doesn't depend on
-  // this file's own claims and has its own reading to show regardless.
+  // ABSENT IS NOT ZERO. A set whose manifest was written before the frames
+  // recorded where they came from (TOR-179 added the field without bumping
+  // manifest.Version, so those results stay readable and simply cannot say)
+  // has nothing to say about WHERE its frames came from - so the strip
+  // hatches instead of rendering full or empty, neither of which would be
+  // true, and the row stays visible rather than hiding outright (as it did
+  // before TOR-153) because the swarm chip beside it doesn't depend on this
+  // file's own frames and has its own reading to show regardless. The server
+  // omits reach entirely for that case rather than sending an empty one
+  // (web.reachOf), which is what this filter reads.
   const withReach = (sets || []).filter((s) => s.reach && s.reach.pieces > 0);
   const known = withReach.length > 0;
   fentry.reachStrip.dataset.known = String(known);
   if (!known) {
     fentry.reachStrip.replaceChildren();
     fentry.reachStrip.setAttribute("aria-label",
-      "This file's span of the torrent is not known yet - no claim has been recorded for it");
-    fentry.reachNote.textContent = "capture points not recorded for this file yet";
+      "Where this file's frames came from is not recorded - the set was captured before that was kept");
+    fentry.reachNote.textContent = "where the frames came from was not recorded for this set";
     el.hidden = false;
     renderAvail(fentry);
     return;
@@ -2546,18 +2560,26 @@ function renderReach(fentry, sets) {
     : pct < 10 ? pct.toFixed(1) + "%"
     : pct.toFixed(0) + "%";
   const parts = [
-    reach.claimed_pieces + " of " + reach.pieces + " pieces ordered (" + pctText + ")",
+    reach.claimed_pieces + " of " + reach.pieces + " pieces the frames came from (" + pctText + ")",
     bytesLabel(reach.claimed_pieces * reach.piece_bytes) + " of " +
       bytesLabel(reach.pieces * reach.piece_bytes),
   ];
   // The aggregation is stated, never silently faked: a block standing for
-  // several pieces is shaded by how many of them were ordered.
+  // several pieces is shaded by how many of them the frames came from.
   if (per > 1) parts.push("each block is " + Math.round(per) + " pieces");
+  // PARTIAL KNOWLEDGE IS SAID OUT LOUD, and this is the one case where the
+  // strip is a floor rather than an answer: a set topped up onto one captured
+  // before TOR-179 knows where its newer points came from and nothing about
+  // its older ones, so the union under-reports and no drawing can tell. The
+  // whole-set case says nothing extra, because there is nothing missing.
+  if (reach.located < reach.captured) {
+    parts.push(reach.located + " of " + reach.captured + " frames say where they came from");
+  }
   if (withReach.length > 1) parts.push("set " + set.params.slice(0, 8));
 
   fentry.reachNote.textContent = parts.join(" · ");
   fentry.reachStrip.setAttribute("aria-label",
-    "Pieces of this file the run ordered: " + reach.claimed_pieces + " of " + reach.pieces);
+    "Pieces of this file the frames came from: " + reach.claimed_pieces + " of " + reach.pieces);
   el.hidden = false;
   renderAvail(fentry);
 }

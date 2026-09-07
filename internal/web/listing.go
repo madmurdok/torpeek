@@ -9,6 +9,7 @@ import (
 
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/manifest"
 	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
@@ -157,7 +158,9 @@ type RunSummary struct {
 // drawn that same "absent, not zero" line five times: TOR-119 for claimed
 // pieces, TOR-111 for reach, TOR-135 for availability, TOR-134 for rates,
 // and wire.go's progress event itself (TOR-147) - this is the sixth, at the
-// listing rather than the event stream.
+// listing rather than the event stream. TOR-179 makes seven, on
+// manifest.Frame.ByteRanges - the manifest side of the very field TOR-119
+// drew the line for in run.json.
 //
 // Kept as one struct rather than five independent optional fields because
 // Peers/Seeds/DownloadBps/UploadBps/Swarm all arrive together on one
@@ -614,34 +617,46 @@ type FrameSet struct {
 	// smaller Frames than Count, only a Frames with fewer URLs in it.
 	Count  int `json:"count"`
 	Frames int `json:"frames"`
-	// Reach is how much of this file's own stretch of the torrent the run
-	// that wrote this set actually ordered (TOR-111). It hangs off the SET
-	// rather than off the file because a claim belongs to a run: two sets of
-	// one file are two runs that reached differently.
+	// Reach is how much of this file's own stretch of the torrent this set's
+	// frames were taken from (TOR-111, re-sourced by TOR-179). It hangs off
+	// the SET rather than off the file because the frames do: two sets of one
+	// file are two plans, captured from different places.
 	//
-	// Absent, not empty, for a run recorded before the claims were kept
-	// (TOR-119 added them without bumping cache.Version, so older records
-	// stay readable and simply have nothing to say here). A strip drawn from
-	// an absent reach would assert that a run touched nothing.
+	// Absent, not empty, when nothing in the set can say - a manifest written
+	// before manifest.Frame.ByteRanges existed (added without bumping
+	// manifest.Version, so older results stay readable and simply have
+	// nothing to say here). A strip drawn from an absent reach would assert
+	// that a run touched nothing.
 	Reach *Reach `json:"reach,omitempty"`
 }
 
-// Reach is one file's slice of what a run ordered from the swarm: where the
+// Reach is one file's slice of what a set's frames were taken from: where the
 // file starts in the torrent's pieces, how many pieces it spans, and which of
-// those the run claimed.
+// those the frames came out of.
 //
 // 44 of 270 pieces is the argument of the whole product and we could only say
 // it as a sentence. This is the shape a picture of it needs, and every field
-// comes off disk rather than from a new measurement: the claims from
-// run.json's own record, the piece length from the manifest, the file's offset
-// and length from the run record.
+// comes off disk rather than from a new measurement: the ranges from the
+// frames' own records in the manifest (manifest.Frame.ByteRanges), the piece
+// length from the manifest too, the file's offset and length from the run
+// record.
+//
+// IT IS NO LONGER DRAWN FROM cache.Run.Claimed, which is what TOR-179
+// changed and why: that field is one traversal's claim log, overwritten by
+// whichever run wrote last, so a topped-up set showed the couple of pieces
+// the top-up needed beside a frame grid holding twenty frames' worth of
+// coverage. The per-frame ranges accumulate because the frames do - a reused
+// frame carries its own (core.reusableFrames) - so the union over a set's
+// frames is the set's coverage however many runs built it. Run.Claimed's own
+// doc now says it is not this.
 //
 // Claimed is in pieces counted FROM FirstPiece, half-open, ascending and
-// non-touching - the same shape swarm.ClaimedRanges produces, clipped to this
-// file. Offsets rather than absolute indices so a drawing does not have to
-// subtract, and because the interesting axis is the file, not the torrent: a
-// run over one file of a six-file torrent claims pieces in the thousands and
-// none of that is where the picture wants its origin.
+// non-touching, coalesced across every frame - the frames overlap heavily,
+// since each one's ffprobe re-reads the container header. Offsets rather than
+// absolute indices so a drawing does not have to subtract, and because the
+// interesting axis is the file, not the torrent: a run over one file of a
+// six-file torrent claims pieces in the thousands and none of that is where
+// the picture wants its origin.
 type Reach struct {
 	FirstPiece int   `json:"first_piece"`
 	Pieces     int   `json:"pieces"`
@@ -650,17 +665,41 @@ type Reach struct {
 	// the ranges - and so the two can be checked against each other.
 	ClaimedPieces int      `json:"claimed_pieces"`
 	Claimed       [][2]int `json:"claimed"`
+	// Captured is how many of this set's points produced a frame, and Located
+	// how many of those say where they came from. Deliberately NOT named
+	// Frames, which FrameSet above already uses for a third count: two facts
+	// that look like one is the trap QueuePosition and Arrival are named
+	// apart for, and this payload carries both objects at once.
+	//
+	// The pair exists for the one state the strip cannot otherwise be honest
+	// about: a set TOPPED UP onto one written before the ranges existed knows
+	// the provenance of its newer points and nothing about its older ones, so
+	// its coverage is a floor rather than an answer. Equal counts mean the
+	// coverage is the whole story; Located below Captured means it is part of
+	// it, and the caption says so rather than letting a reader take a partial
+	// union for the set's full reach.
+	Captured int `json:"captured"`
+	Located  int `json:"located"`
 }
 
-// reachOf turns a run's torrent-wide piece claims into one file's stretch.
+// reachOf turns a set's per-frame byte ranges into one file's stretch of
+// pieces.
 //
-// Reports nil rather than a zeroed Reach whenever it cannot answer: no claims
-// recorded (a pre-TOR-119 record), no piece length (a manifest old enough not
-// to carry one), or a file whose length is zero. Each of those is "nothing to
-// say", which a drawing must render as nothing rather than as a run that
-// touched none of the file.
-func reachOf(claimed [][2]int, file cache.File, pieceBytes int64) *Reach {
-	if len(claimed) == 0 || pieceBytes <= 0 || file.Bytes <= 0 {
+// Reports nil rather than a zeroed Reach whenever it cannot answer: no piece
+// length (a manifest old enough not to carry one), a file whose length is
+// zero, no captured frame at all, or not one captured frame that records
+// where it came from - a manifest written before manifest.Frame.ByteRanges
+// existed. Each of those is "nothing to say", which a drawing must render as
+// nothing rather than as a run that touched none of the file, and the last of
+// them is the whole reason the field could be added without bumping
+// manifest.Version.
+//
+// A FAILED POINT IS NOT ASKED. It has no frame for a range to be the
+// provenance of, and it is already marked as failed by Shift and Error, so
+// counting its silence towards "nobody knows" would let one unreachable point
+// hide what nineteen good frames plainly record.
+func reachOf(frames []manifest.Frame, file cache.File, pieceBytes int64) *Reach {
+	if pieceBytes <= 0 || file.Bytes <= 0 {
 		return nil
 	}
 
@@ -668,27 +707,102 @@ func reachOf(claimed [][2]int, file cache.File, pieceBytes int64) *Reach {
 	last := int((file.Offset + file.Bytes - 1) / pieceBytes)
 	out := &Reach{FirstPiece: first, Pieces: last - first + 1, PieceBytes: pieceBytes}
 
-	for _, r := range claimed {
-		begin, end := r[0], r[1]
-		if begin < first {
-			begin = first
-		}
-		if end > last+1 {
-			end = last + 1
-		}
-		if end <= begin {
-			// A claim entirely outside this file - another file of the same
-			// torrent, or the metadata pieces at the front.
+	ranges := make([][2]int, 0, len(frames))
+	for _, f := range frames {
+		if f.Shift == manifest.ShiftFailed || f.Path == "" {
 			continue
 		}
-		out.Claimed = append(out.Claimed, [2]int{begin - first, end - first})
-		out.ClaimedPieces += end - begin
+		out.Captured++
+		if len(f.ByteRanges) == 0 {
+			continue
+		}
+		out.Located++
+		for _, r := range f.ByteRanges {
+			if pieces, ok := pieceSpanOf(r, file, pieceBytes); ok {
+				ranges = append(ranges, [2]int{pieces[0] - first, pieces[1] - first})
+			}
+		}
+	}
+	if out.Captured == 0 || out.Located == 0 {
+		return nil
 	}
 
-	// A run whose claims all fall outside this file reached none of it, which
-	// is an answer rather than a silence: it is returned with no ranges, and a
-	// strip of untouched blocks is the truthful drawing of it. Only the cases
-	// above, where nothing was recorded to reason from, are nil.
+	// A set whose frames record ranges that all fall outside this file - which
+	// no run of ours writes, the ranges being this file's own offsets - would
+	// come back with a geometry and no ranges, and a strip of untouched blocks
+	// is the truthful drawing of that. Only the cases above, where nothing was
+	// recorded to reason from, are nil.
+	out.Claimed = coalescePieceRanges(ranges)
+	for _, r := range out.Claimed {
+		out.ClaimedPieces += r[1] - r[0]
+	}
+	return out
+}
+
+// pieceSpanOf maps one frame's byte range within a file onto the absolute
+// piece indices holding it, reporting ok=false for a range that says nothing.
+//
+// Expanded to whole pieces, because a piece is the swarm's unit of exchange
+// and the strip's own unit - the same expansion swarm.PieceRangeFor makes on
+// the way out, run backwards. That is what makes the round trip exact: a claim
+// was whole pieces before it was clipped to the file
+// (swarm.Torrent.fileBytesOf), so expanding the clipped bytes lands on the
+// very pieces that were ordered, no wider and no narrower.
+//
+// The range is clamped into the file first. Nothing this project writes needs
+// it - the engine records offsets within the file it read - but the record
+// comes off disk, and one byte past the end would put a piece index past the
+// strip's own axis.
+func pieceSpanOf(r [2]int64, file cache.File, pieceBytes int64) ([2]int, bool) {
+	begin, end := r[0], r[1]
+	if begin < 0 {
+		begin = 0
+	}
+	if end > file.Bytes {
+		end = file.Bytes
+	}
+	if end <= begin {
+		return [2]int{}, false
+	}
+	return [2]int{
+		int((file.Offset + begin) / pieceBytes),
+		int((file.Offset+end-1)/pieceBytes) + 1,
+	}, true
+}
+
+// coalescePieceRanges sorts piece ranges and merges the ones that touch or
+// overlap, so what a drawing gets is a map rather than a bag.
+//
+// It has to merge rather than concatenate because the input is one range set
+// per frame and the frames genuinely overlap: every capture point's ffprobe
+// re-reads the container header, so twenty frames of one file all carry its
+// first pieces. swarm.coalesceSpans is the same rule one conversion earlier,
+// on byte offsets within one point rather than piece indices across a set.
+func coalescePieceRanges(ranges [][2]int) [][2]int {
+	if len(ranges) == 0 {
+		return nil
+	}
+
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i][0] != ranges[j][0] {
+			return ranges[i][0] < ranges[j][0]
+		}
+		return ranges[i][1] < ranges[j][1]
+	})
+
+	out := [][2]int{ranges[0]}
+	for _, r := range ranges[1:] {
+		last := &out[len(out)-1]
+		if r[0] <= last[1] {
+			// Touches or overlaps. Max rather than assignment: a short range
+			// wholly inside a longer earlier one must not shorten it.
+			if r[1] > last[1] {
+				last[1] = r[1]
+			}
+			continue
+		}
+		out = append(out, r)
+	}
 	return out
 }
 

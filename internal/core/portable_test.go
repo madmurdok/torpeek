@@ -516,3 +516,49 @@ func TestRecordedSourceOfAMovedTorrentRunStaysPasteable(t *testing.T) {
 		t.Errorf("recorded source names infohash %s, want %s", hash.HexString(), infoHash)
 	}
 }
+
+// TestAnEarlierReleasesManifestKnowsNoFrameProvenance is TOR-179's half of the
+// same trap TestReplayOfARunWrittenByAnEarlierRelease guards above, on the
+// same REAL 0.7.0 record rather than a paraphrase of one.
+//
+// manifest.Frame.ByteRanges was added WITHOUT bumping manifest.Version - the
+// TOR-52 trap: a bump turns every manifest already on disk into a miss rather
+// than an older shape to read. So the captured record must still LOAD, and
+// every frame in it must come back with no ranges at all. Nil, not empty:
+// "this build cannot say where these came from" and "these came from nowhere"
+// are opposite answers, and the strip draws them differently
+// (web.reachOf reports no reach at all for the first, which app.js hatches).
+func TestAnEarlierReleasesManifestKnowsNoFrameProvenance(t *testing.T) {
+	if strings.Contains(manifest07Shape, "byte_ranges") {
+		t.Fatal("the 0.7.0 fixture has grown a byte_ranges field; it must stay the captured record")
+	}
+
+	root := t.TempDir()
+	layout := output.Layout{Root: root, InfoHash: sevenHash, Params: sevenParams}
+	fileDir := layout.FileDir(0, sevenFile)
+	if err := os.MkdirAll(filepath.Join(fileDir, "frames"), 0o755); err != nil {
+		t.Fatalf("create the frames directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fileDir, manifest.Name), []byte(manifest07Shape), 0o600); err != nil {
+		t.Fatalf("write the 0.7.0 manifest: %v", err)
+	}
+
+	m, ok := cache.LoadManifest(fileDir)
+	if !ok {
+		t.Fatal("a manifest written before ByteRanges existed became a miss - the field was " +
+			"added without bumping manifest.Version precisely so this could not happen")
+	}
+	if len(m.Frames) != 3 {
+		t.Fatalf("the 0.7.0 manifest read back %d frames, want 3", len(m.Frames))
+	}
+	for _, f := range m.Frames {
+		if f.ByteRanges != nil {
+			t.Errorf("frame %d of a 0.7.0 manifest claims to have come from %v; it cannot know",
+				f.Index, f.ByteRanges)
+		}
+	}
+	// And adding the field cost the older record nothing else it did carry.
+	if m.Torrent.PieceLength == 0 || m.File.Bytes == 0 || m.Frames[0].ActualMS == nil {
+		t.Errorf("adding ByteRanges cost the 0.7.0 record its other fields: %+v", m)
+	}
+}

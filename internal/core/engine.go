@@ -790,8 +790,22 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		}
 
 		stalls, _ := deps.bridge.Stalls(url)
+		// TOR-179: from here to EndClaimLog below is this point's own window
+		// on the swarm, and the only interval in which its footprint exists -
+		// swarm's claim figures are cumulative across the run and cannot be
+		// attributed to a point after the fact (StartClaimLog says so in
+		// full). Opened before captureOne because the keyframe query is
+		// already a read, and closed after rejectBlank because a step onto a
+		// neighbouring keyframe is still this point ordering pieces.
+		deps.torrent.StartClaimLog(file.Index)
 		shot, err := e.captureOne(ctx, cfg, deps, url, file, info.Duration, at, tolerance/4)
 		if err != nil {
+			// Closed and discarded: a point that produced nothing has no
+			// frame for a provenance to belong to, and recording what it
+			// ordered anyway would put a range on a record whose Path is
+			// empty (manifest.Frame.ByteRanges: empty on a failed point).
+			deps.torrent.EndClaimLog(file.Index)
+
 			// Same reasoning as at the inspect above, and this is where it was
 			// actually caught: a keyframe query whose read timed out comes
 			// back as "no keyframe with a byte position", which is a statement
@@ -852,6 +866,11 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		// point: a deliberate shift is not a failed seek, and confusing the
 		// two would throw away the frame the shift went to find.
 		if !landedNear(shot.asked, shot.actual, tolerance) {
+			// Discarded for the same reason as the branch above: this point is
+			// about to be recorded as failed, and the frame that was decoded
+			// is not being kept.
+			deps.torrent.EndClaimLog(file.Index)
+
 			skipped++
 			records = append(records, manifest.Frame{
 				Index:       i,
@@ -887,6 +906,11 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		// can only be judged once a frame exists to look at.
 		shot = e.rejectBlank(ctx, deps, url, tolerance/4, shot)
 
+		// This point's footprint, closed before anything can fail below:
+		// whatever becomes of the write, no later point's reads may be
+		// attributed to this one.
+		byteRanges := deps.torrent.EndClaimLog(file.Index)
+
 		path, err := deps.writer.WriteFrame(file.Index, file.Path, i, shot.frame.Data, extensionFor(cfg.Format))
 		if err != nil {
 			return produced, false, Fail(CodeStorage, err)
@@ -904,6 +928,11 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 			Shift:  manifest.Shift(shot.shift),
 			Width:  shot.frame.Width,
 			Height: shot.frame.Height,
+			// Where in the file this came from (TOR-179), so the answer
+			// outlives the pieces it was read from and accumulates across
+			// runs: a top-up reuses this record wholesale (reusableFrames),
+			// carrying the provenance of a point it never re-took.
+			ByteRanges: byteRanges,
 		})
 
 		// Actual almost never equals Requested: decoding starts at the

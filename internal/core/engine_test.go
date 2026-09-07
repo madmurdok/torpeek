@@ -1818,3 +1818,341 @@ func TestClaimedPairsKeepsNothingAsNothing(t *testing.T) {
 		t.Errorf("claimedPairs = %v, want %v", got, want)
 	}
 }
+
+// TOR-179: every frame records where in the file it came from.
+
+// fineGrainedTorrent is multiFileTorrent's clip at a piece size small enough
+// for one capture point's footprint to be a fraction of the file rather than
+// all of it. 16 KiB against the usual 256 KiB, over a ~670 KB clip: forty-odd
+// pieces to spread four capture points across, which is what lets a test tell
+// "recorded where this frame came from" apart from "recorded the whole file".
+func fineGrainedTorrent(t *testing.T, tools ffmpeg.Tools) (torrentPath, seeder string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	path := filepath.Join(dir, "episode-1.mkv")
+	if _, err := tools.Run(ctx, "ffmpeg",
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=640x360:rate=25:duration=30",
+		"-c:v", "libx264", "-g", "50", "-pix_fmt", "yuv420p", "-b:v", "200k",
+		path,
+	); err != nil {
+		t.Fatalf("render clip: %v", err)
+	}
+
+	fixture := torrenttest.BuildDir(t, dir, 16<<10)
+	return fixture.TorrentPath, fixture.StartSeeder(t)
+}
+
+// loadOnlyManifest finds the one manifest a single-file run wrote and reads it
+// back the way every consumer does - through cache.LoadManifest, so what is
+// checked is the record on disk rather than anything the run still held.
+func loadOnlyManifest(t *testing.T, outputRoot string) (manifest.Manifest, cache.Run) {
+	t.Helper()
+
+	var m manifest.Manifest
+	var run cache.Run
+	found := 0
+	err := filepath.WalkDir(outputRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		switch d.Name() {
+		case manifest.Name:
+			if loaded, ok := cache.LoadManifest(filepath.Dir(path)); ok {
+				m, found = loaded, found+1
+			}
+		case cache.Name:
+			if loaded, ok := cache.LoadRun(filepath.Dir(path)); ok {
+				run = loaded
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the output tree: %v", err)
+	}
+	if found != 1 {
+		t.Fatalf("found %d readable manifests under %s, want exactly 1", found, outputRoot)
+	}
+	if run.InfoHash == "" {
+		t.Fatal("the run wrote no readable run record")
+	}
+	return m, run
+}
+
+// TestEveryFrameRecordsWhereInTheFileItCameFrom is TOR-179's acceptance
+// criterion against a real run: the answer to "where did this screenshot come
+// from" has to be on the frame, on disk, once the run is over and its pieces
+// are gone.
+//
+// The strong part is the last check rather than the presence of the field.
+// Every range a frame carries is turned back into pieces and required to be a
+// piece the run's OWN claim log lists (cache.Run.Claimed) - two records built
+// by different code down different paths, one per point and one per run, which
+// have to agree about what was ordered. A per-point log that drifted, or a
+// byte/piece conversion off by one, breaks that and cannot break it quietly.
+//
+// THE GEOMETRY IS DELIBERATELY FINE, and that is what makes this more than a
+// presence check. TestTheRunRecordSaysWhereTheRunReached costs out why the
+// ordinary fixture cannot show a spread: testsrc caps out near 1.6 MB whatever
+// bitrate is asked for, so the whole file is smaller than min-traffic's 1 MiB
+// window and every point covers all of it. Here the torrent is built with
+// 16 KiB pieces and the profile's window is narrowed to match, so a capture
+// point's footprint is a few pieces of forty rather than the file - which is
+// the shape the whole feature exists for, and the shape a frame that recorded
+// the wrong region could not fake.
+//
+// WHAT THIS FIXTURE MEASURED, and it is a real limit of the record rather than
+// of the test. At 16 KiB pieces the four points come out as three records of
+// just [0,32768) and one of [0,32768) plus two stretches around 76-88% of the
+// file. That is not a bug in the attribution: a range is claimed only where
+// ffmpeg ASKS for one, the bridge deliberately claims only the HEAD of each
+// requested range (bridge's Fetch, TOR-88), and on a file this small ffmpeg
+// opens `bytes=0-` and reads forward - so everything past the head arrives as
+// the reader's readahead, which is a hint rather than an order and is excluded
+// from every claim figure this project keeps (swarm.noteClaimed's own doc).
+// The point that DID seek recorded exactly where it seeked to, which is the
+// behaviour a real film-sized file gives every point.
+func TestEveryFrameRecordsWhereInTheFileItCameFrom(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := fineGrainedTorrent(t, tools)
+
+	cfg := runConfig(t, torrentPath, seeder)
+	cfg.Swarm.Peers = []string{seeder}
+	// Narrowed to one piece of this fixture's geometry. WindowSize rounds a
+	// window up to whole pieces anyway (swarm.Profile.WindowSize), so this
+	// asks for the smallest claim the torrent can serve rather than a size
+	// the swarm would ignore.
+	cfg.Profile = swarm.Profile{Name: swarm.MinTraffic.Name, Readahead: 16 << 10, Window: 16 << 10}
+	cfg.Plan = frames.Plan{Count: 4, Start: 0.1, End: 0.9}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, ev := range collect(t, events) {
+		if f, ok := ev.(Failed); ok {
+			t.Fatalf("run failed: %s: %v", f.Code, f.Err)
+		}
+	}
+
+	m, run := loadOnlyManifest(t, cfg.OutputRoot)
+	file, ok := fileEntryOf(run, m.File.Index)
+	if !ok {
+		t.Fatalf("the run record does not list file %d", m.File.Index)
+	}
+
+	// The pieces the run itself says it ordered, as a set to check against.
+	ordered := map[int]bool{}
+	for _, r := range run.Claimed {
+		for i := r[0]; i < r[1]; i++ {
+			ordered[i] = true
+		}
+	}
+	if len(ordered) == 0 {
+		t.Fatal("the run record claims no pieces at all, so there is nothing to check against")
+	}
+
+	captured := 0
+	for _, f := range m.Frames {
+		if f.Shift == manifest.ShiftFailed || f.Path == "" {
+			if f.ByteRanges != nil {
+				t.Errorf("point %d produced no frame but claims to have come from %v",
+					f.Index, f.ByteRanges)
+			}
+			continue
+		}
+		captured++
+		if len(f.ByteRanges) == 0 {
+			t.Errorf("frame %d records no ranges - a captured point cannot have been taken "+
+				"without ordering anything", f.Index)
+			continue
+		}
+		for i, r := range f.ByteRanges {
+			if r[1] <= r[0] {
+				t.Errorf("frame %d carries an empty or inverted range %v", f.Index, r)
+			}
+			if r[0] < 0 || r[1] > m.File.Bytes {
+				t.Errorf("frame %d came from %v, outside the file's own %d bytes",
+					f.Index, r, m.File.Bytes)
+			}
+			if i > 0 && r[0] <= f.ByteRanges[i-1][1] {
+				t.Errorf("frame %d's ranges %v and %v touch or overlap; they should have coalesced",
+					f.Index, f.ByteRanges[i-1], r)
+			}
+
+			// The cross-check: every piece behind a frame's range is a piece
+			// the run's own log says it ordered.
+			first := int((file.Offset + r[0]) / m.Torrent.PieceLength)
+			last := int((file.Offset + r[1] - 1) / m.Torrent.PieceLength)
+			for p := first; p <= last; p++ {
+				if !ordered[p] {
+					t.Errorf("frame %d says it came from bytes %v, which is piece %d - "+
+						"a piece the run's own claim log %v does not list",
+						f.Index, r, p, run.Claimed)
+				}
+			}
+		}
+		t.Logf("frame %d came from %v of %d bytes", f.Index, f.ByteRanges, m.File.Bytes)
+	}
+	if captured == 0 {
+		t.Fatal("the run captured no frame at all, so nothing here was actually checked")
+	}
+}
+
+// fileEntryOf is the file's own offset and length out of the run record - the
+// only place a manifest's byte offsets can be turned into torrent pieces,
+// since the manifest deliberately does not carry where the file sits
+// (manifest.Frame.ByteRanges says why).
+func fileEntryOf(run cache.Run, index int) (cache.File, bool) {
+	for _, v := range run.Videos {
+		if v.Index == index {
+			return v, true
+		}
+	}
+	return cache.File{}, false
+}
+
+// TestATopUpKeepsWhereTheEarlierRunsFramesCameFrom is the acceptance criterion
+// that the per-run claim log could not meet, and the case the owner reported:
+// a set built over SEVERAL runs must end up describing the whole of what its
+// frames cover, not just the last run's traversal.
+//
+// The mechanism is that a reused frame carries its own record
+// (core.reusableFrames copies the whole manifest.Frame), so this checks
+// exactly that: the frames the first run took are byte-for-byte the same
+// records afterwards, provenance included, while the frames the second run
+// added have their own. Nothing merges and nothing is re-derived - which is
+// the whole argument for putting the record on the frame.
+//
+// Stopped by cancelling rather than by a byte ceiling, for the reason
+// TestSecondRunFillsTheGapsRatherThanStartingOver states: where a budget lands
+// depends on how the clip compressed, and a test that needs "some but not all"
+// cannot be left to that.
+func TestATopUpKeepsWhereTheEarlierRunsFramesCameFrom(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, seeder := multiFileTorrent(t, tools, 1, 60, "600k")
+
+	out := t.TempDir()
+	base := DefaultConfig(torrentPath, out, t.TempDir())
+	base.Swarm.DHT = false
+	base.Swarm.MetadataTimeout = 10 * time.Second
+	base.Swarm.Peers = []string{seeder}
+	base.Profile = swarm.MinTraffic
+	base.Plan = frames.Plan{Count: 8, Start: 0.1, End: 0.9}
+	base.Parallelism = 1
+	base.Budget = Budget{MaxBytes: 64 << 20, MaxTime: 4 * time.Minute, WarnAt: 0.8}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
+	defer cancel()
+
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+
+	events, err := NewEngine(tools).Run(runCtx, base)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	const stopAfter = 3
+	produced := 0
+	for ev := range events {
+		if _, ok := ev.(FrameReady); ok {
+			produced++
+			if produced == stopAfter {
+				stop()
+			}
+		}
+	}
+	if produced == 0 || produced >= base.Plan.Count {
+		t.Fatalf("first run produced %d of %d frames; the test needs it stopped partway",
+			produced, base.Plan.Count)
+	}
+
+	before, _ := loadOnlyManifest(t, out)
+	first := map[int]manifest.Frame{}
+	for _, f := range before.Frames {
+		if f.Shift == manifest.ShiftFailed || f.Path == "" {
+			continue
+		}
+		if len(f.ByteRanges) == 0 {
+			t.Fatalf("the first run's frame %d recorded no ranges, so there is nothing for "+
+				"the top-up to keep", f.Index)
+		}
+		first[f.Index] = f
+	}
+	t.Logf("first run: %d frames, provenance for %d of them", produced, len(first))
+
+	events, err = NewEngine(tools).Run(ctx, base)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	var done *Done
+	for _, ev := range collect(t, events) {
+		switch e := ev.(type) {
+		case Failed:
+			t.Errorf("second run failed: %s: %v", e.Code, e.Err)
+		case Done:
+			done = &e
+		}
+	}
+	if done == nil || done.Reason != StopCompleted {
+		t.Fatalf("second run did not complete: %+v", done)
+	}
+
+	after, _ := loadOnlyManifest(t, out)
+	if len(after.Frames) != base.Plan.Count {
+		t.Fatalf("the topped-up manifest lists %d points, want %d",
+			len(after.Frames), base.Plan.Count)
+	}
+
+	kept := 0
+	for _, f := range after.Frames {
+		if f.Shift == manifest.ShiftFailed || f.Path == "" {
+			t.Errorf("point %d is still unfilled after the top-up: %s", f.Index, f.Error)
+			continue
+		}
+		if len(f.ByteRanges) == 0 {
+			t.Errorf("frame %d has no provenance after the top-up - a set built over two runs "+
+				"must describe all of what its frames cover, which is the bug this fixes", f.Index)
+			continue
+		}
+		earlier, reused := first[f.Index]
+		if !reused {
+			continue
+		}
+		kept++
+		if len(f.ByteRanges) != len(earlier.ByteRanges) {
+			t.Errorf("reused frame %d came back with %v, the first run recorded %v",
+				f.Index, f.ByteRanges, earlier.ByteRanges)
+			continue
+		}
+		for i := range earlier.ByteRanges {
+			if f.ByteRanges[i] != earlier.ByteRanges[i] {
+				t.Errorf("reused frame %d came back with %v, the first run recorded %v",
+					f.Index, f.ByteRanges, earlier.ByteRanges)
+				break
+			}
+		}
+	}
+	if kept != len(first) {
+		t.Errorf("the top-up carried the provenance of %d of the first run's %d frames",
+			kept, len(first))
+	}
+
+	// And the point the claim log could not make: the second run's own
+	// traversal is not what the frames say, because it only worked the points
+	// the first run missed. Logged rather than asserted as an inequality -
+	// this fixture's file is smaller than min-traffic's window, so both cover
+	// all of it here (TestTheRunRecordSaysWhereTheRunReached costs that out);
+	// the disagreement is proved on set geometry in web's own tests.
+	_, run := loadOnlyManifest(t, out)
+	t.Logf("the second run's own claim log is %v; the frames between them describe %d points",
+		run.Claimed, len(after.Frames))
+}

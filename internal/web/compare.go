@@ -105,10 +105,11 @@ type resultSet struct {
 	DurationMS    int64
 	Width, Height int
 	Frames        []FrameRef
-	// Reach is how much of this file the run ordered (TOR-111), nil when the
-	// record has nothing to say. Computed here because this is where the run
-	// record, the manifest's piece length and the file's own offset are all
-	// already in hand.
+	// Reach is how much of this file this set's frames were taken from
+	// (TOR-111, re-sourced onto the frames themselves by TOR-179), nil when
+	// nothing in the manifest can say. Computed here because this is where
+	// the manifest's frames and piece length and the file's own offset from
+	// the run record are all already in hand.
 	Reach *Reach
 }
 
@@ -140,7 +141,11 @@ func (s *Server) loadResultSet(infoHash, params string, index int) (resultSet, b
 		Width:      m.Video.Width, Height: m.Video.Height,
 	}
 	if file, ok := videoEntry(run, index); ok {
-		set.Reach = reachOf(run.Claimed, file, m.Torrent.PieceLength)
+		// From the manifest's frames, not run.Claimed: the run record holds
+		// only the last traversal's claim log, which a top-up shrinks to the
+		// points it worked (cache.Run.Claimed's own doc). The run record is
+		// still what says where this file sits in the torrent.
+		set.Reach = reachOf(m.Frames, file, m.Torrent.PieceLength)
 	}
 	for _, f := range m.Frames {
 		at := f.RequestedMS
