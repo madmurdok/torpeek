@@ -129,6 +129,10 @@ const el = {
   comparePlace: document.getElementById("compare-place"),
   compareTimes: document.getElementById("compare-times"),
   compareNote: document.getElementById("compare-note"),
+  // No id on this one in index.html - it is the scroll wrapper, not a
+  // control, and TOR-174 is the first thing that needs to read it from JS
+  // (syncRunDetailWidth, below).
+  runTableWrap: document.querySelector(".run-table-wrap"),
 };
 
 // Every torrent this page knows about lives here, keyed by run id - or, for a
@@ -1764,6 +1768,44 @@ async function retryRun(entry) {
 }
 
 // ---------------------------------------------------------------------------
+// THE DETAIL'S OWN WIDTH (TOR-174). app.css's .run-detail explains WHAT this
+// is for (sticky pins the offset, this sets the size) - this is WHERE the
+// number comes from and WHEN it gets recomputed.
+//
+// One shared custom property (--run-detail-w) on :root, the same pattern
+// applyColumnWidth already uses for --col-w-* - every open .run-detail reads
+// the same var(), so one write here keeps all of them current at once
+// instead of walking the open rows by hand.
+//
+// Called from three places, each somewhere the PANE's own width can change:
+//   - window resize, the obvious one;
+//   - setRunExpanded, because opening or closing a row changes the PAGE's
+//     height, which can add or remove the document's own vertical scrollbar
+//     and, with it, a few pixels of the viewport width .run-table-wrap was
+//     counting on;
+//   - endColumnDrag (below), because TOR-157 dragging a column changes the
+//     TABLE's width, not the pane's - .run-table-wrap's clientWidth is not
+//     expected to move from that alone, but a table that crosses the
+//     overflow threshold can gain or lose a horizontal scrollbar, and that
+//     is a real (if rare) way the pane's own box changes. Recomputing here
+//     costs one comparison and closes that gap rather than assume it never
+//     happens.
+// Deliberately NOT hooked to pointermove mid-drag: the pane's width does not
+// track a border being dragged frame by frame, only (rarely) the moment a
+// scrollbar appears or disappears, which the drag's end already covers.
+function syncRunDetailWidth() {
+  if (!el.runTableWrap) return;
+  const width = el.runTableWrap.clientWidth;
+  // 0 while the wrap is display:none or not yet laid out - leave the
+  // previous value (or app.css's own 100% fallback) rather than pin every
+  // open detail to zero.
+  if (width > 0) {
+    document.documentElement.style.setProperty("--run-detail-w", width + "px");
+  }
+}
+window.addEventListener("resize", syncRunDetailWidth);
+
+// ---------------------------------------------------------------------------
 // THE ACCORDION (TOR-138). A torrent's detail lives in its own row, and this
 // is the only function that may put one on screen or take it off.
 //
@@ -1795,6 +1837,11 @@ async function retryRun(entry) {
 // and reversible with the same click.
 function setRunExpanded(entry, expanded) {
   entry.expanded = expanded;
+  // TOR-174: either direction can change the page's own height (a detail
+  // coming on or off screen), which can add or remove the document's
+  // vertical scrollbar and with it a few pixels of .run-table-wrap's own
+  // width - see syncRunDetailWidth's own comment.
+  syncRunDetailWidth();
   // TOR-152: opening a row is when its top-up standing is worth reading off
   // disk - here rather than in toggleRun, because this is the one function
   // that may put a detail on screen (see this block's own heading) and
@@ -4444,6 +4491,10 @@ for (const th of el.sortHeaders) {
       // already lost - see lostpointercapture below) - nothing more to do.
     }
     saveColumnWidths(columnWidths);
+    // TOR-174: see syncRunDetailWidth's own comment for why a column drag,
+    // which changes the TABLE's width rather than the pane's, still gets a
+    // recheck here.
+    syncRunDetailWidth();
   }
   handle.addEventListener("pointerup", endColumnDrag);
   handle.addEventListener("pointercancel", endColumnDrag);

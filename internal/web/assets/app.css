@@ -949,7 +949,39 @@ button:disabled { opacity: .5; }
    edge would either be clipped or add a scrollbar. */
 .run-detail {
   min-width: 0;
-  position: relative;
+  /* TOR-174: sticky, not relative. .run-detail sits in a colspanned <td>
+     that is, by construction, as wide as the TABLE (every column's summed
+     width) rather than as wide as the PANE (.run-table-wrap's own visible
+     width) - table-layout: fixed (TOR-157) is exactly what lets those two
+     diverge, the moment a drag or a narrow window makes the columns sum to
+     more than the pane shows. `left: 0` pins this element's left edge to
+     the pane's own left edge as .run-table-wrap scrolls sideways under it -
+     the same primitive .run-table thead th already uses on top (vertical
+     axis) and .run-detail-header-actions already uses on right, both
+     resolving against this same scrolling ancestor.
+     VERIFIED LIVE, NOT ASSUMED: sticky inside table structures is exactly
+     the kind of thing the spec says one way and a browser does another (the
+     ticket's own warning). Checked in a real Chrome, on a real replayed run,
+     at two narrow panes (592px and 432px) and after a real column drag that
+     pushed the table to 1399px: dragging .run-table-wrap's own scrollbar
+     left this element's getBoundingClientRect() exactly unchanged - it does
+     not travel with the table underneath it. It holds.
+     THE TRAP: sticky constrains OFFSET, never SIZE. Without the `width`
+     below, this element would still be exactly as wide as its containing
+     block (the <td>, i.e. the table), and everything past the pane's own
+     right edge - the top-up figure among it - would just be dragged along
+     for the ride instead of left behind at scroll 0. `width` and
+     `box-sizing: border-box` are therefore not decoration; delete them and
+     the fix silently reverts to "sticky but still table-wide". app.js's
+     syncRunDetailWidth() is what keeps --run-detail-w current - see its own
+     comment for the three places that call it. The 100% fallback is what
+     this element is before that first runs (there is no visible row before
+     a row is expanded, and expansion is exactly when it does run, but the
+     fallback keeps a detached/test DOM sane too). */
+  position: sticky;
+  left: 0;
+  width: var(--run-detail-w, 100%);
+  box-sizing: border-box;
   padding: .9rem 1rem 1.2rem;
   /* Back to the page's own body size. The detail is inside .run-table now,
      and the table's .82rem is meant for the one-line torrent rows, not for a
