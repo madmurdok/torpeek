@@ -1109,19 +1109,37 @@ function newRunEntry(id) {
     '<header class="run-detail-header">' +
       '<span class="run-badge"></span>' +
       '<h2 class="run-detail-title"></h2>' +
-      '<button class="run-detail-cancel" type="button" hidden>Cancel</button>' +
+      // The run's own .torrent, offered once the run has announced one
+      // (TOR-73), pinned level with the name together with Cancel (TOR-169).
+      // It used to sit two blocks down, under the summary, on the strength
+      // of being a property of the torrent rather than of any one video
+      // file - a property of the torrent belongs, if anything, even more
+      // plainly on the torrent's own header than under its summary, so that
+      // reasoning is what moved it here rather than what it argued against.
+      // Cancel already lived in this header; .run-detail-header-actions
+      // (app.css) is where the two now sit in a fixed order so neither
+      // moves when the other appears or disappears - see that rule's own
+      // comment for why a top-up can put both on screen at once.
+      '<span class="run-detail-header-actions">' +
+        '<a class="torrent-save" download ' +
+          'title="The info dictionary is the one the swarm sent, so this file\'s infohash is the torrent\'s. ' +
+          'The wrapper around it is generated: the creation date is when the file was written, and the comment ' +
+          'and created-by name the BitTorrent library, not whoever published the torrent.">Save .torrent</a>' +
+        '<button class="run-detail-cancel" type="button" data-idle>Cancel</button>' +
+      '</span>' +
     "</header>" +
     '<p class="run-detail-error" hidden></p>' +
     '<p class="torrent-summary" hidden></p>' +
-    // The run's own .torrent, offered once the run has announced one (TOR-73).
-    // It sits under the summary line - a property of the torrent, like the
-    // summary itself - and deliberately not inside a file block: there is one
-    // .torrent per run, not one per video file.
+    // What Save .torrent (now in the header above) left behind: sending the
+    // same file to a watch directory on this host, and the note reporting
+    // what a send did (TOR-73). This half stays here rather than following
+    // Save up into the header (TOR-169) for two reasons - it is a
+    // secondary, less-used action (most deployments have no watch
+    // directory, state.watch, to send to at all), and torrent-note carries
+    // a sentence ("sent to /path/to/watch", or an error), which reads fine
+    // as a line of prose under the summary and would only compete with the
+    // name for room in the header.
     '<p class="torrent-actions" hidden>' +
-      '<a class="torrent-save" download ' +
-        'title="The info dictionary is the one the swarm sent, so this file\'s infohash is the torrent\'s. ' +
-        'The wrapper around it is generated: the creation date is when the file was written, and the comment ' +
-        'and created-by name the BitTorrent library, not whoever published the torrent.">Save .torrent</a>' +
       '<button type="button" class="torrent-send" hidden>Send to my client</button>' +
       '<span class="torrent-note"></span>' +
     '</p>' +
@@ -1483,7 +1501,14 @@ function syncEntry(entry) {
   entry.detailBadge.dataset.state = badgeState(entry);
   entry.detailTitle.textContent = shown.text;
   entry.detailTitle.classList.toggle("run-name-provisional", shown.provisional);
-  entry.detailCancel.hidden = entry.disk || !cancellable(entry.state);
+  // data-idle, not .hidden: Save .torrent sits right next to Cancel in
+  // .run-detail-header-actions (TOR-169), and [hidden]'s display: none would
+  // let Save slide over to fill the gap the instant Cancel is not
+  // cancellable - the same "control that jumps sideways" .run-priority-up/
+  // -down are disabled rather than hidden at the ends of their band to
+  // avoid, a few lines up. data-idle keeps Cancel's box in the flow (see
+  // its own rule in app.css) so Save's position never depends on it.
+  entry.detailCancel.toggleAttribute("data-idle", entry.disk || !cancellable(entry.state));
   entry.detailError.hidden = !entry.error;
   entry.detailError.textContent = entry.error || "";
   // One rule for whether the picker is on screen, and it is the run's own
@@ -3521,29 +3546,39 @@ function link(href, text) {
   return a;
 }
 
-// showTorrent reveals - or takes away - the run's own .torrent.
+// showTorrent reveals - or takes away - the run's own .torrent, in the
+// header (the save link) and, if this server has somewhere to send it, the
+// group below it (TOR-169).
 //
-// The one thing that decides whether the link is there is whether the run
-// announced a URL for it, which the server only does when the file is really
-// on disk (server.go's record). So a run captured before torpeek kept one,
-// and a run whose write failed, simply have no link; nothing here guesses at
-// a path, and there is no broken link to press.
+// The one thing that decides whether the save link is there is whether the
+// run announced a URL for it, which the server only does when the file is
+// really on disk (server.go's record). So a run captured before torpeek
+// kept one, and a run whose write failed, simply have no link; nothing here
+// guesses at a path, and there is no broken link to press.
 //
 // The anchor carries a bare download attribute rather than a filename: the
 // server sends a Content-Disposition that already names the file after the
 // torrent itself (TOR-170) - or, absent a name, after its infohash - and
 // that server-sent filename is what a browser uses. Putting a name here too
 // would only be a second name that never takes effect.
+//
+// .torrent-actions (Send to my client, and the note reporting what a send
+// did) is a separate decision from the save link's own: it needs both a
+// .torrent AND a watch directory (state.watch) to have anything to show, so
+// it is gated on both rather than mirroring the save link's single
+// condition - see the block's own comment in the template above.
 function showTorrent(entry, href) {
   entry.torrentURL = href || "";
-  entry.torrentActions.hidden = !entry.torrentURL;
+  entry.torrentSave.hidden = !entry.torrentURL;
   entry.torrentNote.textContent = "";
   if (!entry.torrentURL) {
     entry.torrentSend.hidden = true;
+    entry.torrentActions.hidden = true;
     return;
   }
   entry.torrentSave.href = url(entry.torrentURL);
   entry.torrentSend.hidden = !state.watch;
+  entry.torrentActions.hidden = !state.watch;
 }
 
 // sendTorrent asks the server to drop this run's .torrent into the watch
@@ -3952,9 +3987,12 @@ async function loadDefaults() {
     state.watch = data.watch === true;
     // This can land after a reconnecting socket has already replayed a
     // finished run, so anything already showing a .torrent is asked again
-    // whether it may offer the button.
+    // whether it may offer the button - and .torrent-actions (TOR-169)
+    // along with it, since the whole group is only worth showing when the
+    // button in it is.
     for (const entry of state.runs.values()) {
       entry.torrentSend.hidden = !state.watch || !entry.torrentURL;
+      entry.torrentActions.hidden = entry.torrentSend.hidden;
     }
   } catch (err) {
     log("could not read the defaults: " + (err.message || err));
