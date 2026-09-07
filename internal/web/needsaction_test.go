@@ -358,8 +358,17 @@ func TestClosingEndsAParkedTorrent(t *testing.T) {
 	}
 }
 
-// TestDecideAnswersTheRequestItWasGiven walks the four ways a decision is
-// refused and the one way it is taken.
+// TestDecideAnswersTheRequestItWasGiven walks the four ways a tick is refused
+// and the one way it is taken.
+//
+// TOR-181 rewrote the second row of this table rather than adding to it. The
+// refusal it used to assert was "this run is not waiting to be told
+// anything", tested against a RUNNING torrent - and a running torrent is now
+// exactly a row a tick may grow (into its next pass, DecideRun), so the case
+// as written no longer describes a refusal at all. What replaced it is the
+// state that genuinely has no run left to grow: one that has finished, where
+// a further file is a new run with a new ceiling and must not be spent on a
+// tick.
 func TestDecideAnswersTheRequestItWasGiven(t *testing.T) {
 	lister := newFakeLister()
 	lister.holds(manySource, 3)
@@ -368,9 +377,11 @@ func TestDecideAnswersTheRequestItWasGiven(t *testing.T) {
 	srv, ts := newTestServerWithLister(t, runs.runner, lister.list)
 
 	parked := parkOne(t, srv, ts.URL)
-	// A second torrent that is running rather than parked, to decide at.
-	running := startRun(t, ts.URL, oneSource)
-	waitFor(t, func() bool { return runInfo(t, srv, running.id).State == RunRunning })
+	// A second torrent, run to completion, to tick at.
+	settled := startRun(t, ts.URL, oneSource)
+	waitFor(t, func() bool { return runInfo(t, srv, settled.id).State == RunRunning })
+	runs.finish(t, oneSource)
+	waitFor(t, func() bool { return runInfo(t, srv, settled.id).State == RunDone })
 
 	for _, tc := range []struct {
 		name  string
@@ -379,7 +390,7 @@ func TestDecideAnswersTheRequestItWasGiven(t *testing.T) {
 		want  int
 	}{
 		{"a run this server does not hold", "deadbeef", []string{"0"}, http.StatusNotFound},
-		{"a run that is not waiting to be told anything", running.id, []string{"0"}, http.StatusConflict},
+		{"a run that has settled, so there is nothing left to grow", settled.id, []string{"0"}, http.StatusConflict},
 		{"an empty selection", parked.id, nil, http.StatusBadRequest},
 		{"a file this torrent does not have", parked.id, []string{"9"}, http.StatusBadRequest},
 		{"a file named by something that is not an index", parked.id, []string{"*.mkv"}, http.StatusBadRequest},

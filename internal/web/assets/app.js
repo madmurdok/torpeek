@@ -1185,29 +1185,37 @@ function newRunEntry(id) {
     // entry, so a second torrent's list cannot land in it.
     //
     // The .picker-* class names are kept on purpose even though this is no
-    // longer only a picker. Three of them (.picker-go, .picker-cost,
-    // .picker-list) are named in TOR-181..184 as the things those tickets
-    // move, remove or hang a per-file figure on, and renaming furniture
-    // mid-epic would make four open tickets describe selectors that no
-    // longer exist - a rename is worth its churn once the epic has settled,
-    // not in its first step.
+    // longer a picker at all: since TOR-181 a tick IS the decision, so
+    // nothing here stages one. Two of the names TOR-180 kept for this
+    // ticket's sake are gone with the thing they named (.picker-go and the
+    // foot's own .picker-cost), and .picker-cost has been re-used for the
+    // figure that moved onto each file's row. Renaming the rest mid-epic
+    // would make TOR-182..184 describe selectors that no longer exist.
+    //
+    // NO BUTTON UNDER THE LIST, and that is the whole of this step: a tick
+    // starts that file's frames on the spot (tickFile), so a "Take frames"
+    // under the list would be a second click for something already done -
+    // and the cost line that sat beside it, which is TOR-50's whole warning,
+    // was a price shown where the decision no longer is. It is now on each
+    // file's own row, beside the box that spends it.
+    //
+    // Select none is gone too, and for a sharper reason than tidiness: it
+    // used to clear a selection nobody had committed. A tick is now
+    // irreversible - the fetch has started - so a control that unticks boxes
+    // would say it can stop something it cannot. TOR-184 is the ticket that
+    // gives un-ticking a real meaning (cancel these), and it can bring the
+    // control back with it.
     '<section class="picker" hidden>' +
       '<p class="picker-head">' +
         '<span class="picker-title"></span>' +
         '<button type="button" class="picker-all" hidden>Select all</button>' +
-        '<button type="button" class="picker-none" hidden>Select none</button>' +
+        // The armed note: what Select all is about to spend, and the ask for
+        // a second click. role=status rather than aria-live on the button,
+        // because the sentence is the new information and the button's own
+        // label is only its short form (armSelectAll).
+        '<span class="picker-armed" role="status"></span>' +
       '</p>' +
       '<ul class="picker-list"></ul>' +
-      // Head buttons and foot both start hidden and are shown only while
-      // this torrent is actually waiting to be picked from (syncFileList):
-      // "Take frames" on a run that is already running, finished or on disk
-      // would be a control that either does nothing or is refused by the
-      // server (handleDecideRun answers only a parked run), and Select
-      // all/none only ever stage a decision for it.
-      '<p class="picker-foot" hidden>' +
-        '<button type="button" class="picker-go">Take frames</button>' +
-        '<span class="picker-cost"></span>' +
-      '</p>' +
     '</section>' +
     '<section class="files"></section>';
   detailCell.append(detailEl);
@@ -1324,10 +1332,60 @@ function newRunEntry(id) {
     // where it is not, rather than reporting one list's length as the
     // other's - which is a misreport a reader has no way to check.
     fileListKnown: false,
-    // picked is the ticked indices. It is seeded from the run's own selection
-    // for a torrent whose files are already decided, and starts empty for one
-    // still parked - nothing is pre-ticked there on purpose (renderFileList).
+    // picked is what this row HAS ASKED TO CAPTURE, by torrent index, and
+    // since TOR-181 that is the server's answer rather than this page's
+    // staged intention: run_state's "ticked" is written straight into it on
+    // every message, so a tick that was refused, or a second browser tab
+    // ticking the same torrent, cannot leave the boxes disagreeing with what
+    // is actually being fetched. A tick sets it optimistically for the one
+    // frame between the click and the socket, and rolls it back if the POST
+    // is refused (tickFile).
+    //
+    // It is seeded from the run's own selection on metadata_ready and starts
+    // empty for a parked torrent - nothing is pre-ticked there on purpose,
+    // since the count is per file and pre-ticking six variants would put the
+    // most expensive possible run one careless click away (TOR-50).
     picked: new Set(),
+    // deferred is the part of picked that is NOT in the pass in flight: a
+    // file ticked while this row was already fetching, which the engine
+    // cannot be handed mid-plan, so the server holds it and re-arms this
+    // very entry when the current pass ends (runEntry.pending). Its own set
+    // rather than a flag on picked, because the two say different things on
+    // the row - "in this run" against "in the next pass" - and a reader has
+    // to be able to tell which of their ticks is already spending.
+    deferred: new Set(),
+    // tickable is the server's own verdict on whether a tick would be
+    // ACCEPTED for this row at all (run_state's "tickable", from
+    // runEntry.refuseTick), and tickRefusal is the sentence to put on the
+    // box when it would not.
+    //
+    // Read rather than re-derived from entry.state, deliberately: the rule
+    // has a case this page cannot see (a torrent dropped as a file, whose
+    // staged copy is gone once its run ends), so a page deciding for itself
+    // would offer live checkboxes the server then refuses. false to begin
+    // with, which is the one safe default - a row this page has not yet
+    // heard a state for must not draw a live box.
+    tickable: false,
+    tickRefusal: "",
+    // passCount is the frames-per-file the pass this row is forming will
+    // use (run_state's "count"). DecideRun locks it to the tick that opened
+    // that pass, so once anything is ticked the remaining rows have to be
+    // priced at THIS number rather than at whatever the intake box now
+    // shows - otherwise a person who retyped the count would read a price
+    // their next tick will not get. 0 means "the server's own -n", which is
+    // exactly what the intake box displays (loadDefaults).
+    passCount: 0,
+    // armed is Select all's confirmation state: it has been pressed once and
+    // is showing what it would cost, waiting for the second press that
+    // spends it (armSelectAll). Per row, because two parked torrents can
+    // each be waiting on their own answer.
+    armed: false,
+    // pickerRows maps a torrent index to the elements of its row, so
+    // syncFileList can re-state every box's checked/disabled state and every
+    // figure without rebuilding the list - the list is rebuilt only when the
+    // file list itself changes, and rebuilding it on each event would drop
+    // the scroll position of a season pack mid-tick.
+    pickerRows: new Map(),
     // Set once this run's first file block is built, so every file after it
     // defaults to collapsed - only the first one earns the auto-expand.
     autoExpanded: false,
@@ -1367,10 +1425,7 @@ function newRunEntry(id) {
     pickerTitle: detailEl.querySelector(".picker-title"),
     pickerList: detailEl.querySelector(".picker-list"),
     pickerAll: detailEl.querySelector(".picker-all"),
-    pickerNone: detailEl.querySelector(".picker-none"),
-    pickerFoot: detailEl.querySelector(".picker-foot"),
-    pickerGo: detailEl.querySelector(".picker-go"),
-    pickerCost: detailEl.querySelector(".picker-cost"),
+    pickerArmed: detailEl.querySelector(".picker-armed"),
     filesEl: detailEl.querySelector(".files"),
   };
 
@@ -1404,9 +1459,21 @@ function newRunEntry(id) {
   });
   entry.detailCancel.addEventListener("click", () => cancelRun(entry.id));
 
-  entry.pickerAll.addEventListener("click", () => setAllPicked(entry, true));
-  entry.pickerNone.addEventListener("click", () => setAllPicked(entry, false));
-  entry.pickerGo.addEventListener("click", () => decide(entry));
+  entry.pickerAll.addEventListener("click", () => armSelectAll(entry));
+  // Escape disarms, and it is bound on the SECTION rather than the document:
+  // the lightbox and the compare dialog both own Escape while they are open
+  // (see their own handlers), and a key that reached past a modal to disarm
+  // a button behind it would be the page acting on a screen nobody is
+  // looking at. A blur disarms for the same reason a menu closes when you
+  // click elsewhere - an armed control left standing is one somebody comes
+  // back to and presses without re-reading.
+  entry.pickerEl.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && entry.armed) {
+      event.stopPropagation();
+      disarmSelectAll(entry);
+    }
+  });
+  entry.pickerAll.addEventListener("blur", () => disarmSelectAll(entry));
   entry.torrentSend.addEventListener("click", () => sendTorrent(entry));
   entry.againGo.addEventListener("click", () => topUpRun(entry));
   entry.againRetry.addEventListener("click", () => retryRun(entry));
@@ -1460,6 +1527,16 @@ function resetRunContent(entry) {
   entry.fileList = [];
   entry.fileListKnown = false;
   entry.picked.clear();
+  entry.deferred.clear();
+  entry.pickerRows.clear();
+  // The tick's own two readings go with the list: they are the server's
+  // answer for a state this row is about to be told again, and a stale
+  // "tickable" would draw a live checkbox for one frame on a row whose run
+  // has since ended. false is the safe direction (see the field's own doc).
+  entry.tickable = false;
+  entry.tickRefusal = "";
+  entry.passCount = 0;
+  disarmSelectAll(entry);
   entry.pickerList.replaceChildren();
   entry.pickerEl.hidden = true;
   // The .torrent link goes with the rest of what this run has shown. It comes
@@ -2064,18 +2141,36 @@ async function setPriority(entry, priority) {
 }
 
 // ---------------------------------------------------------------------------
-// WHAT THE TORRENT HOLDS. Since TOR-180 this list is a row's ordinary
-// content: every file the torrent carries, video or not, in every state that
-// knows a file list rather than only while a multi-file torrent is parked
-// waiting to be picked from (TOR-67).
+// WHAT THE TORRENT HOLDS, AND WHAT EACH FILE COSTS TO TAKE.
+//
+// Since TOR-180 this list is a row's ordinary content: every file the
+// torrent carries, video or not, in every state that knows a file list
+// rather than only while a multi-file torrent is parked waiting to be picked
+// from (TOR-67).
+//
+// SINCE TOR-181 A TICK IS THE DECISION. There is no button under the list
+// any more: ticking a box starts that file's frames on this row's own run
+// (tickFile), which is why the price moved onto each file's row. A cost
+// shown where a button used to be is a cost nobody sees, and the price is
+// the whole point of showing one - -n is frames PER video file, so a torrent
+// of six quality variants costs six times the intake's number (TOR-50), and
+// the moment that multiplication becomes a decision is the checkbox.
+//
+// A TICK GROWS ONE RUN. It never opens a second row or a second run beside
+// the first: a parked torrent's tick lets it out of needs-action and into
+// the queue, a tick on a torrent still queued joins the pass it is already
+// waiting to make, and a tick on one that is already fetching is held by the
+// server until that pass ends and then starts on the same entry
+// (Server.DecideRun, runEntry.pending). The row says which of the three
+// happened, per file: "in this run" or "in the next pass".
 //
 // The non-video files are here because they answer the question a count
 // never could - "what did I actually download" - and because they are how a
 // person finds out that the film they were after is a .nfo, some artwork and
 // a sample. They cannot be ticked: swarm.SelectVideos decides what frames
-// can be taken from, the server validates a decision against exactly that
-// list (runEntry.holdsFile), and offering a tick the server would refuse
-// would be a control that lies.
+// can be taken from, the server validates a tick against exactly that list
+// (runEntry.holdsFile), and offering a tick the server would refuse would be
+// a control that lies.
 //
 // SAYING SO WITHOUT COLOUR. They read in --ink-2 (never --ink-3, which
 // TOR-158 took off text for failing AA on every surface), and grey alone
@@ -2114,11 +2209,14 @@ const WHY_NOT_VIDEO =
 // pre-ticking them all would put the most expensive possible run one
 // careless click away, since the count is per file and six variants at 20
 // frames is 120 captures (TOR-50). Select all is right there for the person
-// who does mean all of it.
+// who does mean all of it, and since TOR-181 it states that total and asks
+// before spending it (armSelectAll).
 //
-// The boxes are not interactive outside a parked row yet; syncFileList
-// disables them, and TOR-181 is the ticket that gives a tick its meaning in
-// every state.
+// IT BUILDS THE ROWS AND NOTHING ELSE decides state: every checked,
+// disabled, priced or explained thing about a row is written by
+// updateFileCosts, which re-runs on every event without rebuilding the list.
+// A season pack is twenty rows in a scrolling box, and rebuilding it under
+// somebody mid-tick would throw their scroll position away each heartbeat.
 function renderFileList(entry, ev) {
   entry.videos = ev.videos || [];
   // ABSENT IS NOT EMPTY. A message with no "files" key cannot say what the
@@ -2128,10 +2226,20 @@ function renderFileList(entry, ev) {
   // true of that list by construction.
   entry.fileListKnown = !!ev.files;
   entry.fileList = ev.files || entry.videos;
-  // A parked torrent has decided nothing yet, and its own record carries no
-  // "selected" (server.go's needsActionRecordLocked deliberately omits it),
-  // so this is empty exactly there.
-  entry.picked = new Set(ev.selected || []);
+  // ADDED TO, NEVER ASSIGNED, and this is a bug the browser found rather
+  // than the tests: ev.selected is the pass IN FLIGHT, which for a SECOND
+  // pass names only the files that pass was re-armed with (TOR-181), so
+  // assigning it here cleared the tick beside a file the first pass had
+  // already captured - which reads as the capture having been undone.
+  //
+  // The cumulative answer is the server's (runEntry.asked, run_state's
+  // "ticked"); all this has to do is not throw it away. It is still exactly
+  // right for a parked torrent, whose own record carries no "selected" at
+  // all (server.go's needsActionRecordLocked deliberately omits it) and
+  // whose set is empty because resetRunContent emptied it when the run's
+  // history opened.
+  for (const index of ev.selected || []) entry.picked.add(index);
+  entry.pickerRows = new Map();
 
   const tickable = new Set(entry.videos.map((video) => video.index));
 
@@ -2154,12 +2262,7 @@ function renderFileList(entry, ev) {
       box = document.createElement("input");
       box.type = "checkbox";
       box.value = String(file.index);
-      box.checked = entry.picked.has(file.index);
-      box.addEventListener("change", () => {
-        if (box.checked) entry.picked.add(file.index);
-        else entry.picked.delete(file.index);
-        updatePickerCost(entry);
-      });
+      box.addEventListener("change", () => tickFile(entry, file.index, box));
     } else {
       // The em dash, in the column the checkbox would have occupied: the
       // non-colour half of "you cannot tick this", and aria-hidden because
@@ -2185,6 +2288,20 @@ function renderFileList(entry, ev) {
     size.textContent = bytesLabel(file.length);
 
     row.append(box, name, size);
+
+    // TOR-181's two spans, and only on a row a tick can reach: what this
+    // file would cost, and - once it has been asked for - which run it is
+    // in. Never both at once (updateFileCosts), and an untickable row has
+    // neither: there is no price for something that cannot be bought.
+    if (video) {
+      const cost = document.createElement("span");
+      cost.className = "picker-cost";
+      const asked = document.createElement("span");
+      asked.className = "picker-state";
+      row.append(cost, asked);
+      entry.pickerRows.set(file.index, { item, row, box, cost, state: asked });
+    }
+
     item.append(row);
     return item;
   }));
@@ -2208,34 +2325,20 @@ function syncFileList(entry) {
   // would state as "holds nothing".
   entry.pickerEl.hidden = entry.fileList.length === 0;
 
-  // PARKED is the one state in which a tick still decides anything: nothing
-  // has been fetched, and the server accepts a selection for this run
-  // (handleDecideRun refuses any other state). Everything that stages or
-  // sends a decision is scoped to it, and the frame around the list is too -
-  // .picker's --warn border says "this is blocking, nothing happens until
-  // you act", which would be a false alarm on a run already going.
+  // PARKED still earns the frame, and only the frame: .picker's --warn
+  // border says "this is blocking, nothing happens until you act", which is
+  // true of a torrent waiting to be picked from and a false alarm on a run
+  // already going. What it no longer decides is whether a tick works -
+  // TOR-181 made that the server's own answer, carried on every run_state
+  // (entry.tickable), because the rule has a case this page cannot see.
   const parked = entry.state === "needs-action";
   entry.pickerEl.dataset.parked = String(parked);
-  entry.pickerAll.hidden = !parked;
-  entry.pickerNone.hidden = !parked;
-  entry.pickerFoot.hidden = !parked;
   entry.pickerTitle.textContent = fileListTitle(entry, parked);
 
-  // A tick outside a parked row is a reading, not a control, so it is a real
-  // disabled state rather than a live box that silently does nothing - the
-  // same choice .run-priority-up/-down make at the ends of their band. TOR-181
-  // is what makes ticking mean something in the other states, and dropping
-  // this line is most of that change.
-  for (const box of entry.pickerList.querySelectorAll("input[type=checkbox]")) {
-    box.disabled = !parked;
-  }
-
-  // The foot's own two jobs - what pressing the button would cost, and
-  // whether it may be pressed at all - are one function, and it has to run
-  // here as well as on every tick: a row that has just reached the parked
-  // state has a foot that has never been drawn, and "Take frames" must not
-  // arrive live with nothing ticked behind it.
-  updatePickerCost(entry);
+  // Every box's state, every price, and Select all's own label and total.
+  // One function, and it has to run here as well as on each tick: a row that
+  // has just reached the parked state has boxes that have never been priced.
+  updateFileCosts(entry);
 }
 
 // fileListTitle says what the list is, and it must not report the video
@@ -2248,66 +2351,284 @@ function syncFileList(entry) {
 // files the torrent holds, and claiming the video count as the total would
 // be the same misreport in a place a reader could not check.
 function fileListTitle(entry, parked) {
-  const suffix = parked ? " — pick what to capture" : "";
+  // "tick a file to start it", not "pick what to capture": since TOR-181
+  // there is nothing to pick and then confirm, and a sentence that says
+  // otherwise would have people ticking a box and hunting for the button
+  // that used to follow it.
+  const suffix = parked ? " — tick a file to start it" : "";
   if (!entry.fileListKnown) {
     return entry.videos.length + " video file(s)" + suffix;
   }
   return entry.fileList.length + " file(s), " + entry.videos.length + " video" + suffix;
 }
 
-function setAllPicked(entry, picked) {
-  entry.picked = new Set(picked ? entry.videos.map((video) => video.index) : []);
-  // Only the boxes, which exist only on the tickable rows - a non-video file
-  // has none, so "all" cannot reach one however it is written.
-  for (const box of entry.pickerList.querySelectorAll("input[type=checkbox]")) {
-    box.checked = picked;
-  }
-  updatePickerCost(entry);
+// untickedVideos is every capturable file this row has NOT asked for yet -
+// what a tick still has left to reach, and what Select all would start.
+function untickedVideos(entry) {
+  return entry.videos
+    .map((video) => video.index)
+    .filter((index) => !entry.picked.has(index));
 }
 
-// updatePickerCost shows what pressing the button would cost, before it is
-// spent rather than after.
+// passCount is the frames-per-file THIS ROW'S next start will actually use.
 //
-// This is the one place in the whole program where that number can be shown
-// in advance: -n is frames PER video file (TOR-50), so a bundle of quality
-// variants multiplies it, and every other screen only ever reports the
-// traffic once it is gone. It follows both inputs live - the ticks here and
-// the count on the intake line, which a person may well adjust while looking
-// at this list.
-function updatePickerCost(entry) {
-  const files = entry.picked.size;
-  const n = countValue();
-  entry.pickerGo.disabled = files === 0;
-  if (files === 0) {
-    entry.pickerCost.textContent = "nothing picked yet";
+// It is the intake's number until this row has asked for something, and the
+// server's locked figure afterwards (run_state's "count", DecideRun). Those
+// are different numbers the moment somebody retypes the intake box with a
+// pass already forming, and the row has to quote the one its next tick will
+// get - a price that changes under a person after they read it is worse than
+// no price.
+function passCount(entry) {
+  if (entry.picked.size > 0 && entry.passCount > 0) return entry.passCount;
+  return countValue();
+}
+
+// framesLabel is one file's price, in the unit TOR-50's trap is measured in.
+//
+// Frames rather than bytes, and that is deliberate: the frame count is the
+// thing that multiplies per file and the thing this page can state exactly.
+// What a frame costs in traffic is the server's arithmetic, priced off a
+// record on disk and shown where the server has computed it (.run-again-cost
+// for a top-up); a byte figure invented here would be a guess wearing the
+// authority of a measurement.
+function framesLabel(n) {
+  return n ? n + " frames" : "server default";
+}
+
+// updateFileCosts re-states every row: whether its box may be clicked, what
+// clicking it would spend, and - for a file already asked for - which run it
+// is in.
+//
+// This is the one place in the whole program where a cost can be shown IN
+// ADVANCE. Every other screen only ever reports traffic once it is gone. It
+// follows both inputs live: the ticks (through run_state), and the count on
+// the intake line, which a person may well adjust while reading this list.
+function updateFileCosts(entry) {
+  const n = passCount(entry);
+
+  for (const [index, row] of entry.pickerRows) {
+    const asked = entry.picked.has(index);
+    const deferred = entry.deferred.has(index);
+
+    // ASKED FOR IS DISABLED, and the box stays checked. Un-ticking cannot
+    // un-start a fetch, so a box that could be cleared would claim to stop
+    // something it has no way of stopping - the same reason Select none is
+    // gone. TOR-184 is the ticket that makes un-ticking mean "cancel this",
+    // and turning this line into a live box is most of that change.
+    row.box.disabled = asked || !entry.tickable;
+    row.box.checked = asked;
+
+    if (asked) {
+      row.item.dataset.tick = "asked";
+      row.cost.textContent = "";
+      // ONLY THE EXCEPTION IS SPOKEN. The ticked box already says this file
+      // has been asked for; a span repeating "in this run" beside every one
+      // of twenty rows would be a column of the same three words. What a
+      // reader cannot see is the one case where a tick did NOT join the run
+      // in flight, so that is the only case with words on it.
+      row.state.textContent = deferred ? "in the next pass" : "";
+      row.row.title = deferred
+        ? "ticked while this torrent was already fetching - the engine works from a plan " +
+            "it was handed, so this file starts the moment that pass ends, on this same row"
+        : "this row has asked for this file - whatever it has taken is in the file's own " +
+            "block below";
+      continue;
+    }
+
+    row.state.textContent = "";
+
+    if (!entry.tickable) {
+      // The server's own sentence, not this page's guess at it: refuseTick
+      // is the single rule, and run_state carries its words so a disabled
+      // box says exactly what the POST would have answered.
+      row.item.dataset.tick = "closed";
+      row.cost.textContent = "";
+      row.row.title = entry.tickRefusal ||
+        "this row cannot be asked for another file right now";
+      continue;
+    }
+
+    row.item.dataset.tick = "open";
+    row.cost.textContent = framesLabel(n);
+    row.row.title = "tick to start this file's frames now — " + framesLabel(n) +
+      " for this one file, and the count is per file";
+  }
+
+  syncSelectAll(entry);
+}
+
+// ---------------------------------------------------------------------------
+// SELECT ALL IS THE MOST EXPENSIVE CLICK ON THE PAGE (TOR-181).
+//
+// It used to stage a selection somebody then confirmed with a button under
+// the list; the button is gone, so pressing it now spends traffic on every
+// video file the torrent holds at once. A one-click bill is exactly what
+// this ticket refuses to leave it as, and dropping it is not the answer
+// either - a person who does mean all twenty episodes should not have to
+// click twenty times.
+//
+// So it keeps its job and grows a confirmation, in the button itself rather
+// than in a dialog: the first press ARMS it and it says what it is about to
+// cost ("Start all 6 — 120 frames"), the second press starts them. The
+// wording is not decoration - it is the multiplication TOR-50 exists to warn
+// about, stated before the money is spent rather than after.
+//
+// A native confirm() was the other candidate and was rejected: this page
+// deliberately has no confirmation dialogs (see deleteFrame's own note on
+// why a dialog per thumbnail would be worse than the frames), an unstyleable
+// modal cannot state a figure in the page's own type, and a blocking dialog
+// cannot be seen in a screenshot of what the page said. Three carriers say
+// the armed state and only one of them is colour: the label changes, a
+// sentence appears beside it, and the button wears --warn.
+
+function armSelectAll(entry) {
+  // The second press. Everything it will start is read again HERE rather
+  // than remembered from the first press: a tick or a run_state may have
+  // landed in between, and starting a list that is no longer true would
+  // spend on a file somebody else's tick already started.
+  if (entry.armed) {
+    const files = untickedVideos(entry);
+    disarmSelectAll(entry);
+    startFiles(entry, files);
     return;
   }
-  entry.pickerCost.textContent = n
-    ? files + " file(s) × " + n + " = " + files * n + " frames"
-    : files + " file(s)";
+  entry.armed = true;
+  syncSelectAll(entry);
 }
 
-// decide sends the selection and lets the torrent out of its parked state.
+function disarmSelectAll(entry) {
+  entry.armed = false;
+  syncSelectAll(entry);
+}
+
+// syncSelectAll draws the button in whichever of its two states it is in,
+// and takes it off screen when it has nothing left to offer.
 //
-// The answer is only an acknowledgement: what actually moves this row from
-// "choose files" to "queued" (and takes the picker off the screen) is the
-// run_state that arrives on the socket, the same way every other change to a
-// run reaches this page.
-async function decide(entry) {
+// PARKED ONLY, and that is a scope decision rather than an oversight: "all
+// of it" is the answer to a torrent whose whole list is undecided, which is
+// what the parked state is. On a row already fetching, the files left are
+// the ones somebody chose not to take, and a button that starts them all
+// would undo that choice in one press. Ticking them individually still
+// works there.
+function syncSelectAll(entry) {
+  const parked = entry.state === "needs-action";
+  const remaining = untickedVideos(entry);
+  const offer = parked && entry.tickable && remaining.length > 0;
+
+  entry.pickerAll.hidden = !offer;
+  if (!offer) {
+    entry.armed = false;
+    entry.pickerAll.removeAttribute("data-armed");
+    entry.pickerAll.textContent = "Select all";
+    entry.pickerAll.title = "";
+    entry.pickerArmed.textContent = "";
+    return;
+  }
+
+  const n = passCount(entry);
+  const total = n ? remaining.length * n : 0;
+  const sum = total
+    ? remaining.length + " file(s) × " + n + " = " + total + " frames"
+    : remaining.length + " file(s) at the server's own frame count";
+
+  if (!entry.armed) {
+    entry.pickerAll.removeAttribute("data-armed");
+    entry.pickerAll.textContent = "Select all";
+    entry.pickerAll.title = "start every video file in this torrent at once — " + sum;
+    entry.pickerArmed.textContent = "";
+    return;
+  }
+
+  entry.pickerAll.dataset.armed = "true";
+  entry.pickerAll.textContent = total
+    ? "Start all " + remaining.length + " — " + total + " frames"
+    : "Start all " + remaining.length;
+  // The sentence, beside the button, because a label that changed is a hint
+  // and this needs an instruction: nothing has been spent yet, and a person
+  // has to be told that the next press is the one that spends it.
+  entry.pickerArmed.textContent = "this starts " + sum +
+    " — press again to confirm, Esc to cancel";
+  entry.pickerAll.title = entry.pickerArmed.textContent;
+}
+
+// tickFile is what a checkbox now means: capture this file, now.
+//
+// The box is CHECKED by the time this runs (it is a change listener), and
+// that check is optimistic - startFiles rolls it back if the server refuses.
+// A cleared box cannot happen through the UI, since updateFileCosts disables
+// every box it has asked for; the guard is here for a stale DOM and for the
+// one honest answer available until TOR-184 gives un-ticking a meaning.
+function tickFile(entry, index, box) {
+  // Somebody who ticks a single file has answered Select all's question by
+  // doing something else; leaving it armed behind them would put a
+  // twenty-file bill under a second stray press.
+  disarmSelectAll(entry);
+
+  if (!box.checked) {
+    box.checked = true;
+    showError("un-ticking cannot stop a capture that has already started — " +
+      "use Cancel on the torrent's own row to stop this run");
+    return;
+  }
+  startFiles(entry, [index]);
+}
+
+// startFiles asks the server to add these files to this row's run, and is
+// the one path both a tick and Select all go through.
+//
+// It sends a SET rather than one index, which is why Select all is a single
+// call and a single confirmation: the route has always taken a list
+// (decideRequest), and the server adds it to whatever the row already has
+// rather than replacing it, so two calls racing cannot lose a file.
+//
+// The count it sends is the number this row DISPLAYED (passCount), never the
+// intake box read afresh - the promise a price makes is that pressing the
+// thing beside it costs that. The server ignores it for a pass already
+// forming, having locked the figure to the tick that opened it, and answers
+// with that figure on run_state so the row keeps quoting the truth.
+async function startFiles(entry, indices) {
   showError("");
-  const files = [...entry.picked].sort((a, b) => a - b).map(String);
+
+  const files = indices.filter((index) => !entry.picked.has(index));
   if (files.length === 0) return;
 
-  entry.pickerGo.disabled = true;
+  // Optimistic, for the frame between the click and the socket: the boxes
+  // are the only feedback there is, and leaving them empty until a websocket
+  // message lands reads as a click that did nothing. run_state overwrites
+  // all of it moments later (the "ticked" and "deferred" keys), which is
+  // what makes guessing safe here - including the guess below about which
+  // pass these land in, since a row already fetching cannot take them into
+  // the plan the engine is working from.
+  const later = entry.state === "running";
+  for (const index of files) {
+    entry.picked.add(index);
+    if (later) entry.deferred.add(index);
+  }
+  updateFileCosts(entry);
+
   try {
-    await post("runs/decide", { id: entry.id, files, count: countValue() });
-    logFor(entry, "capturing " + files.length + " of " + entry.videos.length + " file(s)");
+    await post("runs/decide", {
+      id: entry.id,
+      files: files.map(String),
+      count: passCount(entry),
+    });
+    logFor(entry, (later ? "queued for the next pass: " : "capturing: ") +
+      files.length + " file(s) of " + entry.videos.length + ", " +
+      framesLabel(passCount(entry)) + " each");
   } catch (err) {
+    // Rolled all the way back. A refusal is a real answer here - a run that
+    // has settled, or a torrent dropped as a file whose staged copy is gone
+    // (refuseTick) - and a box left ticked after one would say a file is
+    // being captured when nothing is.
+    for (const index of files) {
+      entry.picked.delete(index);
+      entry.deferred.delete(index);
+    }
+    updateFileCosts(entry);
     showError(String(err.message || err));
-    entry.pickerGo.disabled = false;
+    logFor(entry, "could not start " + files.length + " file(s): " + (err.message || err));
   }
 }
-
 function addSpec(dl, label, value) {
   const dt = document.createElement("dt");
   dt.textContent = label;
@@ -3970,6 +4291,33 @@ function apply(ev) {
       entry.selected = ev.selected || 0;
       entry.partial = !!ev.partial;
     }
+    // TOR-181: what this row has asked to capture, and whether it can be
+    // asked for more. All four ride on run_state rather than on a message of
+    // their own for the reason the queue's two fields do (server.go's
+    // runStateFieldsLocked): the hub replays a run's LAST run_state to a
+    // reconnecting page, so a field overwritten by the run's own next state
+    // can never be replayed stale.
+    //
+    // OVERWRITTEN, NEVER MERGED. entry.picked is the server's answer, not
+    // this page's intention: a tick that was refused, a second tab ticking
+    // the same torrent, or a pass ending and taking the deferred files into
+    // itself all arrive here, and keeping whatever the page thought would be
+    // the one way the boxes could come to disagree with what is fetching.
+    // Absent means empty here, which is safe for exactly this message - the
+    // server always knows the answer for a live entry, and nothing replays a
+    // run_state off disk for an older shape's silence to be mistaken for a
+    // fact.
+    entry.picked = new Set(ev.ticked || []);
+    entry.deferred = new Set(ev.deferred || []);
+    // false when the key is missing, which cannot happen for a run this
+    // server holds (it is sent on every run_state, true or false) and is the
+    // safe direction if it ever does: a live checkbox the server would
+    // refuse is worse than a disabled one it would have taken.
+    entry.tickable = !!ev.tickable;
+    entry.tickRefusal = ev.tick_refusal || "";
+    // 0 is "the server's own -n", which the intake box already displays, so
+    // passCount falls back to that rather than quoting a zero.
+    entry.passCount = ev.count || 0;
     // A stall reading belongs to a run that is actively going nowhere; a
     // run that just left a cancellable state (done, failed, cancelled) is
     // not stalled any more, it is over - cleared the same moment and by the
@@ -4495,15 +4843,17 @@ el.form.addEventListener("submit", async (event) => {
   }
 });
 
-// The cost line beside "Take frames" reads the intake's count, so a foot on
+// The price on every file's row reads the intake's count, so a list on
 // screen has to follow it while it is being typed in.
 //
-// Keyed off the FOOT, not the section: since TOR-180 the file list itself is
-// on screen for every row that knows one, and only a parked row carries the
-// button and the figure this updates.
+// Keyed off the SECTION now, not a foot: since TOR-181 the figure is on each
+// file's own row rather than beside a button, so every row that HAS a list
+// has prices to restate - and updateFileCosts is what knows that a row with
+// a pass already forming quotes the server's locked count instead of this
+// box (passCount).
 el.count.addEventListener("input", () => {
   for (const entry of state.runs.values()) {
-    if (!entry.pickerFoot.hidden) updatePickerCost(entry);
+    if (!entry.pickerEl.hidden) updateFileCosts(entry);
   }
 });
 

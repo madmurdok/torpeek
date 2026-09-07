@@ -420,26 +420,36 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// decideRequest is a picker's answer: this run, these files, this many
-// frames each.
+// decideRequest is one tick: this run, these files, this many frames each.
+//
+// It was a picker's whole ANSWER before TOR-181 - everything somebody had
+// staged, sent once by a button under the list - and the route is unchanged
+// because the shape is: the page still sends a set rather than a single
+// index, so a tick that raced a lost message, or a "Select all", is one
+// call. What changed is that the server ADDS the set to what the row is
+// already fetching instead of replacing a selection nobody had committed
+// yet (Server.DecideRun).
 //
 // It names the run by id rather than by infohash, unlike the reopen request
-// next to it: this is about one entry in this process's registry - the one
-// parked and waiting - not about a torrent's results on disk, and the same
-// torrent may well have been added twice.
+// next to it: this is about one entry in this process's registry - the row
+// whose run is being grown - not about a torrent's results on disk, and the
+// same torrent may well have been added twice.
 type decideRequest struct {
 	ID    string   `json:"id"`
 	Files []string `json:"files"`
-	// Count is the intake's frames-per-file at the moment the button was
-	// pressed, so the number a person was looking at while ticking boxes is
-	// the number the run uses. Absent (or zero) leaves the run with whatever
-	// the original request carried.
+	// Count is the intake's frames-per-file at the moment the box was
+	// ticked, so the number a person was looking at beside that file is the
+	// number the run uses. Absent (or zero) leaves the run with whatever the
+	// original request carried, and a count on a tick that joins a pass
+	// already forming is ignored - see DecideRun on why the figure locks to
+	// the tick that opened it.
 	Count int `json:"count,omitempty"`
 }
 
-// handleDecideRun puts a parked torrent back in the queue with the files
-// someone ticked (TOR-67). The answer is the same {id, state} shape POST
-// /runs gives, because that is what this is: the moment the run someone
+// handleDecideRun starts a ticked file's frames on the row that holds it
+// (TOR-181), which for a parked torrent is the moment it leaves needs-action
+// and rejoins the queue (TOR-67). The answer is the same {id, state} shape
+// POST /runs gives, because that is what this is: the moment the run someone
 // asked for actually becomes a run.
 func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
 	var req decideRequest
@@ -498,11 +508,11 @@ func (s *Server) handleSetPriority(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// decideStatus maps a decision's four failures: a run this server does not
-// hold, a request that does not name a selection this torrent can satisfy, a
-// server that has closed, and - everything left - a run that is not waiting
-// to be told anything, which is the same conflict CancelRun reports for a
-// run that has already ended.
+// decideStatus maps a tick's four failures: a run this server does not hold,
+// a request that does not name a selection this torrent can satisfy, a
+// server that has closed, and - everything left - a run with nothing left
+// for a tick to grow (refuseTick), which is the same conflict CancelRun
+// reports for a run that has already ended.
 //
 // handleSetPriority answers through it too, because a reorder fails in
 // exactly those same four ways and means the same thing by each: an id this
