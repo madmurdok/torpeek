@@ -1677,8 +1677,17 @@ button:disabled { opacity: .5; }
    above, the state pill below, and the key-hint line further down) and the
    chamfer is not one of them, same as the label tab and the tick run.
 
-   Positioned fully INSIDE the panel rather than straddling the cut - TOR-176
-   is explicit that this differs from how it worked before. The notch's own
+   Positioned so its whole THICKNESS lands on the panel's side of the cut,
+   rather than straddling the cut as it did before TOR-176. Not "fully inside
+   the panel", which is what this comment claimed until TOR-177 measured it:
+   the bar's rotated bounding box still pokes about 0.7px past the panel's
+   right edge, and that 0.7px WAS the 1px horizontal overflow TOR-177 was sent
+   to explain. The arithmetic, so nobody has to re-measure: right -2.5px on a
+   17px box puts the centre 6px inside, and a 17x2 bar rotated -45 degrees has
+   an axis-aligned width of (17+2)/sqrt(2) = 13.4px, so it reaches 6.7px each
+   way from that centre - 0.7px of it beyond the edge. Harmless now only
+   because .lightbox itself clips (see its own overflow rule); do not read this
+   as the stroke being contained. The notch's own
    diagonal (two 10px legs) is ~14.14px; this bar is 17px so it overhangs
    both ends slightly for a flush join, and its centre sits 1px further into
    the panel than the cut line itself (bottom-right in un-rotated space:
