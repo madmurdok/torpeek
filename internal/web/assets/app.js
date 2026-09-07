@@ -975,7 +975,12 @@ for (const th of el.sortHeaders) {
 
 // detailSeq only exists to give each detail container a unique id, which the
 // row's toggle needs for aria-controls: a disclosure control has to name the
-// region it opens, and there are now as many regions as there are torrents.
+// region it opens, and there are now as many regions as there are torrents -
+// and, since TOR-182, as many again as there are video files inside them
+// (renderFileList mints "file-detail-N" from this same counter). One counter
+// for both depths on purpose: what it has to guarantee is uniqueness across
+// the document, which two counters would each only guarantee within their
+// own prefix.
 let detailSeq = 0;
 
 // RUN_TABLE_COLUMNS is how far the detail row has to span, read off the
@@ -997,8 +1002,9 @@ function newRunEntry(id) {
   const main = document.createElement("button");
   main.type = "button";
   main.className = "run-row-main";
-  // The same disclosure triangle a file block wears one level down, for the
-  // same reason: an accordion that gives no sign it opens is a table.
+  // The same disclosure triangle a video file's own row wears one level down
+  // (.picker-open, since TOR-182), for the same reason: an accordion that
+  // gives no sign it opens is a table.
   const icon = document.createElement("span");
   icon.className = "run-toggle-icon";
   icon.setAttribute("aria-hidden", "true");
@@ -1179,10 +1185,16 @@ function newRunEntry(id) {
     // WHAT THE TORRENT HOLDS (TOR-180), and since that ticket the row's
     // ordinary content rather than a state one run happens to be in: this
     // list is on screen in every state that knows a file list, not only for
-    // a torrent parked waiting to be picked from. It sits between the
-    // torrent's own summary line and its per-file blocks: the one gap in
-    // this pane, and both of its neighbours are already scoped to this
-    // entry, so a second torrent's list cannot land in it.
+    // a torrent parked waiting to be picked from.
+    //
+    // AND SINCE TOR-182 IT IS THE LAST BLOCK IN THIS PANE, because each
+    // file's own detail - its metadata, its progress, its frames and its
+    // buttons - now hangs off that file's own row inside this list rather
+    // than in a `<section class="files">` below it. There is nothing left to
+    // put after the list, so the detail's structure is: what the run is
+    // (header, summary, top-up), then what the torrent holds, and inside
+    // that, one file at a time. See renderFileList for the row and its
+    // nested slot, and fileBlock for what fills the slot.
     //
     // The .picker-* class names are kept on purpose even though this is no
     // longer a picker at all: since TOR-181 a tick IS the decision, so
@@ -1216,8 +1228,7 @@ function newRunEntry(id) {
         '<span class="picker-armed" role="status"></span>' +
       '</p>' +
       '<ul class="picker-list"></ul>' +
-    '</section>' +
-    '<section class="files"></section>';
+    '</section>';
   detailCell.append(detailEl);
 
   const entry = {
@@ -1385,7 +1396,28 @@ function newRunEntry(id) {
     // figure without rebuilding the list - the list is rebuilt only when the
     // file list itself changes, and rebuilding it on each event would drop
     // the scroll position of a season pack mid-tick.
+    //
+    // Since TOR-182 a row also carries the SLOT its file's whole detail is
+    // built into (`detail`), which turns "rebuilding it on each event would
+    // drop the scroll position" from a courtesy into a correctness rule: a
+    // rebuild now throws away every frame grid, every open disclosure and
+    // every element fileBlock is holding a reference to. fileListSig below
+    // is what makes that impossible rather than merely unlikely.
     pickerRows: new Map(),
+    // fileListSig is the file list this row's DOM was LAST BUILT FROM -
+    // indices, paths and whether the whole list was known - so renderFileList
+    // can tell a message that says something new about the list from one that
+    // repeats what it already drew.
+    //
+    // It exists because more than one message carries a file list and only
+    // the first of them is a fresh start. A top-up and a retry (TOR-152) mint
+    // a run whose events land on THIS entry (claimReopenedRun), and each of
+    // them publishes its own metadata_ready - so before TOR-182 the second
+    // one merely redrew an identical list, and since TOR-182 it would take
+    // the details nested in that list down with it, mid-run, on a row whose
+    // frames are on screen. A genuine reset comes through resetRunContent,
+    // which clears this along with the list itself.
+    fileListSig: "",
     // Set once this run's first file block is built, so every file after it
     // defaults to collapsed - only the first one earns the auto-expand.
     autoExpanded: false,
@@ -1426,7 +1458,6 @@ function newRunEntry(id) {
     pickerList: detailEl.querySelector(".picker-list"),
     pickerAll: detailEl.querySelector(".picker-all"),
     pickerArmed: detailEl.querySelector(".picker-armed"),
-    filesEl: detailEl.querySelector(".files"),
   };
 
   // One listener on the row, not the name button alone: a click anywhere in
@@ -1498,7 +1529,12 @@ function ensureRun(id) {
 // history is starting over (a fresh start, or a reconnecting page about to
 // replay it from the beginning), not "every torrent on the page is gone".
 function resetRunContent(entry) {
-  entry.filesEl.replaceChildren();
+  // Since TOR-182 the file blocks live INSIDE the file list's own rows, so
+  // there is no separate container to empty here - entry.pickerList's own
+  // replaceChildren below is what takes the blocks off screen with the rows
+  // that hold them. This map still has to be cleared by hand, and before
+  // that happens rather than after: it is the only handle on those blocks,
+  // and every one of them is about to be detached.
   entry.fileEntries.clear();
   entry.autoExpanded = false;
   entry.torrentSummary.hidden = true;
@@ -1538,6 +1574,10 @@ function resetRunContent(entry) {
   entry.passCount = 0;
   disarmSelectAll(entry);
   entry.pickerList.replaceChildren();
+  // The signature goes with the list it describes. Left behind, it would
+  // tell the replayed metadata_ready that follows "you already drew this",
+  // and the row would come back from a reset with an empty list (TOR-182).
+  entry.fileListSig = "";
   entry.pickerEl.hidden = true;
   // The .torrent link goes with the rest of what this run has shown. It comes
   // back from the done event the replayed history ends on, so a reconnecting
@@ -2217,6 +2257,29 @@ const WHY_NOT_VIDEO =
 // updateFileCosts, which re-runs on every event without rebuilding the list.
 // A season pack is twenty rows in a scrolling box, and rebuilding it under
 // somebody mid-tick would throw their scroll position away each heartbeat.
+//
+// AND SINCE TOR-182 A ROW IS A DISCLOSURE, not just a line with a checkbox
+// on it: each video file's own detail - its metadata, its progress bar, its
+// frames and its buttons - is built into a slot inside that file's own <li>
+// (fileBlock fills it), which is the third depth this page now has. Three
+// things follow from that, and each has its own note below where it lands:
+//
+//   1. THE ROW BUILD IS NOW LOAD-BEARING, not a redraw. It used to be free
+//      to rebuild the list on every message that carried one; now a rebuild
+//      detaches every frame grid on the row. The signature below is what
+//      makes a second metadata_ready - which a top-up and a retry both
+//      publish onto this same entry - redraw nothing.
+//   2. THE ROW OWNS THE TOGGLE, not the block inside it. The listener is on
+//      .picker-file and the detail is its SIBLING inside the <li>, never its
+//      descendant - the same shape, and for the same reason, as the run
+//      row's own detail being a separate <tr> (see newRunEntry's heading): a
+//      click on a thumbnail or on Regenerate must not close the thing it is
+//      being used on.
+//   3. THE TICK AND THE DISCLOSURE ARE ONE ROW WITH TWO MEANINGS, and they
+//      cannot collide, because a file gets a detail exactly when it has been
+//      asked for - and updateFileCosts disables the box of every asked-for
+//      file. So a row either spends traffic (no detail yet) or opens what
+//      that traffic bought (box disabled), never both.
 function renderFileList(entry, ev) {
   entry.videos = ev.videos || [];
   // ABSENT IS NOT EMPTY. A message with no "files" key cannot say what the
@@ -2239,7 +2302,49 @@ function renderFileList(entry, ev) {
   // whose set is empty because resetRunContent emptied it when the run's
   // history opened.
   for (const index of ev.selected || []) entry.picked.add(index);
+
+  // THE SAME LIST IS NOT REDRAWN, and since TOR-182 that is a correctness
+  // rule rather than a courtesy about scroll positions. A top-up or a retry
+  // (TOR-152) mints a run whose events land on this very entry
+  // (claimReopenedRun), and that run publishes its own metadata_ready - so
+  // this function runs a second time, mid-life, on a row whose files are
+  // open with frames on screen. Rebuilding the rows there would detach every
+  // frame grid, every open disclosure and every element fileBlock is holding
+  // a reference to, and the page would look as though the run had lost its
+  // work.
+  //
+  // The signature is the list ITSELF (each file's index and path) plus
+  // whether the whole of it was known, because those are exactly the inputs
+  // the rows are built from - not a message counter or a length, either of
+  // which would call two different lists the same. A genuine fresh start
+  // arrives through resetRunContent, which clears the signature with the
+  // list, so this can never suppress the rebuild that follows a reset.
+  const sig = entry.fileList.length
+    ? (entry.fileListKnown ? "files:" : "videos:") +
+        entry.fileList.map((file) => file.index + " " + file.path).join("\n")
+    : "";
+  if (sig !== "" && sig === entry.fileListSig) {
+    // Everything about the row that is not its shape - the boxes, the prices,
+    // the frame and the title - is restated, which is all this message can
+    // legitimately have changed about a list it has already drawn.
+    syncFileList(entry);
+    return;
+  }
+  entry.fileListSig = sig;
   entry.pickerRows = new Map();
+  // AND THE BLOCKS GO WITH THE ROWS THAT HELD THEM. Every fentry points at
+  // elements inside a row this rebuild is about to detach, so keeping the map
+  // would leave fileBlock returning a block whose DOM is no longer on the
+  // page - and that file's detail would then never appear again, silently,
+  // for the rest of the row's life. Cleared here rather than in
+  // resetRunContent alone, because this is the OTHER way the rows can go.
+  //
+  // Reaching this line at all means the list genuinely changed shape (the
+  // signature above is what settles that), which for one torrent on one row
+  // should never happen - so this is the guard for a case that ought to be
+  // impossible rather than a path with a known caller.
+  entry.fileEntries.clear();
+  entry.autoExpanded = false;
 
   const tickable = new Set(entry.videos.map((video) => video.index));
 
@@ -2257,11 +2362,66 @@ function renderFileList(entry, ev) {
     const row = document.createElement(video ? "label" : "span");
     row.className = "picker-file";
 
+    // THE DISCLOSURE (TOR-182), first in the row and the same mark the
+    // torrent's own row wears one level up (.run-toggle-icon): opening a
+    // torrent and opening one of its files should not be two different
+    // gestures.
+    //
+    // A <button> only where there can ever be something to open, and a
+    // <span> in the same class otherwise, so the column is RESERVED on every
+    // row and the names below still line up - the reasoning
+    // .run-detail-cancel[data-idle] already follows one block up, and the
+    // reason .picker-mark draws an em dash where a checkbox would be.
+    // app.css keys the triangle's visibility off the item's data-detail,
+    // which fileBlock is the only writer of, so there is one source of truth
+    // for "this file has a detail" rather than a disabled flag to keep in
+    // step with it.
+    //
+    // WHY IT MAY SIT INSIDE THE <label>, and the trap that is: HTML's
+    // activation behaviour for a label does nothing for events targeted at
+    // interactive content descendants, so clicking the triangle cannot also
+    // toggle the checkbox beside it. That half held. What did not is which
+    // control the label belongs to.
+    //
+    // A <label> with no `for` labels its FIRST LABELABLE DESCENDANT, and
+    // `button` is labelable. So this button, sitting first in the row,
+    // silently became the label's control: clicking the file's NAME
+    // activated the button, which dispatched a second click on this same
+    // row, which toggled the detail straight back closed - one click, two
+    // toggles, a row that looked dead. Worse and quieter, the checkbox
+    // stopped being the label's control at all, so clicking the name of a
+    // row that CAN be ticked would no longer tick it, which is the whole of
+    // TOR-181 undone by DOM order.
+    //
+    // Found in a browser, not by the text checks, which is what the browser
+    // check is for. The fix is `for` on the label (below): naming the
+    // control explicitly is the only form of this that does not depend on
+    // which element happens to come first in the row.
+    const open = document.createElement(video ? "button" : "span");
+    open.className = "picker-open";
+    if (video) {
+      open.type = "button";
+      open.setAttribute("aria-expanded", "false");
+      open.title = "this file's frames, metadata and buttons";
+      // Its own name, because the label's text belongs to the checkbox: a
+      // control announced as "button" with nothing after it is one nobody
+      // reading by ear can act on.
+      open.setAttribute("aria-label", "Frames and metadata for " + basename(file.path));
+    } else {
+      open.setAttribute("aria-hidden", "true");
+    }
+
     let box = null;
     if (video) {
       box = document.createElement("input");
       box.type = "checkbox";
       box.value = String(file.index);
+      // THE LABEL NAMES ITS CONTROL, rather than letting the DOM's order
+      // decide (see the disclosure's own note just above for what that cost).
+      // The id comes from the same counter the detail regions use, for the
+      // same reason: it only has to be unique across the document.
+      box.id = "file-tick-" + (++detailSeq);
+      row.htmlFor = box.id;
       box.addEventListener("change", () => tickFile(entry, file.index, box));
     } else {
       // The em dash, in the column the checkbox would have occupied: the
@@ -2287,7 +2447,10 @@ function renderFileList(entry, ev) {
     size.className = "picker-size";
     size.textContent = bytesLabel(file.length);
 
-    row.append(box, name, size);
+    row.append(open, box, name, size);
+    // The row first, so the detail slot below can be appended after it and
+    // read as what it is: the thing this row opens onto.
+    item.append(row);
 
     // TOR-181's two spans, and only on a row a tick can reach: what this
     // file would cost, and - once it has been asked for - which run it is
@@ -2299,10 +2462,58 @@ function renderFileList(entry, ev) {
       const asked = document.createElement("span");
       asked.className = "picker-state";
       row.append(cost, asked);
-      entry.pickerRows.set(file.index, { item, row, box, cost, state: asked });
+      // WHAT THE FILE ALREADY HAS, on the same row (TOR-182). This is the
+      // .file-summary that used to sit on each file block's own title line -
+      // resolution and frame count, kept current by updateFileSummary -
+      // moved here with the rest of the block, because the title line it sat
+      // on IS this row now.
+      //
+      // Last rather than beside the name, so it takes the place the price
+      // vacates: the two are mutually exclusive by construction (a file with
+      // frames has been asked for, and updateFileCosts clears the price of
+      // an asked-for file), so the column reads as one column of "what this
+      // row costs or what it got" rather than two half-empty ones.
+      const summary = document.createElement("span");
+      summary.className = "picker-summary";
+      row.append(summary);
+
+      // THE SLOT ITSELF: built empty with the row, filled by fileBlock the
+      // first time this file says anything, and a SIBLING of the row rather
+      // than part of it (see this function's own heading, point 2). It is
+      // built here rather than in fileBlock so that the id the toggle names
+      // in aria-controls exists from the start - a disclosure control has to
+      // name the region it opens, and a region minted later is one the
+      // control pointed at nothing for.
+      const detail = document.createElement("div");
+      detail.className = "file-detail";
+      detail.hidden = true;
+      detail.id = "file-detail-" + (++detailSeq);
+      open.setAttribute("aria-controls", detail.id);
+      item.append(detail);
+
+      entry.pickerRows.set(file.index,
+        { item, row, box, name, cost, state: asked, summary, open, detail });
+
+      // ONE LISTENER FOR THE WHOLE ROW, on the row and not on the triangle:
+      // the ticket's own words are that clicking a video FILE opens its
+      // detail, and a 0.7em triangle is not the file. The triangle is inside
+      // this row, so its clicks arrive here too and there is nothing to
+      // stop bubbling from.
+      //
+      // THE CHECKBOX IS EXCLUDED BY TARGET, and it has to be by target
+      // rather than by state: activating a <label> dispatches a second,
+      // synthetic click on the control it labels, which bubbles here as
+      // well - so a click on the file's name would arrive twice and toggle
+      // the detail back closed. Excluding events whose target IS the box
+      // leaves exactly one toggle per click, and leaves a click on the box
+      // itself meaning only what it has meant since TOR-181: start this
+      // file.
+      row.addEventListener("click", (event) => {
+        if (event.target === box) return;
+        toggleFileDetail(entry, file.index);
+      });
     }
 
-    item.append(row);
     return item;
   }));
 
@@ -2670,15 +2881,36 @@ function trackGroup(label, tracks, formatter) {
   return section;
 }
 
-// fileBlock returns the section for one file of one torrent, building it the
+// fileBlock returns the detail for one file of one torrent, building it the
 // first time it is needed. Each video file gets its own summary panel and
 // its own frame grid, since a multi-file torrent should not mix their frames
 // or their tracks in one place - and one torrent's files must never mix with
 // another's now that the page can hold several at once.
 //
-// Everything below the title - specs, tracks, links, progress, the frame
+// SINCE TOR-182 IT BUILDS INTO THE FILE'S OWN ROW, one level in, rather than
+// into a `.files` section under the list. Nothing about what it builds
+// changed in that move - the metadata disclosure, the progress line, the
+// reach strip, the grid and the buttons are the same elements with the same
+// comments - and two things about WHERE it builds did:
+//
+//   1. THE TITLE LINE IS GONE, because the row is the title line. The
+//      `<h2 class="file-title">` held a toggle, the file's name and its
+//      summary; the row already carries a disclosure, the name (as a base
+//      name with the whole path on its title, which is the better of the two
+//      conventions) and now the summary too. Keeping a second one inside the
+//      thing the first one opens would have been the same line twice.
+//   2. THE MOUNT POINT COMES FROM THE LIST, and if the list has no row for
+//      this index there is nowhere to put a detail. That cannot happen for
+//      any sequence the server produces - MetadataReady is published before
+//      the first FileStarted on both paths that publish one at all
+//      (core.Engine.run, and cacheHit.publish for a replay), and its file
+//      list holds every video the run can then start - so this returns null
+//      rather than inventing a home, and the events that call it treat that
+//      the way they already treat any absent reading.
+//
+// Everything in the detail - specs, tracks, links, progress, the frame
 // grid - is built and filled in exactly as before, whether or not the file
-// is expanded; only file-body's `hidden` attribute decides what is on
+// is expanded; only the slot's `hidden` attribute decides what is on
 // screen. A frame_ready for a collapsed file still appends its figure to
 // .grid (addFrame never checks expanded state), so expanding it later shows
 // everything that arrived while it was closed - nothing is built lazily,
@@ -2687,8 +2919,8 @@ function trackGroup(label, tracks, formatter) {
 // Only the first file built for a run is auto-expanded (entry.autoExpanded
 // latches on the first call and never resets except on a full
 // resetRunContent). Every file after that starts collapsed, and a file's
-// expanded state changes from then on only in response to its own toggle
-// button - never from a later file_started/frame_ready/progress event - so
+// expanded state changes from then on only in response to its own row being
+// clicked - never from a later file_started/frame_ready/progress event - so
 // a person's click can neither be collapsed out from under them nor have
 // the expansion stolen back to file zero.
 //
@@ -2705,17 +2937,21 @@ function fileBlock(entry, index) {
   let fentry = entry.fileEntries.get(index);
   if (fentry) return fentry;
 
-  const article = document.createElement("article");
-  article.className = "file";
-  article.innerHTML =
-    '<h2 class="file-title">' +
-      '<button type="button" class="file-toggle" aria-expanded="false">' +
-        '<span class="file-toggle-icon" aria-hidden="true"></span>' +
-        '<span class="file-name"></span>' +
-        '<span class="file-summary"></span>' +
-      "</button>" +
-    "</h2>" +
-    '<div class="file-body">' +
+  const listRow = entry.pickerRows.get(index);
+  if (!listRow) {
+    // SAID OUT LOUD RATHER THAN SWALLOWED. Every caller below already copes
+    // with a null the way this page copes with any absent reading, so a file
+    // whose row never arrived costs its frames rather than a broken page -
+    // but it would cost them in total silence, and the invariant this
+    // depends on lives in another package. The log is where a person can see
+    // it happened at all.
+    logFor(entry, "file " + index + " has no row in the torrent's file list, so there is " +
+      "nowhere to show it - the metadata that names the list must arrive first");
+    return null;
+  }
+
+  const body = listRow.detail;
+  body.innerHTML =
       '<section class="meta">' +
         '<h3 class="meta-title">' +
           '<button type="button" class="meta-toggle" aria-expanded="false">' +
@@ -2756,31 +2992,40 @@ function fileBlock(entry, index) {
         "</div>" +
         '<figcaption class="reach-note"></figcaption>' +
       "</figure>" +
-      '<div class="grid"></div>' +
-    "</div>";
-  entry.filesEl.append(article);
+      '<div class="grid"></div>';
+  // The row's own item carries the open/closed state, so app.css can dress
+  // the whole row - not just the slot under it - the way .run-row
+  // [data-expanded="true"] already dresses an open torrent one level up.
+  // data-detail is what brings the row's disclosure triangle on screen: this
+  // is the moment there is something behind it, and this is the only writer
+  // of that attribute.
+  listRow.item.dataset.detail = "true";
 
   fentry = {
-    article,
-    toggle: article.querySelector(".file-toggle"),
-    name: article.querySelector(".file-name"),
-    summary: article.querySelector(".file-summary"),
-    body: article.querySelector(".file-body"),
-    metaToggle: article.querySelector(".meta-toggle"),
-    metaBody: article.querySelector(".meta-body"),
-    specs: article.querySelector(".specs"),
-    tracks: article.querySelector(".tracks"),
-    links: article.querySelector(".file-links"),
-    regenCount: article.querySelector(".file-regen-count"),
-    regenGo: article.querySelector(".file-regen-go"),
-    compareGo: article.querySelector(".file-compare"),
-    progress: article.querySelector(".file-progress"),
-    availSwarm: article.querySelector(".avail-swarm"),
-    availSwarmText: article.querySelector(".avail-swarm-text"),
-    reach: article.querySelector(".reach"),
-    reachStrip: article.querySelector(".reach-strip"),
-    reachNote: article.querySelector(".reach-note"),
-    grid: article.querySelector(".grid"),
+    // item is the row's <li>, body the slot inside it. The two are what the
+    // old .file article and its .file-body were, one level in - see this
+    // function's own heading for what happened to the title line between
+    // them.
+    item: listRow.item,
+    toggle: listRow.open,
+    name: listRow.name,
+    summary: listRow.summary,
+    body,
+    metaToggle: body.querySelector(".meta-toggle"),
+    metaBody: body.querySelector(".meta-body"),
+    specs: body.querySelector(".specs"),
+    tracks: body.querySelector(".tracks"),
+    links: body.querySelector(".file-links"),
+    regenCount: body.querySelector(".file-regen-count"),
+    regenGo: body.querySelector(".file-regen-go"),
+    compareGo: body.querySelector(".file-compare"),
+    progress: body.querySelector(".file-progress"),
+    availSwarm: body.querySelector(".avail-swarm"),
+    availSwarmText: body.querySelector(".avail-swarm-text"),
+    reach: body.querySelector(".reach"),
+    reachStrip: body.querySelector(".reach-strip"),
+    reachNote: body.querySelector(".reach-note"),
+    grid: body.querySelector(".grid"),
     expanded: false,
     metaExpanded: false,
     // frames is this file's grid, keyed by timecode in milliseconds. The key
@@ -2826,15 +3071,12 @@ function fileBlock(entry, index) {
   fentry.regenGo.addEventListener("click", () => regenerate(entry, index, fentry));
   fentry.compareGo.addEventListener("click", () => openCompare(entry.infohash, index));
 
-  fentry.toggle.addEventListener("click", () => {
-    const expanded = !fentry.expanded;
-    setFileExpanded(fentry, expanded);
-    // Opening a file is when it is worth reading the other result sets off
-    // disk - not on every run_state, and not for a file nobody looked at.
-    // Once is enough: a set only gains frames by a run finishing, which
-    // asks again itself (onFileDone).
-    if (expanded && !fentry.detailLoaded) loadFileDetail(entry, fentry, index);
-  });
+  // No toggle listener here any more: the row that opens this detail is
+  // built once by renderFileList and owns the click (toggleFileDetail), so
+  // the listener lives with the element it is on rather than being attached
+  // to it from inside the thing it opens. fentry.toggle is still the row's
+  // own disclosure button, because aria-expanded has to travel with the
+  // expanded state and setFileExpanded is where that is written.
   setFileExpanded(fentry, !entry.autoExpanded);
   entry.autoExpanded = true;
   updateFileSummary(fentry);
@@ -2900,14 +3142,89 @@ async function regenerate(entry, index, fentry) {
   }
 }
 
+// toggleFileDetail is what clicking a file's row does (renderFileList binds
+// it), and the only path a person's click takes to setFileExpanded.
+//
+// A row whose file has said nothing yet has no detail to open - the ticks are
+// what start a file, and until one has, there is no metadata, no plan and no
+// frames to show - so this is a no-op there rather than an empty panel.
+function toggleFileDetail(entry, index) {
+  const fentry = entry.fileEntries.get(index);
+  if (!fentry) return;
+
+  const expanded = !fentry.expanded;
+  setFileExpanded(fentry, expanded);
+  // Opening a file is when it is worth reading the other result sets off
+  // disk - not on every run_state, and not for a file nobody looked at.
+  // Once is enough: a set only gains frames by a run finishing, which
+  // asks again itself (onFileDone).
+  if (expanded && !fentry.detailLoaded) loadFileDetail(entry, fentry, index);
+}
+
+// ---------------------------------------------------------------------------
+// ONE FILE'S DETAIL AT A TIME (TOR-182), and this is the level where that
+// decision is made rather than the one above it.
+//
+// The row level deliberately allows SEVERAL torrents open at once, for three
+// written reasons (see setRunExpanded's own heading) - the first of which is
+// that closing one to open another destroys work in progress. None of those
+// reasons is repealed here; what changes is what the worst case costs. A
+// season pack holds twenty-five video files, and two expanded torrents that
+// each allowed twenty-five open frame grids would put fifty grids on one
+// page: not a page anybody can read, and not one any of the three reasons
+// above asks for.
+//
+// So the bound goes on the INNER level, which is the one place it costs
+// nothing that matters:
+//
+//   - The outer level keeps what it is for. Two torrents side by side, one
+//     of them mid-run, is exactly the comparison setRunExpanded exists to
+//     allow, and it still works.
+//   - The inner level has nothing to lose by closing. A file's detail is
+//     built once and updated whether or not it is on screen (fileBlock's own
+//     heading): a collapsed file's grid still fills, its progress line still
+//     moves, and re-opening it shows everything that arrived meanwhile. This
+//     is the same property that makes closing a torrent's row harmless, and
+//     it is why "closing one destroys work" - true of a pane that has to be
+//     rebuilt - is not true of either accordion in this page.
+//   - And a person comparing two files of one torrent has the level above:
+//     nothing stops the same torrent's row from being open beside another's.
+//
+// What it costs, said plainly: two files of ONE torrent cannot be read side
+// by side. Compare (TOR-109) is the answer for two result sets of the same
+// file, and there is no equivalent for two different files - if one is ever
+// wanted, this function is where it would be relaxed, and the reasoning
+// above is what would have to be answered.
 function setFileExpanded(fentry, expanded) {
+  // Every sibling first, and only when opening: this is the accordion, and
+  // it reads the entry's own map rather than a "which one is open" field so
+  // that nothing can be left claiming to be open after a reset emptied the
+  // map from under it.
+  if (expanded) {
+    for (const other of fentry.entry.fileEntries.values()) {
+      if (other !== fentry && other.expanded) setFileExpanded(other, false);
+    }
+  }
+
   fentry.expanded = expanded;
-  fentry.article.dataset.expanded = String(expanded);
+  // On the row's own <li>, not on the slot: an open file is a state of the
+  // row, the same way .run-row[data-expanded="true"] is a state of the
+  // torrent's row rather than of its detail.
+  fentry.item.dataset.expanded = String(expanded);
   fentry.toggle.setAttribute("aria-expanded", String(expanded));
   fentry.body.hidden = !expanded;
-  // The collapsed-only summary line and the specs panel say the same thing
-  // two different ways; showing both at once would just repeat resolution.
-  fentry.summary.hidden = expanded;
+  // THE SUMMARY STAYS, and that is a change of behaviour TOR-182 owes a
+  // reason for. It used to be hidden while the file was expanded, because
+  // "the collapsed-only summary line and the specs panel say the same thing
+  // two different ways" - but that premise stopped being true when TOR-71
+  // put the specs behind their own disclosure, collapsed by default: opening
+  // a file now takes the resolution and the frame count off screen and
+  // replaces them with nothing.
+  //
+  // The move is what makes keeping it the better answer rather than merely
+  // the harmless one. The summary is a COLUMN of the file list now, read
+  // down twenty-five rows, and a column that empties the row you are looking
+  // at is a column that has to be re-found every time you open something.
 }
 
 // setMetaExpanded is the file-level setFileExpanded's counterpart one level
@@ -2924,12 +3241,14 @@ function setMetaExpanded(fentry, expanded) {
   fentry.metaBody.hidden = !expanded;
 }
 
-// updateFileSummary keeps a collapsed row worth choosing by without opening
-// it: the file name is always visible on the toggle itself, and this adds
+// updateFileSummary keeps a row worth choosing by without opening it: the
+// file name and size are already on the row (renderFileList), and this adds
 // whatever of resolution and frame count are already known - both update
 // live (resolution the moment file_started arrives, the frame count on
 // every frame_ready) whether or not the file happens to be expanded right
-// now.
+// now. Since TOR-182 it writes into that same row (.picker-summary) rather
+// than onto a title line inside the detail, and it is on screen open or
+// closed - see setFileExpanded for why that stopped being a repetition.
 // updateFileSummary says how many frames the file has, and against what it
 // was trying for when the two differ.
 //
@@ -2959,7 +3278,16 @@ function updateFileSummary(fentry) {
 // moment the file's media is known - before a single frame exists.
 function onFileStarted(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
-  fentry.name.textContent = ev.path;
+  if (!fentry) return;
+  // The engine's own path, restated on the row in the LIST's convention
+  // rather than the block's: a base name with the whole path on its title
+  // (renderFileList). The two used to differ - the block's title line showed
+  // the full path, which in a season pack is the same forty characters of
+  // directory twenty-five times over - and since TOR-182 there is one line
+  // to show it on, so one of the two conventions had to win. This one did
+  // because the list is read as a column.
+  fentry.name.textContent = basename(ev.path);
+  fentry.name.title = ev.path;
   fentry.width = ev.width;
   fentry.height = ev.height;
 
@@ -3002,6 +3330,9 @@ function onFileStarted(entry, ev) {
 // same file share timecodes, and the grid is one list ordered by time.
 function addFrame(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
+  // Nowhere to put it (see fileBlock): the frame is on disk either way, and
+  // it is reachable again the moment a row for this file exists.
+  if (!fentry) return;
   const at = ev.actual_ms;
 
   // No params: a frame straight off the event stream has no result set to
@@ -4130,6 +4461,7 @@ el.compare.addEventListener("keydown", (event) => {
 
 function onFileDone(entry, ev) {
   const fentry = fileBlock(entry, ev.file);
+  if (!fentry) return;
   fentry.progress.hidden = true;
 
   const links = [];
@@ -4403,8 +4735,13 @@ function apply(ev) {
       // one still waiting, and a person watching cannot tell a slow read
       // from a dead one (TOR-110).
       const fentry = fileBlock(entry, ev.file);
-      fentry.skipped.set(ev.index, { code: ev.code || "", reason: ev.reason || "" });
-      renderFrames(fentry);
+      // The log line still goes out for a file with no row of its own: the
+      // skip is what a person is owed here, and the cell it would have
+      // marked does not exist to mark.
+      if (fentry) {
+        fentry.skipped.set(ev.index, { code: ev.code || "", reason: ev.reason || "" });
+        renderFrames(fentry);
+      }
       logFor(entry, "frame " + ev.index + " skipped: " + ev.code + " " + ev.reason);
       break;
     }
@@ -4422,10 +4759,12 @@ function apply(ev) {
       // time regardless, which is the whole point of that heartbeat.
       if (ev.frames_total > 0) {
         const fentry = fileBlock(entry, ev.file);
-        fentry.progress.hidden = false;
-        fentry.progress.textContent =
-          ev.frames_done + " / " + ev.frames_total + " frames · " +
-          bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
+        if (fentry) {
+          fentry.progress.hidden = false;
+          fentry.progress.textContent =
+            ev.frames_done + " / " + ev.frames_total + " frames · " +
+            bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
+        }
         // The row's own line and bar, which read from the fuller of two
         // signals rather than this heartbeat alone - see applyFrameProgress's
         // own doc for why a top-up needs that (TOR-167). ev.frames_done still
