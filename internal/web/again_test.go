@@ -174,6 +174,14 @@ func TestTopUpStatesWhatItWillSpendBeforeItIsSpent(t *testing.T) {
 		t.Fatalf("a run with %d of %d frames on each of two files was refused: %s",
 			takenPerFile, askedPerFile, offer.Refused)
 	}
+	// TOR-178: Complete is the flag the page now reads to tell "nothing
+	// wrong, just whole" apart from every other refusal - it must not be set
+	// on an offer that is not even refused, or a client trusting it alone
+	// (without also checking Refused) would misread a genuine top-up as one.
+	if offer.Complete {
+		t.Error("a genuinely partial set (16 of 20 frames on each file) reports Complete - " +
+			"that flag means there was nothing left to finish, and this set plainly has")
+	}
 	if offer.Count != askedPerFile || len(offer.Files) != 2 {
 		t.Errorf("offer covers %d file(s) at %d frames, want 2 at %d",
 			len(offer.Files), offer.Count, askedPerFile)
@@ -505,6 +513,17 @@ func TestTopUpRefusesASetWithNothingMissing(t *testing.T) {
 		t.Error("a complete set offered a top-up, which would re-inspect every file " +
 			"to reuse every frame")
 	}
+	// TOR-178: this is the ONE refusal reason app.js no longer draws as a
+	// line in the run-again block - the row's own DONE/PARTIAL badge already
+	// says a whole set is whole. Complete is how the page tells this refusal
+	// apart from the other five (a stale record, files missing from disk),
+	// which still get drawn in full - so it has to be true here, on exactly
+	// the set that has nothing missing.
+	if !offer.Complete {
+		t.Error("a set with nothing missing (askedPerFile of askedPerFile on both files) " +
+			"does not report Complete - the page has no way left to tell this refusal apart " +
+			"from one that explains an actual problem with the record")
+	}
 
 	resp := post(t, base, "/runs/topup", `{"infohash":"`+hash+`"}`)
 	if resp.StatusCode != http.StatusConflict {
@@ -718,6 +737,63 @@ func TestTheServedPageOffersToppingUpAndRetrying(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Errorf("the served app.js never mentions %q", want)
 		}
+	}
+}
+
+// ---- TOR-178: two lines dropped from the run detail, one of them a choice ----
+//
+// "every frame this run asked for is already on disk" and "N of M video
+// file(s) selected" both used to render in the detail. The owner asked for
+// both gone, on the grounds that the row's own DONE/PARTIAL badge already
+// carries the first. The two are NOT equally redundant, though: the second
+// names a fact - how many video files the torrent holds (M) - that appears
+// nowhere else on the page, so removing the sentence without giving M
+// another home would silently drop the answer to "did I take all of it, or
+// a slice" (the same arithmetic TOR-50's trap is about). This test guards
+// both halves: the sentence is gone from the served script, and the figure
+// it used to carry still is a live spec, not a lost one.
+func TestTheDetailDropsTheRedundantLineButKeepsTheFileCount(t *testing.T) {
+	js := appJS(t)
+
+	// The exact sentence metadata_ready used to draw on .torrent-summary. If
+	// this comes back, either directly or via a differently-worded
+	// reintroduction of "selected" against ev.videos.length, this guard is
+	// the thing that should catch it - not a person noticing the page looks
+	// busier again.
+	if strings.Contains(js, "video file(s) selected") {
+		t.Error("the served app.js still draws the removed \"N of M video file(s) selected\" " +
+			"line - TOR-178 asked for it gone")
+	}
+
+	// M's new home: the per-file Metadata disclosure (onFileStarted's specs),
+	// the only torrent-scoped-fact-adjacent disclosure that exists anywhere
+	// in this detail. Dropping this spec would be the "half-way" outcome the
+	// ticket named explicitly: the sentence gone and the figure gone with it,
+	// with nothing recording that as a decision.
+	if !strings.Contains(js, `"Torrent files"`) {
+		t.Error(`the served app.js no longer offers a "Torrent files" spec - TOR-178 moved the ` +
+			"torrent's own video-file count there when the summary line that used to carry it " +
+			"was removed")
+	}
+
+	// The collapsing half: a refused top-up whose ONLY problem is
+	// completeness (TopUp.Complete) must not draw entry.topup.refused as a
+	// line of its own - that text is exactly the second redundant sentence,
+	// now a server string instead of a page literal. Keying this off a
+	// structured field rather than matching the refused text against a
+	// literal keeps TopUp.Refused's own contract intact (its doc: "a
+	// sentence rather than a code... nothing for a client to branch on",
+	// Complete aside).
+	// Keyed on the negated form, "!t.complete", specifically: that string
+	// only occurs where the flag actually gates the refusal line (showRefusal
+	// in renderAgain), not wherever the identifier merely gets mentioned in a
+	// comment - a looser "t.complete" substring would still pass if the
+	// wiring were renamed away and only prose kept saying it existed.
+	if !strings.Contains(js, "!t.complete") {
+		t.Error("the served app.js has no reference to topup.complete - the run-again block has " +
+			"no way left to tell a genuinely-nothing-wrong refusal apart from every other one, " +
+			"so it would either draw the redundant sentence again or hide a refusal that needed " +
+			"reading")
 	}
 }
 
