@@ -2,7 +2,9 @@ package web
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -129,5 +131,147 @@ func TestEveryColourComesFromAToken(t *testing.T) {
 	if len(found) > 0 {
 		t.Errorf("colour literals outside the :root token rule, where nothing can "+
 			"reach them:\n  %s", strings.Join(found, "\n  "))
+	}
+}
+
+// ---- TOR-158: measured legibility, not asserted. ----
+//
+// WCAG 2.x relative luminance and contrast ratio, computed the same way the
+// numbers in the ticket's own description were: sRGB channels linearised,
+// then the standard 0.2126/0.7152/0.0722 weighting. AA for body text is
+// 4.5:1. A ratio recomputed here is worth more than one asserted in a
+// comment, because a comment does not fail the build when a later edit
+// invalidates it.
+
+func relLuminance(hex string) float64 {
+	hex = strings.TrimPrefix(hex, "#")
+	r, _ := strconv.ParseInt(hex[0:2], 16, 64)
+	g, _ := strconv.ParseInt(hex[2:4], 16, 64)
+	b, _ := strconv.ParseInt(hex[4:6], 16, 64)
+	lin := func(c int64) float64 {
+		v := float64(c) / 255
+		if v <= 0.03928 {
+			return v / 12.92
+		}
+		return math.Pow((v+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+func contrastRatio(hexA, hexB string) float64 {
+	la, lb := relLuminance(hexA), relLuminance(hexB)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+// hexToken reads a :root token's value as a plain 6-digit hex literal, the
+// only shape this test knows how to score - rgba()/hsla() tokens (--scrim,
+// the glows) are not colours this ticket touches.
+func hexToken(t *testing.T, root map[string]string, name string) string {
+	t.Helper()
+	v, ok := root[name]
+	if !ok {
+		t.Fatalf(":root declares no %s", name)
+	}
+	v = strings.TrimSpace(v)
+	if !regexp.MustCompile(`^#[0-9a-fA-F]{6}$`).MatchString(v) {
+		t.Fatalf("%s is %q, want a plain 6-digit hex literal so contrast can be computed", name, v)
+	}
+	return v
+}
+
+// TestInkTokensReachAAOnEverySurface is TOR-158. Measured before the fix:
+// --ink-3 scored 4.14 / 3.87 / 3.54 / 3.14 / 3.28 against --bg / --s1 / --s2
+// / --s3 / --hover - AA for text is 4.5, so it failed on every surface it
+// was actually painted on (every muted caption, the copies/piece line, the
+// magnet field's placeholder, and the em dash every absent cell renders).
+//
+// The fix folds that third ink level into --ink-2 at every point of use
+// that is text: two ink levels now carry all of the page's prose, both held
+// to AA here. --ink-3 still exists - see its own comment in :root for the
+// one non-text use it keeps (the swarm-health dot's neutral fill, which
+// only needs the 3.0 a UI part needs, not the 4.5 text needs) - which is
+// why it is deliberately not one of the tokens this test scores.
+func TestInkTokensReachAAOnEverySurface(t *testing.T) {
+	css := stylesheet(t)
+	root := block(t, css, ":root {")
+
+	surfaces := []string{"--bg", "--s1", "--s2", "--s3", "--hover"}
+	inks := []string{"--ink", "--ink-2"}
+
+	for _, ink := range inks {
+		inkHex := hexToken(t, root, ink)
+		for _, surf := range surfaces {
+			surfHex := hexToken(t, root, surf)
+			if ratio := contrastRatio(inkHex, surfHex); ratio < 4.5 {
+				t.Errorf("%s (%s) against %s (%s) is %.2f:1, want >= 4.5 (AA for text)",
+					ink, inkHex, surf, surfHex, ratio)
+			}
+		}
+	}
+}
+
+// ---- TOR-159: the resting edge, measured, and kept apart from the accent. ----
+
+// TestEdgeTokenIsVisibleAndNotTheAccent is TOR-159's measurement half.
+// #source was styled border: 1px solid var(--rule) on background: var(--s1)
+// - a contrast of 1.36, which is not a faint edge, it is no edge: 3.0 is the
+// floor for a UI part to be distinguishable at all.
+//
+// The fix is a new token, --edge, for an interactive control's resting
+// border - not --accent, which app.css's own comment reserves for "this is
+// live or this is where you are" and spends nowhere decorative, and not a
+// brighter --rule, which keeps its quiet job separating rows and panels
+// elsewhere in the page.
+func TestEdgeTokenIsVisibleAndNotTheAccent(t *testing.T) {
+	css := stylesheet(t)
+	root := block(t, css, ":root {")
+
+	edge := hexToken(t, root, "--edge")
+	accent := hexToken(t, root, "--accent")
+	rule := hexToken(t, root, "--rule")
+
+	if edge == accent {
+		t.Errorf("--edge equals --accent (%s) - a resting border must not spend the "+
+			"accent's meaning on furniture", accent)
+	}
+	if edge == rule {
+		t.Errorf("--edge equals --rule (%s) - --rule stays quiet on purpose for row/panel "+
+			"separators; an interactive edge needs its own, brighter, token", rule)
+	}
+
+	for _, surf := range []string{"--s1", "--s2"} {
+		surfHex := hexToken(t, root, surf)
+		if ratio := contrastRatio(edge, surfHex); ratio < 3.0 {
+			t.Errorf("--edge (%s) against %s (%s) is %.2f:1, want >= 3.0 (the floor for a "+
+				"UI part to be distinguishable at all)", edge, surf, surfHex, ratio)
+		}
+	}
+}
+
+// TestIntakeRowSharesTheEdgeAndReservesTheAccentForFocus is TOR-159's other
+// half. The number field and the mode select in the same row as #source
+// carried the identical invisible border, and fixing only the magnet field
+// would leave one lit control between two unlit ones - so all three must
+// share --edge at rest. None may borrow --accent to do it: focus is where
+// the accent belongs, so #source needs its own :focus-visible rule reaching
+// for it, visibly different from the resting edge.
+func TestIntakeRowSharesTheEdgeAndReservesTheAccentForFocus(t *testing.T) {
+	css := stylesheet(t)
+
+	for _, sel := range []string{`#source {`, `input[type="number"] {`, `select, button {`} {
+		b := block(t, css, sel)
+		border, ok := b["border"]
+		if !ok || !strings.Contains(border, "var(--edge)") {
+			t.Errorf("%s border is %q, want it to use var(--edge)", sel, border)
+		}
+	}
+
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	if !regexp.MustCompile(`#source:focus-visible[\s\S]{0,400}?var\(--accent\)`).MatchString(live) {
+		t.Errorf("no #source:focus-visible rule reaching for var(--accent) - focus is where " +
+			"the accent belongs, and there is nothing here saying so")
 	}
 }

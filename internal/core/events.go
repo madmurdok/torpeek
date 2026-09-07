@@ -80,17 +80,359 @@ type Progress struct {
 	FramesDone     int
 	FramesTotal    int
 	DownloadedByte int64
-	Elapsed        time.Duration
-	Peers          int
-	Seeds          int
+	// UploadedByte is what this run has SENT to peers so far -
+	// swarm.Torrent.Uploaded(), the counter TOR-133 added. Read fresh on
+	// every heartbeat the same way DownloadedByte is; no second counter
+	// exists or is kept here.
+	UploadedByte int64
+	Elapsed      time.Duration
+	Peers        int
+	Seeds        int
+
+	// DownloadRate and UploadRate are this heartbeat's speed, in bytes per
+	// second: the delta in DownloadedByte/UploadedByte since the PREVIOUS
+	// heartbeat, divided by the REAL time between the two - never a nominal
+	// period, because the heartbeat is not a ticker and its spacing is
+	// whatever the network and the capture loop happened to take. That is
+	// what keeps a stall honest: a run that goes quiet for twenty seconds
+	// and then receives a burst divides the burst's bytes by the whole
+	// twenty-plus seconds, since that is how long the window it is reported
+	// for actually took - so the figure is never the burst's own peak rate,
+	// without needing to smooth across more than the two heartbeats that
+	// bracket it.
+	//
+	// Deliberately the INSTANTANEOUS rate since the one heartbeat before
+	// this, not smoothed across a longer window. A heartbeat already fires
+	// about once per frame produced, which is the cadence a person watching
+	// a stalled file needs left intact - averaging further would blur the
+	// very signal that says "this file is going nowhere" into a number that
+	// still looks like progress. A client wanting a smoother figure can
+	// average successive readings of this field itself; recovering the
+	// instantaneous rate back out of an average this event never sent is
+	// not possible, so this is the one direction that keeps both options
+	// open.
+	//
+	// Nil before the run's second heartbeat, and nil rather than zero for
+	// the same reason Swarm below is nil rather than a zeroed reading
+	// (TOR-119, TOR-111, TOR-135): a rate with no interval behind it yet is
+	// unknown, not measured at zero, and reporting 0 B/s would read as
+	// "stalled" for a run that has simply not had a second heartbeat yet.
+	//
+	// They are the WHOLE RUN's rates, not this File's, even though they
+	// arrive on a per-file event. DownloadedByte and UploadedByte are
+	// run-wide counters too, so there is no per-file figure here to be had -
+	// but a client that labels these beside the file name is saying
+	// something the event never claimed. With cfg.Parallelism above one,
+	// heartbeats from several files interleave and each takes its delta
+	// against whichever fired last, so successive readings are also shorter
+	// and noisier windows than one file's cadence alone would give.
+	DownloadRate *float64
+	UploadRate   *float64
+
+	// Swarm is this heartbeat's live availability reading - what the SWARM
+	// HOLDS right now, never what this run has ordered from it. That other
+	// question is Done.ClaimedByte/ClaimedPieces/ClaimedRanges, answered once
+	// at the end rather than per heartbeat; two figures of the same shape
+	// meaning opposite things is the trap to avoid wherever both reach a
+	// reader (TOR-111), so a client must keep the two visually apart.
+	//
+	// Nil means unknown, never zero copies. That is true for two different
+	// reasons a client must not conflate: swarm.Torrent.Availability's own
+	// doc records that a client does not dial anyone until something asks
+	// for bytes - measured, "PeerConns stayed empty for twenty seconds after
+	// adding a live seeder, and filled the moment a range was asked for" -
+	// so a torrent that has not started fetching yet has nothing here even
+	// while running; and a queued run publishes no Progress at all, since it
+	// has no client to read from, which already reports unknown for free by
+	// never setting this field.
+	Swarm *SwarmAvailability
+
+	// Stall is which of the distinct "nothing is landing" causes currently
+	// explains it, and how long it has continuously been true (TOR-141) -
+	// the answer to the user's own complaint, in their own words: "если
+	// возникнет ситуация что сидов нету - то мы никак не показываем и
+	// пользователь может ждать годами". Concurrency does not fix this on its
+	// own (several torrents at once only stops a stalled one blocking the
+	// others; a torrent with no seeds still has no seeds), and neither does
+	// a bigger buffer of Peers/Seeds/Swarm above - those already say WHAT
+	// the swarm looks like right now, but not whether "right now" has been
+	// true for two seconds (normal) or four minutes (the answer).
+	//
+	// Nil means the run IS progressing at this heartbeat - not "unknown",
+	// the one field on this event where that distinction does not apply,
+	// because a heartbeat is never published without something to report:
+	// see this heartbeat's own two sources (engine.go's stall-classifying
+	// helpers and startFileHeartbeat) for exactly when each is nil.
+	//
+	// It rides on THIS heartbeat's own File the same way Peers/Seeds/Swarm
+	// do, which is deliberately not "run-wide" the way DownloadRate/
+	// UploadRate are documented to be: two files worked on in parallel can
+	// be stalled for two different reasons at once (one file's pieces
+	// unavailable while another's read is timing out), and folding both
+	// into one run-wide verdict would report whichever happened to be
+	// observed last as if it were the whole run's condition.
+	Stall *Stall
 }
+
+// Stall is one heartbeat's stall verdict: which ErrorCode currently explains
+// no progress, and how long - continuously, not merely "as of ever" - that
+// has been true. It deliberately reuses ErrorCode rather than a parallel
+// vocabulary: CodeNoPeers, CodeUnavailable, CodeNoMetadata and CodeReadStalled
+// already have their own doc comments (errors.go) explaining why each is
+// distinct, and a client that already reads those needs nothing new to read
+// this.
+type Stall struct {
+	Code  ErrorCode
+	Since time.Duration
+}
+
+// stallClock is one run's own account of how long the SAME cause has
+// continuously explained no progress - not a raw stopwatch, because the
+// duration this ticket calls "the load-bearing part" has to reset the
+// instant something better happens (a frame lands) or the cause itself
+// changes (peers arrive mid-read, turning a no_peers wait into an
+// unavailable one), and must not restart merely because a fresh heartbeat
+// repeats the same finding: a duration that quietly restarts on every
+// heartbeat would look like a fresh problem forever, which is precisely the
+// bug this exists to avoid.
+//
+// Zero value is a clock that has never seen a cause, matching a run that has
+// never stalled - the same zero-value-is-usable shape rateSample already
+// uses, for the same reason (no explicit constructor needed at every call
+// site).
+type stallClock struct {
+	code    ErrorCode
+	startAt time.Time
+}
+
+// observe folds in a DEFINITIVE verdict at moment now: code == "" is
+// evidence that something just went right (a frame landed, a point failed
+// for a reason that says data DID flow), which clears the clock outright;
+// any other code is evidence that THIS cause is true right now, which starts
+// the clock the moment it is first seen and lets it keep running while the
+// same code keeps being reported, but restarts it - a fresh start, a fresh
+// duration - the moment a DIFFERENT code takes its place. Two different
+// answers to "why", one after another, are not one four-minute wait; they
+// are two shorter ones.
+func (c *stallClock) observe(now time.Time, code ErrorCode) *Stall {
+	if code == "" {
+		c.code = ""
+		return nil
+	}
+	if code != c.code || c.startAt.IsZero() {
+		c.code = code
+		c.startAt = now
+	}
+	return &Stall{Code: c.code, Since: now.Sub(c.startAt)}
+}
+
+// peek reports the clock's current reading without new evidence of its own -
+// what a heartbeat that has nothing definitive to add (engine.go's
+// startFileHeartbeat, ticking while a single slow read is still in flight and
+// has not yet timed out to say why) can still honestly say: whatever cause is
+// already running keeps the start time observe gave it, so a tick that finds
+// nothing new does not fabricate progress by staying silent about the clock,
+// and does not restart a clock it did not itself witness starting.
+func (c *stallClock) peek(now time.Time) *Stall {
+	if c.code == "" {
+		return nil
+	}
+	return &Stall{Code: c.code, Since: now.Sub(c.startAt)}
+}
+
+// classifyPointFailure turns one capture point's own failure code into the
+// stall verdict a heartbeat reports, folding in the one fact the point-level
+// code cannot see for itself: whether ANY peer is connected at all.
+//
+// CodeUnavailable's own doc is specific - "the pieces needed are not held by
+// any connected peer" - which presumes there IS a connected peer to ask; when
+// peers is zero that presumption is false, and reporting CodeUnavailable
+// would say a swarm was consulted when there was nobody there to consult.
+// The same correction applies to CodeReadStalled: a read that timed out with
+// zero peers connected timed out for the most basic possible reason, and
+// CodeNoPeers - declared in errors.go but, before this, never actually
+// assigned to anything - says that plainly instead of blaming the bridge for
+// a wait nothing was ever going to fill.
+//
+// Every other outcome returns "": CodeSeekFailed and a successful frame both
+// mean data arrived and was read - the run IS making progress, just not
+// always landing where asked - so neither belongs in a stall summary, and the
+// caller's own clock treats an empty return as "clear it, this point was not
+// a case of nothing happening".
+func classifyPointFailure(code ErrorCode, peers int) ErrorCode {
+	if code != CodeUnavailable && code != CodeReadStalled {
+		return ""
+	}
+	if peers == 0 {
+		return CodeNoPeers
+	}
+	return code
+}
+
+// classifyLiveStall is the same question asked BETWEEN point attempts, from
+// torrent-level facts alone - no attempt has failed yet to ask about, because
+// one may still be in flight (engine.go's startFileHeartbeat exists exactly
+// for that window). Both signals are trusted only when they are KNOWN, per
+// swarm.Availability's own "a connected peer is not yet a peer that has said
+// what it holds" rule (newSwarmAvailability's own doc): an availability
+// reading that has not arrived yet says nothing, and reporting CodeUnavailable
+// from it would be exactly the "absent read as zero" mistake this project has
+// now avoided six times running (TOR-119, TOR-111, TOR-135, TOR-134, wire.go's
+// progress event, listing.go's Live).
+//
+// Returning "" here is not "not stalled" - it is "nothing definitive to add
+// this tick" - which is why the caller peeks the clock rather than clearing
+// it on this alone; only classifyPointFailure's "" (an attempt that actually
+// succeeded or read data) is entitled to clear it.
+func classifyLiveStall(peers int, swarm *SwarmAvailability) ErrorCode {
+	if peers == 0 {
+		return CodeNoPeers
+	}
+	if swarm != nil && swarm.NumPieces > 0 && swarm.Unavailable >= swarm.NumPieces {
+		return CodeUnavailable
+	}
+	return ""
+}
+
+// SwarmAvailability is a live copies-per-piece reading, built from
+// swarm.Torrent.Availability(). See newSwarmAvailability for how the two
+// unknown-vs-zero cases above are told apart.
+//
+// CopiesPerPiece is the mean number of connected peers holding each piece,
+// which is swarm.Availability's own unit - NOT a percentage, and it commonly
+// exceeds 1.0. 0.8 means pieces are missing from the swarm; 3.2 means it is
+// healthy. A client must label it as a copy count rather than let a bare
+// number be misread as a fraction.
+//
+// Unavailable is how many of NumPieces no connected peer holds at all - zero
+// on a healthy swarm, and what makes a capture point need shifting when it
+// is not.
+type SwarmAvailability struct {
+	CopiesPerPiece float64
+	Unavailable    int
+	NumPieces      int
+}
+
+// swarmSnapshot is the part of swarm.Availability newSwarmAvailability needs.
+// Named here rather than taken concretely so the conversion can be tested
+// without standing up a swarm - the same reasoning engine.go's own
+// availabilityMap interface uses, and swarm.Availability satisfies both
+// without change.
+type swarmSnapshot interface {
+	Known() bool
+	NumPieces() int
+	Unavailable() int
+	At(piece int) int
+}
+
+// newSwarmAvailability turns one swarm.Availability sample into the shape a
+// live reader gets, or nil when the sample is not yet known.
+//
+// Known() is swarm.Availability's own line between ignorance and a fact - "a
+// connected peer is not the same as a peer that has said what it holds" - and
+// this defers to it entirely rather than re-deciding the question from peer
+// or piece counts here.
+func newSwarmAvailability(a swarmSnapshot) *SwarmAvailability {
+	if !a.Known() {
+		return nil
+	}
+	n := a.NumPieces()
+	if n == 0 {
+		return nil
+	}
+
+	sum := 0
+	for piece := 0; piece < n; piece++ {
+		sum += a.At(piece)
+	}
+
+	return &SwarmAvailability{
+		CopiesPerPiece: float64(sum) / float64(n),
+		Unavailable:    a.Unavailable(),
+		NumPieces:      n,
+	}
+}
+
+// rateSample is the pure arithmetic behind Progress.DownloadRate and
+// Progress.UploadRate: a delta between two readings of a cumulative counter,
+// divided by the REAL time between them rather than a nominal heartbeat
+// period. See Progress.DownloadRate's own doc for why that is what keeps a
+// stall-then-burst honest and why the result is deliberately not smoothed
+// further.
+//
+// Kept as its own tiny type, independent of core.Progress, the engine or
+// anything that stands up a swarm, so the rule is testable against a
+// synthetic sequence of (bytes, elapsed) readings alone - TOR-134's own
+// requirement, and the same reasoning swarmSnapshot above gives for keeping
+// newSwarmAvailability testable without a swarm.
+type rateSample struct {
+	known   bool
+	bytes   int64
+	elapsed time.Duration
+}
+
+// next folds in one heartbeat's cumulative byte count and cumulative
+// elapsed time, and returns the rate since the previous call - nil before a
+// previous call exists to take an interval against, or if the clock did not
+// advance (a repeated or out-of-order heartbeat has no honest interval to
+// divide by). Absent, not zero: the same "unknown, not zero" rule
+// newSwarmAvailability's own doc gives for Progress.Swarm.
+func (r *rateSample) next(bytes int64, elapsed time.Duration) *float64 {
+	prevBytes, prevElapsed, known := r.bytes, r.elapsed, r.known
+	r.bytes, r.elapsed, r.known = bytes, elapsed, true
+
+	if !known {
+		return nil
+	}
+	dt := elapsed - prevElapsed
+	if dt <= 0 {
+		return nil
+	}
+	delta := bytes - prevBytes
+	if delta < 0 {
+		// A counter that went backwards is not a rate either; nothing in
+		// this run's own counters does this, but a caller feeding a
+		// synthetic sequence out of order should get "unknown" rather than
+		// a negative speed.
+		return nil
+	}
+
+	rate := float64(delta) / dt.Seconds()
+	return &rate
+}
+
+// LimitScope says WHOSE ceiling a warning is about. The two are easy to
+// confuse and mean opposite things to the person reading them: one says this
+// run is spending a lot, the other says the client is, which may be entirely
+// the doing of the runs beside it.
+type LimitScope string
+
+const (
+	// LimitRun is the run's own budget (REQUIREMENTS.md 2.6, Budget).
+	LimitRun LimitScope = "run"
+	// LimitClient is the roof over every run sharing a client (Roof). A
+	// warning at this scope is about traffic this run did not necessarily
+	// cause and cannot stop, and the stop that follows it is StopRoof.
+	LimitClient LimitScope = "client"
+)
 
 // BudgetWarning means a limit is close enough that the run may not finish.
 type BudgetWarning struct {
+	// Scope is whose ceiling this is. SpentBytes and LimitBytes are read
+	// against it: at LimitRun they are this run's, at LimitClient they are
+	// the whole client's, and a client that ignored this field would report
+	// the second set as the first.
+	Scope LimitScope
+	// SpentBytes and LimitBytes are the traffic figure and its ceiling, at
+	// Scope.
 	SpentBytes int64
 	LimitBytes int64
-	Elapsed    time.Duration
-	LimitTime  time.Duration
+	// Elapsed is always this run's, at either scope: a run is the only thing
+	// here with a start.
+	Elapsed time.Duration
+	// LimitTime is the time ceiling, and is zero at LimitClient - the roof
+	// has none (see Roof).
+	LimitTime time.Duration
 }
 
 // FileDone means one video file's frames, contact sheet and manifest are
@@ -216,6 +558,45 @@ type StopReason string
 
 const (
 	StopCompleted StopReason = "completed"
-	StopBudget    StopReason = "budget"
+	// StopBudget means this run reached its OWN traffic ceiling (Budget.MaxBytes,
+	// REQUIREMENTS.md 2.6).
+	//
+	// Until TOR-161 this reason also covered the run's own wall-clock ceiling -
+	// BudgetTracker.Exhausted returned StopBudget for either, and
+	// manifest.Cost.LimitHit recorded both as "budget". That collapsed two
+	// causes a person acts on differently ("narrow the run" fits a traffic
+	// stop and is useless advice for a clock) into one, and left every
+	// consumer to re-derive which one actually happened by comparing elapsed
+	// time against the time ceiling - which is exactly what TOR-152's topUpFor
+	// had to do. See StopTime.
+	StopBudget StopReason = "budget"
+	// StopTime means this run reached its OWN wall-clock ceiling
+	// (Budget.MaxTime, REQUIREMENTS.md 2.6) - the clock's own reason, apart
+	// from StopBudget's traffic ceiling, for the same reason StopBudget is
+	// apart from StopRoof: a bigger traffic allowance cannot help a run that
+	// ran out of time, and folding the two into one reason hands every
+	// consumer the job of telling them apart itself.
+	//
+	// A run that has crossed BOTH its own byte ceiling and its own time
+	// ceiling by the moment it is asked reports StopTime, never StopBudget:
+	// BudgetTracker.Exhausted checks the clock first for exactly this reason
+	// - more traffic could not have finished a run whose time had already run
+	// out, so "reached its traffic ceiling" would be true but misleading
+	// advice, while "ran out of time" is true and actionable regardless of
+	// how much traffic was left. This precedence is decided here, at the
+	// source, rather than by a consumer (contrast the pre-TOR-161 state
+	// above).
+	StopTime StopReason = "time"
+	// StopRoof means the CLIENT reached the traffic roof over every run
+	// sharing it (Roof), so this run stopped along with all of them.
+	//
+	// A separate reason rather than a second flavour of StopBudget, because
+	// the difference is the only thing a person can act on. A run stopped for
+	// StopBudget asked for too much and its own numbers say so; a run stopped
+	// for StopRoof may have spent almost nothing and been stopped by its
+	// neighbours, and its own limits are no explanation at all. Telling a
+	// person to narrow a run that was already narrow is the wrong advice, and
+	// one reason for both is how it would be given.
+	StopRoof      StopReason = "traffic_roof"
 	StopCancelled StopReason = "cancelled"
 )

@@ -42,34 +42,57 @@ const (
 // A directory the caller named is theirs: keeping their pieces or removing
 // them is their decision, not ours.
 type Options struct {
-	Source      string
-	Output      string
-	DataDir     string
-	Count       int
-	Start       float64
-	End         float64
-	Profile     string
-	Format      string
-	MaxBytes    int64
-	MaxTime     time.Duration
-	Parallelism int
-	Port        int
-	BridgePort  int
-	WebHost     string
-	WebPort     int
-	BasePath    string
-	Token       string
-	WatchDir    string
-	Headless    bool
-	Peers       []string
-	Upload      bool
-	DHT         bool
-	Sequential  bool
-	JSON        bool
-	Web         bool
-	Version     bool
-	List        bool
-	Files       []string
+	Source   string
+	Output   string
+	DataDir  string
+	Count    int
+	Start    float64
+	End      float64
+	Profile  string
+	Format   string
+	MaxBytes int64
+	MaxTime  time.Duration
+	// MaxClientBytes is the client-wide traffic roof, not a per-run ceiling
+	// (core.Roof). It bounds every run this process makes together, which is
+	// the only bound that survives the web UI running several at once.
+	MaxClientBytes int64
+	Parallelism    int
+	// MaxActiveTorrents is -max-active-torrents: how many torrents the web
+	// UI's queue lets fetch at once (web.Config.MaxActiveTorrents). It is a
+	// -web-only setting, consumed in cli/web.go rather than in config()
+	// below, the same way WebHost, WebPort, BasePath and WatchDir already
+	// are - none of those describe a run, only the server that queues runs.
+	MaxActiveTorrents int
+	BridgePort        int
+	WebHost           string
+	WebPort           int
+	BasePath          string
+	Token             string
+	WatchDir          string
+	Headless          bool
+	Peers             []string
+	Upload            bool
+	DHT               bool
+	Sequential        bool
+	JSON              bool
+	Web               bool
+	Version           bool
+	List              bool
+	Files             []string
+
+	// TorrentPorts is -torrent-ports as typed, parsed by config() with
+	// swarm.ParsePortSet rather than here, the same way CacheMaxSize is.
+	//
+	// It records whether the flag appeared at all, because "absent" and
+	// "present but empty" are different answers here and must not collapse
+	// into one. Absent means nobody configured ports, so the OS chooses -
+	// the local default. Empty means somebody tried to configure them and
+	// supplied nothing, which on a managed host is how a systemd unit with
+	// an unset ${TORPEEK_TORRENT_PORTS} would otherwise slide silently onto
+	// a random port outside the allocated range (REQUIREMENTS.md 4.1). That
+	// is a usage error, and the old int-valued -torrent-port gave the same
+	// answer for the same reason - "" was never a number either.
+	TorrentPorts optionalString
 
 	// CacheMaxSize is -cache-max-size as typed, parsed by config() with
 	// parseSize rather than here: a bad value must be a usage error the same
@@ -196,8 +219,10 @@ func parse(args []string, stderr io.Writer) (Options, error) {
 	fs.StringVar(&opts.Format, "format", string(frames.JPEG), "jpeg or png")
 	fs.Int64Var(&opts.MaxBytes, "max-bytes", 0, "traffic ceiling for the run (default: scaled to the file count)")
 	fs.DurationVar(&opts.MaxTime, "max-time", 0, "time ceiling for the run (default: 10m)")
+	fs.Int64Var(&opts.MaxClientBytes, "max-client-bytes", 0, "traffic ceiling for this whole process, across every run it makes together, counted on bytes actually received (default: no roof). A per-run -max-bytes multiplies by the number of runs going at once; this is the ceiling that does not (section 2.6). It does not cap upload, which nothing caps")
 	fs.IntVar(&opts.Parallelism, "parallel", core.DefaultParallelism, "video files to work on at once")
-	fs.IntVar(&opts.Port, "torrent-port", 0, "BitTorrent listen port - also pins DHT and uTP, which share it (default: an OS-assigned port; required where a port range is allocated)")
+	fs.IntVar(&opts.MaxActiveTorrents, "max-active-torrents", web.DefaultMaxActiveTorrents, "torrents the web UI's queue lets fetch at once (default: 5, section 3.3); above it a request waits its turn, never refused. This governs torrents, not per-file readers - -parallel is that knob - so N of these at -parallel's default is N times the concurrent readers. The default suits a machine you are sitting at; on a managed host set it to 1, where section 4.1's fair-use guidance is 1-3 active downloads and it counts readers. Widening does not require -max-client-bytes, but N runs do multiply one run's own traffic ceiling by N, and startup says what that comes to (section 2.6)")
+	fs.Var(&opts.TorrentPorts, "torrent-ports", "BitTorrent listen ports, as one port, an inclusive range, a comma-separated list, or any mixture: 51413, 51000-51004, 51000-51002,51010. Each client binds one of them, and also pins its DHT and uTP to it (default: an OS-assigned port). Set it where a port range is allocated and going outside it is forbidden - and take the size seriously: every public torrent shares one client and one port, but a private torrent needs a client of its own, so this is what bounds how many private torrents can fetch at once (section 4.1)")
 	fs.IntVar(&opts.BridgePort, "bridge-port", 0, "loopback port for the internal HTTP bridge (default: an OS-assigned port; required where a port range is allocated)")
 	fs.StringVar(&opts.WebHost, "web-host", "", "bind address for the web UI (default: "+web.DefaultHost+"; a reverse proxy on the same host is the documented way to expose it, section 3.3)")
 	fs.IntVar(&opts.WebPort, "web-port", 0, fmt.Sprintf("port for the web UI (default: %d)", web.DefaultPort))
@@ -273,9 +298,18 @@ func (o *Options) config() (core.Config, error) {
 
 	cfg.Sequential = o.Sequential
 
+	ports, err := o.portSet()
+	if err != nil {
+		return core.Config{}, err
+	}
+
 	cfg.Swarm.Upload = o.Upload
 	cfg.Swarm.DHT = o.DHT
-	cfg.Swarm.ListenPort = o.Port
+	// One pool for the whole process, built here rather than per run: a run
+	// borrows a port from it and hands it back, and two runs must never be
+	// handed the same one. cfg is copied per run (see cli/web.go's runner),
+	// and a pointer is what survives that copy as one shared thing.
+	cfg.Swarm.Ports = swarm.NewPortPool(ports)
 	cfg.Swarm.Peers = o.Peers
 
 	if o.BridgePort > 0 {
@@ -284,6 +318,12 @@ func (o *Options) config() (core.Config, error) {
 
 	// Zero means "decide once the file count is known", which the engine does.
 	cfg.Budget = core.Budget{MaxBytes: o.MaxBytes, MaxTime: o.MaxTime, WarnAt: 0.8}
+	// Zero means no roof, which is the documented default and a decision -
+	// core.DefaultRoof says why torpeek will not pick this number itself.
+	// WarnAt is the same fraction the run's budget uses: there is no argument
+	// for the two warning at different fullnesses, and a second flag for it
+	// would be a knob nobody has asked for.
+	cfg.Roof = core.Roof{MaxBytes: o.MaxClientBytes, WarnAt: 0.8}
 
 	ceiling, err := parseSize(o.CacheMaxSize)
 	if err != nil {
@@ -292,6 +332,46 @@ func (o *Options) config() (core.Config, error) {
 	cfg.CacheCeiling = ceiling
 
 	return cfg, nil
+}
+
+// portSet turns -torrent-ports into the set of ports this process may bind.
+//
+// The flag being absent is the unmanaged set: nothing was allocated, so every
+// client asks the OS for a port and nothing bounds how many there can be.
+// That is the local and test case, and it stays a distinct state rather than
+// a set that happens to be empty - swarm.PortSet.Managed is what tells a
+// managed host from a laptop.
+func (o *Options) portSet() (swarm.PortSet, error) {
+	if !o.TorrentPorts.given {
+		return swarm.PortSet{}, nil
+	}
+
+	set, err := swarm.ParsePortSet(o.TorrentPorts.value)
+	if err != nil {
+		return swarm.PortSet{}, fmt.Errorf("-torrent-ports: %w", err)
+	}
+	return set, nil
+}
+
+// optionalString is a string flag that remembers whether it was given at all.
+// flag.StringVar cannot: a default of "" and an explicit "" arrive as the
+// same value, and for -torrent-ports those two mean opposite things (see
+// Options.TorrentPorts).
+type optionalString struct {
+	value string
+	given bool
+}
+
+func (s *optionalString) String() string {
+	if s == nil {
+		return ""
+	}
+	return s.value
+}
+
+func (s *optionalString) Set(v string) error {
+	s.value, s.given = v, true
+	return nil
 }
 
 // splitList reads a comma-separated flag value, dropping blanks so a trailing

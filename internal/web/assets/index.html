@@ -11,33 +11,17 @@
 </head>
 <body>
 <div class="workspace">
-  <aside id="runs-panel" class="runs-panel">
-    <header class="panel-header">
-      <h1>torpeek</h1>
-      <span id="status" class="status">connecting</span>
-    </header>
-    <h2 class="runs-panel-title">Torrents</h2>
-    <div class="run-table-wrap">
-      <table id="run-table" class="run-table">
-        <thead>
-          <tr>
-            <th scope="col" data-sort="name" tabindex="0" role="button" aria-sort="none">Name</th>
-            <th scope="col" data-sort="when" tabindex="0" role="button" aria-sort="descending">Added</th>
-            <th scope="col" data-sort="status" tabindex="0" role="button" aria-sort="none">Status</th>
-            <th scope="col" class="run-actions-header" aria-hidden="true"></th>
-          </tr>
-        </thead>
-        <tbody id="run-list"></tbody>
-      </table>
-    </div>
-    <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
-  </aside>
-
-  <div id="resizer" class="resizer" role="separator" aria-orientation="vertical"
-       aria-label="Resize the torrent panel" tabindex="0"></div>
-
   <div class="main">
     <section id="intake" class="intake">
+      <!-- The page's title and its live connection indicator, moved in here
+           from the left panel TOR-168 removed (see that ticket's own
+           description for the panel's full former shape). Ahead of the input
+           row per the project owner's call: this section is sticky, so the
+           two travel with it and stay reachable without scrolling back up. -->
+      <div class="intake-head">
+        <h1>torpeek</h1>
+        <span id="status" class="status">connecting</span>
+      </div>
       <form id="start" autocomplete="off">
         <div id="dropzone" class="dropzone">
           <input id="source" name="source" type="text" spellcheck="false"
@@ -63,8 +47,30 @@
       <p id="error" class="error" hidden></p>
     </section>
 
-    <section id="detail" class="detail">
-      <p id="detail-empty" class="detail-empty">Select a torrent on the left to see its files and frames.</p>
+    <!-- The torrent table, and since TOR-138 the whole of the detail too: a
+         row expands and its own detail renders in a second row directly
+         beneath it, rather than in one shared pane below the table. There is
+         no #detail element any more, and no empty-state paragraph under the
+         table either - a closed row shows nothing, which needs no sentence to
+         explain it, and the one genuinely empty state (no torrents at all)
+         already has #run-list-empty. app.js builds both rows per entry, so
+         the tbody below stays empty here. -->
+    <section id="runs" class="runs">
+      <h2 class="runs-title">Torrents</h2>
+      <div class="run-table-wrap">
+        <table id="run-table" class="run-table">
+          <thead>
+            <tr>
+              <th scope="col" data-sort="name" tabindex="0" role="button" aria-sort="none">Name</th>
+              <th scope="col" data-sort="when" tabindex="0" role="button" aria-sort="descending">Added</th>
+              <th scope="col" data-sort="status" tabindex="0" role="button" aria-sort="none">Status</th>
+              <th scope="col" class="run-actions-header" aria-hidden="true"></th>
+            </tr>
+          </thead>
+          <tbody id="run-list"></tbody>
+        </table>
+      </div>
+      <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
     </section>
   </div>
 </div>
@@ -119,10 +125,46 @@
   <p class="compare-keys">← → position · space, ↑ ↓ or click flips · 1 2 pick a set · esc closes</p>
 </dialog>
 
+<!-- The frame, full size (TOR-172). The panel is HUD chrome in the reference
+     sheet's language - hard corners, three L-brackets, one chamfered corner,
+     an uppercase label tab riding the top strip - and the picture inside it
+     obeys four rules: fits at 100% means drawn at 100% (never upscaled), does
+     not fit means scaled down to fit, a click goes to 100% and pans, and it
+     never spills out of the panel. app.css holds the chrome and the panel's
+     own arithmetic; app.js holds the scaling, the pan and its clamp.
+
+     #lightbox-view is the new element and it is load-bearing twice over: it
+     is the window the picture is clipped to (overflow: hidden, so "never
+     spills out" cannot be got wrong), and its box is what app.js measures to
+     decide the fit. The close button and the caption live INSIDE it on
+     purpose - both sit over the footage, both carry their own ground for it
+     (TOR-122), and both stay put while the picture pans beneath them. -->
 <dialog id="lightbox" class="lightbox">
-  <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
-  <img id="lightbox-img" alt="">
-  <p id="lightbox-caption" class="lightbox-caption"></p>
+  <p class="lightbox-bar">
+    <span class="lightbox-tab">
+      <span class="lightbox-chev" aria-hidden="true">&rsaquo;&rsaquo;</span>
+      frame
+      <!-- The zoom readout, and the one thing in this panel wearing --accent:
+           it is the state, not decoration. aria-live so a change announces
+           itself to anyone who cannot see the pill fill. -->
+      <span id="lightbox-zoom" class="lightbox-zoom" aria-live="polite">fit</span>
+    </span>
+    <span class="lightbox-ticks" aria-hidden="true"></span>
+  </p>
+  <div id="lightbox-view" class="lightbox-view" tabindex="0" role="button"
+       aria-label="The frame - press to zoom to 100%, then the arrow keys pan it">
+    <img id="lightbox-img" alt="">
+    <button id="lightbox-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
+    <p id="lightbox-caption" class="lightbox-caption"></p>
+  </div>
+  <p class="lightbox-keys">click zooms to 100% &middot; &larr; &uarr; &rarr; &darr; or the mouse pans &middot; esc closes</p>
+  <!-- The two corners the dialog's own ::before/::after cannot reach: a
+       bottom-left bracket and the stroke along the chamfer. A direct child of
+       the dialog, NOT of the view - every bracket sits in one of the panel's
+       label strips, off the footage, because a hairline in a single colour
+       over arbitrary picture content is TOR-122's problem with no scrim
+       available to solve it. -->
+  <span class="lightbox-marks" aria-hidden="true"></span>
 </dialog>
 
 <script src="app.js"></script>

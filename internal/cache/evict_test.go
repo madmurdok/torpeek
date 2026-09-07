@@ -1,8 +1,10 @@
 package cache
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -127,7 +129,7 @@ func TestEvictRemovesOldestFirstUntilUnderCeiling(t *testing.T) {
 
 	// Three sets of ~1000 bytes each; a ceiling of 1500 leaves room for only
 	// one of them once run.json's own bytes are counted too.
-	result, err := Evict(root, 1500, "")
+	result, err := Evict(root, 1500, nil)
 	if err != nil {
 		t.Fatalf("evict: %v", err)
 	}
@@ -152,7 +154,7 @@ func TestEvictDoesNothingWithNoCeiling(t *testing.T) {
 	now := time.Now().UTC()
 	old := makeSet(t, root, "aaaa000000000000000000000000000000000a", "1111111111111111", now.Add(-10*day), 10_000)
 
-	result, err := Evict(root, 0, "")
+	result, err := Evict(root, 0, nil)
 	if err != nil {
 		t.Fatalf("evict: %v", err)
 	}
@@ -176,7 +178,7 @@ func TestEvictNeverRemovesTheProtectedSet(t *testing.T) {
 	other := makeSet(t, root, "bbbb000000000000000000000000000000000b", "2222222222222222", now, 1000)
 
 	// A ceiling low enough that, unprotected, both sets would need to go.
-	result, err := Evict(root, 100, live)
+	result, err := Evict(root, 100, []string{live})
 	if err != nil {
 		t.Fatalf("evict: %v", err)
 	}
@@ -208,7 +210,7 @@ func TestEvictLeavesAnUnagedSetInPlace(t *testing.T) {
 		t.Fatalf("write payload: %v", err)
 	}
 
-	result, err := Evict(root, 1, "")
+	result, err := Evict(root, 1, nil)
 	if err != nil {
 		t.Fatalf("evict: %v", err)
 	}
@@ -272,4 +274,62 @@ func TestClearAllRemovesEverySet(t *testing.T) {
 	if len(result.Removed) != 2 {
 		t.Errorf("removed %d sets, want 2", len(result.Removed))
 	}
+}
+
+// TestEvictConcurrentlyProtectsEveryLiveDirectory is TOR-132's acceptance
+// criterion at the cache package's own level: with more than one run able to
+// be live at once (core.Engine, over swarm.Pool), any of them can call Evict
+// at any moment, and each call must protect every OTHER live directory too -
+// not only the one that happens to be calling.
+//
+// Each live set here is backdated hard and by a different amount, exactly
+// what a RESUMED run's directory looks like: it carries the CreatedAt of its
+// own earlier, incomplete attempt (cache.Evict's own doc explains why that
+// makes Set.Aged alone unable to tell "still live" from "finished long
+// ago"), so on age alone every one of them is a plausible oldest-first
+// eviction target. A genuinely non-live set, backdated older still, is named
+// live by nobody and must still be removed - proving the exclusion is an
+// explicit check against the live list, not merely "ceiling was never
+// reached".
+func TestEvictConcurrentlyProtectsEveryLiveDirectory(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC()
+
+	const n = 8
+	liveDirs := make([]string, n)
+	for i := 0; i < n; i++ {
+		hash := fmt.Sprintf("live%036d", i)
+		liveDirs[i] = makeSet(t, root, hash, "paramshash00000", now.Add(-time.Duration(i+1)*day), 10_000)
+	}
+	stale := makeSet(t, root, "stale000000000000000000000000000000", "paramshash00000", now.Add(-100*day), 10_000)
+
+	// Small enough that, unprotected, every one of these sets - live and
+	// stale alike - would have to go to get under it.
+	const ceiling = 5000
+
+	// Several finishing runs calling Evict at the same moment, each handed
+	// the very same live set (as core.Engine.liveDirs would report it to any
+	// of them) - the "concurrently with several writers" the ticket asks
+	// for, not merely several sequential calls.
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := Evict(root, ceiling, liveDirs); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("evict: %v", err)
+	}
+
+	for _, dir := range liveDirs {
+		mustExist(t, dir)
+	}
+	mustNotExist(t, stale)
 }

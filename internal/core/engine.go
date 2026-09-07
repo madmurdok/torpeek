@@ -42,6 +42,22 @@ type Config struct {
 	Profile swarm.Profile
 	Budget  Budget
 
+	// Roof is the ceiling over the whole CLIENT this run's torrent comes out
+	// of - Torrents below, or the pool this run builds for itself - rather
+	// than over this run. Zero MaxBytes, the default, means unlimited; see
+	// Roof and DefaultRoof.
+	//
+	// A value rather than a pointer, unlike Torrents, and the difference is
+	// worth reading. Torrents has to be shared because it holds state; a roof
+	// holds none - its figure lives on the client's own counter, which every
+	// run over that client reads - so copies of this number all enforce the
+	// same ceiling against the same total. What that does NOT excuse is
+	// setting it per run: it describes the client, so the one place that
+	// builds the pool is the one place that should set it (cli/web.go), and
+	// two runs given different numbers would be two opinions about one
+	// client, of which the larger silently wins.
+	Roof Roof
+
 	// Sequential opts into degrading to sequential reading from the start
 	// when a container states no duration to plan capture points across
 	// (REQUIREMENTS.md 2.7). Off by default: a container with no index gets
@@ -62,6 +78,24 @@ type Config struct {
 
 	Swarm  swarm.Config
 	Bridge bridge.Config
+
+	// Torrents is where this run gets its torrent from: a pool that outlives
+	// it, holding one long-lived client for every public torrent.
+	//
+	// A run no longer configures a client - it attaches to a torrent and
+	// detaches from it, and the pool decides whether that torrent shares the
+	// public client or needs one of its own (swarm.Pool). Swarm above is
+	// still what a pool is built FROM: the data directory, the DHT and upload
+	// switches, the port set, the known peers.
+	//
+	// Nil means this run owns the whole arrangement: it builds a pool over
+	// Swarm for itself and closes it when the run ends, which is exactly what
+	// a one-shot CLI run wants and exactly what every run did before pools
+	// existed. A process that stays up - the web server - builds one pool and
+	// puts it here, so the client is the server's to close and never a run's.
+	// A pointer is what survives cfg being copied per run, the same way
+	// Swarm.Ports is.
+	Torrents *swarm.Pool
 }
 
 // DefaultConfig fills in the defaults from REQUIREMENTS.md section 7.
@@ -72,11 +106,27 @@ func DefaultConfig(source, outputRoot, dataDir string) Config {
 		Plan:        frames.DefaultPlan(),
 		Profile:     swarm.MinTime,
 		Budget:      DefaultBudget(1),
+		Roof:        DefaultRoof(),
 		Parallelism: 4,
 		Format:      frames.JPEG,
 		Swarm:       swarm.DefaultConfig(dataDir),
 		Bridge:      bridge.DefaultConfig(),
 	}
+}
+
+// poolFor settles where this run's torrent comes from, and reports whether
+// the run has to close what it was given.
+//
+// The nil case builds a pool for this run alone rather than falling back to
+// some other way of opening a torrent, so there is exactly one path through
+// swarm however a run was configured. It costs nothing: a pool starts no
+// client until a torrent is attached, and closing one that never started is
+// a no-op.
+func poolFor(cfg Config) (pool *swarm.Pool, owned bool) {
+	if cfg.Torrents != nil {
+		return cfg.Torrents, false
+	}
+	return swarm.NewPool(cfg.Swarm), true
 }
 
 // DefaultParallelism is how many files a desktop run works on at once.
@@ -85,11 +135,58 @@ const DefaultParallelism = 4
 // Engine runs one job and reports it as events. It prints nothing.
 type Engine struct {
 	tools ffmpeg.Tools
+
+	// liveMu guards live below - runs share one Engine (TOR-128 put more
+	// than one Engine.Run in flight over a shared swarm.Pool) and finish on
+	// their own goroutines, so marking and reading this map races without
+	// it.
+	liveMu sync.Mutex
+	// live is every RunDir a run on this Engine is currently writing to,
+	// refcounted rather than a plain set: two runs can legitimately resolve
+	// to the same RunDir (same infohash and params - see ParamsKey) and
+	// overlap, and unmarking must not clear a directory the other one is
+	// still writing. cache.Evict reads a snapshot of this to know which
+	// directories no run's own CreatedAt-based ordering can be trusted to
+	// protect (see its own doc for why Aged alone stopped being enough).
+	live map[string]int
 }
 
 // NewEngine returns an engine using the given external tools.
 func NewEngine(tools ffmpeg.Tools) *Engine {
-	return &Engine{tools: tools}
+	return &Engine{tools: tools, live: make(map[string]int)}
+}
+
+// markLive records dir as a run's own directory for as long as that run is
+// still writing to it, and unmarkLive is called once - always paired, always
+// deferred - when that run is done with it.
+func (e *Engine) markLive(dir string) {
+	e.liveMu.Lock()
+	e.live[dir]++
+	e.liveMu.Unlock()
+}
+
+func (e *Engine) unmarkLive(dir string) {
+	e.liveMu.Lock()
+	if e.live[dir] <= 1 {
+		delete(e.live, dir)
+	} else {
+		e.live[dir]--
+	}
+	e.liveMu.Unlock()
+}
+
+// liveDirs snapshots every directory currently marked live, for a run's own
+// cache.Evict call to exclude - not just its own directory, since any other
+// run on this Engine may be mid-write (or mid-resume - see cache.Evict) at
+// the same moment.
+func (e *Engine) liveDirs() []string {
+	e.liveMu.Lock()
+	defer e.liveMu.Unlock()
+	dirs := make([]string, 0, len(e.live))
+	for dir := range e.live {
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 // Run starts a job and returns the events it produces. The channel closes when
@@ -134,29 +231,54 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		return
 	}
 
-	session, torrent, err := swarm.Open(ctx, cfg.Swarm, src)
+	pool, ownPool := poolFor(cfg)
+	if ownPool {
+		// Registered before the attachment's own defer, so it runs after it:
+		// the torrent is detached first, and only then is the client this run
+		// brought into being for itself taken down. When the pool came from
+		// the caller there is nothing here to close - a run must never take
+		// the pool down, which is the whole point of Config.Torrents.
+		defer pool.Close()
+	}
+
+	// Before the attach, not after: a full roof means this client has already
+	// received everything it was allowed to, and going online to find that
+	// out would spend more of it. A refusal rather than a Done, for the same
+	// reason ErrTorrentBusy is one - the run never happened, and there are no
+	// frames to keep. A run that is stopped BY the roof after it has begun is
+	// the other case, and ends on Done{Reason: StopRoof} below.
+	//
+	// And after serveFromCache above, deliberately: a run served from disk
+	// goes nowhere and receives nothing, so a full roof is no reason to
+	// refuse it. The roof bounds traffic, not work.
+	if cfg.Roof.Reached(pool.Downloaded()) {
+		err := fmt.Errorf("the client-wide traffic roof of %d bytes is used up; "+
+			"raise -max-client-bytes or restart", cfg.Roof.MaxBytes)
+		bus.Publish(Failed{File: -1, Code: CodeTrafficRoof, Err: err})
+		return
+	}
+
+	attachment, err := pool.Attach(ctx, src, cfg.Swarm.Peers...)
 	if err != nil {
 		bus.Publish(Failed{File: -1, Code: CodeOf(err), Err: err})
 		return
 	}
-	defer func() {
-		// Order matters: DiscardPieces is only safe to call once Close has
-		// returned (see its doc comment on why that is the real boundary,
-		// not merely a convenient one).
-		session.Close()
+	torrent := attachment.Torrent()
 
-		// Every exit from here down goes through this defer - completed,
-		// budget-stopped or cancelled alike - and discards this run's own
-		// pieces every time. A run that was cut short still gets to keep
-		// what matters: resume (serveFromCache and reusableFrames, both in
-		// this package) reads only the output directory's manifests and
-		// frames, never the swarm's piece cache, so a stopped run loses
-		// nothing a later run could have reused by leaving pieces in place.
-		// This is what makes a long-lived web session, not just a one-shot
-		// CLI run, actually drop pieces after every torrent instead of
-		// piling them up for however long the process stays up.
-		_ = session.DiscardPieces(torrent.InfoHash())
-	}()
+	// Every exit from here down goes through this defer - completed,
+	// budget-stopped, cancelled or failed alike - and lets this run's torrent
+	// go every time, discarding its pieces with it. Detaching is not closing:
+	// the shared public client carries on holding whatever else is attached
+	// to it, and a run that fails takes nothing down with it.
+	//
+	// A run that was cut short still gets to keep what matters: resume
+	// (serveFromCache and reusableFrames, both in this package) reads only
+	// the output directory's manifests and frames, never the swarm's piece
+	// cache, so a stopped run loses nothing a later run could have reused by
+	// leaving pieces in place. This is what makes a long-lived web session,
+	// not just a one-shot CLI run, actually drop pieces after every torrent
+	// instead of piling them up for however long the process stays up.
+	defer attachment.Detach()
 
 	videos := torrent.Videos()
 
@@ -171,7 +293,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		Private:  torrent.Private(),
 		Videos:   videos,
 		Selected: indicesOf(selected),
-		BlindDHT: session.WentOnlineBlind(),
+		BlindDHT: attachment.WentOnlineBlind(),
 	})
 
 	if len(videos) == 0 {
@@ -192,7 +314,13 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	// selection earlier, into cfg.Files before swarm.Select runs above;
 	// narrowing the file list after this point would leave the budget sized
 	// for files no longer being fetched.
-	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent)
+	//
+	// The pool is handed in as the roof's meter, not the torrent: the roof is
+	// the client's ceiling and is read off the client's own counter, which
+	// keeps the traffic of torrents this pool has already let go
+	// (swarm.Pool.Downloaded). Summing what the live runs report would forget
+	// exactly the arrivals section 2.6 insists on counting.
+	tracker := NewBudgetTracker(budgetFor(cfg, len(selected)), torrent, cfg.Roof, pool)
 
 	runCtx, cancel := tracker.Context(ctx)
 	defer cancel()
@@ -206,6 +334,14 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		bus.Publish(Failed{File: -1, Code: CodeStorage, Err: err})
 		return
 	}
+
+	// Marked live for the rest of this function, resume included: a resumed
+	// run reuses a directory its own earlier, incomplete attempt already put
+	// a run.json in (Aged is already true, on an old CreatedAt), so without
+	// this a concurrent run finishing elsewhere could pick it as the
+	// oldest-first eviction candidate it looks like. See cache.Evict's doc.
+	e.markLive(writer.Layout().RunDir())
+	defer e.unmarkLive(writer.Layout().RunDir())
 
 	// The .torrent is written before a single frame is fetched, not at the end
 	// beside the run record. It can only be reconstructed while this session
@@ -252,6 +388,11 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 	sem := make(chan struct{}, cfg.Parallelism)
 	var wg sync.WaitGroup
 
+	// One tracker for the whole run, shared by every file's goroutine below
+	// - see runSpeed's own doc for why that has to be one instance rather
+	// than one per file.
+	speed := &runSpeed{}
+
 	for _, video := range selected {
 		if reason, halt := haltReason(runCtx, tracker); halt {
 			mu.Lock()
@@ -274,6 +415,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 				extractor: extractor,
 				writer:    writer,
 				tracker:   tracker,
+				speed:     speed,
 				bus:       bus,
 			}, file)
 
@@ -319,14 +461,16 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		// eviction at all - skipping the call entirely also skips the scan
 		// cost of Evict finding that out for itself on every run).
 		//
-		// This run's own directory is named explicitly as the one set Evict
-		// must never remove: the single-slot queue (REQUIREMENTS.md 3.3)
-		// guarantees this is the only run writing right now, but a failure
-		// here must not cost a person the frames this run just finished
-		// producing - so, like a .torrent that could not be written
+		// e.liveDirs() names every directory any run on this Engine is
+		// currently writing - this run's own included, since unmarkLive is
+		// still deferred - not just this one: with more than one run able to
+		// be live at once (TOR-128's pool), each finishing run's own Evict
+		// call has to protect every sibling still going, not only itself. A
+		// failure here must not cost a person the frames this run just
+		// finished producing - so, like a .torrent that could not be written
 		// (TOR-79), it becomes a warning on Done rather than a run-scoped
 		// Failed.
-		if _, err := cache.Evict(cfg.OutputRoot, cfg.CacheCeiling, writer.Layout().RunDir()); err != nil {
+		if _, err := cache.Evict(cfg.OutputRoot, cfg.CacheCeiling, e.liveDirs()); err != nil {
 			warnings = append(warnings, fmt.Sprintf("cache eviction: %v", err))
 		}
 	}
@@ -368,6 +512,123 @@ func stallSince(b *bridge.Bridge, url string, before int) error {
 	return last
 }
 
+// runSpeed is one run's download and upload rate tracker, shared across
+// every file's goroutine. Progress heartbeats fire from more than one file
+// at once (cfg.Parallelism), but they read off the SAME cumulative
+// counters - the budget tracker's Spent and torrent.Uploaded are both
+// run-wide, not per-file (NewBudgetTracker's own doc: "the budget covers
+// the whole run, so every file shares one tracker") - so the previous
+// reading a rate is a delta against has to be one shared point too, not one
+// per goroutine, and reading or advancing it from two files at once needs a
+// lock rather than each guessing at the other's last sample.
+//
+// The arithmetic itself is rateSample (events.go); this only adds the
+// concurrency this run's parallel files need around it.
+type runSpeed struct {
+	mu   sync.Mutex
+	down rateSample
+	up   rateSample
+}
+
+// sample folds in this heartbeat's cumulative download and upload bytes,
+// both read against the one shared elapsed reading, and returns the two
+// rates - see rateSample.next and Progress.DownloadRate for what nil means.
+func (s *runSpeed) sample(downloadedByte, uploadedByte int64, elapsed time.Duration) (downloadRate, uploadRate *float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.down.next(downloadedByte, elapsed), s.up.next(uploadedByte, elapsed)
+}
+
+// fileStallClock pairs a stallClock (events.go) with the mutex its two
+// callers both need: this file's own capture loop, which has definitive
+// evidence every time a point finishes, and this file's own heartbeat
+// ticker (startFileHeartbeat), which has none while a single point is still
+// in flight and only peeks the clock meanwhile. One instance per FILE, not
+// per run - Progress.Stall's own doc explains why a shared, run-wide clock
+// would be wrong here even though Peers/Seeds/DownloadRate are run-wide:
+// two files worked on in parallel (cfg.Parallelism) can be stalled for two
+// different reasons at once, and a single clock would report whichever was
+// observed most recently as if it explained both.
+type fileStallClock struct {
+	mu    sync.Mutex
+	clock stallClock
+}
+
+func (f *fileStallClock) observe(now time.Time, code ErrorCode) *Stall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.clock.observe(now, code)
+}
+
+func (f *fileStallClock) peek(now time.Time) *Stall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.clock.peek(now)
+}
+
+// stallHeartbeatInterval is how often startFileHeartbeat reports peers,
+// seeds, the swarm's own availability reading and the current stall verdict
+// while a file is being worked on - independent of whether any capture
+// point has succeeded, failed, or even finished being attempted yet.
+//
+// Five seconds, chosen against the thing it has to beat: bridge.RequestTimeout
+// defaults to sixty seconds, and BOTH probe.Inspect (before FileStarted even
+// fires) and a single capture point's KeyframeAt/Frame read can block for the
+// whole of it without producing any other event - a torrent nobody seeds
+// fails every such read that way, so without this heartbeat a row goes
+// silent for up to a minute at a time, repeatedly, which is this ticket's own
+// complaint restated. Five seconds is frequent enough that "no peers" or "no
+// seeds" is recognisable well inside one metadata timeout (sixty seconds,
+// the OLD worst case this replaces) and infrequent enough not to flood the
+// bus with a heartbeat nobody asked to see that often.
+const stallHeartbeatInterval = 5 * time.Second
+
+// startFileHeartbeat runs a ticker for as long as done is open, publishing a
+// Progress reading of this file's current peers/seeds/availability/rates and
+// stall verdict on every tick. FramesDone and FramesTotal are left at zero,
+// which a client must read as "this heartbeat has nothing to say about the
+// capture plan" rather than as a real 0-of-0 (frames.Plan.Validate rejects
+// an empty plan, so a real per-point heartbeat never reports that) - see
+// wire.go's progress rendering and app.js's own handling of frames_total.
+//
+// Reads only local, already-computed state (torrent.Peers/Availability,
+// the shared rate tracker, the budget tracker's own counters) - never a new
+// network request - so it costs nothing to run alongside a slow read rather
+// than instead of one, which is the whole point: it keeps reporting while
+// something else is still blocked.
+func (e *Engine) startFileHeartbeat(deps fileDeps, file int, stall *fileStallClock, done <-chan struct{}) {
+	ticker := time.NewTicker(stallHeartbeatInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-ticker.C:
+				connected, seeds := deps.torrent.Peers()
+				swarm := newSwarmAvailability(deps.torrent.Availability())
+				spent, elapsed := deps.tracker.Spent()
+				uploaded := deps.torrent.Uploaded()
+				downloadRate, uploadRate := deps.speed.sample(spent, uploaded, elapsed)
+
+				var reading *Stall
+				if code := classifyLiveStall(connected, swarm); code != "" {
+					reading = stall.observe(now, code)
+				} else {
+					reading = stall.peek(now)
+				}
+
+				deps.bus.Publish(Progress{
+					File: file, DownloadedByte: spent, UploadedByte: uploaded,
+					Elapsed: elapsed, Peers: connected, Seeds: seeds,
+					DownloadRate: downloadRate, UploadRate: uploadRate,
+					Swarm: swarm, Stall: reading,
+				})
+			}
+		}
+	}()
+}
+
 // fileDeps groups what processing one file needs, so the signature does not
 // grow a parameter per collaborator.
 type fileDeps struct {
@@ -377,7 +638,10 @@ type fileDeps struct {
 	extractor *frames.Extractor
 	writer    *output.Writer
 	tracker   *BudgetTracker
-	bus       *Bus
+	// speed is this run's shared rate tracker (see runSpeed's own doc for
+	// why one instance, not one per file).
+	speed *runSpeed
+	bus   *Bus
 
 	// toneMap is the colour conversion decided for this one file, once its
 	// stream has been inspected. It lives here rather than on the extractor
@@ -406,6 +670,23 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 		return 0, false, err
 	}
 	defer withdraw()
+
+	// TOR-141: a heartbeat for the whole of this file's own processing, not
+	// gated on anything below succeeding - see startFileHeartbeat's own doc
+	// for why that has to run concurrently with, rather than only between,
+	// the blocking calls beneath it (Inspect included: a torrent nobody
+	// seeds can stall THAT before FileStarted has even fired). Stopped by
+	// closing done, deferred immediately so it cannot outlive this file's
+	// own torrent/bridge, which stay open only until this function returns.
+	//
+	// Named fileStall rather than stall: this function already shadows that
+	// name locally, below, for stallSince's own per-attempt bridge reading -
+	// a different, narrower question (did THIS ONE read time out) than the
+	// clock's own (how long has the SAME cause been true).
+	fileStall := &fileStallClock{}
+	heartbeatDone := make(chan struct{})
+	e.startFileHeartbeat(deps, file.Index, fileStall, heartbeatDone)
+	defer close(heartbeatDone)
 
 	stalls, _ := deps.bridge.Stalls(url)
 	info, err := deps.prober.Inspect(ctx, url)
@@ -520,18 +801,42 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 					at.Round(time.Second), stall, err)
 			}
 			skipped++
+			pointCode := CodeOf(err)
 			records = append(records, manifest.Frame{
 				Index:       i,
 				RequestedMS: at.Milliseconds(),
 				Shift:       manifest.ShiftFailed,
-				Error:       string(CodeOf(err)),
+				Error:       string(pointCode),
 			})
 			deps.bus.Publish(FrameSkipped{
 				File:      file.Index,
 				Index:     i,
 				Requested: at,
-				Code:      CodeOf(err),
+				Code:      pointCode,
 				Reason:    err.Error(),
+			})
+			// TOR-141: this point's own failure, reclassified against whether
+			// ANY peer is connected (classifyPointFailure's own doc) and
+			// folded into this file's stall clock - the row's answer to
+			// "why, and for how long" for exactly the two causes a failed
+			// point can mean (CodeUnavailable/CodeReadStalled, or CodeNoPeers
+			// when neither presumption those two make actually holds).
+			// FrameSkipped.Code above is untouched: TOR-45's own acceptance
+			// (stall_test.go) is about that field staying CodeReadStalled,
+			// and this is a second, additive reading alongside it, not a
+			// replacement.
+			now := time.Now()
+			connected, seeds := deps.torrent.Peers()
+			swarmNow := newSwarmAvailability(deps.torrent.Availability())
+			spentNow, elapsedNow := deps.tracker.Spent()
+			uploadedNow := deps.torrent.Uploaded()
+			downloadRate, uploadRate := deps.speed.sample(spentNow, uploadedNow, elapsedNow)
+			deps.bus.Publish(Progress{
+				File: file.Index, FramesDone: produced, FramesTotal: len(points),
+				DownloadedByte: spentNow, UploadedByte: uploadedNow, Elapsed: elapsedNow,
+				Peers: connected, Seeds: seeds,
+				DownloadRate: downloadRate, UploadRate: uploadRate, Swarm: swarmNow,
+				Stall: fileStall.observe(now, classifyPointFailure(pointCode, connected)),
 			})
 			continue
 		}
@@ -563,6 +868,14 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 					shot.actual.Round(time.Second), (shot.asked - shot.actual).Abs().Round(time.Second),
 					shot.asked.Round(time.Second)),
 			})
+			// TOR-141: a seek landing wide of its mark still means a read
+			// went through and a container got decoded - the swarm is
+			// plainly not the problem here, so this clears the stall clock
+			// (classifyPointFailure's own "every other outcome" rule)
+			// rather than leaving a stale cause reading behind it. The next
+			// heartbeat (startFileHeartbeat, at most stallHeartbeatInterval
+			// away) carries the cleared reading to the row.
+			fileStall.observe(time.Now(), "")
 			continue
 		}
 
@@ -610,14 +923,32 @@ func (e *Engine) processFile(ctx context.Context, cfg Config, deps fileDeps, fil
 
 		spent, elapsed := deps.tracker.Spent()
 		connected, seeds := deps.torrent.Peers()
+		uploaded := deps.torrent.Uploaded()
+		// Both rates are taken against this one shared elapsed reading, so a
+		// download stall and an upload burst arriving on the very same
+		// heartbeat are each divided by the same real interval rather than
+		// two different notions of "since last time" (runSpeed, rateSample).
+		downloadRate, uploadRate := deps.speed.sample(spent, uploaded, elapsed)
 		deps.bus.Publish(Progress{
 			File:           file.Index,
 			FramesDone:     produced,
 			FramesTotal:    len(points),
 			DownloadedByte: spent,
+			UploadedByte:   uploaded,
 			Elapsed:        elapsed,
 			Peers:          connected,
 			Seeds:          seeds,
+			DownloadRate:   downloadRate,
+			UploadRate:     uploadRate,
+			// What the SWARM holds, read fresh on every heartbeat, and nil
+			// when the client has not learned it yet - which is a real state
+			// and not zero copies (newSwarmAvailability, Progress.Swarm).
+			Swarm: newSwarmAvailability(deps.torrent.Availability()),
+			// TOR-141: a frame just landed, which is the clearest possible
+			// evidence this file is NOT a case of nothing happening - so this
+			// clears the stall clock (classifyPointFailure's own "" rule)
+			// rather than leaving whatever an earlier failed point set.
+			Stall: fileStall.observe(time.Now(), ""),
 		})
 	}
 
@@ -1165,8 +1496,12 @@ func reachable(avail availabilityMap, profile swarm.Profile,
 func haltReason(ctx context.Context, tracker *BudgetTracker) (StopReason, bool) {
 	if ctx.Err() != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			// The only deadline on this context is the time budget.
-			return StopBudget, true
+			// The only deadline on this context is the time budget
+			// (BudgetTracker.Context), so a context that expired on its own
+			// - rather than being cancelled by a caller - can only mean the
+			// clock. StopTime, never StopBudget: this is the run's own wall
+			// clock, told apart from its own traffic ceiling since TOR-161.
+			return StopTime, true
 		}
 		return StopCancelled, true
 	}

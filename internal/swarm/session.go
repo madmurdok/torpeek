@@ -11,8 +11,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 
 	alog "github.com/anacrolix/log"
@@ -36,15 +41,38 @@ type Config struct {
 	// private flag overrides this to off, whatever the value here.
 	DHT bool
 
-	// ListenPort is the BitTorrent port. anacrolix binds TCP, uTP and (when
-	// DHT is on) the DHT server to this same port - pinning it pins all
-	// three, which is what section 4.1's "no port outside the allocated
-	// range" actually requires. Zero lets the OS choose one port for all of
-	// them, which is fine locally but not on a managed host with a fixed
-	// range, so callers there must set it. A pinned port already taken is a
-	// startup error, not silently retried on a different one - anacrolix
-	// only falls back to another port when ListenPort is zero.
+	// ListenPort is the BitTorrent port for this one client. anacrolix binds
+	// TCP, uTP and (when DHT is on) the DHT server to this same port -
+	// pinning it pins all three, which is what section 4.1's "no port
+	// outside the allocated range" actually requires. Zero lets the OS choose
+	// one port for all of them, which is fine locally but not on a managed
+	// host with a fixed range, so callers there must set it. A pinned port
+	// already taken is a startup error, not silently retried on a different
+	// one - anacrolix only falls back to another port when ListenPort is
+	// zero.
+	//
+	// Set this when the caller has already decided which port this client
+	// gets. A caller running several clients sets Ports instead and leaves
+	// this at zero; setting both is an error rather than a precedence rule,
+	// because there is no reading of "here is a port, and also here is where
+	// to get one" that is not somebody's mistake.
 	ListenPort int
+
+	// Ports, when set, is where this client's ListenPort comes from: Open
+	// leases one port for the client's whole life and Close hands it back.
+	//
+	// It exists because a client is the unit that owns a port - DHT and PEX
+	// are client-wide switches, so a private torrent cannot share a client
+	// with a public one, and every extra client is another port out of the
+	// allocation. One pool shared across a process is what keeps two clients
+	// from asking for the same port, and what makes running out of ports a
+	// stated refusal (ErrNoPortAvailable) instead of a silent fall back to an
+	// OS-assigned port outside the allocated range.
+	//
+	// Nil means the caller is managing the port itself through ListenPort,
+	// which is every single-client caller and every test that pins or
+	// ignores the port.
+	Ports *PortPool
 
 	// MetadataTimeout bounds the wait for metadata.
 	MetadataTimeout time.Duration
@@ -72,6 +100,21 @@ var (
 	// ErrPrivacyUnresolvable means the only way to fetch metadata would be
 	// DHT, which we refuse to touch before knowing the torrent is public.
 	ErrPrivacyUnresolvable = errors.New("magnet has no trackers and DHT is disabled")
+
+	// ErrPrivateOnDHTClient means a torrent carrying the BEP 27 private flag
+	// was offered to a client that has DHT - and therefore PEX - running, and
+	// the add was refused.
+	//
+	// It is what makes acceptance criterion 5 structural rather than
+	// incidental. Before there was a pool the criterion held by construction:
+	// one client held one torrent and Open decided that client's DHT from
+	// that torrent's own flag, so a private torrent's client simply never had
+	// DHT. A client shared between torrents took that construction away, and
+	// this error is how it comes back - not as a rule stated in a comment
+	// upstream of the add, but as a refusal by the add itself. See
+	// Session.addTo, which is the one door every torrent enters a client
+	// through.
+	ErrPrivateOnDHTClient = errors.New("a private torrent may not be added to a client with DHT enabled")
 )
 
 // Session owns a BitTorrent client for the lifetime of one run.
@@ -91,22 +134,48 @@ type Session struct {
 	// left its piece-completion database open for the life of the process,
 	// and a client that failed to start leaked one outright.
 	//
-	// This is also the whole of TOR-59's "couldn't open piece completion db:
-	// timeout". That db is bbolt, held under an exclusive flock with a
+	// This was also the whole of TOR-59's "couldn't open piece completion db:
+	// timeout". That db was bbolt, held under an exclusive flock with a
 	// one-second timeout, and a leaked storage held it for the life of the
 	// process - so the second client of a public-magnet restart, and the
 	// second run over one data dir, timed out on the lock and silently fell
-	// back to in-memory bookkeeping. completion_test.go pins both shapes, and
-	// they separate the arms cleanly: with this Close removed every run warns
-	// and the db stays held; with it, none of 126 runs did, 120 of them at
-	// load averages between 84 and 265. It looked unexplained only because
-	// bbolt is the default piece completion solely when cgo is off - the
-	// shipped build - while a bare `go test` has cgo on and gets sqlite,
-	// which shares the file and never warns. Build with CGO_ENABLED=0 (make
-	// check) to see any of it.
-	store   storage.ClientImplCloser
+	// back to in-memory bookkeeping.
+	//
+	// As of TOR-155 there is no flock to leak: pieceStorage hands the client
+	// an in-memory piece completion on purpose, for reasons measured and
+	// written down there. So closing the storage is no longer what stands
+	// between a run and that warning - it is now just the ordinary courtesy
+	// of closing what we opened, which is reason enough on its own and would
+	// have to be done again the day persistence is worth having.
+	store storage.ClientImplCloser
+	// lease is this session's claim on a port out of Config.Ports, held for
+	// the client's whole life and handed back by Close. Nil when the caller
+	// pinned ListenPort itself, or configured no pool at all.
+	lease   *PortLease
 	dhtOn   bool
 	blindly bool // DHT was used before the private flag could be checked
+}
+
+// leasePort settles which port this config's client binds, taking one out of
+// the pool when there is one.
+//
+// Returning the lease separately from the port is what lets Open hold a
+// single lease across the restart it may have to do: the port is decided
+// once, and the two clients that briefly follow each other onto it are the
+// same claim, not two.
+func (c Config) leasePort() (*PortLease, int, error) {
+	if c.Ports == nil {
+		return nil, c.ListenPort, nil
+	}
+	if c.ListenPort != 0 {
+		return nil, 0, fmt.Errorf("swarm: ListenPort %d and Ports are both set; a client takes its port from one or the other", c.ListenPort)
+	}
+
+	lease, err := c.Ports.Acquire()
+	if err != nil {
+		return nil, 0, err
+	}
+	return lease, lease.Port(), nil
 }
 
 // Open starts a session and adds the source, returning the torrent once its
@@ -122,6 +191,31 @@ func Open(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, erro
 		return nil, nil, route.err
 	}
 
+	// One lease for the whole of Open, including the restart below. Leasing
+	// per client instead would mean the restart asking a pool that may have
+	// been emptied in the meantime by another torrent, and failing halfway
+	// through a torrent that had already been given a port.
+	lease, port, err := cfg.leasePort()
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg.ListenPort = port
+
+	s, t, err := openOnPort(ctx, cfg, src, route)
+	if err != nil {
+		lease.Release()
+		return nil, nil, err
+	}
+
+	// The surviving session owns the lease, so its Close is what hands the
+	// port back. Sessions Open discards along the way never hold it.
+	s.lease = lease
+	return s, t, nil
+}
+
+// openOnPort is Open's body once the port is settled: cfg.ListenPort is the
+// port every client it starts will bind.
+func openOnPort(ctx context.Context, cfg Config, src Source, route onlineRoute) (*Session, *Torrent, error) {
 	s, err := newSession(cfg, route.dht)
 	if err != nil {
 		return nil, nil, err
@@ -135,7 +229,9 @@ func Open(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, erro
 			return nil, nil, err
 		}
 		// The trackers stayed silent, so DHT is the only way left - and we
-		// still do not know whether this torrent is private.
+		// still do not know whether this torrent is private. If it turns out
+		// to be, the add refuses it rather than carrying it on a client that
+		// has DHT on; see onlineRoute.blind for why that is the decision.
 		return openBlind(ctx, cfg, src)
 	}
 
@@ -184,8 +280,16 @@ func carriedOverMetainfo(mi metainfo.MetaInfo) metainfo.MetaInfo {
 	return mi
 }
 
-// openBlind is the honest-but-imperfect path: DHT before the privacy check,
-// reachable only when a magnet carries no working trackers.
+// openBlind starts a client with DHT on for a source whose private flag
+// cannot be read first, and is the second of the two ways onto that route:
+// openOnPort takes it directly for a magnet with no trackers at all, and this
+// is the fallback for one whose trackers turned out silent, where the probe
+// with DHT off has already been tried and answered by nobody.
+//
+// What happens when the metadata then says "private" - and why it is not the
+// convenient thing - is written down at onlineRoute.blind. Both ways onto the
+// route enforce it through the same line in addTo, so neither of them decides
+// anything here.
 func openBlind(ctx context.Context, cfg Config, src Source) (*Session, *Torrent, error) {
 	s, err := newSession(cfg, true)
 	if err != nil {
@@ -220,6 +324,95 @@ func (s *Session) UsesDHT() bool {
 // anacrolix's own tests keep a DHT-enabled client offline.
 var tuneClientForTest func(*torrent.ClientConfig)
 
+// pieceStorage builds the storage every client here is handed: one directory
+// per torrent under dataDir, and piece completion kept in memory on purpose.
+//
+// # Why completion is in memory, and why that is a decision rather than a fallback
+//
+// It used to be persistent by accident. storage.NewFileByInfoHash builds its
+// own piece completion by way of the package-private pieceCompletionForDir,
+// which opens a bbolt database at <dataDir>/.torrent.bolt.db under an
+// exclusive flock with a one-second timeout - one database per data
+// DIRECTORY, not per client and not per torrent. One client at a time made
+// that invisible. A pool that keeps a long-lived shared client and starts
+// others beside it (a private torrent's own client, a magnet's tracker probe,
+// a blind magnet - see Pool) made every client after the first wait out that
+// second, fail, and fall back to storage.NewMapPieceCompletion with a WARN on
+// the process-wide slog default. Nothing in torpeek configures an slog
+// handler and the per-client filter above is anacrolix/log, not slog, so that
+// warning reached a terminal's stderr and nowhere else (TOR-155).
+//
+// What the fallback actually cost was then measured rather than argued, and it
+// turned out to be two quite different things:
+//
+//   - The completion itself: nothing. A second run over a data dir whose
+//     pieces were still on disk downloaded 0 bytes and read back the right
+//     bytes both with the persistent database and with it held away by
+//     another opener. What recovers those pieces is anacrolix's initial hash
+//     check (Torrent.queueInitialPieceCheck, entered for any piece whose
+//     completion is unknown), not the database - and it cannot be the
+//     database, because part files are on by default, so
+//     fileTorrentImpl.setCompletionFromPartFiles runs at every OpenTorrent
+//     and demotes every stored "complete" to unknown for any file not present
+//     at its full length. torpeek only ever holds slivers of a file, so that
+//     is every file of every torrent, every time. On top of which a run
+//     discards its own pieces the moment it ends (REQUIREMENTS.md 2.9;
+//     DiscardPieces, Attachment.Detach), so there is nothing left on disk for
+//     a stored "complete" to describe. 2.9's "a re-run does not go to the
+//     network" is kept by the OUTPUT tree - manifests and frames - and never
+//     by the piece cache.
+//
+//   - The wait: a whole second per degraded client start. Measured with the
+//     database held by another opener, three reps each: newSession took
+//     963ms, 962ms and 958ms, against 24ms, 1ms and 0s with it free. That is
+//     bbolt's own flock timeout, and it is the part a person actually felt -
+//     the three warnings seen in one UI session were three seconds added to
+//     attaching a torrent.
+//
+// So the persistent database bought this workload nothing and charged a second
+// for the privilege of being contended. Passing the completion in explicitly
+// is what makes it ours: there is no lock left to lose, no fallback left to
+// take, and nothing left for the library to warn about. It is also where
+// anacrolix itself has gone - NewFileOpts defaults to NewMapPieceCompletion
+// when part files are on, and NewFileByInfoHash reaches its bbolt database
+// through NewFileWithCustomPathMaker, which upstream marks Deprecated.
+//
+// # What would make persistence worth having again
+//
+// A run that keeps its pieces. If 2.9 ever stops discarding them - a real
+// seeding mode, or a resume that reads the piece cache instead of the output
+// tree - then completion across runs starts to mean something and this has to
+// be decided again. The constraint to design against then is the one that
+// caused all of this: the database is per data DIRECTORY, so several live
+// clients over one data dir cannot each have their own.
+//
+// # The layout, which DiscardPieces depends on
+//
+// infoHashDir is a copy of anacrolix's own unexported infoHashPathMaker
+// (storage/file-paths.go), because NewFileOpts is the only constructor that
+// takes a piece completion and the path maker that used to come with it is
+// not exported. Every other field is left exactly as NewFileByInfoHash left
+// it - default FilePathMaker, part files on, default logger - so the only
+// thing that changed is the completion. What must not drift is the directory
+// shape: DiscardPieces removes <dataDir>/<infohash>/ by name, and its whole
+// safety argument is that the subtree belongs to one torrent. The test helper
+// requireOneDirectoryPerTorrent pins it, and every test below that runs a
+// client over a data dir calls it.
+func pieceStorage(dataDir string) storage.ClientImplCloser {
+	return storage.NewFileOpts(storage.NewFileClientOpts{
+		ClientBaseDir:   dataDir,
+		TorrentDirMaker: infoHashDir,
+		PieceCompletion: storage.NewMapPieceCompletion(),
+	})
+}
+
+// infoHashDir namespaces one torrent's pieces under the data directory. It is
+// what storage.NewFileByInfoHash produced, path for path; see pieceStorage for
+// why torpeek spells it out itself now.
+func infoHashDir(baseDir string, _ *metainfo.Info, infoHash metainfo.Hash) string {
+	return filepath.Join(baseDir, infoHash.HexString())
+}
+
 func newSession(cfg Config, dht bool) (*Session, error) {
 	tc := torrent.NewDefaultClientConfig()
 	// The library logs read failures to stderr, including the ones we cause
@@ -227,7 +420,7 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// stays silent and its clients decide what a person sees, so nothing below
 	// Critical is allowed through.
 	tc.Logger = alog.Default.FilterLevel(alog.Critical)
-	store := storage.NewFileByInfoHash(cfg.DataDir)
+	store := pieceStorage(cfg.DataDir)
 	tc.DefaultStorage = store
 	tc.NoUpload = !cfg.Upload
 	tc.NoDHT = !dht
@@ -245,6 +438,41 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	// "nothing else is listening" (TOR-28's acceptance criterion): these
 	// probes bind their own ephemeral port each time, unpinned by design.
 	tc.NoDefaultPortForwarding = true
+	// Webseeds off, and this is a bug workaround rather than a preference -
+	// read the whole reason before turning them back on.
+	//
+	// updateWebseedRequests opens with an assertion that the webseed requests
+	// collected from the CLIENT equal the same set recomputed per torrent
+	// (webseed-requesting.go, panicif.False(maps.Equal(...))). That is a
+	// consistency check on bookkeeping spanning every torrent a client holds,
+	// and it fires as a PANIC on the library's own timer goroutine, where no
+	// recover of ours can reach it - so there is nothing to defend against,
+	// only a trigger to remove.
+	//
+	// It did not fire while a client held one torrent for one run. It fires
+	// now because a single long-lived client holds every public torrent while
+	// they attach and detach underneath it (Pool), which is exactly what that
+	// assertion is about. Measured, not inferred: this pinned revision is the
+	// one 1.1.0 shipped and its acceptance run passed all seven criteria on
+	// the same archive.org torrent with webseeds enabled; 1.2.0's acceptance
+	// died inside criterion 1 in 41 seconds. So this release exposed a latent
+	// library bug rather than importing a new one, and the blast radius is
+	// bigger than it was: the panic takes the process down, and the process
+	// now holds several fetching torrents and a queue that survives nothing
+	// (REQUIREMENTS.md 3.3).
+	//
+	// Upstream has not fixed it. Master at 20260906115345 - six days newer
+	// than this pin - carries that assertion byte for byte, so a later pin
+	// bump must not quietly assume webseeds are safe again: check that line
+	// before deleting this one.
+	//
+	// What it costs: an HTTP mirror as a second source for torrents that
+	// publish one. torpeek is about what a SWARM will give up (section 2.6
+	// counts what peers send), so losing it costs reach on some public
+	// torrents rather than correctness - and it makes every traffic figure
+	// purely swarm traffic, which is what section 2.6 always claimed to be
+	// measuring.
+	tc.DisableWebseeds = true
 
 	if tuneClientForTest != nil {
 		tuneClientForTest(tc)
@@ -253,19 +481,67 @@ func newSession(cfg Config, dht bool) (*Session, error) {
 	cl, err := torrent.NewClient(tc)
 	if err != nil {
 		// The storage was opened before the client and nothing else will
-		// close it now. Left behind, its flock on .torrent.bolt.db outlives
-		// the failure for the life of the process, so the next attempt -
-		// after a pinned port frees up, say - would be the one that silently
-		// falls back to in-memory bookkeeping.
+		// close it now. It no longer holds a lock anyone else waits on
+		// (pieceStorage), so this is no longer the difference between a
+		// working next attempt and a degraded one - but it is still the only
+		// thing that releases what this call allocated, and a client that
+		// failed to start should leave nothing behind.
 		store.Close()
 		return nil, fmt.Errorf("start torrent session: %w", err)
 	}
 	return &Session{cl: cl, cfg: cfg, store: store, dhtOn: dht}, nil
 }
 
-// add attaches the source to this session's client and waits for metadata.
-// A non-nil mi short-circuits the wait by supplying the info bytes directly.
+// add attaches the source to this session's client and waits for metadata,
+// introducing the peers this session was configured with.
 func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*Torrent, error) {
+	return s.addTo(ctx, src, mi, s.cfg.Peers)
+}
+
+// addTo is add with the peer list given per call rather than taken from the
+// session's own config.
+//
+// The two differ only for the shared public client (see Pool): one client
+// holds many torrents, so "which peers to introduce" is a property of the
+// torrent being attached, not of the client it is attached to. Every
+// single-torrent caller goes through add and keeps the old behaviour exactly.
+//
+// A non-nil mi short-circuits the metadata wait by supplying the info bytes
+// directly.
+//
+// # Where BEP 27 is enforced
+//
+// Here, because this is the one door: every torrent that has ever entered a
+// client entered it through this function. A private torrent offered to a
+// client with DHT (and so PEX) on is refused with ErrPrivateOnDHTClient, and
+// that refusal is not a check some caller has to remember to perform first -
+// no route, no existing caller and no caller added later can put a private
+// torrent on an announcing client, because the add itself will not do it.
+func (s *Session) addTo(ctx context.Context, src Source, mi *metainfo.MetaInfo, peers []string) (*Torrent, error) {
+	if s.cl == nil {
+		return nil, errors.New("swarm: session is closed")
+	}
+
+	// The guard is in two halves, and `known` is the seam: it says whether
+	// the flag can be read without asking the swarm.
+	//
+	// Half one, for every source that settles the flag offline - which is
+	// every source but a magnet whose metadata has not arrived - refuses
+	// BEFORE AddTorrent. The ordering is the whole value of it: a client with
+	// DHT on starts announcing an infohash as soon as the torrent is added,
+	// so a check that ran afterwards would already have published the thing
+	// it exists to keep unpublished. Nothing is added here, so nothing is
+	// announced.
+	//
+	// Half two is below, after the metadata wait, and covers exactly the
+	// sources this one cannot. Neither half backs the other up: each is the
+	// only thing standing in the way on the sources it covers, which is what
+	// makes each of them separately able to fail a test.
+	private, known := privacyInHand(src, mi)
+	if known && private && s.dhtOn {
+		return nil, ErrPrivateOnDHTClient
+	}
+
 	var (
 		t   *torrent.Torrent
 		err error
@@ -298,8 +574,8 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 	// at construction - and here it is exactly what has not arrived yet. A
 	// magnet reaches this line with a nil Info, and building one crashed the
 	// run before it started (TOR-48). Introducing a peer needs none of that.
-	if len(s.cfg.Peers) > 0 {
-		addPeers(t, s.cfg.Peers...)
+	if len(peers) > 0 {
+		addPeers(t, peers...)
 	}
 
 	select {
@@ -308,7 +584,64 @@ func (s *Session) add(ctx context.Context, src Source, mi *metainfo.MetaInfo) (*
 		return nil, fmt.Errorf("%w after %s", ErrNoMetadata, timeout)
 	}
 
-	return newTorrent(t), nil
+	tor := newTorrent(t)
+
+	// Half two, and there is exactly one way to reach it: a magnet whose
+	// metadata has only just arrived, on the one client that had to have DHT
+	// on to fetch that metadata at all (onlineRoute.blind). Until this line
+	// the flag was unreadable; now it is read, and a private torrent goes no
+	// further on this client.
+	//
+	// Gated on `known` rather than run unconditionally, and that is
+	// deliberate. A second reading of a flag half one already acted on would
+	// be untestable belt-and-braces: delete half one and this would quietly
+	// cover for it, so nothing could show that the ordering - refuse before
+	// the announce, not after - was still being honoured. There is no gap
+	// between the two either. The info bytes AddTorrent is handed are the
+	// same bytes privacyInHand read, so a source that settled the flag
+	// offline cannot arrive here saying something else.
+	//
+	// Dropped rather than reported and kept: Drop removes it from the client
+	// and waits for its storage to close, so nothing of it stays attached to
+	// something that announces, and its staging subtree goes with it because
+	// this attempt has no session for the caller to Close.
+	if !known && tor.Private() && s.dhtOn {
+		t.Drop()
+		refusal := fmt.Errorf("%w: the metadata says this torrent is private, and it could "+
+			"only be fetched through DHT (a magnet carrying no trackers)", ErrPrivateOnDHTClient)
+		if err := discardPieces(s.cfg.DataDir, t.InfoHash().HexString()); err != nil {
+			return nil, errors.Join(refusal, err)
+		}
+		return nil, refusal
+	}
+
+	return tor, nil
+}
+
+// privacyInHand settles the BEP 27 private flag from what is already known,
+// without a single connection: the source itself states it (a .torrent does),
+// or metadata a client that already fetched it handed over.
+//
+// known false means only the swarm can answer, and that is one case: a magnet
+// whose metadata has not arrived. It is the sole reason the enforcement in
+// addTo needs a second half after the metadata wait rather than being a
+// single check before the add.
+//
+// Deliberately not a method on Source: the second argument is the point.
+// Metadata carried over from another client settles the flag exactly as
+// authoritatively as a .torrent's own bytes do, and both callers of the
+// shared client's door arrive with one or the other.
+func privacyInHand(src Source, mi *metainfo.MetaInfo) (private, known bool) {
+	if mi != nil {
+		info, err := mi.UnmarshalInfo()
+		if err != nil {
+			// Unreadable info bytes settle nothing. Saying "not private"
+			// here would be the one lie that matters.
+			return false, false
+		}
+		return info.Private != nil && *info.Private, true
+	}
+	return src.Privacy()
 }
 
 // DHTEnabled reports whether this session's client has DHT and PEX on.
@@ -318,12 +651,49 @@ func (s *Session) DHTEnabled() bool { return s.dhtOn }
 // what Config.ListenPort resolved to, whether it was pinned or left at zero
 // for the OS to assign. Exists so a caller (or a test) can observe the real
 // socket rather than trust the config that asked for it.
-func (s *Session) ListenPort() int { return s.cl.LocalPort() }
+func (s *Session) ListenPort() int {
+	if s.cl == nil {
+		return 0
+	}
+	return s.cl.LocalPort()
+}
 
 // WentOnlineBlind reports that DHT was used before the private flag could be
 // checked - only possible for a magnet carrying no trackers. Callers should
 // surface this rather than hide it.
 func (s *Session) WentOnlineBlind() bool { return s.blindly }
+
+// Received is the useful data this CLIENT has taken off the wire since it
+// started, in bytes: the same BytesReadUsefulData Torrent.Downloaded reports,
+// accumulated by anacrolix at the client level rather than the torrent level
+// (every chunk that reaches a torrent's ConnStats reaches the client's too -
+// peer.go's modifyRelevantConnStats walks both).
+//
+// It is NOT the sum of Downloaded over the torrents attached right now, and
+// the difference is the point. A torrent's counter goes when the torrent goes,
+// so a sum over live torrents forgets everything a detached run received -
+// including the chunks that kept arriving from several peers after its last
+// claim was released, measured between 1.5 and 10.6 MiB per run on the
+// acceptance torrent (docs/tor-88-min-traffic-spread.md). Those bytes crossed
+// the link. A ceiling that protects a link and a quota (REQUIREMENTS.md 2.6)
+// must not be reset by tidying up, so the client-wide roof is read from here.
+//
+// Received data only, in keeping with 2.6: BytesWrittenData - what this client
+// SENT, which Torrent.Uploaded reports and nothing caps - is not in it.
+//
+// Cumulative and monotonic for the life of the client, and zero once Close
+// has run: Close drops the client reference, and the counters go with it. A
+// caller that needs a closed client's final figure - Pool, folding it into
+// the total behind its roof - must take it BEFORE closing. Measured, not
+// assumed: reading it afterwards returned 0 where the client had received a
+// megabyte.
+func (s *Session) Received() int64 {
+	if s.cl == nil {
+		return 0
+	}
+	stats := s.cl.ConnStats()
+	return stats.BytesReadUsefulData.Int64()
+}
 
 // Close shuts the client down.
 func (s *Session) Close() error {
@@ -342,17 +712,114 @@ func (s *Session) Close() error {
 		}
 		s.store = nil
 	}
+
+	// Last of all, and only once the socket has actually gone: whoever binds
+	// this port next - Open's own restart, or the next client out of the
+	// pool - must not race the close.
+	waitPortFree(s.cfg.ListenPort)
+	s.lease.Release()
+	s.lease = nil
+
 	return errors.Join(errs...)
+}
+
+// How long Close waits for a pinned port to come free, and how often it looks.
+// The wait is normally a poll or two; the ceiling exists so a port that never
+// frees cannot hang a caller.
+const (
+	portFreeWait = 2 * time.Second
+	portFreePoll = 5 * time.Millisecond
+)
+
+// waitPortFree blocks until nothing is listening on port, or the ceiling is
+// reached. Port 0 - the OS chose it, nobody will ask for it by name - returns
+// at once.
+//
+// This is not belt and braces, it is a documented hole in Client.Close. That
+// method waits (closeGroup.Wait) for the work it queues on torrents and their
+// storage, but the listening sockets are not part of that: client.go registers
+// them as `cl.onClose = append(cl.onClose, func() { go s.Close() })`, a
+// goroutine nothing ever waits on. So Client.Close can return with the port
+// still bound, and the next bind on it - which on a managed host is a
+// certainty rather than a possibility, because the whole point of a pinned
+// range is that the ports come back around - fails with "address already in
+// use" and, since the port is pinned, fails the run rather than sliding onto
+// another port.
+//
+// Timing out is deliberately silent and hands the port back anyway: a port
+// still held after two seconds is something the next bind will report
+// honestly, and dropping it from the set for the life of the process would
+// turn a transient into a permanent loss of capacity.
+func waitPortFree(port int) {
+	if port == 0 {
+		return
+	}
+
+	deadline := time.Now().Add(portFreeWait)
+	for {
+		if portFree(port) {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		time.Sleep(portFreePoll)
+	}
+}
+
+// portFree reports whether every socket a client puts on its port is
+// bindable again.
+//
+// Each address family is probed by name rather than through a wildcard
+// "tcp"/"udp" listen, and that is not thoroughness for its own sake: on
+// darwin net.Listen("tcp", ":p") binds v4 only (supportsIPv4map is false
+// there), so a wildcard probe reports a port free while anacrolix's own
+// tcp6 socket is still on it - which is exactly the socket the next client
+// fails to bind, with "subsequent listen: listen tcp6 :p: bind: address
+// already in use". Measured, not reasoned: with the wildcard probe, 40
+// open/close cycles on OS-assigned ports hit that failure.
+//
+// Only EADDRINUSE counts as busy. A host with IPv6 switched off refuses a
+// tcp6 bind for a reason that has nothing to do with this port, and reading
+// that as "still busy" would make every close wait out the full ceiling.
+// Windows reports its own WSAEADDRINUSE, which this does not recognise, so
+// there the wait simply never triggers and Close behaves as it did before.
+func portFree(port int) bool {
+	addr := net.JoinHostPort("", strconv.Itoa(port))
+	for _, network := range []string{"tcp4", "tcp6", "udp4", "udp6"} {
+		if portBusy(network, addr) {
+			return false
+		}
+	}
+	return true
+}
+
+func portBusy(network, addr string) bool {
+	var (
+		closer io.Closer
+		err    error
+	)
+	if strings.HasPrefix(network, "udp") {
+		closer, err = net.ListenPacket(network, addr)
+	} else {
+		closer, err = net.Listen(network, addr)
+	}
+	if err != nil {
+		return errors.Is(err, syscall.EADDRINUSE)
+	}
+	closer.Close()
+	return false
 }
 
 // DiscardPieces removes this run's own piece subtree for one torrent, never
 // the data directory itself (REQUIREMENTS.md 2.9: raw pieces are staging
 // data, not a result worth keeping).
 //
-// storage.NewFileByInfoHash, which newSession always configures as the
-// client's storage, namespaces every torrent under <DataDir>/<infohash>/ -
-// see anacrolix's storage/file-paths.go infoHashPathMaker. That is exactly
-// what makes dropping one run's own subtree safe: it cannot reach a sibling
+// pieceStorage, which newSession always configures as the client's storage,
+// namespaces every torrent under <DataDir>/<infohash>/ - see infoHashDir,
+// which is anacrolix's own storage/file-paths.go infoHashPathMaker spelled
+// out here. That is exactly what makes dropping one run's own subtree safe:
+// it is one torrent's directory, so the removal cannot reach a sibling
 // torrent's pieces, and a directory the caller named with -data keeps
 // existing, only lighter.
 //
@@ -376,8 +843,22 @@ func (s *Session) Close() error {
 // Close's wait to even need to cover - it is a genuine guarantee, not one
 // this happens to lean on without headroom.
 func (s *Session) DiscardPieces(infoHash string) error {
-	if s.cfg.DataDir == "" || infoHash == "" {
+	return discardPieces(s.cfg.DataDir, infoHash)
+}
+
+// discardPieces is DiscardPieces without a session, for the caller that drops
+// one torrent out of a client it does not own (Attachment.Detach). Everything
+// DiscardPieces documents applies here unchanged - it is the same removal,
+// under the same <DataDir>/<infohash>/ namespacing - except for what marks the
+// boundary it must not be called before. For a session that is Close; for one
+// torrent out of a shared client it is Torrent.Drop, which carries the same
+// guarantee at a narrower scope: Drop takes the client lock, calls the very
+// same Torrent.close(wg) that Client.Close calls for every torrent, and waits
+// on its own WaitGroup before returning - so this torrent's storage.Close has
+// already run, while every sibling torrent in the client is untouched.
+func discardPieces(dataDir, infoHash string) error {
+	if dataDir == "" || infoHash == "" {
 		return nil
 	}
-	return os.RemoveAll(filepath.Join(s.cfg.DataDir, infoHash))
+	return os.RemoveAll(filepath.Join(dataDir, infoHash))
 }

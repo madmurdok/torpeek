@@ -307,6 +307,70 @@ func TestRunRejectsATorrentWithNoVideo(t *testing.T) {
 	}
 }
 
+// TestNoPeersIsVisibleWithinOneHeartbeatInterval is TOR-141's own acceptance,
+// run end to end rather than only against the pure classifiers: a torrent
+// nobody is seeding must produce a VISIBLE signal - a Progress event
+// carrying a Stall reading of CodeNoPeers - within one stallHeartbeatInterval
+// of attaching, not only after this file eventually gives up and fails.
+//
+// Metadata comes from the .torrent file itself (torrenttest.BuildDir builds
+// one directly, the same fixture multiFileTorrent renders into), so there is
+// no metadata wait to isolate this from: attaching succeeds almost
+// immediately, and every video byte after that is unreachable, exactly the
+// case the ticket names - "a run with no peers looks exactly like a run
+// that is working" - because nothing published anything during that wait
+// before TOR-141.
+//
+// bridge.RequestTimeout is set above stallHeartbeatInterval so this file's
+// own Inspect call is still blocked when the heartbeat's first tick fires -
+// proving the heartbeat runs CONCURRENTLY with the blocking read, not merely
+// between capture points (see startFileHeartbeat's own doc for why that
+// distinction is the point).
+func TestNoPeersIsVisibleWithinOneHeartbeatInterval(t *testing.T) {
+	tools := locateTools(t)
+	torrentPath, _ := multiFileTorrent(t, tools, 1, 10, "200k")
+
+	cfg := runConfig(t, torrentPath, "") // no seeder: genuinely nobody to ask
+	cfg.Bridge.RequestTimeout = 8 * time.Second
+	cfg.Budget = Budget{MaxBytes: 8 << 20, MaxTime: 20 * time.Second}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+
+	events, err := NewEngine(tools).Run(ctx, cfg)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var stalls []Progress
+	for _, ev := range collect(t, events) {
+		if p, ok := ev.(Progress); ok && p.Stall != nil {
+			stalls = append(stalls, p)
+		}
+	}
+
+	if len(stalls) == 0 {
+		t.Fatal("no Progress event carried a Stall reading for a torrent with " +
+			"no peers at all - TOR-141's own complaint, reproduced: the row would " +
+			"have shown nothing until this file eventually failed")
+	}
+
+	first := stalls[0]
+	t.Logf("first stall reading: peers=%d code=%s since=%s", first.Peers, first.Stall.Code, first.Stall.Since)
+
+	if first.Peers != 0 {
+		t.Errorf("first stall reading reports %d peers, want 0 - this torrent has none connected", first.Peers)
+	}
+	if first.Stall.Code != CodeNoPeers {
+		t.Errorf("first stall reading code = %s, want %s", first.Stall.Code, CodeNoPeers)
+	}
+	if first.Stall.Since > stallHeartbeatInterval {
+		t.Errorf("first stall reading reports %s of no-peers time, want at most "+
+			"one heartbeat interval (%s) - recognisable within a STATED time, "+
+			"not after the metadata or bridge timeout", first.Stall.Since, stallHeartbeatInterval)
+	}
+}
+
 func TestParamsKeyDistinguishesWhatChangesTheResult(t *testing.T) {
 	base := DefaultConfig("magnet:?xt=urn:btih:x", "/out", "/data")
 

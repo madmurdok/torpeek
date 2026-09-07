@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/madmurdok/torpeek/internal/cache"
+	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
@@ -83,6 +84,158 @@ type RunSummary struct {
 	// When orders the list: a live entry's most recent lifecycle timestamp
 	// (ended, else started, else queued), or a disk row's created_at.
 	When time.Time `json:"when"`
+
+	// Live is this row's most recent live swarm reading - see the Live
+	// type's own doc for exactly which rows get one and why "having a
+	// client" is judged by more than State alone.
+	Live *Live `json:"live,omitempty"`
+
+	// Priority is the level this row waits at (runs.go's Priority, TOR-140),
+	// and QueuePosition its 1-based place in the queue as the server
+	// actually holds it.
+	//
+	// A POINTER for the level and a plain int for the position, and the
+	// difference is not an accident. PriorityNormal is zero and is a real
+	// answer, so omitempty on an int would erase exactly the commonest one -
+	// a client could not tell "normal" from "this row has no priority",
+	// which is the distinction that decides whether it draws a control at
+	// all. Zero is NOT a real position: the queue is 1-based and "not
+	// waiting" is the only thing zero can mean, so omitempty says it
+	// perfectly.
+	//
+	// Both are present for exactly the rows whose priority still decides
+	// something (RunState.queueable): queued, and parked waiting for a file
+	// selection - though a parked row holds no position while it waits, so
+	// it carries a level and no place. A running, finished or disk-only row
+	// carries neither. That is the same absent-is-not-zero line Live draws,
+	// for the same reason: a running torrent reported at "priority normal,
+	// position 0" would read as a standing in a queue it has already left.
+	//
+	// TOR-139's Queue column had to DERIVE this, ranking queued rows by
+	// their own reported queued time, because the queue was strict FIFO and
+	// no priority existed to report. Reporting it is what lets the derived
+	// version be deleted rather than kept alongside - the two would disagree
+	// the first time anybody reordered anything.
+	Priority      *int `json:"priority,omitempty"`
+	QueuePosition int  `json:"queue_position,omitempty"`
+
+	// Arrival is "this was the Nth torrent added to this server", 1-based,
+	// and it is the figure the Queue column shows (TOR-156). It is NOT
+	// QueuePosition under another name - see runEntry.arrival for the full
+	// three-way distinction - and the two are reported side by side here
+	// precisely so that nothing downstream has to guess which of them a
+	// single number was meant to be. TOR-153 merged two bars that said the
+	// same thing; this is the opposite trap, two facts that look like one,
+	// and the answer is to name both rather than to ship one number twice.
+	//
+	// Present for every LIVE row in every state - queued, running, parked,
+	// done, failed, cancelled - which is the whole change: before this,
+	// the queue column had something to say only about a row still waiting,
+	// and at the shipped queue width of 5 (TOR-149) almost nothing ever is.
+	//
+	// Absent, not zero, for a row found only on disk: the counter is this
+	// process's own, so a run from a previous process was never handed one
+	// (runEntry.arrival says why per-process is the only honest scope for
+	// it). Zero is not a real ordinal - the count is 1-based - so omitempty
+	// says "no ordinal" exactly, the same way it does for QueuePosition
+	// above and for every other absent-is-not-zero field on this type.
+	Arrival int `json:"arrival,omitempty"`
+}
+
+// Live is one row's most recent live reading: peers, seeds, both speeds and
+// the availability reading, from the run's own core.Progress heartbeats
+// (runEntry.applyProgress).
+//
+// Present only for a row with an actual client that has spoken at least
+// once - the run's first heartbeat - and absent, not zeroed, for every row
+// without one: a queued or needs-action row has no client yet, a disk-only
+// row never will, and a live row still waiting on its first heartbeat has
+// nothing to report either (TOR-136). A queued torrent showing 0 peers and
+// 0 KB/s would be indistinguishable from a running torrent that found
+// nobody, and those are opposite situations - one is waiting its turn, the
+// other is the pain a person actually watches for. This project has now
+// drawn that same "absent, not zero" line five times: TOR-119 for claimed
+// pieces, TOR-111 for reach, TOR-135 for availability, TOR-134 for rates,
+// and wire.go's progress event itself (TOR-147) - this is the sixth, at the
+// listing rather than the event stream.
+//
+// Kept as one struct rather than five independent optional fields because
+// Peers/Seeds/DownloadBps/UploadBps/Swarm all arrive together on one
+// heartbeat (core.Progress): a row either has a reading or it does not, and
+// a client should only have to ask once, the same reasoning FileSet.Reach
+// groups a claim's fields under one pointer for.
+type Live struct {
+	Peers int `json:"peers"`
+	Seeds int `json:"seeds"`
+	// DownloadBps/UploadBps are absent, not zero, before the run's second
+	// heartbeat - wire.go's identical field on the progress event follows
+	// the identical rule for the identical reason
+	// (core.Progress.DownloadRate's own doc): a rate with no interval
+	// behind it yet is unknown, not measured at zero.
+	DownloadBps *float64 `json:"download_bps,omitempty"`
+	UploadBps   *float64 `json:"upload_bps,omitempty"`
+	// Swarm is nil until the swarm has answered at all, independently of
+	// Peers/Seeds already being known - a connected peer is not yet a peer
+	// that has said what it holds (swarm.Torrent.Availability's own doc,
+	// core.Progress.Swarm's own doc, wire.go's identical "swarm" key on the
+	// progress event added by TOR-147).
+	Swarm *Availability `json:"swarm,omitempty"`
+
+	// Stall is why this run is getting nowhere and for how long, or absent
+	// when it is progressing (TOR-141). Filled by runEntry.applyProgress
+	// from the same heartbeat the rest of Live comes from, so a page that
+	// has only just loaded reads it out of GET /runs rather than waiting for
+	// the next WebSocket progress event.
+	Stall *Stall `json:"stall,omitempty"`
+}
+
+// Stall mirrors wire.go's "stall" object on the progress event (TOR-141)
+// field for field, the same way Availability mirrors "swarm" - so a client
+// reads a stall reading the same way whichever endpoint it came from.
+type Stall struct {
+	// Code is one of core's own ErrorCode strings (CodeNoPeers,
+	// CodeUnavailable, CodeNoMetadata, CodeReadStalled) - the same
+	// vocabulary Err above already carries for a failed run, so a client
+	// reading this needs no second lookup table.
+	Code string `json:"code"`
+	// SinceMS is how long - continuously, not merely "as of ever" - this
+	// exact code has explained no progress. See core.Progress.Stall's own
+	// doc for the rule that keeps it from restarting on every heartbeat that
+	// merely repeats the same finding.
+	SinceMS int64 `json:"since_ms"`
+}
+
+// renderStall turns a core reading into the wire shape, or nil when the run
+// is progressing - core.Progress.Stall's own "absent, not zero" rule,
+// carried through rather than re-decided here, the same way
+// renderAvailability carries Progress.Swarm's identical rule.
+func renderStall(s *core.Stall) *Stall {
+	if s == nil {
+		return nil
+	}
+	return &Stall{Code: string(s.Code), SinceMS: s.Since.Milliseconds()}
+}
+
+// Availability mirrors wire.go's "swarm" object on the progress event
+// (TOR-147) field for field, so a client reads copies-per-piece the same way
+// whichever endpoint it came from.
+type Availability struct {
+	// CopiesPerPiece is copies PER PIECE, not a percentage, and commonly
+	// exceeds 1.0 - core.SwarmAvailability's own unit, named here the same
+	// way so the two endpoints cannot disagree about what the number means.
+	CopiesPerPiece float64 `json:"copies_per_piece"`
+	Unavailable    int     `json:"unavailable"`
+	Pieces         int     `json:"pieces"`
+}
+
+// renderAvailability turns a core reading into the wire shape, or nil when
+// there is nothing to report yet - core.Progress.Swarm's own "unknown, not
+// zero" rule, carried through rather than re-decided here.
+func renderAvailability(a *core.SwarmAvailability) *Availability {
+	if a == nil {
+		return nil
+	}
+	return &Availability{CopiesPerPiece: a.CopiesPerPiece, Unavailable: a.Unavailable, Pieces: a.NumPieces}
 }
 
 // Partial reports whether this row's selection is short of complete - a
@@ -123,17 +276,22 @@ func partial(complete, selected int) bool {
 // Selected/Complete - Partial() alone stays the only place the comparison is
 // written.
 //
-// This does not make a live run's badge any more (or less) able to show
-// partial than it already was. Selected and Complete are only ever non-zero
-// once listRuns has merged a disk record in - never for a live entry that
-// has not yet reached a final state (see this type's own field comments) -
-// so Partial() answers false at exactly the moments it always did. TOR-80
+// A LIVE ROW CAN NOW ANSWER TRUE HERE, which it could not before TOR-162.
+// Selected and Complete are still only ever non-zero once listRuns has
+// merged a disk record in, but that merge no longer waits for a final state,
+// so a top-up in flight against a half-finished set reports partial: true
+// beside state: "running". That is the set's own honest standing - those are
+// the very frames the run is reusing - and it does not become a badge:
+// app.js reads "partial" only for a row already done (badgeState), so what a
+// person sees while a run is going still comes from the run's own state. A
+// consumer that branched on partial without reading state beside it was
+// already wrong about a disk row, which has no state at all. TOR-80
 // left one gap here, closed by TOR-87 in server.go's pump rather than in
 // this method: the page also learns of a run's state over the WebSocket
 // (run_state records), and until TOR-87 run_state carried neither count, so
 // a run that went running -> done while a page was open kept whatever
-// "partial" this response had last reported (false, since a live entry has
-// nothing merged in) until that page's next GET /runs. Closing it here would
+// "partial" this response had last reported until that page's next
+// GET /runs. Closing it here would
 // have meant this method reaching into the registry and the filesystem for
 // an entry it is never handed - the fix belongs where run_state itself is
 // built, once that message's own entry has reached a final state and (per
@@ -160,20 +318,70 @@ type diskRun struct {
 // registry does not already account for - merged so a run that is both live
 // and already on disk appears once.
 //
-// A live entry only merges with a disk row when it has reached a final state
-// with a known infohash (see runs.go's RunState.final and RunInfo.InfoHash)
-// and that infohash names exactly one directory on disk. A queued or running
-// entry can never merge - it has not written a record yet, whatever its
-// infohash - so it is never at risk of being hidden behind a stale disk row.
-// When an infohash names more than one directory - different capture plans
-// of the same torrent, which core.ParamsKey distinguishes but this package
-// deliberately does not compute (it is a client of the event stream, not a
-// second place run parameters are decided, per ARCHITECTURE.md) - merging is
-// skipped rather than guessed: the live entry is listed without Files or
-// Complete, and every one of those disk directories is listed too. That is
-// the one case a run can still show up twice; it is rare (the same torrent
-// captured under two different plans, one of them still in memory) and
-// listing both is safer than silently merging with the wrong one.
+// THE MERGE KEY IS THE INFOHASH, AT ANY STATE, and TOR-162 is the ticket that
+// took the word "final" out of it. The rule used to be that a live entry
+// merged only once it had FINISHED, on the reasoning that a queued or running
+// entry has not written a record yet and must never be hidden behind a stale
+// one. That was true for as long as a live run always PRECEDED its own
+// record. Three things break it, and all three predate the ticket:
+//
+//   - a TOP-UP (TOR-152) spends its whole life non-final against a directory
+//     that already has a record - that is what a top-up IS;
+//   - a REGENERATE (TOR-68) is an ordinary run started against a torrent that
+//     already has at least one set on disk;
+//   - a REOPEN (TOR-55) replays a record that is on disk by definition, and
+//     RunReplaying is not final either.
+//
+// In every one of them the same torrent was listed twice for the duration of
+// the run. It is a LATENT BUG rather than a regression: TOR-54's own test
+// (the ancestor of TestALiveRunAgainstAnExistingRecordIsStillOneRow) asserted
+// the two rows as intended behaviour from the day this function was written,
+// and top-up only made the shape easy to hit rather than introducing it.
+//
+// Dropping finality is safe because the merge has never been a merge of
+// EQUALS: everything that identifies the row - id, state, error, the live
+// reading, When - is the live entry's, and only Params, the three counts and
+// (since this ticket) a name the live entry does not have yet come off disk.
+// A merged row cannot hide a live run; it can only tell that live run which
+// directory it is filling and what is already in it, which for a top-up is
+// exactly the truth a person is watching for.
+//
+// What it CANNOT do is know which set a non-final entry will write. A live
+// entry knows its infohash only after metadata_ready and never knows its
+// params at all - this package is a client of the event stream, not a second
+// place core.ParamsKey is computed (ARCHITECTURE.md) - so "same torrent, same
+// params" is not a key that exists on this side of the join. The considered
+// alternative was to have the top-up path MARK its entry with the set it was
+// launched against; it was declined because it answers only one of the three
+// shapes above (a regenerate and a fresh run have no set to be marked with),
+// which would leave the invariant half-held in the listing and half-held in
+// the page - the exact split this ticket exists to close. So the one guess
+// this makes is that a non-final entry against a torrent with exactly ONE set
+// on disk is filling that set. It fails toward one row rather than two, and
+// it self-corrects: a run that turns out to have written a sibling set leaves
+// two directories behind, and the next listing reports both.
+//
+// One window stays open and cannot be closed here: an entry that has not
+// learned its infohash yet - a fresh run, queued or running before its own
+// metadata_ready - has no key at all, so a torrent added a second time from
+// scratch is two rows until its metadata arrives. app.js's liveRowFor had the
+// identical hole for the identical reason (it skipped any entry with no
+// infohash), so nothing was lost by deleting it; closing this one means
+// keying on the SOURCE, which two different requests can legitimately share.
+//
+// When an infohash names more than one directory - different capture plans of
+// the same torrent - merging is skipped rather than guessed: the live entry is
+// listed without Files or Complete, and every one of those disk directories is
+// listed too. That is the one case a run can still show up twice, it is
+// TOR-54's own deliberate decision, and listing both is safer than silently
+// merging with the wrong one.
+//
+// consumed also guards the second thing an unconditional key could do: two
+// live entries for one infohash (two tabs topping up the same set, say) can
+// each want the same record, and only the first - oldest, since s.order is
+// oldest-first - takes it. Those are still two rows, because they are two real
+// runs; merging live entries with EACH OTHER would hide one, which is a
+// different and worse failure than showing both.
 func (s *Server) listRuns() []RunSummary {
 	live := s.snapshot()
 	disk := walkRuns(s.cfg.OutputRoot)
@@ -189,11 +397,43 @@ func (s *Server) listRuns() []RunSummary {
 		row := RunSummary{
 			ID: info.ID, State: string(info.State), Source: info.Source,
 			Name: info.Name, InfoHash: info.InfoHash, Err: info.Err, When: liveWhen(info),
+			// Live comes straight off the registry entry's own last
+			// heartbeat (runEntry.applyProgress) - never recomputed here,
+			// and never touched by the disk merge below, which only ever
+			// fills in Files/Complete/Selected/Params/Name from a finished
+			// run's own record. A merged row's Live is still the run's own
+			// live reading, exactly as before the merge.
+			Live: info.Live,
+			// TOR-156: unconditional, where the queue's own two fields below
+			// are not. Every live entry has an ordinal and keeps it for as
+			// long as this process holds the row; only a disk-only row, which
+			// never passed through this loop, goes without.
+			Arrival: info.Arrival,
 		}
-		if info.State.final() && info.InfoHash != "" {
-			if idxs := byHash[info.InfoHash]; len(idxs) == 1 {
+		// TOR-140: the queue's own two fields, on exactly the rows the queue
+		// still has something to say about - see RunSummary.Priority for why
+		// one of them is a pointer and the other is not.
+		if info.State.queueable() {
+			level := int(info.Priority)
+			row.Priority = &level
+			row.QueuePosition = info.QueuePosition
+		}
+		if info.InfoHash != "" {
+			if idxs := byHash[info.InfoHash]; len(idxs) == 1 && !consumed[idxs[0]] {
 				d := disk[idxs[0]]
-				row.Name, row.Params = d.Name, d.Params
+				// The live entry's own confirmed name WINS, where before this
+				// ticket the record's always did. Both are confirmed - a disk
+				// record's name was written by a completed metadata pass, so
+				// neither is a guess (TOR-117's distinction) - but they are
+				// two readings of one torrent and the live one is this
+				// process's own, taken now. The record still answers for the
+				// rows that have nothing: a queued top-up has no name of its
+				// own until its metadata arrives, and before this ticket no
+				// non-final row ever reached this branch to be given one.
+				if row.Name == "" {
+					row.Name = d.Name
+				}
+				row.Params = d.Params
 				row.Files, row.Complete, row.Selected = d.Files, d.Complete, d.Selected
 				if row.Source == "" {
 					row.Source = d.Source

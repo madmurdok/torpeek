@@ -44,6 +44,29 @@ func (f *fakeRun) runner(ctx context.Context, req RunRequest) (<-chan core.Event
 	return f.events, nil
 }
 
+// singleSlotServer and newSingleSlotServer pin the queue to ONE slot.
+//
+// A test about queueing - "the second run waits", "cancelling a queued run
+// leaves the running one alone" - needs a queue that actually forms, and the
+// shipped default width is 5 (DefaultMaxActiveTorrents, TOR-149). Pinning it
+// here rather than leaning on the default is deliberate: the default is a
+// product decision that has already changed once, and when it changes again
+// only TestMaxActiveTorrentsDefaultsToTheShippedWidth should have to notice.
+func singleSlotServer(t *testing.T, runner Runner) *httptest.Server {
+	t.Helper()
+
+	_, ts := newSingleSlotServer(t, runner)
+	return ts
+}
+
+func newSingleSlotServer(t *testing.T, runner Runner) (*Server, *httptest.Server) {
+	t.Helper()
+
+	cfg := DefaultConfig()
+	cfg.MaxActiveTorrents = 1
+	return newTestServerWithConfig(t, cfg, runner)
+}
+
 func testServer(t *testing.T, runner Runner) *httptest.Server {
 	t.Helper()
 
@@ -396,7 +419,7 @@ func TestUploadWithoutAFileIsRejected(t *testing.T) {
 // accepted and waits, rather than being refused.
 func TestUploadWhileARunIsGoingIsQueued(t *testing.T) {
 	fake := &fakeRun{}
-	ts := testServer(t, fake.runner)
+	ts := singleSlotServer(t, fake.runner)
 
 	if resp := post(t, ts.URL, "/runs", `{"source":"magnet:?xt=urn:btih:abc"}`); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("POST /runs: status %d, want 202", resp.StatusCode)
@@ -621,7 +644,7 @@ func TestServesAFileTheRunAnnounced(t *testing.T) {
 // is now kept by the queue rather than by a 409.
 func TestASecondRunWaitsForTheSlot(t *testing.T) {
 	fake := newFakeRuns()
-	ts := testServer(t, fake.runner)
+	ts := singleSlotServer(t, fake.runner)
 
 	first := startRun(t, ts.URL, "magnet:?xt=urn:btih:abc")
 	if first.state != "running" {
@@ -1252,7 +1275,7 @@ func TestTwoRunsBackToBackDoNotContaminateEachOther(t *testing.T) {
 	)
 
 	fake := newFakeRuns()
-	srv, ts := newTestServer(t, fake.runner)
+	srv, ts := newSingleSlotServer(t, fake.runner)
 
 	live := dial(t, ts.URL)
 	if got := next(t, live); got["type"] != "run_state" {
@@ -1376,7 +1399,7 @@ func TestCancellingAQueuedRunLeavesTheRunningOneAlone(t *testing.T) {
 	)
 
 	fake := newFakeRuns()
-	srv, ts := newTestServer(t, fake.runner)
+	srv, ts := newSingleSlotServer(t, fake.runner)
 
 	running := startRun(t, ts.URL, sourceA)
 	queued := startRun(t, ts.URL, sourceB)
@@ -1542,7 +1565,7 @@ func TestClosingCancelsTheQueueAndItsStagedUploads(t *testing.T) {
 	privateTempDir(t)
 
 	fake := newFakeRuns()
-	srv, ts := newTestServer(t, fake.runner)
+	srv, ts := newSingleSlotServer(t, fake.runner)
 
 	running := startRun(t, ts.URL, source)
 

@@ -105,7 +105,16 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer, count int) i
 			fmt.Fprintf(stderr, "  frame %02d  %s skipped (%s)\n", e.Index, e.Requested.Round(time.Second), e.Code)
 
 		case core.BudgetWarning:
-			fmt.Fprintf(stderr, "  warning: %s used of %s\n", humanBytes(e.SpentBytes), humanBytes(e.LimitBytes))
+			// Two sentences, not one with a word swapped: the run's figures
+			// are about this run and the client's are about every run on the
+			// machine, and a person reading "used of" cannot tell which
+			// (core.LimitScope).
+			if e.Scope == core.LimitClient {
+				fmt.Fprintf(stderr, "  warning: %s of the client-wide traffic roof of %s used, by every run together\n",
+					humanBytes(e.SpentBytes), humanBytes(e.LimitBytes))
+			} else {
+				fmt.Fprintf(stderr, "  warning: %s used of %s\n", humanBytes(e.SpentBytes), humanBytes(e.LimitBytes))
+			}
 
 		case core.FileDone:
 			fmt.Fprintf(stdout, "  %d frames", e.Frames)
@@ -138,7 +147,21 @@ func reportText(events <-chan core.Event, stdout, stderr io.Writer, count int) i
 			}
 			switch e.Reason {
 			case core.StopBudget:
-				fmt.Fprintln(stderr, "stopped at a limit; what was produced is kept")
+				fmt.Fprintln(stderr, "stopped at this run's own traffic limit; what was produced is kept")
+				code = ExitPartial
+			case core.StopTime:
+				// Named apart from the traffic line deliberately (TOR-161):
+				// telling someone to lower their traffic or narrow a run that
+				// ran out of TIME is advice that does not apply, and sharing
+				// the wording with StopBudget would give it anyway.
+				fmt.Fprintln(stderr, "stopped at this run's own time limit; what was produced is kept")
+				code = ExitPartial
+			case core.StopRoof:
+				// Named apart from the line above deliberately. This run may
+				// have spent almost nothing; what filled up was the client's
+				// roof, and telling someone to narrow a run that was already
+				// narrow is the advice the shared wording would give.
+				fmt.Fprintln(stderr, "stopped at the client-wide traffic roof, not at this run's own limit; what was produced is kept")
 				code = ExitPartial
 			case core.StopCancelled:
 				fmt.Fprintln(stderr, "cancelled; what was produced is kept")
@@ -168,7 +191,7 @@ func reportJSON(events <-chan core.Event, stdout, stderr io.Writer) int {
 		}
 		if done, ok := ev.(core.Done); ok {
 			switch done.Reason {
-			case core.StopBudget, core.StopCancelled:
+			case core.StopBudget, core.StopTime, core.StopRoof, core.StopCancelled:
 				code = ExitPartial
 			default:
 				if done.Frames == 0 && code == ExitOK {

@@ -67,6 +67,14 @@ func TestServesAFrameFromARealRun(t *testing.T) {
 	t.Cleanup(func() {
 		ts.Close()
 		srv.Close()
+		// Close cancels the run in the slot; it does not wait for it. This
+		// test deliberately returns after the FIRST frame, so the run is still
+		// going - and still writing frames into the output directory that
+		// t.TempDir is about to remove. RemoveAll racing a frame being written
+		// fails with "directory not empty": measured on release-1.2.0, two runs
+		// in eight, before any of TOR-128's changes. Waiting for the slot to
+		// empty is what makes the cleanup that follows this one safe.
+		waitForTheSlotToEmpty(t, srv)
 	})
 
 	conn := dial(t, ts.URL)
@@ -122,5 +130,29 @@ func TestServesAFrameFromARealRun(t *testing.T) {
 	}
 	if got := resp.Header.Get("Content-Type"); got != "image/jpeg" {
 		t.Errorf("frame served as %q, want image/jpeg", got)
+	}
+}
+
+// waitForTheSlotToEmpty blocks until no run is in the server's slot, which is
+// the observable end of the run's own goroutine: pump releases the slot as the
+// last thing it does. Reported rather than waited out for ever, because a run
+// that never ends is a bug worth naming and not a reason to hang the suite.
+func waitForTheSlotToEmpty(t *testing.T, srv *Server) {
+	t.Helper()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		srv.mu.Lock()
+		empty := len(srv.running) == 0
+		srv.mu.Unlock()
+
+		if empty {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Error("a run was still in the slot 30s after the server was closed")
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

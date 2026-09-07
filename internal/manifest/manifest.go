@@ -176,7 +176,29 @@ type Cost struct {
 	ElapsedMS       int64 `json:"elapsed_ms"`
 	LimitBytes      int64 `json:"limit_bytes"`
 	LimitMS         int64 `json:"limit_ms"`
-	// LimitHit names the ceiling that stopped the run, empty if none did.
+	// LimitHit names the ceiling that stopped the run, empty if none did. One
+	// of THREE values, one per ceiling a run can meet (core.StopReason,
+	// TOR-161):
+	//
+	//   - "budget" is this run's OWN traffic ceiling: LimitBytes above was
+	//     reached (core.StopBudget).
+	//   - "time" is this run's OWN wall-clock ceiling: ElapsedMS above met
+	//     LimitMS (core.StopTime). A reader acting on this value alone must
+	//     not offer more traffic - raising LimitBytes cannot finish a run the
+	//     clock already stopped.
+	//   - "traffic_roof" is the client-wide roof over every run at once,
+	//     which is NOT bounded by LimitBytes here and may have been filled by
+	//     other runs entirely (core.StopRoof).
+	//
+	// Before TOR-161, "budget" was recorded for BOTH the traffic ceiling and
+	// the clock, and a reader had no way to tell them apart except by
+	// comparing ElapsedMS against LimitMS itself - which every consumer had
+	// to know to do (internal/web/runs.go's topUpFor is the example that
+	// found this). A manifest written by an older torpeek still says "budget"
+	// for either, and that ambiguity is real and cannot be resolved after the
+	// fact with certainty - a reader of such a record can, at best, apply the
+	// same elapsed-against-limit comparison as a heuristic, not treat it as
+	// this field's own answer.
 	LimitHit string `json:"limit_hit"`
 	// Sequential marks a run that degraded to sequential reading from the
 	// start because the container carried no duration (REQUIREMENTS.md

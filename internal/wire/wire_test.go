@@ -242,3 +242,94 @@ func TestFileStartedWithNoPlanSendsAnEmptyArray(t *testing.T) {
 		t.Errorf("the encoded event does not carry an empty plan array: %s", data)
 	}
 }
+
+// TestProgressCarriesSwarmAvailability is TOR-147: TOR-135 put the reading
+// on core.Progress but the wire never picked it up, so a browser never saw
+// it. The unit matters as much as the presence - 3.2 is deliberately far
+// from both 0 and 1 so a reader cannot mistake copies_per_piece for a
+// fraction (core.SwarmAvailability's own doc: it commonly exceeds 1.0).
+func TestProgressCarriesSwarmAvailability(t *testing.T) {
+	ev := core.Progress{
+		File: 0, FramesDone: 1, FramesTotal: 4,
+		Peers: 3, Seeds: 1,
+		Swarm: &core.SwarmAvailability{CopiesPerPiece: 3.2, Unavailable: 5, NumPieces: 270},
+	}
+
+	m := Event("", ev)
+
+	swarm, ok := m["swarm"].(map[string]any)
+	if !ok {
+		t.Fatalf("swarm = %T, want map[string]any: %v", m["swarm"], m)
+	}
+	if swarm["copies_per_piece"] != 3.2 {
+		t.Errorf("copies_per_piece = %v, want 3.2", swarm["copies_per_piece"])
+	}
+	if swarm["unavailable"] != 5 {
+		t.Errorf("unavailable = %v, want 5", swarm["unavailable"])
+	}
+	if swarm["pieces"] != 270 {
+		t.Errorf("pieces = %v, want 270", swarm["pieces"])
+	}
+}
+
+// TestProgressOmitsSwarmWhenUnknown keeps "we do not know yet" visibly apart
+// from "the swarm holds nothing": a torrent that has not been asked for
+// bytes has no reading at all (core.Progress.Swarm's own doc), and the key
+// must be missing entirely rather than present as zero copies - the same
+// "absent, not zero" rule download_bps/upload_bps already follow, tested
+// alongside this one rather than as a parallel test file.
+func TestProgressOmitsSwarmWhenUnknown(t *testing.T) {
+	m := Event("", core.Progress{File: 0, FramesDone: 0, FramesTotal: 4})
+
+	if _, has := m["swarm"]; has {
+		t.Errorf("progress with no swarm reading still carries a swarm key: %v", m["swarm"])
+	}
+}
+
+// TestProgressCarriesStall is TOR-141: which distinct cause explains no
+// progress, and how long, has to actually reach the wire for a row to show
+// it. Two different codes are asserted, not just one, so this test can tell
+// them apart rather than merely proving SOME string made it through -
+// exactly the distinction the ticket itself demands of a test like this.
+func TestProgressCarriesStall(t *testing.T) {
+	cases := []struct {
+		code    core.ErrorCode
+		sinceMS int64
+	}{
+		{core.CodeNoPeers, 2000},
+		{core.CodeReadStalled, 245300},
+	}
+
+	for _, c := range cases {
+		ev := core.Progress{
+			File: 0, FramesDone: 1, FramesTotal: 4, Peers: 0,
+			Stall: &core.Stall{Code: c.code, Since: time.Duration(c.sinceMS) * time.Millisecond},
+		}
+
+		m := Event("", ev)
+
+		stall, ok := m["stall"].(map[string]any)
+		if !ok {
+			t.Fatalf("stall = %T, want map[string]any: %v", m["stall"], m)
+		}
+		if stall["code"] != string(c.code) {
+			t.Errorf("code = %v, want %s", stall["code"], c.code)
+		}
+		if stall["since_ms"] != c.sinceMS {
+			t.Errorf("since_ms = %v, want %d", stall["since_ms"], c.sinceMS)
+		}
+	}
+}
+
+// TestProgressOmitsStallWhenProgressing is the "absent, not zero" half:
+// core.Progress.Stall is nil the moment a run IS progressing, and that must
+// reach the wire as a missing key, never as a stall object claiming an empty
+// code or a zero duration - either of which a client could mistake for a
+// real, named cause.
+func TestProgressOmitsStallWhenProgressing(t *testing.T) {
+	m := Event("", core.Progress{File: 0, FramesDone: 1, FramesTotal: 4, Peers: 3})
+
+	if _, has := m["stall"]; has {
+		t.Errorf("progress with no stall reading still carries a stall key: %v", m["stall"])
+	}
+}

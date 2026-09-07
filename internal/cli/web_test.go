@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/frames"
@@ -120,5 +122,184 @@ func TestRunConfigKeepsTheDashNFlagWhenTheWebSendsNoCount(t *testing.T) {
 	}
 	if cfg.Plan.Count != 6 {
 		t.Errorf("Plan.Count = %d, want 6 preserved from -n", cfg.Plan.Count)
+	}
+}
+
+// TestQueueWidthErrorAcceptsTheShippedDefault: the default is now a WIDENED
+// queue (web.DefaultMaxActiveTorrents is 5) and no roof is configured out of
+// the box, so the case that used to be refused is now the ordinary one. If
+// this ever fails, torpeek will not start with its own defaults.
+// TestRunConfigCarriesTheRaisedCeilingAndTheRecordedWindow is TOR-152's own
+// seam. A top-up is a run that has to spend MORE than the flags allowed for
+// and land in the SAME result directory as the set it is finishing, and this
+// is the only place either can happen: web builds no configurations (see
+// web.Runner), so a raise or a window that stopped here would be silently
+// dropped and the top-up would quietly become a fresh, full-price run into a
+// sibling directory.
+func TestRunConfigCarriesTheRaisedCeilingAndTheRecordedWindow(t *testing.T) {
+	base := core.Config{
+		Budget: core.Budget{MaxBytes: 300 << 20, MaxTime: 10 * time.Minute},
+		Plan:   frames.Plan{Count: 20, Start: 0.10, End: 0.90},
+		Format: frames.PNG,
+	}
+	req := web.RunRequest{
+		Source:   "magnet:?xt=urn:btih:abc",
+		MaxBytes: 82 << 20,
+		Window: &web.CaptureWindow{
+			Start: 0.05, End: 0.95, Format: "jpeg", Sequential: true,
+		},
+	}
+
+	cfg, err := runConfig(base, req)
+	if err != nil {
+		t.Fatalf("runConfig: %v", err)
+	}
+	if cfg.Budget.MaxBytes != req.MaxBytes {
+		t.Errorf("Budget.MaxBytes = %d, want the raised %d - without it the top-up "+
+			"stops exactly where the run it is finishing stopped",
+			cfg.Budget.MaxBytes, req.MaxBytes)
+	}
+	if cfg.Budget.MaxTime != 10*time.Minute {
+		t.Errorf("Budget.MaxTime = %v, want the flag's own 10m untouched - a person "+
+			"who accepted more TRAFFIC did not ask for more time", cfg.Budget.MaxTime)
+	}
+	if cfg.Plan.Start != 0.05 || cfg.Plan.End != 0.95 {
+		t.Errorf("Plan window = %v-%v, want the recorded 0.05-0.95: core.ParamsKey "+
+			"hashes it, so this server's own -start/-end would write a sibling "+
+			"result set and reuse none of its frames", cfg.Plan.Start, cfg.Plan.End)
+	}
+	if cfg.Format != frames.JPEG {
+		t.Errorf("Format = %q, want the recorded %q for the same reason",
+			cfg.Format, frames.JPEG)
+	}
+	if !cfg.Sequential {
+		t.Error("Sequential is false, want the recorded true - it is hashed into the " +
+			"params key as well")
+	}
+}
+
+// TestRunConfigLeavesTheClientWideRoofAlone is the other half of the ticket's
+// roof question, and the reason a raise on a request is safe at all: topping
+// up must not become a way around the one ceiling that does not multiply.
+//
+// The roof travels with the pool, decided once by whoever decided there is
+// one client (see serveWeb's own comment and core.Config.Roof). A request
+// that varied it would be a second opinion about one client, of which the
+// larger silently wins - so a request carrying a RAISED PER-RUN ceiling must
+// still leave the roof exactly as the pool set it.
+func TestRunConfigLeavesTheClientWideRoofAlone(t *testing.T) {
+	base := core.Config{
+		Roof:   core.Roof{MaxBytes: 4 << 30, WarnAt: 0.8},
+		Budget: core.Budget{MaxTime: 10 * time.Minute},
+	}
+	req := web.RunRequest{Source: "magnet:?xt=urn:btih:abc", MaxBytes: 8 << 30}
+
+	cfg, err := runConfig(base, req)
+	if err != nil {
+		t.Fatalf("runConfig: %v", err)
+	}
+	if cfg.Roof != base.Roof {
+		t.Errorf("Roof = %+v, want the pool's own %+v - a per-run raise that moved "+
+			"the client-wide roof would be exactly the walk-around core.Roof exists "+
+			"to prevent", cfg.Roof, base.Roof)
+	}
+}
+
+// TestRunConfigWithoutAWindowKeepsTheServersOwn: every ordinary run carries
+// no window, and must be left with the flags it was started with.
+func TestRunConfigWithoutAWindowKeepsTheServersOwn(t *testing.T) {
+	base := core.Config{
+		Plan:   frames.Plan{Count: 20, Start: 0.10, End: 0.90},
+		Format: frames.PNG,
+	}
+	req := web.RunRequest{Source: "magnet:?xt=urn:btih:abc"}
+
+	cfg, err := runConfig(base, req)
+	if err != nil {
+		t.Fatalf("runConfig: %v", err)
+	}
+	if cfg.Plan.Start != 0.10 || cfg.Plan.End != 0.90 || cfg.Format != frames.PNG {
+		t.Errorf("window/format = %v-%v %q, want the flags' own 0.10-0.90 %q",
+			cfg.Plan.Start, cfg.Plan.End, cfg.Format, frames.PNG)
+	}
+	if cfg.Budget.MaxBytes != 0 {
+		t.Errorf("Budget.MaxBytes = %d, want 0 so core.budgetFor still scales it to "+
+			"the file count", cfg.Budget.MaxBytes)
+	}
+}
+
+func TestQueueWidthErrorAcceptsTheShippedDefault(t *testing.T) {
+	if err := queueWidthError(web.DefaultMaxActiveTorrents); err != nil {
+		t.Errorf("queueWidthError(%d) = %v, want nil - that is the shipped default",
+			web.DefaultMaxActiveTorrents, err)
+	}
+}
+
+// TestQueueWidthErrorWideningNeedsNoRoof is the decision TOR-149 carried out,
+// kept as a test rather than only as a comment: widening past one slot used
+// to be a usage error unless -max-client-bytes was set, and it deliberately
+// is not any more. The multiplication it guarded against is now stated at
+// startup instead, which TestQueueWidthNoticeStatesTheWorstCase covers.
+func TestQueueWidthErrorWideningNeedsNoRoof(t *testing.T) {
+	for _, n := range []int{2, 3, 5, 20} {
+		if err := queueWidthError(n); err != nil {
+			t.Errorf("queueWidthError(%d) = %v, want nil with no roof configured", n, err)
+		}
+	}
+}
+
+// TestQueueWidthErrorRejectsNonPositive: a width under 1 is not a narrower
+// queue, it is a broken one (see web.Server.SetMaxActiveTorrents), and is
+// the one thing still refused here.
+func TestQueueWidthErrorRejectsNonPositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		if err := queueWidthError(n); err == nil {
+			t.Errorf("queueWidthError(%d) = nil, want an error", n)
+		}
+	}
+}
+
+// TestWorstCaseBytesMultipliesThePerRunCeiling is the arithmetic the startup
+// line prints, checked here rather than through a running server. The
+// zero-budget case is the one that matters: zero means "decide once the file
+// count is known", and the honest ceiling for such a run is the cap
+// core.DefaultBudget applies - not zero, which would print a worst case of
+// nothing at all.
+func TestWorstCaseBytesMultipliesThePerRunCeiling(t *testing.T) {
+	if got, want := worstCaseBytes(5, 0), int64(5)*core.MaxRunBytes; got != want {
+		t.Errorf("worstCaseBytes(5, 0) = %d, want %d - five times the default per-run cap", got, want)
+	}
+	if got, want := worstCaseBytes(3, 100<<20), int64(3)*(100<<20); got != want {
+		t.Errorf("worstCaseBytes(3, 100 MiB) = %d, want %d", got, want)
+	}
+	if got, want := worstCaseBytes(1, 0), int64(core.MaxRunBytes); got != want {
+		t.Errorf("worstCaseBytes(1, 0) = %d, want one run's own ceiling %d", got, want)
+	}
+}
+
+// TestQueueWidthNoticeStatesTheWorstCase is the other half of dropping the
+// refusal. The whole argument for removing it was that the multiplication
+// gets STATED instead of enforced, so if this line ever stops naming the
+// figure, the decision has quietly become plain silence.
+func TestQueueWidthNoticeStatesTheWorstCase(t *testing.T) {
+	notice := queueWidthNotice(5, 0)
+	if notice == "" {
+		t.Fatal("queueWidthNotice(5, 0) = \"\", want a line - five at once is the shipped default")
+	}
+	for _, want := range []string{"5", humanBytes(core.MaxRunBytes), humanBytes(5 * core.MaxRunBytes)} {
+		if !strings.Contains(notice, want) {
+			t.Errorf("the notice %q does not contain %q", notice, want)
+		}
+	}
+}
+
+// TestQueueWidthNoticeIsSilentAtOneSlot: a width of one multiplies nothing,
+// so there is nothing to disclose and the line must not appear - a warning
+// that shows up when it does not apply teaches people to ignore it.
+func TestQueueWidthNoticeIsSilentAtOneSlot(t *testing.T) {
+	for _, n := range []int{0, 1} {
+		if notice := queueWidthNotice(n, 0); notice != "" {
+			t.Errorf("queueWidthNotice(%d, 0) = %q, want empty", n, notice)
+		}
 	}
 }

@@ -15,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
+	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/swarm"
 	"github.com/madmurdok/torpeek/internal/wire"
 )
@@ -39,6 +41,27 @@ const (
 	// needs something else.
 	DefaultAddr = "127.0.0.1:8765"
 )
+
+// DefaultMaxActiveTorrents is how many torrents this server fetches at once
+// when nothing says otherwise.
+//
+// Five, which is a LOCAL default and deliberately not the number
+// REQUIREMENTS.md 4.1 gives. That section's 1 to 3 is fair-use guidance for a
+// shared-HDD seedbox plan, where high IO hits neighbours, and it counts
+// ACTIVE DOWNLOADS rather than torrents - so five of these at Config's
+// per-file parallelism is well past it. On the machine a person is sitting
+// in front of, the disk and the link are their own and the queue being one
+// slot wide was the complaint this width answers; on a managed host the
+// number to set is 1, and 4.1 says so.
+//
+// What five costs, said here because nothing refuses it any more: a per-run
+// traffic ceiling multiplies by the number of runs, so five runs is five
+// times one run's ceiling and there is no client-wide roof by default to
+// stop it (core.Roof, core.DefaultRoof). serveWeb prints that arithmetic at
+// startup rather than leaving it to be discovered. The roof still exists and
+// is still the answer wherever the quota is somebody else's; it is simply
+// not required to widen the queue.
+const DefaultMaxActiveTorrents = 5
 
 // Config configures the UI server.
 type Config struct {
@@ -115,6 +138,50 @@ type Config struct {
 	// page then leaves its field empty - which sends no count at all, and
 	// so still gets the server's default.
 	DefaultCount int
+
+	// MaxActiveTorrents caps how many torrents this server fetches at once -
+	// the width of the request queue (REQUIREMENTS.md 3.3), not a limit on
+	// anything inside a torrent. Above it, a request WAITS its turn exactly
+	// as it always has; nothing is ever refused for arriving over it
+	// (StartRun).
+	//
+	// It governs TORRENTS, not readers. Config.Parallelism (core, default 4)
+	// is a separate per-torrent knob applied once a torrent is already
+	// running, so N torrents each at that default is N times as many
+	// concurrent file reads - three torrents at two files each is six,
+	// against REQUIREMENTS.md 4.1's fair-use guidance of 1 to 3 ACTIVE
+	// DOWNLOADS, which counts readers, not torrents. This cap does not
+	// correct for that multiplication; understating real load this way is
+	// this choice's known weakness, not something hidden from it.
+	//
+	// Zero uses DefaultMaxActiveTorrents. Raising it past 1 must arrive with
+	// a client-wide traffic roof configured - core.Config.Roof, set once
+	// beside the pool in cli/web.go - or N runs multiply the per-run ceiling
+	// by N exactly as core.DefaultRoof warns against; serveWeb refuses to
+	// start rather than let that happen silently (REQUIREMENTS.md 2.6).
+	// Lowering it, including below however many are already running, stops
+	// nothing already going - see Server.SetMaxActiveTorrents.
+	MaxActiveTorrents int
+
+	// RoofBytes is the client-wide traffic ceiling this process was started
+	// with (core.Roof, -max-client-bytes), zero meaning none - the shipped
+	// default (core.DefaultRoof).
+	//
+	// The server does not enforce it and could not: the roof is held
+	// against the pool's own received-bytes counter, inside the engine, and
+	// every run is stopped by it whatever this field says
+	// (core.BudgetTracker.Exhausted asks the roof first and answers
+	// StopRoof). This is the same kind of field DefaultCount above is - a
+	// number repeated here so a page can be told the truth before a button
+	// is pressed rather than after - and it exists for exactly one sentence:
+	// a top-up's offered traffic must never be a bigger figure than the roof
+	// would allow (TOR-152, TopUp.price).
+	//
+	// What it deliberately is NOT is how much of the roof is LEFT. That
+	// lives on the pool's counter, which this package holds no handle on, so
+	// a top-up's offer is bounded by the whole roof and the page says the
+	// roof applies - never that this much is still available.
+	RoofBytes int64
 }
 
 // DefaultConfig serves the desktop case: loopback, fixed port.
@@ -160,6 +227,61 @@ type RunRequest struct {
 	// .torrent). Never set from JSON: it only exists on requests the server
 	// itself builds.
 	Label string `json:"-"`
+
+	// MaxBytes raises this run's traffic ceiling above the one it would
+	// otherwise scale to (core.DefaultBudget). Zero - the default, and the
+	// value every ordinary run carries - leaves that scaling exactly as it
+	// was.
+	//
+	// NEVER SET FROM JSON, the same rule Label above follows, and here it is
+	// load-bearing rather than tidy. A ceiling is the one thing on a request
+	// that spends somebody's allowance, so the only thing allowed to raise
+	// it is the server itself, for a set it has just read off disk and
+	// priced (TopUp.request) - not a page, and not whatever else can reach
+	// POST /runs. What bounds it either way is the client-wide roof, which
+	// is not on this struct at all: it belongs to the pool, is set once by
+	// whoever built it (core.Config.Roof), and stops a run whatever this
+	// says.
+	MaxBytes int64 `json:"-"`
+
+	// Window is the part of a recorded capture plan a request has no other
+	// field to name, carried so a top-up reproduces the plan of the set it
+	// is finishing rather than this server's current flags. Nil - every
+	// ordinary run - leaves those flags alone.
+	//
+	// Never set from JSON either, for a plainer reason than MaxBytes: it is
+	// not a choice a person makes, it is a fact read back off a run.json.
+	Window *CaptureWindow `json:"-"`
+}
+
+// CaptureWindow is the part of a run's plan that decides WHERE its capture
+// points fall and what a frame is encoded as, minus the two pieces a
+// RunRequest can already say for itself (Count and Mode).
+//
+// It exists because of what core.ParamsKey hashes: the count, this window,
+// the profile, the format and the sequential switch, all five, into the
+// directory name a run's results live under. A run that is meant to FINISH
+// an earlier one has to reproduce every one of them or it writes a sibling
+// directory instead - a second result set, no frames reused, full price -
+// which is exactly the surprise a top-up exists to avoid. Count and Mode
+// travel on the request already; these four had nowhere to go.
+//
+// The web package does not interpret any of it. It reads the four values off
+// the run record it is finishing and hands them back to whoever builds run
+// configurations (internal/cli's runConfig), which is the same division of
+// labour Runner itself draws: this package is a consumer of events, never a
+// second place a run is decided.
+type CaptureWindow struct {
+	// Start and End are the fractions of the file the plan spreads its
+	// points across (frames.Plan).
+	Start float64
+	End   float64
+	// Format is the image encoding, as cache.Plan recorded it - the string
+	// form of frames.Format. Empty leaves the server's own.
+	Format string
+	// Sequential is the opt-in to sequential reading for a container with no
+	// duration (REQUIREMENTS.md 2.7), as the run was started with.
+	Sequential bool
 }
 
 // Runner starts a run and returns its event stream.
@@ -203,9 +325,9 @@ type Deleter func(infoHash, params string, fileIndex, frameIndex int) error
 //
 // It is injected for the same reason Runner is: this package does not build
 // a run configuration, and a listing has to start from the very same one a
-// run does, or the two would disagree about the pinned port, the DHT switch
-// and the known peers while looking at the same torrent (cli/web.go's
-// serveWeb builds both from one base config). It takes only a source,
+// run does, or the two would disagree about which client pool, DHT switch and
+// known peers to reach the same torrent by (cli/web.go's serveWeb builds both
+// from one base config, carrying one shared swarm.Pool). It takes only a source,
 // because nothing else about a request can change what a torrent contains.
 //
 // Unlike Replayer and Deleter it takes a context, and that difference is the
@@ -272,12 +394,40 @@ const keepFinishedRuns = 10
 
 // Server serves the embedded UI and the event streams of the runs it holds.
 //
-// It holds a registry of runs and exactly one slot to run them in. One at a
-// time is the same rule as before, and for the same reason: two runs must not
-// quietly compete for the same output directory and traffic budget, and a
-// torrent client binds one pinned port and one client-wide DHT switch, so a
-// second concurrent run could not even start. What changed is what happens to
-// the second request - it waits its turn instead of being refused.
+// It holds a registry of runs and a slot count to run them in - TOR-130's own
+// change, so read this alongside Config.MaxActiveTorrents. One at a time was
+// the rule for a long time as a policy rather than a limit of the machinery:
+// since TOR-128 every public torrent shares one long-lived client on one
+// port (swarm.Pool), so more than one concurrent run was always mechanically
+// possible; what kept the slot at one was that two runs would each carry
+// their own traffic budget with no roof over the pair, on a host whose
+// fair-use guidance is one to three active downloads (REQUIREMENTS.md 4.1).
+// That gap closed first: core.Roof is a client-wide traffic ceiling that does
+// not multiply by the number of runs, and every run this server starts is
+// held to it (core.Config.Roof, set once beside the pool in cli/web.go).
+//
+// So the width is now a number, s.maxActive, defaulting to
+// DefaultMaxActiveTorrents (5) and settable by an operator
+// (-max-active-torrents) or live (SetMaxActiveTorrents).
+//
+// The roof still ships UNLIMITED by default (core.DefaultRoof says why
+// torpeek will not guess a person's allowance), so the shipped pair - width
+// 5, no roof - does let five runs ask for five times one run's own ceiling.
+// That is a decision, not an oversight: the default targets a machine its
+// owner is sitting at, and serveWeb states the arithmetic at startup
+// (cli/web.go, queueWidthNotice) rather than refusing to run, which is what
+// TOR-130 originally did and what made the feature cost two flags to reach.
+// See DefaultMaxActiveTorrents for the width's own argument, and
+// REQUIREMENTS.md 4.1 for why a managed host wants 1 and a roof instead.
+//
+// Lowering the width later, including below however many are already
+// running, cancels nothing: dispatch only ever consults it to decide whether
+// to START a new run, so runs already holding a slot keep it and finish (or
+// are cancelled the normal way) while new ones simply wait for the count to
+// drain under the new width on its own - see SetMaxActiveTorrents.
+//
+// What changed before any of this, and still holds regardless of the width:
+// a request over the cap waits its turn instead of being refused.
 type Server struct {
 	cfg      Config
 	runner   Runner
@@ -298,13 +448,42 @@ type Server struct {
 	// order is their ids, oldest first: what a listing walks and what trim
 	// evicts from the front of.
 	order []string
-	// waiting is the queue, in arrival order. It holds runs that have been
-	// accepted and not yet started.
+	// waiting is the queue, in the order dispatch will actually take them:
+	// highest priority first, arrival order within a level (queueBefore).
+	// It holds runs that have been accepted and not yet started.
+	//
+	// It was strict arrival order until TOR-140. The slice is kept SORTED
+	// rather than scanned for a best candidate at dispatch time, so that
+	// waiting[0] stays "the one that goes next" and an entry's index is its
+	// reported queue position with nothing to recompute - the two things
+	// every other piece of this change reads. Insertion is
+	// enqueueWaitingLocked; a priority change is a removal and a
+	// reinsertion (SetRunPriority); removal is dropWaitingLocked, unchanged.
 	waiting []*runEntry
-	// running is the single slot. Its being one pointer rather than a
-	// collection is the concurrency limit: there is no number to raise.
-	running *runEntry
-	stopped bool
+	// queueSeq hands out the arrival tiebreak, one per ENQUEUE - see
+	// runEntry.queueSeq for why that is not the same thing as queuedAt.
+	queueSeq uint64
+	// arrivalSeq hands out the arrival ordinal, one per ENTRY CREATED, and
+	// never at any other moment - see runEntry.arrival for the three-way
+	// distinction between this, queueSeq and a queue position, and for why
+	// only a counter that goes up can survive both trimming and a parked
+	// torrent rejoining the queue. It is deliberately never decremented by
+	// trim: the whole point is that the ordinals already handed out keep
+	// meaning what they meant.
+	arrivalSeq int
+	// running is every torrent currently holding a slot, keyed by id. Its
+	// being a map rather than one pointer is TOR-130's whole change: the
+	// concurrency limit is now the number maxActive names, not the shape of
+	// this field.
+	running map[string]*runEntry
+	// maxActive is the current width of the queue - how many entries running
+	// may hold before dispatch makes the next one wait. Resolved once from
+	// Config.MaxActiveTorrents at construction (defaulting per
+	// DefaultMaxActiveTorrents) and live thereafter: SetMaxActiveTorrents is
+	// the only thing that changes it after that, under s.mu like every other
+	// field here.
+	maxActive int
+	stopped   bool
 }
 
 // Start listens and begins serving. The returned server must be closed.
@@ -372,16 +551,32 @@ func newServer(ctx context.Context, cfg Config, runner Runner, replayer Replayer
 	}
 	cfg.BasePath = normalizeBasePath(cfg.BasePath)
 	return &Server{
-		cfg:      cfg,
-		runner:   runner,
-		replayer: replayer,
-		deleter:  deleter,
-		lister:   lister,
-		baseCtx:  ctx,
-		files:    newFileSet(),
-		hub:      newHub(connectRecord()),
-		runs:     make(map[string]*runEntry),
+		cfg:       cfg,
+		runner:    runner,
+		replayer:  replayer,
+		deleter:   deleter,
+		lister:    lister,
+		baseCtx:   ctx,
+		files:     newFileSet(),
+		hub:       newHub(connectRecord()),
+		runs:      make(map[string]*runEntry),
+		running:   make(map[string]*runEntry),
+		maxActive: maxActiveOrDefault(cfg.MaxActiveTorrents),
 	}
+}
+
+// maxActiveOrDefault is Config.MaxActiveTorrents resolved the way every
+// other zero-valued Config field here resolves: not stated becomes the
+// documented default rather than "no torrents at all", which a literal zero
+// would otherwise mean for a cap. A negative value - not reachable through
+// the CLI, which refuses one outright (cli/web.go), but reachable from a
+// caller building a Server directly - gets the same treatment rather than a
+// panic, matching ShutdownTimeout's own <= 0 check in Start.
+func maxActiveOrDefault(n int) int {
+	if n <= 0 {
+		return DefaultMaxActiveTorrents
+	}
+	return n
 }
 
 // URL is where the UI can be reached.
@@ -410,13 +605,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /defaults", s.authGuard(s.handleDefaults))
 	mux.HandleFunc("GET /runs", s.authGuard(s.handleListRuns))
 	mux.HandleFunc("GET /runs/{infohash}/files/{index}", s.authGuard(s.handleFileDetail))
+	mux.HandleFunc("GET /runs/{infohash}/topup", s.authGuard(s.handleTopUp))
 	mux.HandleFunc("GET /compare", s.authGuard(s.handleCompare))
 	mux.HandleFunc("GET /compare/sets", s.authGuard(s.handleCompareSets))
 	mux.HandleFunc("POST /runs", s.authGuard(s.handleStartRun))
 	mux.HandleFunc("POST /runs/upload", s.authGuard(s.handleUploadTorrent))
 	mux.HandleFunc("POST /runs/reopen", s.authGuard(s.handleReopenRun))
+	mux.HandleFunc("POST /runs/topup", s.authGuard(s.handleTopUpRun))
+	mux.HandleFunc("POST /runs/retry", s.authGuard(s.handleRetryRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
+	mux.HandleFunc("POST /runs/priority", s.authGuard(s.handleSetPriority))
 	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.HandleFunc("POST /files/{id}/watch", s.authGuard(s.handleWatchTorrent))
@@ -493,12 +692,18 @@ func mountRoot(next http.Handler) http.Handler {
 // StartRun accepts a run and returns what it was given: an id, and whether it
 // took the slot or is waiting for it.
 //
-// It never refuses because another run is going. Only one runs at a time -
-// two runs must not compete for the same output directory and traffic budget,
-// and a pinned BitTorrent port cannot be bound twice - but that is now kept
-// by making the second request wait rather than by turning it away. The error
-// it can still return is about the request or the server, not about traffic:
-// a blank source, or a server that has closed.
+// It never refuses because other runs are going. Only Server.maxActive run at
+// a time - see the type's own comment for what decides that number and what
+// the client-wide roof over every run together changed - but that is kept by
+// making a request past it wait rather than by turning it away. The error it
+// can still return is about the request or the server, not about traffic: a
+// blank source, or a server that has closed.
+//
+// It does not refuse a full traffic roof either, and deliberately: a queued
+// run reaches the engine minutes later, and a roof read here would be the
+// wrong number by then. core.Engine checks it at the moment the run actually
+// starts, and a run refused there arrives on its own stream as a failed run
+// with core.CodeTrafficRoof, exactly as an unopenable source does.
 //
 // A failure of the run itself - a source that does not parse, a torrent that
 // cannot be opened - is not returned here. The runner is only ever called
@@ -550,17 +755,23 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	entry := &runEntry{
 		id: newRunID(), source: display, req: req,
 		state: RunQueued, cleanup: cleanup, queuedAt: time.Now(),
+		arrival: s.nextArrivalLocked(),
 	}
 	s.runs[entry.id] = entry
 	s.order = append(s.order, entry.id)
-	s.waiting = append(s.waiting, entry)
+	s.enqueueWaitingLocked(entry)
 	rec := s.runStateRecordLocked(entry, true)
+	// A fresh run is always PriorityNormal, so it lands behind every normal
+	// and high waiter - but AHEAD of any low one, which moves that low
+	// entry's position down. Nothing else would tell it (TOR-140).
+	moved := s.queueRecordsLocked(entry)
 	s.mu.Unlock()
 
 	// The run opens its own history the moment it is accepted, queued or not:
 	// a page must be able to show a run it asked for before anything has
 	// happened in it. reset marks the record that opens it.
 	s.hub.begin(entry.id, rec)
+	s.publishQueueRecords(moved)
 
 	// Taking the slot here, in the caller's own goroutine, is what makes the
 	// answer to "was I queued?" true rather than a guess: by the time this
@@ -568,57 +779,76 @@ func (s *Server) startRun(req RunRequest, cleanup func()) (RunInfo, error) {
 	s.dispatch()
 
 	s.mu.Lock()
-	info := entry.info()
+	info := s.infoLocked(entry)
 	s.mu.Unlock()
 	return info, nil
 }
 
-// dispatch gives the slot to the next waiting run, if it is free.
+// dispatch fills every free slot it can from the front of the queue.
 //
-// It loops because a run can fail before it produces any events at all - a
-// source that does not parse - and that must not leave the slot empty with
-// runs still waiting behind it.
+// It loops for two reasons now, not one. The original reason still holds: a
+// run can fail before it produces any events at all - a source that does not
+// parse - and that must not leave a slot empty with runs still waiting
+// behind it, so a refusal keeps the loop going to try the next waiter
+// immediately. TOR-130 added the second: with maxActive possibly greater
+// than 1, successfully starting one run must not stop the loop either - there
+// may still be room and more waiters, so every successful start also loops
+// back rather than returning, and only the top-of-loop check (no room, no
+// waiters, or stopped) ever ends it.
 //
-// A run that still has to be told which files to capture takes the slot for
-// its metadata pass first (needsListingLocked, listThenRun). That pass costs
-// the same pinned BitTorrent port a run costs, which is why it happens here
-// rather than beside the queue: RunReplaying's exemption does not transfer -
-// a replay reads local files, a listing opens a swarm session.
+// A run that still has to be told which files to capture takes a slot for
+// its metadata pass first (needsListingLocked, listThenRun). That pass reaches
+// the swarm - it attaches the torrent to get its metadata - which is why it
+// happens here rather than beside the queue: RunReplaying's exemption does not
+// transfer, since a replay reads local files and a listing does not.
 func (s *Server) dispatch() {
 	for {
 		s.mu.Lock()
-		if s.stopped || s.running != nil || len(s.waiting) == 0 {
+		if s.stopped || len(s.running) >= s.maxActive || len(s.waiting) == 0 {
 			s.mu.Unlock()
 			return
 		}
+		// waiting[0] is still simply the front, and since TOR-140 that is
+		// the highest-priority, earliest-arrived waiter rather than only the
+		// earliest one: the queue is kept sorted on the way in
+		// (enqueueWaitingLocked), so nothing here has to choose.
 		entry := s.waiting[0]
 		s.waiting = s.waiting[1:]
+		// Everyone behind it has just moved up one place. Gathered here,
+		// under the lock that made it true, and published below by whichever
+		// branch releases that lock.
+		moved := s.queueRecordsLocked(nil)
 
 		ctx, cancel := context.WithCancel(s.baseCtx)
 
 		if s.needsListingLocked(entry) {
 			// The slot is taken before a single byte is asked for, and the
 			// state is "running" because that is what this is: the run's own
-			// first phase, on the run's own cancellable context, holding the
-			// one thing a second run could not share.
+			// first phase, on the run's own cancellable context, holding one
+			// of the things a run over the cap could not yet share.
 			entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
-			s.running = entry
+			s.running[entry.id] = entry
 			rec := s.runStateRecordLocked(entry, false)
 			s.mu.Unlock()
 
 			s.hub.publish(entry.id, rec)
+			s.publishQueueRecords(moved)
 			// Its own goroutine: this waits on the swarm for metadata, up to
 			// swarm.Config.MetadataTimeout, and dispatch is called from the
 			// goroutine that is answering an HTTP request.
 			go s.listThenRun(ctx, cancel, entry)
-			return
+			continue
 		}
 
-		if s.beginRun(ctx, cancel, entry) {
-			return
-		}
-		// The runner refused this one before it produced any events; the slot
-		// is still free, so the next waiter gets its turn immediately.
+		// beginRun releases s.mu whichever way it goes, so the queue's new
+		// positions are published after it either way - including when the
+		// runner refused this one, where the entry left the queue all the
+		// same and everyone behind it still moved up.
+		s.beginRun(ctx, cancel, entry)
+		s.publishQueueRecords(moved)
+		// A runner that refused this one produced no events; the slot it
+		// would have held is still free, so the next waiter gets its turn
+		// immediately - the same loop-back a successful start takes.
 	}
 }
 
@@ -678,7 +908,7 @@ func (s *Server) beginRun(ctx context.Context, cancel context.CancelFunc, entry 
 	}
 
 	entry.cancel, entry.state, entry.startedAt = cancel, RunRunning, time.Now()
-	s.running = entry
+	s.running[entry.id] = entry
 	rec := s.runStateRecordLocked(entry, false)
 	s.mu.Unlock()
 
@@ -690,10 +920,10 @@ func (s *Server) beginRun(ctx context.Context, cancel context.CancelFunc, entry 
 // listThenRun is a run's first phase: find out what the torrent holds, then
 // either capture it or stop and ask.
 //
-// It runs inside the slot, because a listing opens a full swarm session on
-// the same pinned port a run uses, and it deliberately does not go through
-// pump - pump reads a stream that ends as a run that finished, which is the
-// one thing a metadata pass must not be mistaken for.
+// It runs inside the slot, because a listing attaches the very torrent the run
+// after it will attach, and it deliberately does not go through pump - pump
+// reads a stream that ends as a run that finished, which is the one thing a
+// metadata pass must not be mistaken for.
 //
 // Three ways out, and only one of them keeps the slot:
 //   - the listing failed, or a cancel or a Close overtook it: the entry ends
@@ -804,9 +1034,9 @@ func (s *Server) listThenRun(ctx context.Context, cancel context.CancelFunc, ent
 // from keepFinishedRuns.
 //
 // It never touches s.waiting or s.running: a cache hit costs no network and
-// competes for neither the traffic budget nor the pinned port the queue
-// exists to protect, so making it wait behind a live download would defend
-// against a conflict that cannot happen. Unlike startRun, this runs
+// competes for none of the traffic the queue exists to ration, so making it
+// wait behind a live download would defend against a conflict that cannot
+// happen. Unlike startRun, this runs
 // pump synchronously rather than handing it to a goroutine - a replay is a
 // handful of local file reads, not a wait on the network, so there is
 // nothing to gain by returning before it is done, and the caller gets back
@@ -832,6 +1062,14 @@ func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
 		id: newRunID(), source: "reopened", state: RunReplaying,
 		infoHash: infoHash, cancel: func() {},
 		queuedAt: time.Now(), startedAt: time.Now(),
+		// A reopen takes an ordinal like any other entry, and that is the
+		// answer rather than an oversight: reopening is how a run this
+		// process never held becomes something it is working on now, so it
+		// joins the order in which this session was asked to do things. The
+		// alternative - no ordinal, because "the torrent was added long ago"
+		// - would leave the one row a person just clicked as the only live
+		// row in the table with a dash where every other one has a number.
+		arrival: s.nextArrivalLocked(),
 	}
 	s.runs[entry.id] = entry
 	s.order = append(s.order, entry.id)
@@ -850,7 +1088,210 @@ func (s *Server) ReopenRun(infoHash, params string) (RunInfo, error) {
 	s.pump(entry, events)
 
 	s.mu.Lock()
-	info := entry.info()
+	info := s.infoLocked(entry)
+	s.mu.Unlock()
+	return info, nil
+}
+
+// TopUp reads one result set off disk and prices finishing it, for a page to
+// show BEFORE anything is spent (TOR-152). ok=false is a 404: no such set.
+// A set that exists but cannot be finished comes back with TopUp.Refused
+// saying why - see topUpFor.
+//
+// params may be empty, and usually is. A row that finished while the page
+// was watching learns its infohash from its own metadata_ready, but nothing
+// tells it which params directory that run wrote - run_state carries no such
+// field, and the listing is the only place the two are joined. So the set is
+// resolved from the infohash alone whenever the caller cannot name it, by
+// exactly the rule listRuns uses to decide whether a live row may merge with
+// a disk record at all: one directory, or none of them (resolveSet).
+func (s *Server) TopUp(infoHash, params string) (TopUp, bool) {
+	infoHash, params = strings.TrimSpace(infoHash), strings.TrimSpace(params)
+	if params == "" {
+		resolved, ok := resolveSet(s.cfg.OutputRoot, infoHash)
+		if !ok {
+			return TopUp{}, false
+		}
+		params = resolved
+	}
+	return topUpFor(s.cfg.OutputRoot, infoHash, params, s.cfg.RoofBytes)
+}
+
+// TopUpRun finishes a partial result set: the same source, the same plan,
+// the files that are still short, and - when raising it is the right lever -
+// a traffic ceiling sized to the points still missing.
+//
+// EVERYTHING IT NEEDS COMES OFF DISK, which is what lets it work from a row
+// this process never ran: the record kept the source as a magnet (see
+// cache.Run.Source, which is deliberately not a path for exactly this
+// reason), so nothing has to be pasted back in and a torrent that arrived as
+// a dropped .torrent can be topped up too, long after its staged copy was
+// removed.
+//
+// THE CEILING IS PRICED HERE, NOT SENT. The request names a set, never a
+// number: a figure a client could choose would be a way to spend somebody's
+// allowance by asking, and the whole point of stating it in the UI first is
+// that the server and the page agree about a figure the server computed.
+// The page shows what GET .../topup answered; this recomputes it from the
+// same disk a moment later and runs with its own answer.
+//
+// id, when given, names the live registry entry this row is already showing.
+// A finished entry for this very torrent is RE-ARMED rather than left behind
+// beside a new one: a torrent is one row (TOR-140), and minting a second
+// entry would make GET /runs report two of them for one directory the moment
+// the second finished. An id that names nothing, names something still
+// going, or names another torrent is ignored rather than refused - the top-up
+// is about a set on disk, and the worst an unusable id can do is cost this
+// run a fresh entry, which the page folds into its existing row anyway.
+func (s *Server) TopUpRun(infoHash, params, id string) (RunInfo, error) {
+	infoHash, params = strings.TrimSpace(infoHash), strings.TrimSpace(params)
+
+	plan, ok := s.TopUp(infoHash, params)
+	if !ok {
+		return RunInfo{}, fmt.Errorf("%w: no single run on disk for %s", ErrNoSuchRun, infoHash)
+	}
+	// Never the params the caller sent: TopUp may have resolved it from the
+	// infohash, and the record has to be read from the set that was actually
+	// priced rather than from the one that was asked for.
+	params = plan.Params
+	if plan.Refused != "" {
+		// A conflict rather than a bad request: the address was understood
+		// and names a real set, that set simply cannot be finished.
+		return RunInfo{}, errors.New(plan.Refused)
+	}
+
+	record, loaded := cache.LoadRun(output.Layout{
+		Root: s.cfg.OutputRoot, InfoHash: infoHash, Params: params,
+	}.RunDir())
+	if !loaded {
+		return RunInfo{}, fmt.Errorf("%w: no run on disk at %s/%s", ErrNoSuchRun, infoHash, params)
+	}
+
+	return s.again(strings.TrimSpace(id), infoHash, plan.request(record))
+}
+
+// RetryRun runs a failed run's own request again, unchanged.
+//
+// A DIFFERENT JOB FROM TopUpRun, not a variation on it, and the difference is
+// what each one has to work from. A top-up finishes something: there is a
+// record on disk, frames to reuse, a measured cost to price the rest from.
+// A retry follows a run that produced NOTHING - the magnet whose metadata
+// never arrived is the case this exists for - so there is no record, no
+// plan to reproduce and nothing to price. What it has is the request the
+// registry still holds, and running that again is the whole of it.
+//
+// SO IT RAISES NOTHING. A run that never reached a ceiling is not one a
+// bigger ceiling helps, and offering one here would be a cost consented to
+// for no reason. Same source, same files, same count, same ordinary budget.
+//
+// The entry is re-armed in place, so the row keeps its id and its history
+// (TOR-140: one torrent, one row). Refused for a run that is still going -
+// there is nothing to retry yet, and cancelling is the button for that - and
+// for one whose source was a dropped .torrent, whose staged copy was removed
+// when that run ended (handleUploadTorrent, RunRequest.Label) and cannot be
+// read a second time. Re-pasting is the answer there, exactly as it is for
+// Regenerate.
+func (s *Server) RetryRun(id string) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+
+	s.mu.Lock()
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if entry.req.Label != "" {
+		s.mu.Unlock()
+		return RunInfo{}, fmt.Errorf("%w: this torrent was dropped onto the page as a file, "+
+			"and the staged copy was removed when its run ended - drop it again", errBadRequest)
+	}
+	req := entry.req
+	s.mu.Unlock()
+
+	// Deliberately reset rather than carried: a retry of a run that was
+	// itself a top-up must not inherit the raise. The frames a top-up left
+	// are still on disk and still reused, so a plain retry costs no more for
+	// having them; what it must not do is silently keep spending at a
+	// ceiling somebody consented to once, for a different question.
+	req.MaxBytes = 0
+
+	return s.again(id, "", req)
+}
+
+// again is the one path both TopUpRun and RetryRun end at: put this request
+// in the queue, on the row it belongs to.
+//
+// id names the entry the page is already showing, and infoHash - when the
+// caller knows one - is what proves the entry is really that torrent. An
+// entry that matches and has FINISHED is re-armed: same id, same history,
+// same row, its state replaced rather than a second row appended. Anything
+// else gets a fresh entry, which the page folds onto its row the way it
+// already folds a reopened disk row (app.js's claimReopenedRun).
+//
+// Re-arming clears exactly what belongs to the run that ended - its error,
+// its end time, its cancelled flag, its last live reading, and its cleanup,
+// which has already run and must not run twice - and keeps what belongs to
+// the TORRENT: its name, its infohash, the file list a metadata pass paid
+// for, and the fact that it listed at all, so a decided torrent does not pay
+// for a second listing to be told what it already knows.
+func (s *Server) again(id, infoHash string, req RunRequest) (RunInfo, error) {
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	switch {
+	case entry == nil:
+	case !entry.state.final():
+		s.mu.Unlock()
+		info := RunInfo{ID: id, State: entry.state}
+		return info, fmt.Errorf("run %s is not finished, it is %s", id, info.State)
+	case infoHash != "" && entry.infoHash != "" && entry.infoHash != infoHash:
+		// The row this id names is a different torrent. Not an error - the
+		// set on disk is still there to be finished - so this falls through
+		// to a fresh entry below.
+		entry = nil
+	}
+
+	if entry == nil {
+		s.mu.Unlock()
+		return s.startRun(req, nil)
+	}
+
+	entry.req = req
+	entry.state = RunQueued
+	entry.err = nil
+	entry.cancelled = false
+	entry.endedAt = time.Time{}
+	entry.startedAt = time.Time{}
+	entry.live = nil
+	entry.cleanup = nil
+	s.enqueueWaitingLocked(entry)
+	// reset is false, and that is the row's answer to "what does a top-up
+	// show afterwards" (TOR-152). A reset tells a page to throw away
+	// everything it is showing for this run before the replay rebuilds it;
+	// here there is nothing to throw away and everything to keep - the
+	// frames on screen are the frames on disk, they are the very ones this
+	// run is about to reuse, and blanking the grid to redraw the same
+	// thumbnails would be the only visible sign that anything was lost.
+	rec := s.runStateRecordLocked(entry, false)
+	moved := s.queueRecordsLocked(entry)
+	s.mu.Unlock()
+
+	s.hub.publish(entry.id, rec)
+	s.publishQueueRecords(moved)
+	// In the caller's own goroutine, for the reason startRun and DecideRun
+	// both give: by the time this returns the run has either started or is
+	// behind one that has, so the state answered here is the truth.
+	s.dispatch()
+
+	s.mu.Lock()
+	info := s.infoLocked(entry)
 	s.mu.Unlock()
 	return info, nil
 }
@@ -986,39 +1427,51 @@ func isTorrentPath(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".torrent")
 }
 
-// CancelRun stops one run: the one in the slot, or one still waiting for it.
+// CancelRun stops one run: one holding a slot, or one still waiting for one.
 // Frames already written stay on disk, which is the whole point of cancelling
 // rather than killing (section 2.10).
 //
-// An empty id means the run in the slot, which is what a page showing one run
-// asks for.
+// An empty id means "the run in the slot" - what a page showing exactly one
+// run asks for, and still unambiguous exactly when there is exactly one:
+// nobody running names none to cancel, and one running names that one. Since
+// TOR-130 there can be more than one at once, and an empty id then names
+// nothing in particular - answered as a 400 about the request rather than a
+// guess at which of several a person meant, because a wrong guess here stops
+// someone's download instead of someone else's.
 //
 // A queued run has no context to cancel - it never got one - so cancelling it
 // is taking it out of the queue, which is why this cannot be left to the run
 // itself to notice. A torrent parked for a file selection is the same case
 // for a different reason: it had a context and gave it back when it released
-// the slot, and nothing is watching it that could notice anything.
+// its slot, and nothing is watching it that could notice anything.
 func (s *Server) CancelRun(id string) (RunInfo, error) {
 	s.mu.Lock()
 
-	entry := s.running
-	if id != "" {
+	var entry *runEntry
+	switch {
+	case id != "":
 		entry = s.runs[id]
 		if entry == nil {
 			s.mu.Unlock()
 			return RunInfo{}, ErrNoSuchRun
 		}
-	}
-	if entry == nil {
+	case len(s.running) == 1:
+		for _, e := range s.running {
+			entry = e
+		}
+	case len(s.running) == 0:
 		s.mu.Unlock()
 		return RunInfo{}, errors.New("no run is in progress")
+	default:
+		s.mu.Unlock()
+		return RunInfo{}, fmt.Errorf("%w: more than one run is going, name which one to cancel", errBadRequest)
 	}
 
 	switch entry.state {
 	case RunRunning:
 		entry.cancelled = true
 		cancel := entry.cancel
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 
 		// The run ends on its own terms: it stops, writes what it has, and
@@ -1031,7 +1484,10 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		entry.state, entry.endedAt = RunCancelled, time.Now()
 		s.dropWaitingLocked(entry)
 		rec := s.runStateRecordLocked(entry, false)
-		info := entry.info()
+		// Everything that was behind it has moved up one place - the same
+		// republish dispatch does when it takes the front of the queue.
+		moved := s.queueRecordsLocked(entry)
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 
 		// It will never start, so nothing will ever be reading its source.
@@ -1039,6 +1495,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 			entry.cleanup()
 		}
 		s.hub.publish(entry.id, rec)
+		s.publishQueueRecords(moved)
 		s.trim()
 		return info, nil
 
@@ -1065,7 +1522,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		entry.cancelled = true
 		entry.state, entry.endedAt = RunCancelled, time.Now()
 		rec := s.runStateRecordLocked(entry, false)
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 
 		if entry.cleanup != nil {
@@ -1076,7 +1533,7 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 		return info, nil
 
 	default:
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 		return info, fmt.Errorf("run %s is already %s", entry.id, info.State)
 	}
@@ -1129,7 +1586,7 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 		return RunInfo{}, ErrNoSuchRun
 	}
 	if entry.state != RunNeedsAction || entry.contents == nil {
-		info := entry.info()
+		info := s.infoLocked(entry)
 		s.mu.Unlock()
 		return info, fmt.Errorf("run %s is not waiting for a file selection, it is %s", entry.id, info.State)
 	}
@@ -1149,11 +1606,18 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 		entry.req.Count = count
 	}
 	entry.state = RunQueued
-	s.waiting = append(s.waiting, entry)
+	// A decided torrent joins the queue now, not when it was first accepted:
+	// enqueueWaitingLocked stamps it with a fresh arrival, so it waits behind
+	// everything already queued at its level exactly as the plain append it
+	// replaces did. Its priority, if someone set one while it was parked,
+	// is what it comes back at (TOR-140).
+	s.enqueueWaitingLocked(entry)
 	rec := s.runStateRecordLocked(entry, false)
+	moved := s.queueRecordsLocked(entry)
 	s.mu.Unlock()
 
 	s.hub.publish(entry.id, rec)
+	s.publishQueueRecords(moved)
 	// The same call StartRun makes, in the caller's own goroutine and for the
 	// same reason: by the time this returns, this torrent has either started
 	// or is behind one that has - so the state answered here is the truth
@@ -1161,7 +1625,7 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 	s.dispatch()
 
 	s.mu.Lock()
-	info := entry.info()
+	info := s.infoLocked(entry)
 	s.mu.Unlock()
 	return info, nil
 }
@@ -1190,25 +1654,170 @@ func (e *runEntry) holdsFile(spec string) bool {
 	return false
 }
 
-// releaseSlotLocked gives the single slot back, if this entry is what holds
-// it.
+// SetRunPriority changes where one waiting torrent sits in the queue,
+// without cancelling it - TOR-140's whole point, and the answer to the one
+// pain this ticket is written from: "нет возможности менять приорететы
+// (только отменяя скачку)". It answers with the entry as it now stands,
+// including the position it has just moved to.
 //
-// The one place s.running is ever cleared. Three paths reach it - a run
-// whose event stream ended (pump), a run the runner refused before it
-// produced a stream (beginRun), and a torrent parked for someone to choose
-// files (listThenRun) - and a second assignment written by hand in any of
-// them would be free to drift from the others.
+// IT NEVER PREEMPTS A RUNNING TORRENT, and that is a decision rather than an
+// omission - the request is refused, with the reason, rather than quietly
+// doing less than it looks like it does. Three arguments, and the third is
+// the one that settles it:
+//
+//   - It is the position this project already took. TOR-130 settled that
+//     LOWERING the concurrency cap stops nobody: dispatch reads the width to
+//     decide whether to START a run, never whether to keep one going,
+//     because nobody's work should be destroyed by a settings change. One
+//     could argue this act is different in kind - lowering a cap is a global
+//     setting whose victim the machine picks, while raising X's priority is
+//     a deliberate statement about X - and that argument is real. It is not
+//     enough on its own, which is why it is not the reason.
+//   - What preemption would COST here is not a pause. A run that gives up
+//     its slot releases its torrent, and releasing a torrent erases the
+//     pieces it has pulled (REQUIREMENTS.md 3.3: "он отпускает свою раздачу
+//     и стирает её куски"). The traffic those pieces cost has already been
+//     spent against a shared fair-use allowance (4.1) and a client-wide roof
+//     that counts every byte (2.6, core.Roof). Preempting therefore does not
+//     defer work, it destroys work and its traffic both, and the torrent
+//     promoted past it has to buy the same bytes over again.
+//   - There is nowhere for a preempted run to go. RunCancelled is final
+//     (RunState.final) and nothing moves an entry back from it; the one
+//     state that goes backwards is needs-action, and it goes back only
+//     because a person answered a question. "Preempt" would in practice mean
+//     "cancel someone's download and tell them it was a reorder", which is
+//     precisely what this ticket exists to stop being the only option.
+//
+// So priority orders the WAITING. What it can always do is decide which
+// torrent goes next - raise it, or lower the others - and the queue's own
+// promise is unchanged: a request over the cap waits, and eventually runs.
+//
+// A parked torrent (RunNeedsAction) accepts a priority too, though it holds
+// no position while it waits for a person: DecideRun puts it straight back
+// in the queue at whatever level it was given, so refusing here would only
+// mean asking again a moment later. See RunState.queueable.
+//
+// Setting the level a run already has is accepted and is a no-op in effect -
+// it is an absolute value, not a step, precisely so that a page acting twice
+// on a stale view cannot walk a torrent past where anyone asked for.
+func (s *Server) SetRunPriority(id string, priority Priority) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if !priority.valid() {
+		return RunInfo{}, fmt.Errorf("%w: %d is not a queue priority - it runs from %d (low) to %d (high)",
+			errBadRequest, priority, PriorityLow, PriorityHigh)
+	}
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	if !entry.state.queueable() {
+		info := s.infoLocked(entry)
+		s.mu.Unlock()
+		return info, fmt.Errorf("run %s is %s: priority orders the torrents that are waiting, "+
+			"it never interrupts one that is already downloading", entry.id, info.State)
+	}
+
+	entry.priority = priority
+	if entry.state == RunQueued {
+		// Out and back in rather than a re-sort of the whole queue: the rest
+		// of it is already in order, and only this entry moved.
+		s.dropWaitingLocked(entry)
+		s.insertWaitingLocked(entry)
+	}
+
+	// This entry's own record first, then every other waiter's: a reorder
+	// moves the rows it passed as surely as it moves the row a person
+	// clicked, and each of them learns its new position the same way.
+	moved := append([]queuedState{{id: entry.id, rec: s.runStateRecordLocked(entry, false)}},
+		s.queueRecordsLocked(entry)...)
+	info := s.infoLocked(entry)
+	s.mu.Unlock()
+
+	s.publishQueueRecords(moved)
+
+	// Nothing here frees a slot, so this can only ever start something in
+	// the case where a slot was already free and the queue was momentarily
+	// non-empty anyway. It costs one locked comparison when there is no room
+	// - dispatch's own top-of-loop check - and it means this method never
+	// leaves a startable run sitting because the reorder happened to be the
+	// last thing that touched the queue.
+	s.dispatch()
+	return info, nil
+}
+
+// SetMaxActiveTorrents changes the queue's width - how many torrents may
+// fetch at once - effective immediately, and reports an error rather than
+// applying anything if n is not a usable width.
+//
+// Lowering it stops nothing that is already going: dispatch only ever reads
+// the current width to decide whether to START a run, never to decide
+// whether to keep one running, so an entry already holding a slot keeps it
+// and finishes (or is cancelled the ordinary way, CancelRun) exactly as it
+// would have under the old, wider count. A queued run simply waits longer -
+// until enough of the entries holding a slot finish on their own for the
+// count to drop under the new width - which is what "lowering the cap stops
+// nobody" (this task's own framing) actually reduces to in the code: one
+// comparison, unconditionally true for a wider queue and now sometimes false
+// for a narrower one, with nothing that reaches in and cancels a run for
+// having become one too many.
+//
+// Raising it can let queued runs start right away, which is why this calls
+// dispatch before returning rather than leaving the next request to
+// discover the extra room.
+//
+// n must be at least 1: this queue always eventually runs an accepted
+// request (REQUIREMENTS.md 3.3), so a width of zero - "accept nothing new" -
+// is not a state it has, and is a different feature from this one.
+//
+// Nothing in this process calls it yet - -max-active-torrents (cli/web.go)
+// is the only lever wired to an operator today, and it is fixed for the life
+// of the process. This method exists so that lowering the width while runs
+// are already going is a real, exercised code path rather than a claim in a
+// comment - see the concurrency tests for the scenario it makes checkable.
+func (s *Server) SetMaxActiveTorrents(n int) error {
+	if n < 1 {
+		return fmt.Errorf("%w: the queue width must be at least 1, got %d", errBadRequest, n)
+	}
+
+	s.mu.Lock()
+	s.maxActive = n
+	s.mu.Unlock()
+
+	s.dispatch()
+	return nil
+}
+
+// releaseSlotLocked gives back the slot this entry holds, if it holds one.
+//
+// The one place an entry is ever removed from s.running. Three paths reach
+// it - a run whose event stream ended (pump), a run the runner refused
+// before it produced a stream (beginRun), and a torrent parked for someone
+// to choose files (listThenRun) - and a second deletion written by hand in
+// any of them would be free to drift from the others.
 //
 // The guard is not a formality. pump also runs for a replay, which never
-// took the slot at all (ReopenRun), and clearing it there would take the
-// slot away from whoever legitimately holds it; the same guard makes
-// beginRun's failure path safe whether or not its caller had already taken
-// the slot for a listing.
+// took a slot at all (ReopenRun), and deleting blindly by id there could
+// remove some other, unrelated run that happens to hold the same key at that
+// moment; the same guard makes beginRun's failure path safe whether or not
+// its caller had already taken a slot for a listing - deleting a key that
+// was never inserted is a no-op, same as before this held more than one
+// entry.
 //
 // The caller must hold s.mu.
 func (s *Server) releaseSlotLocked(entry *runEntry) {
-	if s.running == entry {
-		s.running = nil
+	if s.running[entry.id] == entry {
+		delete(s.running, entry.id)
 	}
 }
 
@@ -1222,14 +1831,171 @@ func (s *Server) dropWaitingLocked(entry *runEntry) {
 	}
 }
 
+// enqueueWaitingLocked puts one entry into the queue, at the place its
+// priority and its arrival earn it. The one door into s.waiting: both
+// StartRun (a fresh run) and DecideRun (a parked torrent coming back with a
+// selection) go through it, so there is one place the arrival tiebreak is
+// stamped and one place the ordering rule is applied.
+//
+// The caller must hold s.mu.
+func (s *Server) enqueueWaitingLocked(entry *runEntry) {
+	s.queueSeq++
+	entry.queueSeq = s.queueSeq
+	s.insertWaitingLocked(entry)
+}
+
+// nextArrivalLocked hands out the next arrival ordinal (TOR-156).
+//
+// It sits beside enqueueWaitingLocked deliberately, because the pair is the
+// whole ticket: that one stamps a counter on every ENQUEUE, this one on every
+// entry CREATED, and the two must never be collapsed however similar the
+// lines look. An entry passes through enqueueWaitingLocked more than once -
+// a parked torrent that is decided, a finished row that is topped up or
+// retried (Server.again) - and every one of those must keep the ordinal it
+// already has, which it does for the plain reason that nothing here is
+// reachable from those paths.
+//
+// The caller must hold s.mu.
+func (s *Server) nextArrivalLocked() int {
+	s.arrivalSeq++
+	return s.arrivalSeq
+}
+
+// insertWaitingLocked puts an entry that already has its queueSeq back into
+// the sorted queue - the second half of a priority change, where the entry
+// keeps the arrival it earned and only its level moved.
+//
+// A linear insert rather than a sort of the whole slice: the queue is
+// already ordered, so this is the cheaper operation and, more usefully, it
+// cannot reorder anything it was not asked to. A sort.SliceStable over the
+// whole queue would give the same answer today and would quietly stop doing
+// so the day queueBefore grew a third term.
+//
+// The caller must hold s.mu.
+func (s *Server) insertWaitingLocked(entry *runEntry) {
+	at := len(s.waiting)
+	for i, waiting := range s.waiting {
+		if queueBefore(entry, waiting) {
+			at = i
+			break
+		}
+	}
+	s.waiting = append(s.waiting, nil)
+	copy(s.waiting[at+1:], s.waiting[at:])
+	s.waiting[at] = entry
+}
+
+// queueBefore is the queue's whole ordering rule, in one place: a higher
+// priority goes first, and two entries at the same priority keep the order
+// they joined the queue in (TOR-140).
+//
+// The second half is what makes this change invisible to a server nobody
+// reprioritises. Every entry sits at PriorityNormal until someone says
+// otherwise, so the comparison collapses to queueSeq alone - the order they
+// were appended in, which is exactly what "the queue, in arrival order"
+// meant before.
+func queueBefore(a, b *runEntry) bool {
+	if a.priority != b.priority {
+		return a.priority > b.priority
+	}
+	return a.queueSeq < b.queueSeq
+}
+
+// queuePositionLocked is where an entry sits in the queue, 1-based, or zero
+// for an entry that is not waiting for a slot at all.
+//
+// A scan rather than a number kept on the entry, deliberately: a stored
+// position would have to be corrected on every enqueue, dequeue, cancel and
+// reorder, and the first path that forgot would report a position the queue
+// does not actually have. The queue is a person's own torrents, not a
+// swarm's worth of them.
+//
+// The caller must hold s.mu.
+func (s *Server) queuePositionLocked(entry *runEntry) int {
+	for i, waiting := range s.waiting {
+		if waiting == entry {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// infoLocked snapshots one entry together with where the queue currently
+// holds it. Every caller that answers a request with a RunInfo goes through
+// this rather than through entry.info directly, so no answer can carry a
+// position of zero merely because the code path that built it did not think
+// to look one up.
+//
+// The caller must hold s.mu.
+func (s *Server) infoLocked(entry *runEntry) RunInfo {
+	return entry.info(s.queuePositionLocked(entry))
+}
+
+// queuedState is one waiting entry's id and its freshly built run_state,
+// gathered under the lock to be published after it is released.
+type queuedState struct {
+	id  string
+	rec record
+}
+
+// queueRecordsLocked builds a run_state for every entry still in the queue,
+// so a page learns the new position of the rows it did NOT act on.
+//
+// This is the price of the position being a server-side fact instead of a
+// client-side derivation. TOR-139's app.js recomputed every queued row's
+// rank locally whenever any row changed (its refreshQueuePositions), which
+// worked only because the rank was derivable from fields every row already
+// carried. A reorderable position is not derivable, so the moves have to
+// travel: dequeuing the front of the queue moves everyone behind it up one,
+// and nothing else would ever tell them.
+//
+// skip is the entry whose own run_state the caller is already publishing -
+// the one that was just accepted, or just reprioritised - so it does not get
+// two messages saying the same thing. Pass nil to include every waiter.
+//
+// The caller must hold s.mu, and must publish the result after releasing it:
+// the hub is never written to under the registry lock.
+func (s *Server) queueRecordsLocked(skip *runEntry) []queuedState {
+	out := make([]queuedState, 0, len(s.waiting))
+	for _, entry := range s.waiting {
+		if entry == skip {
+			continue
+		}
+		out = append(out, queuedState{id: entry.id, rec: s.runStateRecordLocked(entry, false)})
+	}
+	return out
+}
+
+// publishQueueRecords sends what queueRecordsLocked gathered. The caller
+// must NOT hold s.mu.
+func (s *Server) publishQueueRecords(states []queuedState) {
+	for _, state := range states {
+		s.hub.publish(state.id, state.rec)
+	}
+}
+
 // snapshot lists the registry, oldest first.
+//
+// Every row carries its queue position, so GET /runs can report a real one
+// rather than leave a page to work it out from arrival times (which is what
+// TOR-139's app.js had to do, and what TOR-140's reordering makes wrong).
+// The position comes from one pass over the queue rather than a scan per
+// entry: the registry holds the last ten finished runs as well as the live
+// ones, and looking each of them up in the waiting list to be told "not
+// waiting" is work with a known answer.
 func (s *Server) snapshot() []RunInfo {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	position := make(map[string]int, len(s.waiting))
+	for i, entry := range s.waiting {
+		position[entry.id] = i + 1
+	}
+
 	out := make([]RunInfo, 0, len(s.order))
 	for _, id := range s.order {
-		out = append(out, s.runs[id].info())
+		entry := s.runs[id]
+		out = append(out, entry.info(position[id]))
 	}
 	return out
 }
@@ -1238,9 +2004,10 @@ func (s *Server) snapshot() []RunInfo {
 // the run, then hands the slot to whoever is next.
 //
 // dispatch is its usual caller, in its own goroutine, for the entry that
-// currently holds the slot; ReopenRun also calls it, synchronously and for
-// an entry that never held the slot at all. Both are safe: the "hands the
-// slot to whoever is next" step only fires `if s.running == entry`, which is
+// currently holds a slot; ReopenRun also calls it, synchronously and for an
+// entry that never held a slot at all. Both are safe: the "hands the slot to
+// whoever is next" step only fires when this entry is actually the one
+// s.running holds under its id (releaseSlotLocked's own guard), which is
 // never true for a replay, so it is simply a no-op dispatch() call there
 // rather than a special case this function has to know about.
 func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
@@ -1259,6 +2026,16 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 			s.mu.Lock()
 			entry.infoHash = e.InfoHash
 			entry.name = e.Name
+			s.mu.Unlock()
+		case core.Progress:
+			// The only place a live row's figures come from. Everything
+			// downstream of here - runEntry.live, RunInfo.Live,
+			// RunSummary.Live, GET /runs - was built by TOR-136 and tested
+			// by calling applyProgress directly, because server.go was
+			// being rebuilt for the queue width at the time; without this
+			// case the whole chain is correct and permanently empty.
+			s.mu.Lock()
+			entry.applyProgress(e)
 			s.mu.Unlock()
 		case core.Failed:
 			// A run-scoped failure (File < 0) ends the run; a file-scoped one
@@ -1287,6 +2064,27 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 		outcome = RunCancelled
 	}
 	entry.state, entry.err, entry.endedAt = outcome, failure, time.Now()
+	// TOR-154: a client, once, said this - peers, seeds, both rates, the
+	// swarm reading, the stall reading. Once the state above is final, none
+	// of that is still true: nobody is connected, nothing is moving, and the
+	// last heartbeat was not wrong, it just stopped being now. Cleared as one
+	// pointer, all five readings together, the same grouping applyProgress
+	// itself replaces wholesale for the identical reason - and cleared here
+	// rather than field by field, because a half-cleared Live (say, rates
+	// gone but Swarm still standing) would just be a second, sneakier way to
+	// show a stale reading as current.
+	//
+	// The swarm reading is not moved anywhere: a person may well want to know
+	// what the swarm looked like while a finished run was going, but that is
+	// a HISTORICAL fact about the run, a different field with a different
+	// name, and no such field exists yet. Nil is the honest answer until one
+	// does; quietly repurposing this field to mean "last known" would be the
+	// same bug this ticket exists to remove, one field over.
+	//
+	// This makes a finished live row read exactly like a disk-only row
+	// (listing.go's RunSummary.Live), which never had a Live to begin with -
+	// they are the same situation now, and after this they read the same.
+	entry.live = nil
 	s.releaseSlotLocked(entry)
 	infoHash := entry.infoHash
 	s.mu.Unlock()
@@ -1388,6 +2186,12 @@ func (s *Server) record(entry *runEntry, ev core.Event) record {
 			m["sheet_url"] = s.files.publish(e.SheetPath)
 		}
 		if e.ManifestPath != "" {
+			// TOR-171: the page itself no longer links this (app.js's
+			// onFileDone) - a person looking at frames has no use for the raw
+			// JSON manifest. It stays on the wire regardless, because this
+			// event also reaches whatever else is reading the NDJSON stream,
+			// and a manifest URL is exactly the kind of thing a script - not
+			// a person - would want.
 			m["manifest_url"] = s.files.publish(e.ManifestPath)
 		}
 	case core.Done:
@@ -1450,6 +2254,42 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 	}
 	if entry.err != nil {
 		m["error"] = entry.err.Error()
+	}
+	// TOR-140: the queue's two facts, and they ride on run_state rather than
+	// on a message of their own precisely so that they cannot go stale in a
+	// replay. The hub keeps every run's records and replays them to a page
+	// that reconnects; a separate "here is the whole queue" message would be
+	// replayed as it was when it was sent, while a per-run field is
+	// overwritten by that run's own next state - and every entry whose
+	// position moved gets one (queueRecordsLocked), so the last run_state
+	// per run is always the current answer for that run.
+	//
+	// Present only while the priority still decides something
+	// (RunState.queueable). A running or finished row reports neither, which
+	// is the same absent-is-not-zero line the live figures draw: "priority
+	// normal, position 0" on a torrent already downloading would read as a
+	// standing it does not have, when the truth is that the queue has
+	// nothing left to say about it.
+	if entry.state.queueable() {
+		m["priority"] = int(entry.priority)
+		if pos := s.queuePositionLocked(entry); pos > 0 {
+			m["queue_position"] = pos
+		}
+	}
+	// TOR-156: the arrival ordinal, on EVERY run_state rather than only a
+	// queueable one, and that difference from the two fields above is the
+	// distinction the whole ticket rests on. Priority and position are absent
+	// once a run starts because the queue has nothing left to say about it;
+	// an ordinal is still true of a row that finished yesterday, so gating it
+	// on state would blank the very rows this ticket exists to fill in.
+	//
+	// It never changes, so strictly it only has to travel once - but it rides
+	// along on each message for the reason the paragraph above gives for the
+	// queue's own fields: the hub replays a run's LAST run_state to a page
+	// that reconnects, and a field that appeared on only the first would be
+	// missing from exactly the message a reconnecting page reads.
+	if entry.arrival > 0 {
+		m["arrival"] = entry.arrival
 	}
 	// TOR-117: the state a person watches longest in the worst case - queued
 	// or running, before any metadata has arrived - is also the one this
@@ -1522,7 +2362,7 @@ func encode(m map[string]any) []byte {
 	return data
 }
 
-// Close stops serving, cancels the run in the slot and drops the queue.
+// Close stops serving, cancels every run holding a slot and drops the queue.
 //
 // A queued run is cancelled rather than left behind: nothing will ever start
 // it once the server is stopped, so nothing would ever run its cleanup, and
@@ -1542,7 +2382,10 @@ func (s *Server) Close() error {
 		return nil
 	}
 	s.stopped = true
-	running := s.running
+	running := make([]*runEntry, 0, len(s.running))
+	for _, entry := range s.running {
+		running = append(running, entry)
+	}
 	ended := time.Now()
 
 	// Everything that was going to start and now never will: the queue, plus
@@ -1560,8 +2403,8 @@ func (s *Server) Close() error {
 	}
 	s.mu.Unlock()
 
-	if running != nil {
-		running.cancel()
+	for _, entry := range running {
+		entry.cancel()
 	}
 	for _, entry := range stranded {
 		if entry.cleanup != nil {

@@ -11,9 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
 )
 
@@ -296,6 +299,96 @@ func (s *Server) handleReopenRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
 }
 
+// handleTopUp answers what finishing one result set would cost, and which
+// ceiling stopped it last time (TOR-152). A GET, because it changes nothing
+// and is the sentence a page shows before the button that does.
+//
+// 404 for an address that names no set on disk. A set that exists but cannot
+// be finished is a 200 carrying TopUp.Refused: the request was answerable,
+// and the answer is a sentence a person has to read.
+func (s *Server) handleTopUp(w http.ResponseWriter, r *http.Request) {
+	// params is a query parameter rather than a path segment, the same shape
+	// the frame delete on the neighbouring path uses, and for a stronger
+	// reason here: it is OPTIONAL. A page watching a run that has just
+	// finished knows the torrent's infohash and nothing about which
+	// directory it wrote (run_state carries no params), so the commonest
+	// call omits it entirely and lets the server resolve it - see
+	// Server.TopUp.
+	plan, ok := s.TopUp(r.PathValue("infohash"),
+		strings.TrimSpace(r.URL.Query().Get("params")))
+	if !ok {
+		writeError(w, http.StatusNotFound, "no such run on disk")
+		return
+	}
+
+	// Wrapped under a key like every other response here, so a field can be
+	// added beside it later without the body changing shape.
+	writeJSON(w, http.StatusOK, map[string]any{"topup": plan})
+}
+
+// topUpRequest addresses the result set to finish, and - when the page has
+// one - the live row it is already showing for that torrent.
+//
+// IT CARRIES NO CEILING, and that absence is the design. The extra traffic a
+// top-up may spend is computed by the server from the record on disk
+// (TopUp.price) and stated to the page beforehand by the GET above; a number
+// a client could put here would be a way to raise somebody's traffic
+// allowance by asking for it. The page consents to a figure it was shown; it
+// does not choose one.
+type topUpRequest struct {
+	InfoHash string `json:"infohash"`
+	Params   string `json:"params"`
+	// ID is optional: it names the registry entry this row already has, so a
+	// finished one can be re-armed instead of a second row appearing for one
+	// torrent (Server.TopUpRun). A disk-only row has none, which is exactly
+	// the case reopenRequest above also has to answer for.
+	ID string `json:"id,omitempty"`
+}
+
+// handleTopUpRun starts the run that fills a partial set's gaps. Same
+// {id, state} answer POST /runs gives, because that is what this is.
+func (s *Server) handleTopUpRun(w http.ResponseWriter, r *http.Request) {
+	var req topUpRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.TopUpRun(req.InfoHash, req.Params, req.ID)
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// retryRequest names the run to run again. By id and only by id: a run worth
+// retrying is one that produced nothing, so it left no record on disk for an
+// infohash and params to address (see Server.RetryRun).
+type retryRequest struct {
+	ID string `json:"id"`
+}
+
+// handleRetryRun runs a finished run's own request again, unchanged - the
+// control that did not exist for the torrent whose metadata never arrived,
+// where the only way back was to paste the magnet a second time.
+func (s *Server) handleRetryRun(w http.ResponseWriter, r *http.Request) {
+	var req retryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.RetryRun(strings.TrimSpace(req.ID))
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
 // cancelRequest names the run to stop. An absent id means the run in the
 // slot, which is what a page showing a single run asks for.
 type cancelRequest struct {
@@ -364,11 +457,59 @@ func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
 }
 
+// priorityRequest is a reorder: this run, at this level.
+//
+// Priority is an ABSOLUTE level, never a step, and the field is a plain int
+// rather than a pointer even though its zero value is meaningful: zero IS
+// PriorityNormal, and a request that omits the field is asking for normal,
+// which is a coherent thing to ask for. Sending a step ("one higher") would
+// make two clicks on a stale page walk a torrent somewhere nobody asked for;
+// an absolute value applied twice lands in the same place.
+type priorityRequest struct {
+	ID       string `json:"id"`
+	Priority int    `json:"priority"`
+}
+
+// handleSetPriority moves one waiting torrent up or down the queue without
+// cancelling it (TOR-140). See Server.SetRunPriority for what a priority is
+// and for why this can never reach a torrent that is already downloading.
+//
+// 200 rather than the 202 the start and decide routes answer with: those
+// accept something that will happen later, while this one has already
+// happened by the time it returns - the queue is reordered under the lock
+// this call took, and the position in the body is the one the next dispatch
+// will act on.
+func (s *Server) handleSetPriority(w http.ResponseWriter, r *http.Request) {
+	var req priorityRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.SetRunPriority(req.ID, Priority(req.Priority))
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": info.ID, "state": string(info.State),
+		"priority": int(info.Priority), "queue_position": info.QueuePosition,
+	})
+}
+
 // decideStatus maps a decision's four failures: a run this server does not
 // hold, a request that does not name a selection this torrent can satisfy, a
 // server that has closed, and - everything left - a run that is not waiting
 // to be told anything, which is the same conflict CancelRun reports for a
 // run that has already ended.
+//
+// handleSetPriority answers through it too, because a reorder fails in
+// exactly those same four ways and means the same thing by each: an id this
+// server does not hold, a level outside the band, a closed server, and a run
+// that is not waiting for a slot - which for a reorder is the preemption
+// refusal, and a 409 is the right shape for it (the request was understood,
+// the run is simply not in a state this can act on).
 func decideStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrNoSuchRun):
@@ -597,16 +738,214 @@ func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
 	// renders a page of gibberish instead of saving a file. Content-Type
 	// names what it actually is, and Content-Disposition is what turns the
 	// link into a save; ServeFile leaves an already-set Content-Type alone,
-	// so setting it here wins. The filename is the file's own name on disk,
-	// which output.Layout deliberately made the infohash: unique in whatever
-	// download folder it lands in, and hex, so nothing in it can break out
-	// of the quoted header value.
+	// so setting it here wins.
+	//
+	// The filename is NOT simply the file's own name on disk any more
+	// (TOR-170): output.Layout still names it after the infohash on disk,
+	// for the reason its own doc comment gives, but a person saving it from
+	// the browser wants the torrent's own name, not forty hex characters.
+	// torrentContentDisposition reads that name from the run record beside
+	// the file and builds the header; see its doc for why that is more than
+	// substituting one string for another.
 	if isTorrentPath(path) {
 		w.Header().Set("Content-Type", "application/x-bittorrent")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(path)+`"`)
+		w.Header().Set("Content-Disposition", torrentContentDisposition(path))
 	}
 
 	http.ServeFile(w, r, path)
+}
+
+// maxTorrentNameBytes bounds the saved name before ".torrent" is appended -
+// short enough to leave every common filesystem's own filename limit (255
+// bytes, on ext4/APFS/NTFS alike) with headroom for the extension and for a
+// filesystem that counts UTF-8 bytes rather than characters, since a single
+// CJK or Cyrillic character can cost two or three of those bytes.
+const maxTorrentNameBytes = 200
+
+// torrentContentDisposition builds the RFC 6266 Content-Disposition value
+// for path, a run's saved .torrent - naming the download after the torrent
+// itself rather than after path's own basename, the infohash (TOR-170).
+//
+// The name comes from cache.Run.Name in run.json, which cache.SaveRun always
+// writes into the same directory the .torrent sits in
+// (output.Layout.RunDir) - so path's directory is exactly where to look,
+// with no need to know this run's infohash or params separately. A run with
+// no record yet on disk, or a record whose Name is blank, leaves name at "";
+// contentDispositionAttachment below treats that exactly like a name that
+// sanitises down to nothing, falling back to path's own basename with the
+// extension trimmed - the infohash - which is why this can never fail to
+// produce a usable header.
+func torrentContentDisposition(path string) string {
+	name := ""
+	if record, ok := cache.LoadRun(filepath.Dir(path)); ok {
+		name = record.Name
+	}
+	fallback := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	return contentDispositionAttachment(name, fallback)
+}
+
+// contentDispositionAttachment builds "attachment; filename=...;
+// filename*=..." for a torrent called name, falling back to
+// `attachment; filename="<fallback>.torrent"` alone when name sanitises
+// down to nothing - including when it is already empty.
+//
+// Two names travel together per RFC 6266 / RFC 5987: filename is a
+// sanitised ASCII fallback that a client which ignores the extended form
+// still saves something sane under, and filename* is the real name,
+// UTF-8-encoded and then percent-encoded, for a client that reads it - so a
+// Cyrillic or CJK torrent name arrives intact instead of being mangled or
+// silently dropped. This is why the infohash alone was chosen as the header
+// name before TOR-170: it is hex, so nothing in it can break out of the
+// quoted header value or turn into a path. A torrent's name is arbitrary
+// text from a stranger and gets no such trust - see sanitizeTorrentName for
+// what is stripped or replaced before either form of the name is built, and
+// why.
+//
+// The .torrent extension is always appended, even when name already ends in
+// something that looks like one: a torrent called "Movie.mkv" saves as
+// "Movie.mkv.torrent", not "Movie.torrent" (which would silently swallow
+// what the uploader actually called it, on the guess that ".mkv" was an
+// extension to strip rather than part of the name) and not "Movie.mkv" with
+// no .torrent extension at all (which stops a torrent client from
+// recognising the file by extension the way it does for a downloaded one).
+func contentDispositionAttachment(name, fallback string) string {
+	sanitized := sanitizeTorrentName(name)
+	if sanitized == "" {
+		return `attachment; filename="` + fallback + `.torrent"`
+	}
+
+	asciiName := asciiOnly(sanitized)
+	if asciiName == "" {
+		// The name survived sanitisation but is entirely non-ASCII (a
+		// torrent named purely in Cyrillic or CJK, say) - there is no
+		// sane ASCII stand-in for it, so the classic fallback parameter
+		// names the infohash instead, exactly as it would for no name at
+		// all. filename* below still carries the real name.
+		asciiName = fallback
+	}
+
+	var b strings.Builder
+	b.WriteString(`attachment; filename="`)
+	b.WriteString(asciiName)
+	b.WriteString(`.torrent"; filename*=UTF-8''`)
+	b.WriteString(percentEncodeRFC5987(sanitized))
+	b.WriteString(".torrent")
+	return b.String()
+}
+
+// sanitizeTorrentName strips or replaces what a saved filename cannot
+// safely carry, while leaving non-ASCII characters alone - asciiOnly is
+// what later strips those, only for the classic fallback parameter that has
+// to stay pure ASCII. It also bounds the result to maxTorrentNameBytes of
+// UTF-8, truncated on a rune boundary so a name long enough to trip a
+// filesystem's own limit is shortened rather than left to fail on save.
+//
+//   - CR, LF and every other control character are dropped outright, not
+//     replaced: none has a visible place in a filename to stand in for, and
+//     this is what keeps a torrent's name from ever reaching a raw CR or LF
+//     into the header value, however it is later quoted or encoded.
+//   - '/' and '\' are replaced with '-': a path separator would let the
+//     name read as a directory rather than a file to whatever saves it -
+//     the browser, the OS, or SendToWatchDir's own destination directory.
+//   - a double quote is replaced with an apostrophe: it is the character
+//     that delimits the quoted-string this sits inside, replaced rather
+//     than escaped, so nothing downstream has to reason about
+//     quoted-pair rules.
+//   - ':' '*' '?' '<' '>' '|' are replaced with '-': illegal in a filename
+//     on Windows even though nothing else about this project targets it
+//     specifically - a name that would fail to save on one common OS is
+//     worth avoiding on all of them.
+//
+// A semicolon is deliberately left alone: RFC 7230's quoted-string grammar
+// allows it unescaped, and it is not one of the characters replaced above
+// for filename safety either, so there is nothing here for it to break -
+// see web_test.go's hostile-name coverage, which asserts exactly that.
+func sanitizeTorrentName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r == 0 || unicode.IsControl(r):
+			continue
+		case r == '/' || r == '\\':
+			b.WriteByte('-')
+		case r == '"':
+			b.WriteByte('\'')
+		case r == ':' || r == '*' || r == '?' || r == '<' || r == '>' || r == '|':
+			b.WriteByte('-')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return truncateUTF8(strings.Trim(b.String(), " ."), maxTorrentNameBytes)
+}
+
+// asciiOnly keeps only what the classic, unencoded filename= parameter can
+// safely hold: RFC 6266 leaves anything outside US-ASCII to a client's own
+// interpretation once it appears unencoded, so this drops it rather than
+// approximating it - there is no good ASCII stand-in for "北京" - and the
+// filename* parameter built alongside it is what carries the real name
+// intact.
+func asciiOnly(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r <= 0x7E {
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), " .")
+}
+
+// truncateUTF8 shortens s to at most maxBytes of UTF-8, cutting on a rune
+// boundary so a multi-byte character at the cut point is dropped whole
+// rather than split into invalid UTF-8.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
+
+// rfc5987Hex is upper-case per RFC 3986's own recommendation for
+// percent-encoding, which RFC 5987 defers to.
+const rfc5987Hex = "0123456789ABCDEF"
+
+// percentEncodeRFC5987 percent-encodes s, byte by byte over its own UTF-8
+// encoding, keeping only RFC 5987's attr-char unescaped. This is what the
+// value after filename*=UTF-8 and a pair of single quotes carries: s's real
+// bytes, safe to sit unquoted in a header parameter value because nothing
+// outside attr-char survives unescaped - including a double quote, a
+// semicolon or a percent sign, which would otherwise matter to how the
+// header is parsed.
+func percentEncodeRFC5987(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isRFC5987AttrChar(c) {
+			b.WriteByte(c)
+		} else {
+			b.WriteByte('%')
+			b.WriteByte(rfc5987Hex[c>>4])
+			b.WriteByte(rfc5987Hex[c&0x0F])
+		}
+	}
+	return b.String()
+}
+
+// isRFC5987AttrChar is RFC 5987's attr-char: ALPHA / DIGIT /
+// "!" / "#" / "$" / "&" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~".
+func isRFC5987AttrChar(c byte) bool {
+	switch {
+	case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		return true
+	}
+	switch c {
+	case '-', '.', '_', '~', '!', '#', '$', '&', '+', '^', '`', '|':
+		return true
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, body map[string]any) {

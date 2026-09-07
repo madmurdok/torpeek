@@ -102,14 +102,79 @@ func event(ev core.Event) map[string]any {
 			"requested_ms": e.Requested.Milliseconds(), "code": string(e.Code), "reason": e.Reason,
 		}
 	case core.Progress:
-		return map[string]any{
+		m := map[string]any{
 			"type": "progress", "file": e.File, "frames_done": e.FramesDone,
 			"frames_total": e.FramesTotal, "downloaded": e.DownloadedByte,
-			"elapsed_ms": e.Elapsed.Milliseconds(), "peers": e.Peers, "seeds": e.Seeds,
+			"uploaded":   e.UploadedByte,
+			"elapsed_ms": e.Elapsed.Milliseconds(),
+			"peers":      e.Peers, "seeds": e.Seeds,
 		}
+		// download_bps/upload_bps are this heartbeat's INSTANTANEOUS speed
+		// in bytes per second - the byte delta since the previous heartbeat
+		// divided by the real time between the two, never a nominal period
+		// (core.Progress.DownloadRate's own doc). A stall followed by a
+		// burst therefore reports the burst averaged over the whole stalled
+		// window, never as a sustained peak. Present only from the run's
+		// second heartbeat on: a client must read a missing key as "not yet
+		// known", not as "stopped" or "0 B/s" - the same "absent, not zero"
+		// rule core.Progress.Swarm's own doc argues for (TOR-119, TOR-111,
+		// TOR-135), applied here for the same reason.
+		if e.DownloadRate != nil {
+			m["download_bps"] = *e.DownloadRate
+		}
+		if e.UploadRate != nil {
+			m["upload_bps"] = *e.UploadRate
+		}
+		// swarm is the live availability reading core.Progress.Swarm
+		// carries, under the identical "absent, not zero" rule
+		// download_bps/upload_bps just followed above, and for the
+		// identical reason (core.Progress.Swarm's own doc, TOR-119,
+		// TOR-111, TOR-135): a torrent that has not been asked for
+		// bytes yet has no reading, and 0 copies would read as "the
+		// swarm holds nothing" - the opposite of "we do not know".
+		//
+		// copies_per_piece names the unit so nobody can read it as a
+		// fraction - it is swarm.Availability's own unit, copies PER
+		// PIECE, and commonly exceeds 1.0 (0.8 means pieces are
+		// missing from the swarm, 3.2 means it is healthy).
+		if e.Swarm != nil {
+			m["swarm"] = map[string]any{
+				"copies_per_piece": e.Swarm.CopiesPerPiece,
+				"unavailable":      e.Swarm.Unavailable,
+				"pieces":           e.Swarm.NumPieces,
+			}
+		}
+		// stall is TOR-141's own reading: which of the distinct "nothing
+		// is landing" causes explains THIS file right now, and how long
+		// - continuously, not merely "as of ever" - it has been true
+		// (core.Progress.Stall's own doc has the rule that keeps the
+		// duration honest across a changing cause). Absent under the
+		// same "absent, not zero" discipline every other optional key on
+		// this event already follows: it means the run IS progressing at
+		// this heartbeat, never that nothing is known.
+		//
+		// code is one of core's own ErrorCode strings (CodeNoPeers,
+		// CodeUnavailable, CodeNoMetadata, CodeReadStalled) - the same
+		// vocabulary "code" already carries on frame_skipped and failed,
+		// so a client that already reads those needs no second lookup
+		// table for this one. since_ms, not a bare "since", to match
+		// every other duration this vocabulary carries (elapsed_ms,
+		// requested_ms, duration_ms).
+		if e.Stall != nil {
+			m["stall"] = map[string]any{
+				"code": string(e.Stall.Code), "since_ms": e.Stall.Since.Milliseconds(),
+			}
+		}
+		return m
 	case core.BudgetWarning:
+		// scope says whether spent/limit are this run's or the whole
+		// client's, and is the difference between "you asked for a lot" and
+		// "the machine is nearly out" (core.LimitScope). Always present, so
+		// a consumer reads one key rather than inferring the scope from
+		// limit_ms happening to be zero.
 		return map[string]any{
-			"type": "budget_warning", "spent": e.SpentBytes, "limit": e.LimitBytes,
+			"type": "budget_warning", "scope": string(e.Scope),
+			"spent": e.SpentBytes, "limit": e.LimitBytes,
 			"elapsed_ms": e.Elapsed.Milliseconds(), "limit_ms": e.LimitTime.Milliseconds(),
 		}
 	case core.FileDone:
