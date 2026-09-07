@@ -451,23 +451,22 @@ func rgbaOverWhite(t *testing.T, root map[string]string, name string) string {
 	return out
 }
 
-// TestLightboxChromeIsHudAndKeepsTheAccentForTheZoomState is the palette
-// decision, made checkable. The reference sheet TOR-172 was given wears its
-// accent decoratively and everywhere; :root reserves --accent for "this is
-// live or this is where you are" and says nothing decorative may wear it,
-// which is a rule that exists because before TOR-113 one green served as both
-// the accent and "done". The panel resolves that by NOT being an exception:
-// the whole of its resting chrome is --edge, and the accent is spent on the
-// zoom state alone - the one thing here that carries meaning, since at 100%
-// the panel is a window onto a bigger picture and where you are inside it is
-// the fact the chrome has to tell you.
+// TestLightboxChromeIsHudWithAccentBracketsChipAndHint is TOR-176's palette
+// decision, made checkable, replacing TOR-172's original (TestLightbox
+// ChromeIsHudAndKeepsTheAccentForTheZoomState, before this ticket): the owner
+// looked at the shipped panel next to the HUD reference they gave and said it
+// was "вообще не похож на референс" - not restrained, wrong. Three
+// treatments were built side by side on a real frame with the live tokens;
+// VARIANT B, WITH VARIANT A'S HINT COLOUR, is what this test guards.
 //
-// So: hard corners, a notch, brackets in --edge with no glow and no
-// box-shadow at rest (box-shadow paints a glowing rectangle over a
-// stroke-drawn shape - .run-detail::before's own comment records what that
-// cost), and exactly one place reaching for --accent, keyed on the zoom
-// state.
-func TestLightboxChromeIsHudAndKeepsTheAccentForTheZoomState(t *testing.T) {
+// The accent moves from one place (the zoom state alone) to three: the three
+// corner brackets, now permanently loud (34px at 2px, glowing) rather than
+// gated on the zoom state; the state pill, unchanged from TOR-172; and the
+// key-hint line, which is variant A's own contribution and the owner's
+// specific request. The chamfer stroke, the FRAME label tab and the tick run
+// are deliberately left off that list - the panel does not become
+// accent-coloured throughout.
+func TestLightboxChromeIsHudWithAccentBracketsChipAndHint(t *testing.T) {
 	css := stylesheet(t)
 
 	panel := block(t, css, ".lightbox {")
@@ -480,31 +479,44 @@ func TestLightboxChromeIsHudAndKeepsTheAccentForTheZoomState(t *testing.T) {
 			"motifs the acceptance criteria names, and a polygon() is what cuts it", v, ok)
 	}
 
-	// The resting chrome: every bracket, and the stroke along the chamfer.
+	// The three brackets: loud now, not restrained. 34px at 2px, in --accent,
+	// with a permanent stroke glow - unconditional, no longer keyed on the
+	// zoom state the way TOR-172 had it.
+	dims := block(t, css, ".lightbox::before, .lightbox::after, .lightbox-marks::before {")
+	for _, dim := range []string{"width", "height"} {
+		if v := dims[dim]; v != "34px" {
+			t.Errorf(".lightbox::before/::after/.lightbox-marks::before %s is %q, want 34px - "+
+				"variant B's brackets are a quarter of the panel's own edge, not TOR-172's "+
+				"restrained 12px", dim, v)
+		}
+	}
 	for _, rawSel := range []string{
 		"\n.lightbox::before {",
 		"\n.lightbox::after {",
 		"\n.lightbox-marks::before {",
-		"\n.lightbox-marks::after {",
 	} {
 		sel := strings.TrimSpace(rawSel)
 		b := block(t, css, rawSel)
-		sawEdge := false
+		sawAccent := false
 		for prop, val := range b {
-			if !strings.Contains(prop, "border") && prop != "background" {
+			if !strings.Contains(prop, "border") {
 				continue
 			}
 			if strings.Contains(val, "var(--edge)") {
-				sawEdge = true
+				t.Errorf("%s %s is %q - TOR-176 moves the brackets off --edge onto --accent; "+
+					"the resting chrome is loud now, not the restrained TOR-172 original", sel, prop, val)
 			}
-			if strings.Contains(val, "var(--accent") {
-				t.Errorf("%s %s is %q - resting chrome must not spend --accent; the zoom "+
-					"state is what this panel spends it on", sel, prop, val)
+			if strings.Contains(val, "var(--accent)") {
+				sawAccent = true
+			}
+			if !strings.HasPrefix(val, "2px") {
+				t.Errorf("%s %s is %q, want a 2px border - variant B doubles TOR-172's 1px "+
+					"stroke, part of what makes the chrome loud rather than a hairline", sel, prop, val)
 			}
 		}
-		if !sawEdge {
-			t.Errorf("%s draws nothing in var(--edge) - the panel's chrome is built from the "+
-				"token TOR-159 measured for exactly this job", sel)
+		if !sawAccent {
+			t.Errorf("%s draws no border in var(--accent) - variant B's brackets are accent, "+
+				"not --edge, and not gated on the zoom state any more", sel)
 		}
 		if v, ok := b["box-shadow"]; ok {
 			t.Errorf("%s declares box-shadow: %q - box-shadow follows an element's BOX and "+
@@ -512,39 +524,77 @@ func TestLightboxChromeIsHudAndKeepsTheAccentForTheZoomState(t *testing.T) {
 				"var(--stroke-glow) is the one that follows the painted pixels "+
 				"(.run-detail::before's own comment)", sel, v)
 		}
-		if v, ok := b["filter"]; ok {
-			t.Errorf("%s declares filter: %q at rest - --stroke-glow is accent-tinted, and a "+
-				"permanently glowing panel is the furniture-spending --accent's rule exists "+
-				"to stop", sel, v)
+		if v, ok := b["filter"]; !ok || !strings.Contains(v, "var(--stroke-glow)") {
+			t.Errorf("%s filter is %q (present: %v), want var(--stroke-glow) - the brackets glow "+
+				"permanently under variant B, not only at 100%%", sel, v, ok)
 		}
 	}
 
-	// And the state that does wear it, keyed on the zoom being at 100%.
+	// The chamfer stroke stays off the accent list on purpose - TOR-176
+	// spends --accent on exactly three things (the brackets, the chip, the
+	// hint line) and the chamfer is not one of them, same as the label and
+	// the ticks.
+	chamfer := block(t, css, "\n.lightbox-marks::after {")
+	if v, ok := chamfer["background"]; !ok || !strings.Contains(v, "var(--edge)") {
+		t.Errorf(".lightbox-marks::after background is %q (present: %v), want var(--edge) - "+
+			"the chamfer was left off variant B's accent list on purpose", v, ok)
+	}
+	if v, ok := chamfer["background"]; ok && strings.Contains(v, "var(--accent") {
+		t.Errorf(".lightbox-marks::after background is %q - the panel does not become "+
+			"accent-coloured throughout; only the brackets, the chip and the hint line do", v)
+	}
+
+	// The zoom-state chip: unchanged from TOR-172, and now the only chrome
+	// still keyed on data-zoom - the brackets used to share this rule and no
+	// longer do.
 	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
 	lit := regexp.MustCompile(`\.lightbox\[data-zoom="full"\][^{]*\{[^}]*\}`)
 	states := lit.FindAllString(live, -1)
 	if len(states) == 0 {
-		t.Fatal(`app.css has no .lightbox[data-zoom="full"] rule - the accent has nowhere to be ` +
-			"spent, and the panel cannot look different at 100% than at fit")
+		t.Fatal(`app.css has no .lightbox[data-zoom="full"] rule - the state pill has nowhere ` +
+			"to spend its accent, and the panel cannot look different at 100% than at fit")
 	}
 	all := strings.Join(states, "\n")
-	for _, want := range []string{"var(--accent)", "var(--stroke-glow)", "var(--glow)"} {
+	for _, want := range []string{"var(--accent)", "var(--glow)"} {
 		if !strings.Contains(all, want) {
-			t.Errorf(`no .lightbox[data-zoom="full"] rule reaches for %s - the brackets are `+
-				"stroke-drawn (--stroke-glow) and the state pill is a filled box (--glow); "+
-				"both glows belong to this state and neither to the resting one", want)
+			t.Errorf(`no .lightbox[data-zoom="full"] rule reaches for %s - the state pill is a `+
+				"filled box, so --glow is the one it wants", want)
 		}
 	}
-	if !strings.Contains(all, "border-top-color") {
-		t.Error(`the .lightbox[data-zoom="full"] bracket rule does not use border-*-color ` +
-			"longhands - a border shorthand elsewhere resets the colour a rule like this " +
-			"sets, silently, which is how .run-detail::before painted in the wrong colour " +
-			"from TOR-113 until somebody looked")
+	if strings.Contains(all, "::before") || strings.Contains(all, "::after") {
+		t.Error(`a .lightbox[data-zoom="full"] rule still targets a bracket pseudo-element - ` +
+			"variant B makes the brackets unconditionally accent, so nothing should key their " +
+			"colour off the zoom state any more")
 	}
 
-	// The cursor is the state's other half, and all three states need one:
-	// zoom-in at fit, zoom-out at 100%, and neither on a picture that
-	// already fits, where a click has nothing to do.
+	// The key-hint line: variant A's own contribution, at full strength.
+	// --accent on --s1 measures 11.60:1, so nothing needs weakening, and
+	// opacity multiplying against a token is exactly what TOR-158 removed
+	// from this file (TestLightboxControlsOverThePictureCarryTheirOwnGround
+	// guards the same trap on .lightbox-close/.lightbox-caption).
+	keys := block(t, css, ".lightbox-keys {")
+	if v := keys["color"]; v != "var(--accent)" {
+		t.Errorf(".lightbox-keys color is %q, want var(--accent) - the owner's specific "+
+			"request was variant A's hint colour, carried into variant B", v)
+	}
+	if v, ok := keys["opacity"]; ok {
+		t.Errorf(".lightbox-keys declares opacity: %q - full-strength accent needs no "+
+			"weakening, and this is the exact opacity-over-a-token shape TOR-158 removed "+
+			"from this file", v)
+	}
+	root := block(t, css, ":root {")
+	accent := hexToken(t, root, "--accent")
+	s1 := hexToken(t, root, "--s1")
+	if ratio := contrastRatio(accent, s1); ratio < 4.5 {
+		t.Errorf("--accent (%s) over --s1 (%s), .lightbox-keys' own ground, is %.2f:1, "+
+			"want >= 4.5 - the hint line is text, so it answers to the 4.5 floor, not the "+
+			"3.0 one a UI part like a border gets", accent, s1, ratio)
+	}
+
+	// The cursor is the zoom state's other half, and all three states need
+	// one: zoom-in at fit, zoom-out at 100%, and neither on a picture that
+	// already fits, where a click has nothing to do. Untouched by this
+	// ticket, still required.
 	for _, want := range []string{`[data-zoom="fit"]`, `[data-zoom="full"]`, `[data-zoom="none"]`} {
 		re := regexp.MustCompile(`\.lightbox` + regexp.QuoteMeta(want) + ` \.lightbox-view \{[^}]*cursor:`)
 		if !re.MatchString(live) {

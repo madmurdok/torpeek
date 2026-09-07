@@ -1513,28 +1513,43 @@ button:disabled { opacity: .5; }
    key/value column, and the accent-on-everything colouring - see the palette
    note below.
 
-   THE PALETTE, which is the real decision here rather than a detail. The
-   reference wears its accent decoratively, everywhere; :root says --accent
-   means "this is live or this is where you are" and that nothing decorative
-   may wear it, because before TOR-113 one green served as both the accent and
-   "done". This panel is NOT an exception to that rule - it did not need to
-   be. The whole of the chrome is drawn in --edge (the resting-border token
-   TOR-159 measured, 3.83 against --s1) over --s1, with --ink-2 text and a
-   dashed tick run in the same --edge, and the accent is spent on exactly
-   one thing, which does carry meaning: THE ZOOM STATE. At fit the picture is all of itself and
-   nothing is live; at 100% the panel is a window onto a bigger picture and
-   where you are inside it is the one fact the chrome has to tell you - so
-   that is when the brackets take --accent and the state pill fills with it.
-   A frame that already fits at 100% never lights up: nothing is live there
-   either, because there is nowhere else to be.
+   THE PALETTE (TOR-176 revises this from TOR-172's original call). TOR-172
+   read :root's "nothing decorative wears --accent" rule as binding here too,
+   and built the whole resting chrome from --edge - a correct, restrained
+   dialog that then sat next to the owner's HUD reference and was, in their
+   words, "вообще не похож на референс". The reference's whole character is
+   that its chrome is LOUD: brackets a quarter of the edge long, doubled
+   strokes with a gap, visible glow, saturated colour as the frame rather than
+   as a marker. Three treatments were built side by side on a real frame with
+   the live tokens; VARIANT B, WITH VARIANT A'S HINT COLOUR, is what is here.
+
+   The accent is now spent on three things, not one: the three corner
+   brackets (34px at 2px, glowing, at rest - no longer gated on the zoom
+   state), the zoom-state pill, and the key-hint line. Edges, the FRAME label
+   tab and the dashed tick run stay on ink and --edge - the panel does not
+   become accent-coloured throughout, and the chamfer stroke (below) is left
+   off the accent list on purpose, same as the label and the ticks.
+
+   This does trade something away: :root's "nothing decorative wears --accent"
+   rule exists because before TOR-113 one green served as both the accent and
+   "done", and an always-accent hint line spends the token on instruction
+   rather than state. That is accepted here as the owner's call, made with
+   both variants in front of them, for a MODAL panel over a scrim - there are
+   no neighbours in this view whose attention the loud chrome could steal,
+   which is not true of the rest of the page and is not an argument for
+   spending --accent more freely there. What it obliges: THE ZOOM STATE - the
+   only thing in this panel that actually changes - has to stay distinguishable
+   now that it is no longer the only accent on the surface. It still is: the
+   pill is a FILLED box with a glow at 100%, not just another accent stroke
+   among several, so the state reads from its shape and not merely its colour.
+   Checked in a browser at both zoom states, not only against this claim.
 
    THE GLOWS, both of them, and the difference is the trap .run-detail::before
    records: box-shadow follows an element's BOX, so on an L drawn from two
-   borders it paints a glowing rectangle over the shape. The brackets and the
-   notch stroke are stroke-drawn, so their glow is filter: var(--stroke-glow);
-   the state pill is a filled box, so its glow is box-shadow: var(--glow).
-   Neither appears at rest - both are accent-tinted, and a permanently glowing
-   panel would be the furniture-spending --accent's own rule exists to stop.
+   borders it paints a glowing rectangle over the shape. The brackets are
+   stroke-drawn, so their glow is filter: var(--stroke-glow); the state pill
+   is a filled box, so its glow is box-shadow: var(--glow). The chamfer stroke
+   stays --edge and unglowed, along with the label and the ticks.
 
    WHAT SITS OVER THE PICTURE, and why it carries its own ground. The close
    control and the caption are on the picture by design: the close belongs at
@@ -1581,28 +1596,35 @@ button:disabled { opacity: .5; }
 
 /* THREE CORNER BRACKETS AND A CHAMFER STROKE, the reference's frame
    vocabulary, drawn the way .run-detail::before draws its own: two borders
-   per corner, so each is an L rather than a rectangle. They sit inside the
-   panel's top and bottom label strips, which is what keeps them off the
-   picture entirely - a hairline in one colour over arbitrary footage is
-   TOR-122's problem all over again, and a bracket cannot carry a scrim.
+   per corner, so each is an L rather than a rectangle. TOR-176 (variant B)
+   makes the three brackets loud rather than restrained: 34px, a quarter of
+   the panel's own edge, at 2px, permanently in --accent with a stroke glow -
+   no longer gated on the zoom state, because the reference's whole character
+   comes from the chrome being loud everywhere, and a modal panel over a
+   scrim has no neighbours whose attention that could steal. They still sit
+   inside the panel's top and bottom label strips, clear of the picture
+   itself - a hairline in one colour over arbitrary footage is TOR-122's
+   problem all over again, and a bracket cannot carry a scrim.
    .lightbox-marks exists because a corner needs a pseudo-element of its own
    and one element has two. */
 .lightbox::before, .lightbox::after, .lightbox-marks::before {
   content: "";
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: 34px;
+  height: 34px;
   pointer-events: none;
 }
 .lightbox::before {
   top: 4px; left: 4px;
-  border-top: 1px solid var(--edge);
-  border-left: 1px solid var(--edge);
+  border-top: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  filter: var(--stroke-glow);
 }
 .lightbox::after {
   top: 4px; right: 4px;
-  border-top: 1px solid var(--edge);
-  border-right: 1px solid var(--edge);
+  border-top: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  filter: var(--stroke-glow);
 }
 .lightbox-marks {
   position: absolute;
@@ -1611,39 +1633,37 @@ button:disabled { opacity: .5; }
 }
 .lightbox-marks::before {
   bottom: 4px; left: 4px;
-  border-bottom: 1px solid var(--edge);
-  border-left: 1px solid var(--edge);
+  border-bottom: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  filter: var(--stroke-glow);
 }
 /* The stroke along the chamfer, without which the cut reads as a rendering
-   fault rather than as a corner somebody drew. 17px is the 10px notch's own
-   diagonal; the clip-path trims whatever half of the 2px bar falls outside
-   the panel, leaving a hairline flush with the cut. */
+   fault rather than as a corner somebody drew. Left on --edge, unglowed, on
+   purpose: TOR-176 spends --accent on exactly three things (the brackets
+   above, the state pill below, and the key-hint line further down) and the
+   chamfer is not one of them, same as the label tab and the tick run.
+
+   Positioned fully INSIDE the panel rather than straddling the cut - TOR-176
+   is explicit that this differs from how it worked before. The notch's own
+   diagonal (two 10px legs) is ~14.14px; this bar is 17px so it overhangs
+   both ends slightly for a flush join, and its centre sits 1px further into
+   the panel than the cut line itself (bottom-right in un-rotated space:
+   right -2.5px, bottom 5px puts the rotated bar's centre at (6, 6) rather
+   than the line's own midpoint at (5, 5)), so the whole 2px thickness lands
+   on the panel's own side. Previously it was centred ON the cut and relied
+   on .lightbox's clip-path to trim whichever half fell outside - correct in
+   the result, but a stroke depending on being cut in half by an unrelated
+   property is fragile in a way this avoids. */
 .lightbox-marks::after {
   content: "";
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  right: -2.5px;
+  bottom: 5px;
   width: 17px;
   height: 2px;
   background: var(--edge);
-  transform: translate(50%, 50%) rotate(-45deg);
+  transform: rotate(-45deg);
   pointer-events: none;
-}
-
-/* THE ONE PLACE THE ACCENT IS SPENT: at 100% the panel is a window onto a
-   bigger picture, and which part of it you are looking at is live. The
-   colours arrive as border-*-color longhands on purpose - .run-detail::before
-   records what a shorthand costs here, having painted in the wrong colour
-   since TOR-113 because `border-top: 2px solid` later in the file reset the
-   border-color a previous rule had set. A longhand cannot do that to anyone. */
-.lightbox[data-zoom="full"]::before,
-.lightbox[data-zoom="full"]::after,
-.lightbox[data-zoom="full"] .lightbox-marks::before {
-  border-top-color: var(--accent);
-  border-right-color: var(--accent);
-  border-bottom-color: var(--accent);
-  border-left-color: var(--accent);
-  filter: var(--stroke-glow);
 }
 
 /* The panel's top strip: the label tab, then a dashed tick run filling
@@ -1684,7 +1704,11 @@ button:disabled { opacity: .5; }
    "100%". Filled with the accent at 100% (a filled box, so box-shadow is the
    right glow for it - see :root's two glow tokens), --bg text on it, which is
    the reference's own filled-label-with-dark-text motif and measures 12.4
-   against --accent. */
+   against --accent. Unchanged by TOR-176, and now doing a heavier job than it
+   was: with the brackets and the key-hint line both accent too, the pill's
+   FILLED box at 100% versus its outline at rest is what still marks the zoom
+   state as its own fact rather than one more accent stroke among several -
+   checked in a browser at both states, not only asserted here. */
 .lightbox-zoom {
   padding: 0 .25rem;
   border: 1px solid var(--edge);
@@ -1705,20 +1729,20 @@ button:disabled { opacity: .5; }
     var(--edge) 0 4px, transparent 4px 10px);
 }
 
-/* Only the chrome that changes with the zoom state animates, and it is a
-   colour crossfade rather than motion. The reduced-motion block comes after
-   it rather than before: a media query adds no specificity, so with the two
-   the other way round the transition would win and the preference would do
-   nothing. */
-.lightbox::before, .lightbox::after,
-.lightbox-marks::before, .lightbox-zoom {
+/* Only the state pill still changes with the zoom state, so it is the only
+   thing left in this list to animate - the brackets were the other member
+   before TOR-176 made them unconditionally accent, and a transition with
+   nothing to cross-fade is just dead declarations. The reduced-motion block
+   comes after it rather than before: a media query adds no specificity, so
+   with the two the other way round the transition would win and the
+   preference would do nothing. */
+.lightbox-zoom {
   transition: border-color .12s ease-in-out, background-color .12s ease-in-out,
     color .12s ease-in-out, filter .12s ease-in-out;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lightbox::before, .lightbox::after,
-  .lightbox-marks::before, .lightbox-zoom { transition: none; }
+  .lightbox-zoom { transition: none; }
 }
 
 /* THE WINDOW ONTO THE PICTURE, and rule 4's structural half. Its box is the
@@ -1823,7 +1847,21 @@ button:disabled { opacity: .5; }
 /* The keys, in the panel's bottom strip. Same shape as .compare-keys, for the
    same reason: one line, fixed height, nowrap, so nothing it says can change
    the panel's height. The side margins clear the bottom-left bracket and the
-   chamfer. */
+   chamfer.
+
+   Colour is TOR-176 (variant B, with variant A's own contribution): full-
+   strength --accent, the owner's specific request after seeing the three
+   treatments side by side, in place of TOR-172's --ink-2. --accent on --s1
+   measures 11.60:1, so nothing here needs weakening - variant A's rule
+   carried opacity: .85 on top of the same colour, and that is deliberately
+   NOT repeated: opacity multiplies against whatever the token already
+   measures, which is exactly the invisible-failure shape TOR-158 removed
+   from this file (.lightbox-close/.lightbox-caption's own comment, and
+   TestLightboxControlsOverThePictureCarryTheirOwnGround, record the same
+   trap for this dialog already). This does spend the accent on instruction
+   rather than state, which is a real trade against :root's "nothing
+   decorative wears --accent" rule - see the palette comment above .lightbox
+   for why that is accepted here. */
 .lightbox-keys {
   height: var(--lb-keys);
   margin: var(--lb-gap) 1.1rem 0;
@@ -1835,7 +1873,7 @@ button:disabled { opacity: .5; }
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
-  color: var(--ink-2);
+  color: var(--accent);
 }
 
 /* COMPARING TWO RUNS BY FLIPPING (TOR-109).
