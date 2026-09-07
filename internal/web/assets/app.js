@@ -1793,6 +1793,20 @@ async function retryRun(entry) {
 // Deliberately NOT hooked to pointermove mid-drag: the pane's width does not
 // track a border being dragged frame by frame, only (rarely) the moment a
 // scrollbar appears or disappears, which the drag's end already covers.
+//
+// KNOWN GAP, and it is the cost of hooking three named causes rather than
+// watching the pane itself. The table's wrap does not scroll vertically - the
+// PAGE does (see .run-table-wrap's own comment) - so the page's scrollbar
+// appearing or vanishing changes this pane's clientWidth. During a live run
+// the frame grid grows as frames land, which can bring that scrollbar in
+// without a resize, an expand or a column drag, and the open detail then sits
+// ~15px wider than the pane until one of the three fires. A ResizeObserver on
+// the pane would catch every cause instead of these three; it was not used
+// because the three above are verified live and cannot oscillate, and a
+// scrollbar-driven feedback path deserves its own browser check rather than
+// being introduced in review. The 15px is a sliver at the right edge, and the
+// one thing that must never be off-screen - the top-up figure - is far from
+// that edge, which is why this is recorded rather than fixed.
 function syncRunDetailWidth() {
   if (!el.runTableWrap) return;
   const width = el.runTableWrap.clientWidth;
