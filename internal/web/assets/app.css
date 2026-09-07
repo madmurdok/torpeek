@@ -1591,6 +1591,23 @@ button:disabled { opacity: .5; }
      so nothing of the frame is ever lost to it, and no backdrop shows through
      anywhere the picture reaches. */
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+  /* TOR-177: a <dialog> defaults to overflow: auto, and nobody had put
+     anything on the PANEL itself - TOR-172's overflow: hidden below is on
+     .lightbox-view, the picture's own window, one level in. Left at the
+     default, a feedback loop follows: the panel's true content (714px tall
+     on the measuring frame) came out 1px wider and 13px taller than the
+     panel's own client box for reasons that have nothing to do with real
+     overflow (see .lightbox-marks::after below for the 1px), scrollbars
+     appeared, each ate 15px of client box, and the now-smaller client box
+     made the same content overflow even more - so the bars, once summoned,
+     had no way to go away on their own. overflow: hidden makes "nothing
+     leaves the panel" (rule 4, TOR-172) structurally true at this level too,
+     the same way .lightbox-view's own overflow: hidden makes it true for the
+     picture - and it also stops that feedback loop from ever being able to
+     start, which matters beyond cosmetics: app.js's availableBox() reads its
+     maximum off .lightbox-view's resolved box, and a scrollbar-narrowed
+     ancestor is exactly the kind of thing that number must never depend on. */
+  overflow: hidden;
 }
 .lightbox::backdrop { background: var(--scrim-strong); }
 
@@ -1606,7 +1623,24 @@ button:disabled { opacity: .5; }
    itself - a hairline in one colour over arbitrary footage is TOR-122's
    problem all over again, and a bracket cannot carry a scrim.
    .lightbox-marks exists because a corner needs a pseudo-element of its own
-   and one element has two. */
+   and one element has two.
+
+   TOR-177 asked, while fixing the panel's own scrolling, whether this still
+   needs to span the WHOLE panel (inset: 0 below) rather than sit as a 34px
+   box at its one corner the way .lightbox::before/::after do. Measured
+   (not guessed): a bare .lightbox-marks with both its pseudo-elements
+   suppressed contributes zero scrollable overflow of its own - inset: 0
+   lands it exactly on the panel's padding box, flush. So spanning the panel
+   is not what needed fixing (.lightbox's own overflow: hidden above is), and
+   there is a real reason to leave it spanning: it is the one host for TWO
+   pseudo-elements that reach two different corners - ::before bottom-left,
+   ::after (the chamfer stroke, further down) bottom-right - and shrinking
+   the host to 34px at one corner would leave the other with no box to
+   measure its offsets from, forcing it to depend on the panel's own
+   dimensions by hand instead of by "the far edge of my own containing
+   block" - exactly the kind of fragile-by-construction arithmetic that
+   pseudo-element's own comment (below) describes moving away from once
+   already. Left spanning, on purpose. */
 .lightbox::before, .lightbox::after, .lightbox-marks::before {
   content: "";
   position: absolute;
@@ -1653,7 +1687,27 @@ button:disabled { opacity: .5; }
    on the panel's own side. Previously it was centred ON the cut and relied
    on .lightbox's clip-path to trim whichever half fell outside - correct in
    the result, but a stroke depending on being cut in half by an unrelated
-   property is fragile in a way this avoids. */
+   property is fragile in a way this avoids.
+
+   TOR-177: this is THE SOURCE of the panel's 1px horizontal overflow (882
+   against 881 on the measuring frame), confirmed by counterfactual in a real
+   browser rather than assumed - hiding only this pseudo-element (not the
+   other two brackets, not .lightbox-marks itself) took the panel's
+   scrollWidth-clientWidth from 1 to 0, and zeroing just its `right` offset
+   (rotation kept) did the same, while un-rotating it (offset kept) made the
+   overflow WORSE (1px to 2px). The `right: -2.5px` above is deliberately
+   outside .lightbox-marks's own box - that is what lets the un-rotated bar
+   overhang the cut for a flush join, per this comment's own math - and the
+   -45deg rotation shrinks that box's horizontal extent (a 17x2 rectangle
+   rotated 45 degrees bounds to roughly 13.4x13.4) without shrinking it to
+   zero, so about a pixel still pokes past the panel's right edge after
+   rounding. Neither .lightbox-marks's own inset: 0 nor the fitted picture's
+   rounded width contributes anything here (both measured at exactly 0).
+   Harmless now that .lightbox carries its own overflow: hidden (above,
+   TOR-177) - the stroke still draws exactly where this comment says, just
+   clipped a pixel short of AN ancestor's edge nobody will ever see - but
+   worth naming so the next person does not mistake .lightbox-marks's SPAN
+   for the cause, the way it looks like it should be. */
 .lightbox-marks::after {
   content: "";
   position: absolute;

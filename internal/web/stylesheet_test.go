@@ -709,6 +709,65 @@ func TestLightboxViewIsTheClippedWindowBoundedByThePanelsOwnTokens(t *testing.T)
 	}
 }
 
+// TestLightboxPanelClipsItsOwnOverflow is TOR-177's guard: a <dialog>
+// defaults to overflow: auto, TOR-172 only ever put overflow: hidden on
+// .lightbox-view (the picture's window, one level in), and nobody had put
+// anything on the PANEL itself - so the dialog quietly fell back to its own
+// default, and a 1px/13px non-real overflow (see .lightbox-marks::after's own
+// comment for where the 1px came from) was enough to summon scrollbars that
+// then never went away, because each one ate space and made the same content
+// overflow more. A browser check alone would not catch this coming back -
+// only a real render shows a scrollbar - so this reads the declaration that
+// makes it structurally impossible instead.
+func TestLightboxPanelClipsItsOwnOverflow(t *testing.T) {
+	css := stylesheet(t)
+
+	panel := block(t, css, ".lightbox {")
+	got, ok := panel["overflow"]
+	if !ok {
+		t.Fatal(".lightbox declares no overflow - a <dialog> defaults to overflow: auto, so " +
+			"with nothing here the panel can scroll itself the moment its content measures a " +
+			"pixel wider or taller than its own client box, which is exactly TOR-177's bug")
+	}
+	if got != "hidden" && got != "clip" {
+		t.Errorf(".lightbox overflow is %q, want hidden or clip - anything else (starting with "+
+			"the dialog's own default, auto) lets the panel grow scrollbars of its own, which "+
+			"TOR-172's rule 4 (nothing may leave the panel) treats as the rule failing out loud",
+			got)
+	}
+
+	// The comment recording WHY this declaration exists, not just that it
+	// does - TOR-177 asked specifically for this, so the next person does not
+	// re-discover that a dialog defaults to auto by reintroducing the bug.
+	// Read from the raw (comment-bearing) text, right where the declaration
+	// sits, rather than from the stripped `live` text the other tests here
+	// use to check selectors survive - this one is checking the comment
+	// itself is still there.
+	i := strings.Index(css, ".lightbox {")
+	if i < 0 {
+		t.Fatal("app.css has no \".lightbox {\" rule")
+	}
+	end := strings.Index(css[i:], "\n}\n")
+	if end < 0 {
+		t.Fatal("the \".lightbox {\" rule is never closed")
+	}
+	ruleText := css[i : i+end]
+	if !strings.Contains(ruleText, "overflow: auto") && !strings.Contains(ruleText, "defaults to auto") {
+		t.Error(".lightbox's overflow: hidden carries no comment saying a dialog defaults to " +
+			"auto - that is the whole reason this bug shipped unnoticed once, and TOR-177 asked " +
+			"for the comment specifically so the next person does not rediscover it")
+	}
+
+	// TOR-172's own clip, one level in, untouched: the panel's overflow:
+	// hidden is a second, structural guard, not a replacement for the
+	// picture's own window clipping itself.
+	view := block(t, css, ".lightbox-view {")
+	if got := view["overflow"]; got != "hidden" {
+		t.Errorf(".lightbox-view overflow is %q, want hidden - TOR-177 must not have loosened "+
+			"TOR-172's own clamp while fixing the panel's", got)
+	}
+}
+
 // TestLightboxScalingAndPanAreWiredInTheServedScript reads app.js as served
 // text - there is no JS runner here (columns_test.go's note explains the
 // precedent) - so what it guards is that each of the four rules still has
