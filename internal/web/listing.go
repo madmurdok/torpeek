@@ -10,6 +10,7 @@ import (
 	"github.com/madmurdok/torpeek/internal/cache"
 	"github.com/madmurdok/torpeek/internal/core"
 	"github.com/madmurdok/torpeek/internal/manifest"
+	"github.com/madmurdok/torpeek/internal/output"
 	"github.com/madmurdok/torpeek/internal/swarm"
 )
 
@@ -968,6 +969,92 @@ func (s *Server) fileDetail(infoHash string, index int) (FileDetail, bool) {
 	detail.Frames = merged
 
 	return detail, true
+}
+
+// setsHoldingFrames lists the result sets of one torrent that still have at
+// least one frame of one file ON DISK - which is what ClearFile clears and
+// what the row's own button appears for (TOR-183).
+//
+// FRAMES ON DISK, not manifest records, and that is the whole reason this is
+// not a one-line walk of the parameter directories. A set whose every planned
+// point FAILED has a manifest, is listed in Selected, and has nothing to
+// show: the grid draws its failures as failures (TOR-118) and those records
+// are the only account anybody has of why the points produced nothing. A
+// clear that swept them would destroy the one thing the person did not ask to
+// destroy and could not get back, since a failure is not something a rerun
+// reproduces on demand. So a set with no picture in it is left entirely
+// alone, and the button - which counts pictures too - is never offered for
+// one.
+//
+// The parameter names are taken from the directory rather than validated as
+// core.ParamsKey output (validParams), unlike everything reaching the
+// filesystem from a REQUEST: these came from ReadDir on a path this server
+// built itself, so filtering them could only ever hide a set that is really
+// there.
+//
+// It repeats loadResultSet's disk walk instead of reading fileDetail's
+// answer, and it has to: fileDetail MERGES its frames by timecode, so a
+// second set captured at the same frame count - identical plan, identical
+// timecodes - is deduplicated away entirely and its parameter name never
+// appears in the response. Reading the sets off that would clear one of two
+// sets and report the file clean.
+func (s *Server) setsHoldingFrames(infoHash string, index int) []string {
+	if s.cfg.OutputRoot == "" || !validInfoHash(infoHash) || index < 0 {
+		return nil
+	}
+
+	paramDirs, err := os.ReadDir(filepath.Join(s.cfg.OutputRoot, infoHash))
+	if err != nil {
+		return nil
+	}
+
+	var sets []string
+	for _, paramDir := range paramDirs {
+		if !paramDir.IsDir() {
+			continue
+		}
+		layout := output.Layout{Root: s.cfg.OutputRoot, InfoHash: infoHash, Params: paramDir.Name()}
+		run, ok := cache.LoadRun(layout.RunDir())
+		if !ok {
+			continue
+		}
+		path, ok := videoPath(run, index)
+		if !ok {
+			continue
+		}
+		m, ok := cache.LoadManifest(layout.FileDir(index, path))
+		if !ok {
+			continue
+		}
+		if framesOnDisk(m) == 0 {
+			continue
+		}
+		sets = append(sets, paramDir.Name())
+	}
+	return sets
+}
+
+// framesOnDisk counts the frames of one manifest that are actually there.
+//
+// It is the same judgement loadResultSet makes per frame when it decides what
+// to publish - a record with a path, whose file exists and is not empty - and
+// deliberately not cache.Usable's, which answers a different question (is
+// this whole manifest servable) and would fail a file over a single frame
+// somebody deleted by hand. Nor is it len(m.Frames): a failed point is
+// recorded too, and counting it would call an empty file full, which is the
+// miscount TOR-110 and TOR-124 each fixed one level up.
+func framesOnDisk(m manifest.Manifest) int {
+	n := 0
+	for _, f := range m.Frames {
+		if f.Path == "" {
+			continue
+		}
+		if info, err := os.Stat(f.Path); err != nil || info.Size() == 0 {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // videoPath finds one video file's path in a run record.

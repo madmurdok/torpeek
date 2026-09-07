@@ -1365,6 +1365,30 @@ function newRunEntry(id) {
     // the row - "in this run" against "in the next pass" - and a reader has
     // to be able to tell which of their ticks is already spending.
     deferred: new Set(),
+    // unticked is what somebody has UN-TICKED on this row to be offered the
+    // clear (TOR-183), by torrent index. It is the only piece of tick state
+    // on this page the server does not own, and that is the whole design:
+    // un-ticking a FINISHED file asks nothing of the server and spends
+    // nothing - the run still asked for the file and cache.Run.Selected still
+    // says so - it only puts the Clear frames button on the row. So there is
+    // nothing for run_state to carry and nothing for it to overwrite, which
+    // matters because run_state ASSIGNS entry.picked on every message: a
+    // local un-tick recorded there would be undone by the next one.
+    //
+    // Its own set for the reason deferred above has one: picked answers "has
+    // this row asked for the file", which stays true after a clear and stays
+    // true while the offer is on screen, and folding two answers into one
+    // would leave a reader unable to tell an un-tick from a file that was
+    // never wanted.
+    //
+    // A stale entry is harmless by construction rather than by tidying:
+    // updateFileCosts only ever reads it together with "and this file has
+    // frames to clear", so an index left here for a file that no longer has
+    // any simply stops being offered and the box goes back to checked. It is
+    // still dropped at the two moments the offer genuinely ends - a re-tick,
+    // and a clear that left the file clean - because a top-up could otherwise
+    // bring the frames back and find the row still offering to delete them.
+    unticked: new Set(),
     // tickable is the server's own verdict on whether a tick would be
     // ACCEPTED for this row at all (run_state's "tickable", from
     // runEntry.refuseTick), and tickRefusal is the sentence to put on the
@@ -1564,6 +1588,11 @@ function resetRunContent(entry) {
   entry.fileListKnown = false;
   entry.picked.clear();
   entry.deferred.clear();
+  // And the offers on it (TOR-183). The rows those buttons sat on are about
+  // to be detached, and the frames they offered to clear are re-read from
+  // disk by the history that follows - so an offer kept here would be an
+  // offer about a file this page has yet to be told anything about.
+  entry.unticked.clear();
   entry.pickerRows.clear();
   // The tick's own two readings go with the list: they are the server's
   // answer for a state this row is about to be told again, and a stale
@@ -2477,6 +2506,51 @@ function renderFileList(entry, ev) {
       summary.className = "picker-summary";
       row.append(summary);
 
+      // CLEAR FRAMES (TOR-183), last in the row and hidden until somebody
+      // un-ticks a finished file - see updateFileCosts for the three things
+      // that have to be true at once, and tickFile for why the un-tick is
+      // the gate.
+      //
+      // A BUTTON INSIDE THE <label>, which the disclosure at the head of this
+      // row has already paid for the right to be: HTML's activation behaviour
+      // for a label does nothing for events targeted at interactive content
+      // descendants, so pressing this cannot also toggle the checkbox. What
+      // that note ALSO records is what made it safe - the label names its
+      // control by id (row.htmlFor below), so a labelable element appearing
+      // in the row can no longer steal it by being first, which is exactly
+      // how TOR-182 lost the whole of TOR-181's tick.
+      //
+      // stopPropagation, unlike the disclosure: the row's own click listener
+      // opens the file's detail, and the triangle wants that (it IS the
+      // control for it) while a destructive button must never also be a
+      // gesture that opens something. The same discipline .run-cancel and the
+      // two priority buttons keep one level up.
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "picker-clear";
+      clear.hidden = true;
+      clear.addEventListener("click", (event) => {
+        event.stopPropagation();
+        clearFrames(entry, file.index);
+      });
+      row.append(clear);
+
+      // WHAT A CLEAR THAT ONLY PARTLY HAPPENED LEFT BEHIND (TOR-78's shape at
+      // a file's size): reported here, beside the file, rather than in the
+      // page's own error line - which is where the per-frame delete puts its
+      // warning, and can afford to, because a person clicking a thumbnail is
+      // looking at the one grid it belongs to. A season pack has twenty-five
+      // rows, and a sentence at the top of the page saying some frames could
+      // not be removed would not say WHICH file's.
+      //
+      // A SIBLING OF THE ROW, not part of it, for the reason .file-detail
+      // below is one: the row is a <label>, and a whole sentence inside it
+      // would join the checkbox's accessible name.
+      const note = document.createElement("p");
+      note.className = "picker-note";
+      note.hidden = true;
+      item.append(note);
+
       // THE SLOT ITSELF: built empty with the row, filled by fileBlock the
       // first time this file says anything, and a SIBLING of the row rather
       // than part of it (see this function's own heading, point 2). It is
@@ -2492,7 +2566,7 @@ function renderFileList(entry, ev) {
       item.append(detail);
 
       entry.pickerRows.set(file.index,
-        { item, row, box, name, cost, state: asked, summary, open, detail });
+        { item, row, box, name, cost, state: asked, summary, open, detail, clear, note });
 
       // ONE LISTENER FOR THE WHOLE ROW, on the row and not on the triangle:
       // the ticket's own words are that clicking a video FILE opens its
@@ -2620,14 +2694,56 @@ function updateFileCosts(entry) {
   for (const [index, row] of entry.pickerRows) {
     const asked = entry.picked.has(index);
     const deferred = entry.deferred.has(index);
+    // WHETHER THIS FILE CAN BE CLEARED (TOR-183), which is three things at
+    // once and none of them is "was it selected":
+    //
+    //   - it was asked for, so it is one of this row's files at all;
+    //   - the row has SETTLED, so nothing is fetching this file - un-ticking
+    //     one that is still going is a cancel and a different act entirely,
+    //     which is TOR-184's, and offering a clear there would put a
+    //     destructive button on a file mid-capture. The row's own state is
+    //     the coarsest honest answer available: file_done says a file
+    //     finished, but a row can start a SECOND pass afterwards (TOR-181),
+    //     so a per-file flag would go stale where this cannot;
+    //   - and it HAS FRAMES ON DISK. This is the thing the ticket insists on
+    //     - the page must know a file has frames, not merely that it was
+    //     selected - and the page already does: framesOnDisk counts exactly
+    //     the cells updateFileSummary states beside them, whether they
+    //     arrived live or off disk on a replay.
+    const clearable = asked && FINAL.has(entry.state) && framesOnDisk(entry, index) > 0;
+    // And whether somebody has actually asked for it. Read together with
+    // clearable and never on its own, which is what makes a stale entry in
+    // the set harmless: a file whose frames have gone stops being offered
+    // and its box goes straight back to checked.
+    const offering = clearable && entry.unticked.has(index);
 
-    // ASKED FOR IS DISABLED, and the box stays checked. Un-ticking cannot
-    // un-start a fetch, so a box that could be cleared would claim to stop
-    // something it has no way of stopping - the same reason Select none is
-    // gone. TOR-184 is the ticket that makes un-ticking mean "cancel this",
-    // and turning this line into a live box is most of that change.
-    row.box.disabled = asked || !entry.tickable;
-    row.box.checked = asked;
+    // ASKED FOR IS DISABLED, WITH ONE LIVE CASE. Un-ticking cannot un-start
+    // a fetch, so a box that could be cleared would claim to stop something
+    // it has no way of stopping - the reason Select none is gone, and still
+    // the rule for every file this row is or may yet be fetching. TOR-184
+    // is the ticket that makes un-ticking a file mid-fetch mean "cancel
+    // this". The exception is the one TOR-184's own description hands here:
+    // a FINISHED file with frames on disk, where un-ticking means "offer to
+    // clear them" - so that box has to be clickable, and only that one.
+    row.box.disabled = asked ? !clearable : !entry.tickable;
+    row.box.checked = asked && !offering;
+
+    // The button goes when there is nothing to clear, which is the other
+    // half of its stated lifecycle - and it goes by the `hidden` attribute
+    // alone, never a class (.picker-clear declares no display of its own,
+    // and carries a [hidden] companion anyway; see app.css).
+    row.clear.hidden = !offering;
+    if (offering) {
+      // THE FIGURE IS IN THE BUTTON, the way Select all's total is: this is
+      // the most destructive press on the row, and a control labelled
+      // "Clear" alone would not say how much. Read from the same count the
+      // summary beside it shows, so the two cannot disagree.
+      const frames = framesOnDisk(entry, index);
+      row.clear.textContent = "Clear " + (frames === 1 ? "1 frame" : frames + " frames");
+      row.clear.title = "delete this file's frames, its contact sheet and its manifest from " +
+        "disk, and drop it from what this result counts as complete — the file stays " +
+        "listed as asked for, so a top-up can take it again";
+    }
 
     if (asked) {
       row.item.dataset.tick = "asked";
@@ -2638,11 +2754,23 @@ function updateFileCosts(entry) {
       // reader cannot see is the one case where a tick did NOT join the run
       // in flight, so that is the only case with words on it.
       row.state.textContent = deferred ? "in the next pass" : "";
-      row.row.title = deferred
-        ? "ticked while this torrent was already fetching - the engine works from a plan " +
-            "it was handed, so this file starts the moment that pass ends, on this same row"
-        : "this row has asked for this file - whatever it has taken is in the file's own " +
-            "block below";
+      // WHICH ACT THE BOX IS ABOUT TO DO, BEFORE IT IS DONE, which is a
+      // requirement rather than a courtesy: from TOR-183 an asked-for box is
+      // live in exactly one state and inert in every other, and nothing else
+      // on the row distinguishes the two. The clear's own sentence lives on
+      // the button; this is what the BOX promises, and it promises that
+      // un-ticking spends nothing and deletes nothing by itself.
+      if (deferred) {
+        row.row.title = "ticked while this torrent was already fetching - the engine works " +
+          "from a plan it was handed, so this file starts the moment that pass ends, on " +
+          "this same row";
+      } else if (clearable) {
+        row.row.title = "this row captured this file - un-tick it to be offered a clear, " +
+          "which deletes its frames from disk; un-ticking by itself changes nothing";
+      } else {
+        row.row.title = "this row has asked for this file - whatever it has taken is in " +
+          "the file's own block below";
+      }
       continue;
     }
 
@@ -2762,13 +2890,28 @@ function syncSelectAll(entry) {
   entry.pickerAll.title = entry.pickerArmed.textContent;
 }
 
-// tickFile is what a checkbox now means: capture this file, now.
+// tickFile is what a checkbox means, and since TOR-183 that depends on which
+// way it was just moved and on what the file has.
 //
-// The box is CHECKED by the time this runs (it is a change listener), and
-// that check is optimistic - startFiles rolls it back if the server refuses.
-// A cleared box cannot happen through the UI, since updateFileCosts disables
-// every box it has asked for; the guard is here for a stale DOM and for the
-// one honest answer available until TOR-184 gives un-ticking a meaning.
+// The box's own state is already changed by the time this runs (it is a
+// change listener). A TICK captures the file, optimistically - startFiles
+// rolls the box back if the server refuses. An UN-TICK is one of two entirely
+// different acts, and telling them apart is the whole of this function's new
+// half:
+//
+//   - On a FINISHED file with frames on disk, it offers to clear them. It
+//     asks nothing of the server, spends nothing and deletes nothing: the run
+//     still asked for this file and cache.Run.Selected still says so, so
+//     there is no server state for an un-tick to change. It puts the button
+//     on the row, and ticking the box again takes it away. Nothing about this
+//     is irreversible until that button is pressed.
+//   - On anything else - a file being fetched now, one waiting for the next
+//     pass, one whose row is still going - it is refused with the sentence it
+//     has carried since TOR-181, because a fetch cannot be un-started from
+//     here. Making that gesture mean "stop this file" is TOR-184, which is
+//     also where the two are made legible to a person before they act; until
+//     then updateFileCosts leaves every one of those boxes an honest
+//     `disabled` control and this is the guard for a stale DOM.
 function tickFile(entry, index, box) {
   // Somebody who ticks a single file has answered Select all's question by
   // doing something else; leaving it armed behind them would put a
@@ -2776,12 +2919,191 @@ function tickFile(entry, index, box) {
   disarmSelectAll(entry);
 
   if (!box.checked) {
+    // The same three conditions updateFileCosts drew the live box from, read
+    // again here rather than trusted: a run_state or a delete may have landed
+    // between the render and the click, and the box being clickable is not by
+    // itself evidence that there is anything left to clear.
+    if (entry.picked.has(index) && FINAL.has(entry.state) && framesOnDisk(entry, index) > 0) {
+      entry.unticked.add(index);
+      // Any warning a previous clear on this file left goes with the new
+      // offer: it described a state the button is about to be pressed on
+      // again, and keeping it would read as a report on this press.
+      setFileNote(entry, index, "");
+      updateFileCosts(entry);
+      logFor(entry, "file " + index + " un-ticked - its frames can be cleared from disk, " +
+        "and nothing has been deleted");
+      return;
+    }
     box.checked = true;
     showError("un-ticking cannot stop a capture that has already started — " +
       "use Cancel on the torrent's own row to stop this run");
     return;
   }
+
+  // TICKING AN OFFER BACK CLOSED, and it must be handled before startFiles:
+  // the file is already in entry.picked, so startFiles would filter it out
+  // and return without redrawing, leaving the button standing beside a box
+  // that is ticked again.
+  if (entry.unticked.delete(index)) {
+    setFileNote(entry, index, "");
+    updateFileCosts(entry);
+    return;
+  }
+
   startFiles(entry, [index]);
+}
+
+// framesOnDisk is how many frames of one file this row has to show, which is
+// the same question as "is there anything here to clear" (TOR-183).
+//
+// It counts the very cells updateFileSummary states on the row, through the
+// same helper, so the button's figure and the summary's can never disagree -
+// a "Clear 12 frames" beside "8 frames" would be two answers to one question,
+// and only one of them could be right.
+//
+// Zero for a file with no block at all, which is the honest answer rather
+// than "unknown": a block exists from the moment a file says anything, live
+// or replayed off disk - core's cacheHit.publish republishes file_started and
+// every frame_ready for a reopened run, so a finished file's frames reach
+// this page the same way whether the run is happening now or happened last
+// week. A file with no block has said nothing, and there is nothing on this
+// row for a clear to act on.
+function framesOnDisk(entry, index) {
+  const fentry = entry.fileEntries.get(index);
+  return fentry ? capturedCells(fentry) : 0;
+}
+
+// capturedCells counts the cells of one file's grid that actually have a
+// picture.
+//
+// NOT fentry.frames.size, and that distinction is the one the grid acquired
+// when a point that produced nothing started being listed at all (TOR-118):
+// the map holds an entry for every planned point a finished run recorded,
+// failures included, so its plain size reports a holed run of five frames as
+// twelve. A count that is really a plan pretending to be a result is the kind
+// of quiet lie this project keeps finding.
+function capturedCells(fentry) {
+  return gridCells(fentry).filter((cell) => cell.url).length;
+}
+
+// setFileNote writes - or takes away - the sentence beside one file's row.
+//
+// One function so the note can never be left visible and empty, or filled and
+// hidden: it is taken off screen by the `hidden` attribute AND emptied, since
+// a stale sentence sitting in a hidden element is one an unrelated later
+// change would put back on screen.
+function setFileNote(entry, index, text) {
+  const row = entry.pickerRows.get(index);
+  if (!row) return;
+  row.note.textContent = text;
+  row.note.hidden = !text;
+}
+
+// clearFrames deletes everything one file has on disk - its frames, its
+// contact sheet, its manifest - and drops it from what each result set counts
+// as complete (core.ClearFile, reached through DELETE on the file's frames).
+//
+// NO CONFIRMATION STEP, and unlike the per-frame cross this one has two
+// gestures rather than none: the box has to be un-ticked before the button
+// exists at all, and the button says how many frames it will delete. So the
+// figure is read before the press, which is what Select all's arming exists
+// to achieve for the most expensive click on the page - and there is no
+// dialog here for the same three reasons stated there (this page has none
+// anywhere, an unstyleable modal cannot state a figure in the page's own
+// type, and a blocking dialog cannot be seen in a screenshot of what the page
+// said).
+//
+// THE WAY BACK IS REAL, which is what makes one press acceptable: the file
+// stays in cache.Run.Selected, so a top-up (TOR-152) sees a file that was
+// asked for with nothing captured and offers to take it again, at the same
+// plan, into the same result set. That is stated on the button's own title
+// rather than left for somebody to discover.
+//
+// The grid is REPLACED from what the server read back off disk, never edited
+// here: a page that removed its own tiles and hoped the two agreed is exactly
+// how a frame comes to be on screen that is not on disk.
+async function clearFrames(entry, index) {
+  showError("");
+  if (!entry.infohash) return;
+  const row = entry.pickerRows.get(index);
+  if (!row) return;
+
+  setFileNote(entry, index, "");
+  // The button is the only feedback there is between the press and the
+  // answer, and this is a request that can take a moment (it walks every
+  // result set on disk). A second press would send a second DELETE for a file
+  // the first one is already clearing.
+  row.clear.disabled = true;
+  try {
+    // No params: every result set this torrent holds frames of this file in,
+    // which is what the grid under this row is showing (Server.ClearFile
+    // argues why the button cannot honestly mean one of them). Assembled from
+    // segments for the reason loadFileDetail gives - an inline path would
+    // read as a site-root path and break under a base path.
+    const path = ["runs", entry.infohash, "files", index, "frames"].join("/");
+    const answer = await del(url(path));
+    const detail = answer.file;
+
+    const fentry = entry.fileEntries.get(index);
+    if (fentry) {
+      fentry.frames = new Map();
+      for (const f of (detail && detail.frames) || []) {
+        fentry.frames.set(f.time_ms, detailFrame(f));
+      }
+      // The plan and the live skips go with the frames, for the reason
+      // loadFileDetail drops them: they describe one run's attempt, and what
+      // is on screen now is every set this file has left on disk. Keeping the
+      // plan would lay the grid out from points nothing can fill.
+      fentry.plan = [];
+      fentry.skipped.clear();
+      renderFrames(fentry);
+      updateFileSummary(fentry);
+      // AND THE STRIP THAT DESCRIBED THEM. renderReach draws where in the
+      // file the frames came from; with no frames left there is nothing for
+      // it to be about, and it has no "nothing" state - handed an empty list
+      // it says "where the frames came from was not recorded for this set",
+      // which is a sentence about a set that no longer exists. So it is taken
+      // off screen rather than redrawn.
+      //
+      // AND THE CONTACT SHEET LINK, which the browser found rather than any
+      // test here: it is put on screen by the file's own file_done (onFileDone
+      // reads ev.sheet_url) and nothing else ever takes it away, so after a
+      // clear it stood there offering a picture that had just been deleted -
+      // a link whose only possible answer is a 404. It is exactly the untruth
+      // this ticket is about, one element over from the frames.
+      if (capturedCells(fentry) === 0) {
+        fentry.reach.hidden = true;
+        fentry.links.hidden = true;
+        fentry.links.replaceChildren();
+      } else {
+        renderReach(fentry, (detail && detail.sets) || []);
+      }
+    }
+
+    // THE WARNING GOES BESIDE THE FILE (TOR-78's shape): the clear happened -
+    // the record and the manifest say the file is not part of this result any
+    // more - and something of it is still on disk. Refusing to re-render
+    // would leave frames on screen that nothing accounts for, and reporting
+    // it as a failure would tell a person nothing was deleted.
+    if (answer.warning) setFileNote(entry, index, answer.warning);
+
+    // The offer is over only if the file is actually clean. A clear that
+    // partly failed leaves frames, so it leaves the button too - with the
+    // warning beside it saying what is in the way, and a second press worth
+    // making.
+    if (framesOnDisk(entry, index) === 0) entry.unticked.delete(index);
+    updateFileCosts(entry);
+    logFor(entry, "cleared file " + index + "'s frames from disk" +
+      (answer.warning ? " - " + answer.warning : ""));
+  } catch (err) {
+    // Beside the file, like the warning, and for the same reason: this is a
+    // report on one row's button. Nothing on screen changed, because nothing
+    // on disk did.
+    setFileNote(entry, index, String(err.message || err));
+    logFor(entry, "could not clear file " + index + ": " + (err.message || err));
+  } finally {
+    row.clear.disabled = false;
+  }
 }
 
 // startFiles asks the server to add these files to this row's run, and is
@@ -3258,12 +3580,17 @@ function setMetaExpanded(fentry, expanded) {
 // run recorded, failures included, so its plain size would report a holed run
 // of five frames as twelve. A count that is really a plan pretending to be a
 // result is the kind of quiet lie this project keeps finding.
+//
+// That count is capturedCells, shared with the row's Clear frames button
+// since TOR-183 rather than spelled twice: the button states how many frames
+// it will delete right beside this figure, and two independent counts of one
+// thing is two chances to be wrong about it.
 function updateFileSummary(fentry) {
   const parts = [];
   if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
 
   const cells = gridCells(fentry);
-  const captured = cells.filter((cell) => cell.url).length;
+  const captured = capturedCells(fentry);
   const planned = fentry.plan.length || cells.length;
 
   if (planned > captured) {

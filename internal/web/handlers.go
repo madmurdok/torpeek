@@ -655,12 +655,66 @@ func (s *Server) handleDeleteFrame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// deleteStatus maps a delete's three failures: nothing there to remove, a
-// request that does not name a frame, and a server with no way to remove one.
-// Anything else is a write that failed, which is the server's problem.
+// handleClearFile removes everything one file has on disk and answers with
+// that file's refreshed detail - the same body the GET on it returns and the
+// same body the per-frame DELETE beside it answers with, recomputed after the
+// clear, so a page re-renders from disk truth (TOR-183).
+//
+// A SIBLING ROUTE, not a special case of the one below it: DELETE on
+// .../frames clears the file, DELETE on .../frames/{frame} removes one of
+// them. Two patterns, two handlers, no argument standing in for a mode - a
+// frame index of -1 meaning "all of them" would be exactly the overloaded
+// parameter that makes a destructive call one typo away from a different act.
+//
+// params is OPTIONAL here, where the per-frame delete requires it, and
+// Server.ClearFile argues why: absent means every result set this torrent
+// holds frames of this file in, which is what the row's merged grid shows and
+// what the button beside it offers to clear. It stays a query parameter for
+// the reason handleDeleteFrame gives - the set is part of the address, not a
+// payload, and a DELETE with a body is awkward on both sides.
+//
+// A partial failure is a 200 carrying "warning", exactly as it is for one
+// frame: the clear happened, the file is out of what the result claims to
+// hold, and refusing to re-render would leave frames on screen that the
+// record no longer accounts for (TOR-78).
+func (s *Server) handleClearFile(w http.ResponseWriter, r *http.Request) {
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no such file")
+		return
+	}
+
+	detail, err := s.ClearFile(r.PathValue("infohash"),
+		strings.TrimSpace(r.URL.Query().Get("params")), index)
+	if err != nil && !errors.Is(err, core.ErrClearIncomplete) {
+		writeError(w, deleteStatus(err), err.Error())
+		return
+	}
+
+	// Wrapped under the same "file" key the GET and the per-frame DELETE both
+	// answer with, so a page can read any of the three the same way.
+	body := map[string]any{"file": detail}
+	if err != nil {
+		// The clear happened; some of what it was meant to remove is still
+		// there. Answering 200 says the first and the warning says the
+		// second - where a 500 would say neither truthfully.
+		body["warning"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// deleteStatus maps a removal's failures: nothing there to remove (a frame or
+// a whole file), a request that does not name one, and a server with no way
+// to remove anything. Anything else is a write that failed, which is the
+// server's problem.
+//
+// Shared by both DELETE routes rather than duplicated, which is the argument
+// core.ErrNoSuchFile's own doc makes from the other side: the two sentinels
+// exist so a MESSAGE can name the right noun, and they were never two
+// statuses.
 func deleteStatus(err error) int {
 	switch {
-	case errors.Is(err, core.ErrNoSuchFrame):
+	case errors.Is(err, core.ErrNoSuchFrame), errors.Is(err, core.ErrNoSuchFile):
 		return http.StatusNotFound
 	case errors.Is(err, errBadRequest):
 		return http.StatusBadRequest

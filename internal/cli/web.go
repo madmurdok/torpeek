@@ -70,14 +70,13 @@ func serveWeb(ctx context.Context, opts Options, base core.Config, tools ffmpeg.
 		return engine.Replay(base.OutputRoot, infoHash, params)
 	}
 
-	// Deleting one frame (TOR-70) is injected the same way and for the same
-	// reason: core owns everything under base.OutputRoot - it is the only
-	// package that writes there - and the rules a delete has to keep are the
-	// cache's, not a UI's. web validates the address and calls this; what a
-	// safe delete is stays in core.DeleteFrame.
-	deleter := func(infoHash, params string, fileIndex, frameIndex int) error {
-		return core.DeleteFrame(base.OutputRoot, infoHash, params, fileIndex, frameIndex)
-	}
+	// Removing results (TOR-70 for one frame, TOR-183 for a whole file) is
+	// injected the same way and for the same reason: core owns everything
+	// under base.OutputRoot - it is the only package that writes there - and
+	// the rules a removal has to keep are the cache's, not a UI's. web
+	// validates the address and calls this; what a safe removal is stays in
+	// core.DeleteFrame and core.ClearFile.
+	deleter := outputDeleter{root: base.OutputRoot}
 
 	// Listing a torrent's files before any of them is captured (TOR-67) is
 	// injected for the same reason again, and starts from the same base: the
@@ -384,6 +383,25 @@ func queueWidthNotice(maxActive int, budgetBytes int64) string {
 	return fmt.Sprintf("with %d at once, the per-run traffic ceiling of %s adds up to %s received in the worst case",
 		maxActive, humanBytes(perRunCeiling(budgetBytes)),
 		humanBytes(worstCaseBytes(maxActive, budgetBytes)))
+}
+
+// outputDeleter is web.Deleter over one output root: the whole of what this
+// package has to say about removing results, which is where they live.
+//
+// A type rather than the two closures it replaced (TOR-183), because
+// web.Deleter became an interface when a second operation joined it - see
+// that type's own doc for why two methods beat a seventh positional argument
+// to web.Start. Both methods are one call each into core, which is the point:
+// what a safe removal IS lives there with the cache rules it has to keep, and
+// nothing on this side may add a rule of its own.
+type outputDeleter struct{ root string }
+
+func (d outputDeleter) DeleteFrame(infoHash, params string, fileIndex, frameIndex int) error {
+	return core.DeleteFrame(d.root, infoHash, params, fileIndex, frameIndex)
+}
+
+func (d outputDeleter) ClearFile(infoHash, params string, fileIndex int) error {
+	return core.ClearFile(d.root, infoHash, params, fileIndex)
 }
 
 // perRunCeiling is the traffic ceiling one run is held to: what -max-bytes
