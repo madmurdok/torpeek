@@ -67,16 +67,24 @@ in this document.
 
 ### Sending a name to a third party is telling them what someone is watching
 
-This project already has a position on this class of thing, taken twice.
-Acceptance criterion 5 exists because a private torrent must not announce
-itself; TOR-150 turned webseeds off partly because they are HTTP requests to
-somebody else's server, revealing an IP and a file. Enrichment is the same
-shape: a lookup tells the service what this person is looking at, and a
-private torrent's name may itself be identifying.
+This project already has a position on this class of thing, and it is a
+requirement rather than a preference. Acceptance criterion 5 —
+REQUIREMENTS.md's list, item 5 — is that a `private: 1` torrent emits *not one*
+DHT or PEX request, verified by tracing; TOR-129 gave a private torrent a
+client of its own with DHT off specifically so that criterion stays true by
+construction rather than by care.
+
+Enrichment is the same shape one layer out: a lookup tells a third party what
+this person is looking at, and a private torrent's name can itself identify
+them. Nothing in criterion 5 covers an HTTP request to a metadata service —
+which is exactly why the position has to be taken here deliberately, instead of
+assumed to be inherited.
 
 So it is opt-in, with a plain statement of what leaves the machine and to
 whom — and the offline parse of step 1 must remain useful on its own, so that
-declining costs the tags but not the feature.
+declining costs the tags but not the feature. For a private torrent the
+default should be the stricter one: criterion 5's whole point is that such a
+torrent announces itself nowhere.
 
 ### A wrong answer is worse than no answer
 
@@ -84,8 +92,10 @@ Torrent names are dirty. A mis-parse names the wrong film, and a wrong cast
 list presented as fact is worse than an empty one: it is confidently wrong, in
 a place a person has no reason to doubt.
 
-This project has applied one rule to this seven consecutive times — TOR-119,
-TOR-111, TOR-135, TOR-134, TOR-147, TOR-136, TOR-153 — and it applies here
+This project has drawn one line for exactly this, and `internal/web/listing.go`
+keeps the tally rather than anybody's memory: six times over — TOR-119 for
+claimed pieces, TOR-111 for reach, TOR-135 for availability, TOR-134 for rates,
+TOR-147 on the progress event and TOR-136 at the listing. It applies here
 unchanged: **absent is not zero, and a guess is not a fact.** A low-confidence
 match reads as unknown, or as a candidate marked as one, never as an answer.
 
@@ -104,7 +114,7 @@ not a discovery to make half way through.
 ### Weight is not the obstacle
 
 Worth stating plainly, because "too heavy for a laptop" is the intuition and
-it is wrong:
+the numbers do not support it:
 
 | part | size | cost |
 | --- | --- | --- |
@@ -112,9 +122,13 @@ it is wrong:
 | embedding (MobileFaceNet) | ~4 MB | tens of ms per face, CPU |
 | embedding (ArcFace / buffalo_l) | ~100–300 MB | tens of ms per face, CPU |
 
-The release archives already carry 70–110 MB of bundled ffmpeg. A face stack
-is smaller than what ships today. **The obstacle is labels, not weight** — see
-step 3.
+Against what already ships, read off the 1.2.0 packaging run rather than
+recalled: the darwin-arm64 archive is 69.4 MiB packed and 156.5 MiB unpacked,
+of which the torpeek binary is 30 MB — so roughly 126 MiB of it is bundled
+ffmpeg and ffprobe, and the linux archive is larger again (108.1 MiB packed,
+252.5 MiB unpacked). A whole face stack is smaller than the media tooling this
+project already downloads and checksums. **The obstacle is labels, not
+weight** — see step 3.
 
 ### The library needs no index worth the name
 

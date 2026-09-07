@@ -35,16 +35,20 @@
 //
 // A LOOKUP IS A DISCLOSURE. Sending a name to a service tells that service
 // what this person is looking at, and a private torrent's name can itself
-// identify them. Acceptance criterion 5 exists because a private torrent must
-// not announce itself, and TOR-150 turned webseeds off partly because they are
-// HTTP to somebody else's server. So enrichment is opt-in, what leaves the
-// machine is stated plainly, and the offline parse stays useful on its own -
-// declining should cost the tags, not the feature.
+// identify them. Acceptance criterion 5 (REQUIREMENTS.md) is that a private
+// torrent emits not one DHT or PEX request, and TOR-129 gave such a torrent
+// its own DHT-off client so that stays true by construction - but criterion 5
+// says nothing about an HTTP call to a metadata service, so the position has
+// to be taken here rather than assumed inherited. Enrichment is opt-in, what
+// leaves the machine is stated plainly, the offline parse stays useful alone
+// so declining costs the tags rather than the feature, and a private torrent
+// gets the stricter default.
 //
 // A GUESS IS NOT A FACT. Release names are folklore, not a format, and a
 // mis-parse names the wrong film. A confidently wrong cast list is worse than
 // an empty one, because it sits somewhere a person has no reason to doubt.
-// The rule this project has applied seven times running - absent is not zero -
-// applies unchanged: a weak match reads as unknown, or as a candidate marked
-// as one, and never as an answer.
+// The line this project has drawn six times over - absent is not zero, tallied
+// in internal/web/listing.go rather than in anybody's memory - applies
+// unchanged: a weak match reads as unknown, or as a candidate marked as one,
+// and never as an answer.
 package enrich
