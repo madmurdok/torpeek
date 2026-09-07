@@ -8,6 +8,11 @@
 # Run artefacts
 /out/
 /cache/
+# The -out flag's own default, so this is what a plain run inside a checkout
+# leaves behind - not only the test targets. Ignored rather than tolerated
+# because an untracked directory here is exactly what a blanket `git add -A`
+# would sweep into the next commit.
+/torpeek-out/
 
 .DS_Store
 
