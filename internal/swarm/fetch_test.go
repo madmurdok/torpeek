@@ -551,3 +551,245 @@ func TestClaimedRangesCoalesceALongSequentialSweep(t *testing.T) {
 		t.Errorf("Claimed() counts %d pieces, want 2000", pieces)
 	}
 }
+
+// TOR-179: the per-capture-point claim log. Cumulative figures cannot say
+// where ONE frame came from, so the footprint is captured around each point -
+// StartClaimLog through EndClaimLog - and reported in the file's own bytes.
+
+// twoFileTorrent is the geometry every test below is judged on: two ten-piece
+// files laid end to end, so a claim can straddle the join, sit wholly in
+// another file, or reach past this one's end - all three of which happen for
+// real, since pieces do not respect file boundaries and one claim funnel
+// serves every file of a run at once.
+func twoFileTorrent(pieceLength int64) *Torrent {
+	return &Torrent{
+		files: []FileInfo{
+			{Index: 0, Path: "ep-1.mkv", Length: 10 * pieceLength, Offset: 0},
+			{Index: 1, Path: "ep-2.mkv", Length: 10 * pieceLength, Offset: 10 * pieceLength},
+		},
+		pieceLength: pieceLength,
+		numPieces:   20,
+		length:      20 * pieceLength,
+	}
+}
+
+func TestTheClaimLogSaysWhichPartOfTheFileOnePointOrdered(t *testing.T) {
+	const piece = 256 << 10
+	tor := twoFileTorrent(piece)
+
+	tor.StartClaimLog(1)
+	tor.logClaim(1, PieceRange{10, 12}) // the head of file 1
+	tor.logClaim(1, PieceRange{9, 11})  // straddles the join: only piece 10 is ours
+	tor.logClaim(1, PieceRange{15, 16}) // wholly inside
+	tor.logClaim(1, PieceRange{0, 5})   // wholly inside file 0 - nothing to record here
+	tor.logClaim(1, PieceRange{19, 20}) // the file's last piece
+	tor.logClaim(0, PieceRange{3, 4})   // another file, whose own point is not open
+
+	got := tor.EndClaimLog(1)
+	want := [][2]int64{{0, 2 * piece}, {5 * piece, 6 * piece}, {9 * piece, 10 * piece}}
+	if len(got) != len(want) {
+		t.Fatalf("EndClaimLog(1) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EndClaimLog(1) = %v, want %v", got, want)
+		}
+	}
+
+	// The log is one-shot: the point is over, and a second read must not hand
+	// the next point the last one's footprint.
+	if again := tor.EndClaimLog(1); again != nil {
+		t.Errorf("EndClaimLog(1) a second time = %v, want nil - the log is closed", again)
+	}
+}
+
+// TestTheClaimLogRecordsNothingBetweenPoints is what keeps the record
+// attributable: the container inspection at the start of a file, and any read
+// the bridge serves between capture points, belongs to no frame - so a claim
+// arriving with no log open must be dropped rather than banked for whichever
+// point opens next.
+//
+// Both gaps are checked, and the second is the one that needs the open test
+// rather than merely a fresh log. A stray claim BEFORE the first point is
+// wiped by StartClaimLog resetting the file's entry, so it would be dropped
+// even by a logger that recorded everything; a stray claim AFTER a point
+// closed is only dropped because nothing is open to record it.
+func TestTheClaimLogRecordsNothingBetweenPoints(t *testing.T) {
+	const piece = 256 << 10
+	tor := twoFileTorrent(piece)
+
+	// The inspect at the head of the file, before any point is taken.
+	tor.logClaim(0, PieceRange{0, 4})
+
+	tor.StartClaimLog(0)
+	tor.logClaim(0, PieceRange{6, 7})
+	got := tor.EndClaimLog(0)
+
+	want := [][2]int64{{6 * piece, 7 * piece}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("EndClaimLog(0) = %v, want %v - a read taken before the point opened was "+
+			"attributed to it", got, want)
+	}
+
+	// The gap after that point closed: a read the bridge is still serving
+	// while the engine writes the frame and moves on.
+	tor.logClaim(0, PieceRange{1, 2})
+
+	tor.StartClaimLog(0)
+	tor.logClaim(0, PieceRange{8, 9})
+	got = tor.EndClaimLog(0)
+
+	want = [][2]int64{{8 * piece, 9 * piece}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("EndClaimLog(0) = %v, want %v - a read taken between two points was "+
+			"attributed to the next one", got, want)
+	}
+}
+
+// TestTheClaimLogKeepsTheHeaderForEveryPointThatReadIt is the difference from
+// noteClaimed, and the reason the two are separate records rather than one.
+// The counter de-duplicates across the whole run, deliberately (Claimed's own
+// doc: what the run ordered at least once). Every capture point's ffprobe
+// re-reads the container header, so a log built on the counter's own
+// bookkeeping would hand the header to the first point and tell every other
+// one it came from nowhere near the front of the file.
+func TestTheClaimLogKeepsTheHeaderForEveryPointThatReadIt(t *testing.T) {
+	const piece = 256 << 10
+	tor := twoFileTorrent(piece)
+
+	header := PieceRange{0, 1}
+	for point := 0; point < 3; point++ {
+		tor.StartClaimLog(0)
+		tor.logClaim(0, header)
+		tor.noteClaimed(header)
+		tor.logClaim(0, PieceRange{3 + point, 4 + point})
+		tor.noteClaimed(PieceRange{3 + point, 4 + point})
+
+		got := tor.EndClaimLog(0)
+		want := [][2]int64{{0, piece}, {int64(3+point) * piece, int64(4+point) * piece}}
+		if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+			t.Fatalf("point %d: EndClaimLog(0) = %v, want %v", point, got, want)
+		}
+	}
+
+	// And the run-wide counter is untouched by all that repetition: one header
+	// piece plus three distinct ones.
+	if pieces, _ := tor.Claimed(); pieces != 4 {
+		t.Errorf("Claimed() counts %d pieces, want 4 - the per-point log must not double-count "+
+			"into the run's own figure", pieces)
+	}
+}
+
+// TestTheClaimLogCoalescesWhatOnePointRead: a point orders a window at a time
+// and re-reads the same few kilobytes several times over, so the record is
+// merged into stretches - a picture of where it reached, not a bag of reads.
+func TestTheClaimLogCoalescesWhatOnePointRead(t *testing.T) {
+	const piece = 256 << 10
+	tor := twoFileTorrent(piece)
+
+	tor.StartClaimLog(0)
+	// Out of order, touching, overlapping, and one wholly inside another -
+	// every shape the merge has to survive.
+	tor.logClaim(0, PieceRange{5, 6})
+	tor.logClaim(0, PieceRange{1, 4})
+	tor.logClaim(0, PieceRange{4, 5})
+	tor.logClaim(0, PieceRange{2, 3})
+	tor.logClaim(0, PieceRange{1, 2})
+	tor.logClaim(0, PieceRange{8, 9})
+
+	got := tor.EndClaimLog(0)
+	want := [][2]int64{{piece, 6 * piece}, {8 * piece, 9 * piece}}
+	if len(got) != len(want) {
+		t.Fatalf("EndClaimLog(0) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("EndClaimLog(0) = %v, want %v", got, want)
+		}
+	}
+}
+
+// TestTheClaimLogClipsToTheFilesLastByte: a file's last byte usually sits
+// inside a piece it shares with the next file, and a claim on that piece must
+// be recorded as reaching the end of THIS file rather than past it - the
+// record is the frame's own truth about the file, so an offset outside it
+// would be unreadable against the file's own length.
+func TestTheClaimLogClipsToTheFilesLastByte(t *testing.T) {
+	const piece = 256 << 10
+	// One file ending one byte into piece 3, with a second file after it.
+	tor := &Torrent{
+		files: []FileInfo{
+			{Index: 0, Path: "a.mkv", Length: 3*piece + 1, Offset: 0},
+			{Index: 1, Path: "b.mkv", Length: piece, Offset: 3*piece + 1},
+		},
+		pieceLength: piece,
+		numPieces:   5,
+		length:      4*piece + 1,
+	}
+
+	tor.StartClaimLog(0)
+	tor.logClaim(0, PieceRange{3, 5})
+	got := tor.EndClaimLog(0)
+
+	want := [2]int64{3 * piece, 3*piece + 1}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("EndClaimLog(0) = %v, want %v - the record must stop at the file's own end", got, want)
+	}
+}
+
+// TestNoClaimLogAtAllReportsNothing keeps the two silences the same: a file
+// nobody opened a log for, and a point that ordered nothing. Both are "no
+// provenance", which manifest.Frame.ByteRanges records as absent rather than
+// as a frame that came from nowhere in particular.
+//
+// The middle case is what logClaim's open test is actually load-bearing for,
+// and it is not covered by StartClaimLog resetting the entry: a claim arriving
+// with no log open must not create one, or the map grows an entry per file
+// that nothing ever reads and a later read of a closed log answers with
+// somebody else's traffic.
+func TestNoClaimLogAtAllReportsNothing(t *testing.T) {
+	const piece = 256 << 10
+	tor := twoFileTorrent(piece)
+
+	if got := tor.EndClaimLog(0); got != nil {
+		t.Errorf("EndClaimLog(0) with no log open = %v, want nil", got)
+	}
+
+	// The file's own container inspection, which belongs to no capture point.
+	tor.logClaim(0, PieceRange{0, 4})
+	if got := tor.EndClaimLog(0); got != nil {
+		t.Errorf("EndClaimLog(0) after a claim nobody was recording = %v, want nil - "+
+			"the claim opened a log of its own", got)
+	}
+
+	tor.StartClaimLog(0)
+	if got := tor.EndClaimLog(0); got != nil {
+		t.Errorf("EndClaimLog(0) after a point that ordered nothing = %v, want nil", got)
+	}
+}
+
+// TestTwoFilesCapturedAtOnceKeepTheirOwnFootprints is why the log is keyed by
+// file. A run captures several files at a time (core.Config.Parallelism)
+// through one torrent and therefore one claim funnel, so without the key one
+// file's reads would be recorded as another file's provenance.
+func TestTwoFilesCapturedAtOnceKeepTheirOwnFootprints(t *testing.T) {
+	const piece = 256 << 10
+	tor := twoFileTorrent(piece)
+
+	tor.StartClaimLog(0)
+	tor.StartClaimLog(1)
+	tor.logClaim(0, PieceRange{2, 3})
+	tor.logClaim(1, PieceRange{16, 17})
+	tor.logClaim(0, PieceRange{4, 5})
+
+	first, second := tor.EndClaimLog(0), tor.EndClaimLog(1)
+	wantFirst := [][2]int64{{2 * piece, 3 * piece}, {4 * piece, 5 * piece}}
+	wantSecond := [][2]int64{{6 * piece, 7 * piece}}
+
+	if len(first) != 2 || first[0] != wantFirst[0] || first[1] != wantFirst[1] {
+		t.Errorf("file 0 = %v, want %v", first, wantFirst)
+	}
+	if len(second) != 1 || second[0] != wantSecond[0] {
+		t.Errorf("file 1 = %v, want %v", second, wantSecond)
+	}
+}

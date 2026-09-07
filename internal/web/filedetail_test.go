@@ -2,8 +2,10 @@ package web
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -338,24 +340,58 @@ func TestValidInfoHashRefusesAnythingButADigest(t *testing.T) {
 	}
 }
 
-// TOR-111: a run's torrent-wide piece claims, turned into one file's stretch.
+// TOR-111, re-sourced by TOR-179: one file's stretch of the torrent, drawn
+// from where its own frames were taken rather than from a run's claim log.
 
-func TestReachOfClipsAClaimToTheFilesOwnPieces(t *testing.T) {
+// sourced builds one captured frame recording the file byte ranges it came
+// from - the shape core.processFile writes (manifest.Frame.ByteRanges).
+func sourced(index int, ranges ...[2]int64) manifest.Frame {
+	ms := int64(index) * 1000
+	return manifest.Frame{
+		Index: index, RequestedMS: ms, ActualMS: &ms, Path: "frames/00.jpg",
+		Width: 640, Height: 360, ByteRanges: ranges,
+	}
+}
+
+// unsourced is the same captured frame written before the field existed: a
+// real frame, on disk, with nothing to say about where it came from.
+func unsourced(index int) manifest.Frame {
+	f := sourced(index)
+	f.ByteRanges = nil
+	return f
+}
+
+// failed is a point that produced nothing - no frame, and so no provenance
+// for one either (manifest.ShiftFailed: "Path is empty and Error says why").
+func failed(index int) manifest.Frame {
+	return manifest.Frame{
+		Index: index, RequestedMS: int64(index) * 1000,
+		Shift: manifest.ShiftFailed, Error: "unavailable",
+	}
+}
+
+func TestReachOfTurnsFrameByteRangesIntoTheFilesOwnPieces(t *testing.T) {
 	const piece = 256 << 10
 
-	// A file starting 10 pieces in and spanning 20 of them.
+	// A file starting 10 pieces into the torrent and spanning 20 of them, so
+	// a bug that forgot the offset would show up as a shifted picture rather
+	// than as an equal one.
 	file := cache.File{Index: 1, Path: "b.mkv", Offset: 10 * piece, Bytes: 20 * piece}
 
-	got := reachOf([][2]int{
-		{0, 5},   // entirely before this file - another file, or the metadata
-		{8, 12},  // straddles the start: only 10..11 belong here
-		{15, 18}, // wholly inside
-		{28, 34}, // straddles the end: only 28..29 belong here
-		{40, 44}, // entirely after
+	got := reachOf([]manifest.Frame{
+		// The container header, which every point's ffprobe re-reads.
+		sourced(0, [2]int64{0, piece}),
+		// One byte inside a piece still costs the whole piece: that is the
+		// expansion swarm.PieceRangeFor makes on the way out, run backwards.
+		sourced(1, [2]int64{5 * piece, 5*piece + 1}),
+		// Overlaps the frame above; the two are one stretch, not two.
+		sourced(2, [2]int64{5*piece + 1, 8 * piece}),
+		// The last piece of the file.
+		sourced(3, [2]int64{19 * piece, 20 * piece}),
 	}, file, piece)
 
 	if got == nil {
-		t.Fatal("reachOf returned nil for a file with claims in it")
+		t.Fatal("reachOf returned nil for a set whose frames say where they came from")
 	}
 	if got.FirstPiece != 10 || got.Pieces != 20 || got.PieceBytes != piece {
 		t.Errorf("geometry = first %d, pieces %d, bytes %d; want 10, 20, %d",
@@ -364,7 +400,7 @@ func TestReachOfClipsAClaimToTheFilesOwnPieces(t *testing.T) {
 
 	// Offsets from FirstPiece, not absolute indices: the drawing's origin is
 	// the file, not the torrent.
-	want := [][2]int{{0, 2}, {5, 8}, {18, 20}}
+	want := [][2]int{{0, 1}, {5, 8}, {19, 20}}
 	if len(got.Claimed) != len(want) {
 		t.Fatalf("claimed = %v, want %v", got.Claimed, want)
 	}
@@ -373,8 +409,8 @@ func TestReachOfClipsAClaimToTheFilesOwnPieces(t *testing.T) {
 			t.Fatalf("claimed = %v, want %v", got.Claimed, want)
 		}
 	}
-	if got.ClaimedPieces != 7 {
-		t.Errorf("claimed_pieces = %d, want 7 - and it must equal the ranges' own sum",
+	if got.ClaimedPieces != 5 {
+		t.Errorf("claimed_pieces = %d, want 5 - and it must equal the ranges' own sum",
 			got.ClaimedPieces)
 	}
 
@@ -385,48 +421,98 @@ func TestReachOfClipsAClaimToTheFilesOwnPieces(t *testing.T) {
 	if sum != got.ClaimedPieces {
 		t.Errorf("the ranges cover %d pieces but claimed_pieces says %d", sum, got.ClaimedPieces)
 	}
+	if got.Captured != 4 || got.Located != 4 {
+		t.Errorf("captured/located = %d/%d, want 4/4 - every point produced a frame and every "+
+			"frame recorded its ranges, so the coverage is the whole story",
+			got.Captured, got.Located)
+	}
 }
 
 // TestReachOfSaysNothingRatherThanZero is the distinction TOR-119 already had
-// to make on disk and this inherits: a record with no claims recorded cannot
-// say the run touched nothing, and a strip drawn from it would assert exactly
-// that.
+// to make on disk and this inherits: a set with nothing recorded to reason
+// from cannot say the run touched nothing, and a strip drawn from it would
+// assert exactly that. The first case is the TOR-52 trap's own shape here -
+// manifest.Frame.ByteRanges was added without bumping manifest.Version, so
+// every manifest already on disk stays a hit and simply cannot answer.
 func TestReachOfSaysNothingRatherThanZero(t *testing.T) {
 	const piece = 256 << 10
 	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 10 * piece}
+	captured := []manifest.Frame{sourced(0, [2]int64{0, piece})}
 
 	for _, tc := range []struct {
-		name    string
-		claimed [][2]int
-		file    cache.File
-		piece   int64
+		name   string
+		frames []manifest.Frame
+		file   cache.File
+		piece  int64
 	}{
-		{"a record written before claims were kept", nil, file, piece},
-		{"a manifest with no piece length", [][2]int{{0, 4}}, file, 0},
-		{"a file of no length", [][2]int{{0, 4}}, cache.File{Index: 0, Path: "a.mkv"}, piece},
+		{"a manifest written before the frames recorded where they came from",
+			[]manifest.Frame{unsourced(0), unsourced(1)}, file, piece},
+		{"a manifest with no captured point at all",
+			[]manifest.Frame{failed(0), failed(1)}, file, piece},
+		{"a manifest with no frames at all", nil, file, piece},
+		{"a manifest with no piece length", captured, file, 0},
+		{"a file of no length", captured, cache.File{Index: 0, Path: "a.mkv"}, piece},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := reachOf(tc.claimed, tc.file, tc.piece); got != nil {
+			if got := reachOf(tc.frames, tc.file, tc.piece); got != nil {
 				t.Errorf("reachOf = %+v, want nil - there is nothing to draw from", got)
 			}
 		})
 	}
 }
 
-// TestReachOfReportsAFileTheRunNeverTouched keeps that case distinct from the
-// one above: here the record DOES say what was claimed, and the answer is that
-// none of it was this file. A strip of untouched blocks is the truthful
-// drawing, so it comes back with a geometry and no ranges.
-func TestReachOfReportsAFileTheRunNeverTouched(t *testing.T) {
+// TestReachOfLetsAFailedPointSayNothingAboutTheFile is the acceptance
+// criterion's own sentence: a failed point has no frame and so no range, and
+// that absence is not ignorance about the file. Counting it towards "nobody
+// knows" would let one unreachable point hide what the others plainly record,
+// which is the opposite mistake to the one this ticket exists to fix.
+func TestReachOfLetsAFailedPointSayNothingAboutTheFile(t *testing.T) {
 	const piece = 256 << 10
-	file := cache.File{Index: 2, Path: "c.mkv", Offset: 100 * piece, Bytes: 5 * piece}
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 10 * piece}
 
-	got := reachOf([][2]int{{0, 4}, {10, 20}}, file, piece)
+	got := reachOf([]manifest.Frame{
+		sourced(0, [2]int64{0, piece}),
+		failed(1),
+		sourced(2, [2]int64{8 * piece, 9 * piece}),
+	}, file, piece)
+
 	if got == nil {
-		t.Fatal("reachOf = nil; the record said what was claimed, so the answer is zero, not silence")
+		t.Fatal("reachOf = nil; two frames said where they came from, so the answer is not silence")
 	}
-	if got.Pieces != 5 || len(got.Claimed) != 0 || got.ClaimedPieces != 0 {
-		t.Errorf("reach = %+v, want 5 pieces and none of them claimed", got)
+	if got.Captured != 2 || got.Located != 2 {
+		t.Errorf("captured/located = %d/%d, want 2/2 - the failed point is not a point that "+
+			"could have answered, so it belongs in neither count", got.Captured, got.Located)
+	}
+	want := [][2]int{{0, 1}, {8, 9}}
+	if len(got.Claimed) != len(want) || got.Claimed[0] != want[0] || got.Claimed[1] != want[1] {
+		t.Errorf("claimed = %v, want %v", got.Claimed, want)
+	}
+}
+
+// TestReachOfSaysHowManyFramesCouldAnswer is the state a top-up onto an older
+// set actually lands in: the points it re-took record where they came from and
+// the ones it reused, written before the field existed, do not. The union is
+// then a floor rather than an answer, and the counts are what let the caption
+// say so instead of presenting a partial coverage as the whole reach.
+func TestReachOfSaysHowManyFramesCouldAnswer(t *testing.T) {
+	const piece = 256 << 10
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 10 * piece}
+
+	got := reachOf([]manifest.Frame{
+		unsourced(0),
+		unsourced(1),
+		sourced(2, [2]int64{4 * piece, 5 * piece}),
+	}, file, piece)
+
+	if got == nil {
+		t.Fatal("reachOf = nil; one frame did say where it came from")
+	}
+	if got.Captured != 3 || got.Located != 1 {
+		t.Errorf("captured/located = %d/%d, want 3/1", got.Captured, got.Located)
+	}
+	if got.ClaimedPieces != 1 {
+		t.Errorf("claimed_pieces = %d, want 1 - only the frame that can answer is drawn, and "+
+			"the counts are what admit the rest is unknown", got.ClaimedPieces)
 	}
 }
 
@@ -438,7 +524,7 @@ func TestReachOfHandlesAFileEndingMidPiece(t *testing.T) {
 	// Starts at the very start of piece 0 and ends one byte into piece 3.
 	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 3*piece + 1}
 
-	got := reachOf([][2]int{{0, 8}}, file, piece)
+	got := reachOf([]manifest.Frame{sourced(0, [2]int64{0, 3*piece + 1})}, file, piece)
 	if got == nil {
 		t.Fatal("reachOf returned nil")
 	}
@@ -446,6 +532,144 @@ func TestReachOfHandlesAFileEndingMidPiece(t *testing.T) {
 		t.Errorf("pieces = %d, want 4 - the file's last byte is in piece 3", got.Pieces)
 	}
 	if got.ClaimedPieces != 4 {
-		t.Errorf("claimed_pieces = %d, want 4 - the claim covers the whole file", got.ClaimedPieces)
+		t.Errorf("claimed_pieces = %d, want 4 - the frame came from all of the file", got.ClaimedPieces)
+	}
+}
+
+// TestReachOfKeepsARecordThatLandsNowhereApartFromNoRecord is the same
+// silence-against-zero line one step further in: here the frames DO record
+// ranges and none of them lands inside this file, which no run of ours writes
+// but a record off disk could hold. That is an answer - none of it came from
+// here - and a strip of untouched blocks is the truthful drawing of it.
+func TestReachOfKeepsARecordThatLandsNowhereApartFromNoRecord(t *testing.T) {
+	const piece = 256 << 10
+	file := cache.File{Index: 0, Path: "a.mkv", Offset: 0, Bytes: 5 * piece}
+
+	got := reachOf([]manifest.Frame{sourced(0, [2]int64{9 * piece, 10 * piece})}, file, piece)
+	if got == nil {
+		t.Fatal("reachOf = nil; the frame said where it came from, so the answer is zero, not silence")
+	}
+	if got.Pieces != 5 || len(got.Claimed) != 0 || got.ClaimedPieces != 0 {
+		t.Errorf("reach = %+v, want 5 pieces and none of them drawn", got)
+	}
+	if got.Located != 1 {
+		t.Errorf("located = %d, want 1 - the frame answered, the answer was just outside", got.Located)
+	}
+}
+
+// TestTheStripIsDrawnFromTheFramesNotTheLastRunsClaimLog is TOR-179's own
+// regression, end to end through the endpoint the page actually calls.
+//
+// The set on disk is exactly the shape a TOP-UP leaves behind (TOR-152): four
+// frames spread across the file, and a run.json whose claim log holds the one
+// piece at the very end that the last run needed to fill the gap. Before this,
+// the strip was drawn from that log and showed a block at the end of a file
+// whose frames plainly cover all of it - the disagreement the owner reported.
+// It must now report the frames' own coverage, and the stale log must make no
+// difference to it.
+func TestTheStripIsDrawnFromTheFramesNotTheLastRunsClaimLog(t *testing.T) {
+	const piece = 256 << 10
+	const bytes = 20 * piece
+
+	root := t.TempDir()
+	m := manifest.Manifest{
+		Version: manifest.Version,
+		Torrent: manifest.Torrent{InfoHash: detailHash, PieceLength: piece},
+		File:    manifest.File{Index: 0, Path: "Lupin/ep.mkv", Bytes: bytes, Container: "matroska"},
+		Video:   manifest.Video{Codec: "h264", Width: 640, Height: 360},
+		Frames: []manifest.Frame{
+			sourced(0, [2]int64{0, piece}),
+			sourced(1, [2]int64{5 * piece, 6 * piece}),
+			sourced(2, [2]int64{10 * piece, 11 * piece}),
+			sourced(3, [2]int64{19 * piece, 20 * piece}),
+		},
+	}
+	run := cache.Run{
+		Version: cache.Version, Tool: "test", InfoHash: detailHash, Name: "Lupin",
+		Plan:     cache.Plan{Count: 4, Profile: "min-traffic", Format: "jpeg"},
+		Videos:   []cache.File{{Index: 0, Path: "Lupin/ep.mkv", Bytes: bytes, Offset: 0}},
+		Selected: []int{0},
+		Complete: []int{0},
+		// The last run's own traversal: it filled one point at the end, so
+		// this is all it claimed. Deliberately disjoint from three of the four
+		// frames, so drawing from it cannot be mistaken for drawing from them.
+		Claimed: [][2]int{{19, 20}},
+	}
+	buildCachedRun(t, root, detailHash, "aaaa1111", run, m)
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	fake := &fakeRun{}
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	detail, status := getFileDetail(t, ts.URL, detailHash, "0")
+	if status != http.StatusOK {
+		t.Fatalf("status %d, want 200", status)
+	}
+	if len(detail.Sets) != 1 || detail.Sets[0].Reach == nil {
+		t.Fatalf("sets = %+v, want one carrying a reach", detail.Sets)
+	}
+
+	got := detail.Sets[0].Reach
+	want := [][2]int{{0, 1}, {5, 6}, {10, 11}, {19, 20}}
+	if len(got.Claimed) != len(want) {
+		t.Fatalf("claimed = %v, want %v - the strip is drawn from run.json's stale claim log, "+
+			"not from the frames", got.Claimed, want)
+	}
+	for i := range want {
+		if got.Claimed[i] != want[i] {
+			t.Fatalf("claimed = %v, want %v", got.Claimed, want)
+		}
+	}
+	if got.ClaimedPieces != 4 {
+		t.Errorf("claimed_pieces = %d, want 4 - one per frame", got.ClaimedPieces)
+	}
+	if got.Captured != 4 || got.Located != 4 {
+		t.Errorf("captured/located = %d/%d, want 4/4", got.Captured, got.Located)
+	}
+}
+
+// TestAManifestWithNoFrameProvenanceSendsNoReachAtAll is the payload half of
+// "absent is unknown": the set is real and servable, its frames are on disk,
+// and it simply predates manifest.Frame.ByteRanges. The endpoint must omit
+// reach entirely rather than send one claiming zero coverage, because that is
+// the only shape the page can tell apart from a run that touched nothing
+// (app.js's renderReach hatches the strip on it).
+func TestAManifestWithNoFrameProvenanceSendsNoReachAtAll(t *testing.T) {
+	const piece = 256 << 10
+
+	root := t.TempDir()
+	m := manifest.Manifest{
+		Version: manifest.Version,
+		Torrent: manifest.Torrent{InfoHash: detailHash, PieceLength: piece},
+		File:    manifest.File{Index: 0, Path: "Lupin/ep.mkv", Bytes: 20 * piece, Container: "matroska"},
+		Video:   manifest.Video{Codec: "h264", Width: 640, Height: 360},
+		Frames:  []manifest.Frame{unsourced(0), unsourced(1)},
+	}
+	run := cache.Run{
+		Version: cache.Version, Tool: "test", InfoHash: detailHash, Name: "Lupin",
+		Plan:     cache.Plan{Count: 2, Profile: "min-traffic", Format: "jpeg"},
+		Videos:   []cache.File{{Index: 0, Path: "Lupin/ep.mkv", Bytes: 20 * piece, Offset: 0}},
+		Selected: []int{0},
+		Complete: []int{0},
+	}
+	buildCachedRun(t, root, detailHash, "aaaa1111", run, m)
+
+	cfg := DefaultConfig()
+	cfg.OutputRoot = root
+	fake := &fakeRun{}
+	_, ts := newTestServerWithConfig(t, cfg, fake.runner)
+
+	resp := get(t, ts.URL, "/runs/"+detailHash+"/files/0")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), `"reach"`) {
+		t.Errorf("the payload carries a reach for a set that cannot say where its frames "+
+			"came from; a zeroed one would draw as a run that touched none of the file:\n%s", body)
 	}
 }
