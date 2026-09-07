@@ -306,20 +306,40 @@ type Runner func(ctx context.Context, req RunRequest) (<-chan core.Event, error)
 // rather than by what a fresh run would be asked to do.
 type Replayer func(infoHash, params string) <-chan core.Event
 
-// Deleter removes one frame of one result set from disk - the record in the
-// file's manifest and the frame file both - and reports whether it could.
+// Deleter removes results from under the output root on a page's behalf: one
+// frame of one file, or everything one file has in one result set.
 //
 // It is injected for the same reason Runner and Replayer are: this package
 // does not decide what a run is and does not write under the output root.
-// core.DeleteFrame is the one real implementation, and everything that makes
-// a delete safe (the manifest written before the file is unlinked, survivors
-// never renumbered, a file whose last frame is gone taken out of run.json's
-// Complete) lives there with the cache rules it has to keep. Here there is
-// only an address to validate.
+// core owns both implementations, and everything that makes either safe - the
+// manifest written before a frame file is unlinked, survivors never
+// renumbered, the run record edited before a byte goes - lives there with the
+// cache rules it has to keep. Here there is only an address to validate.
 //
-// It takes no context: like a replay, this is a handful of local file
-// operations with nothing worth cancelling.
-type Deleter func(infoHash, params string, fileIndex, frameIndex int) error
+// AN INTERFACE RATHER THAN TWO INJECTED FUNCS, which it was until TOR-183
+// added the second operation. The alternative was a seventh positional
+// argument to Start and newServer, and the cost of that lands on the callers
+// that want neither: `newServer(ctx, cfg, runner, nil, nil, nil, nil)` is
+// four consecutive nils nobody can read, and a delete silently wired into the
+// lister's slot is the kind of mistake positional arguments make possible
+// rather than unlikely. Two methods on one capability also state the true
+// thing - both remove results from the same tree, under the same rules, for
+// the same reason - where two func types would have said they were unrelated.
+//
+// Neither method takes a context: like a replay, both are a handful of local
+// file operations with nothing worth cancelling.
+type Deleter interface {
+	// DeleteFrame removes one frame - the record in the file's manifest and
+	// the frame file both - leaving the rest of the run servable.
+	// core.DeleteFrame is the one real implementation (TOR-70).
+	DeleteFrame(infoHash, params string, fileIndex, frameIndex int) error
+	// ClearFile removes everything one file has in this result set - its
+	// frames, its contact sheet, its manifest - and drops it from that run
+	// record's Complete while leaving Selected alone. core.ClearFile is the
+	// one real implementation and argues that split, the order of the
+	// removals and what a partial failure means (TOR-183).
+	ClearFile(infoHash, params string, fileIndex int) error
+}
 
 // Lister reports what a torrent holds - its name, its infohash and its video
 // files - without capturing anything from it.
@@ -361,8 +381,11 @@ var errBadRequest = errors.New("web: malformed request")
 
 // errDeleteUnavailable is DELETE's counterpart to errReplayUnavailable: a
 // server built with no Deleter, or with no output root to delete from,
-// refuses rather than pretending it removed something.
-var errDeleteUnavailable = errors.New("web: deleting a frame is not available")
+// refuses rather than pretending it removed something. One sentinel for both
+// of the Deleter's methods (TOR-183), because the condition is the same
+// condition - there is nothing wired up to remove anything with - and the
+// message says removing rather than naming one of the two.
+var errDeleteUnavailable = errors.New("web: removing results from disk is not available")
 
 // errWatchUnavailable is what SendToWatchDir returns on a server started
 // without -watch-dir. The page does not show the button at all in that case
@@ -617,6 +640,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
 	mux.HandleFunc("POST /runs/priority", s.authGuard(s.handleSetPriority))
+	// The whole file, and one of its frames. Two patterns rather than one
+	// with an argument that means "all of them" - see handleClearFile.
+	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames", s.authGuard(s.handleClearFile))
 	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.HandleFunc("POST /files/{id}/watch", s.authGuard(s.handleWatchTorrent))
@@ -1337,7 +1363,7 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 	// handler answers with both, and a person is told what happened rather
 	// than being told the delete failed and left to discover otherwise on a
 	// reload (TOR-78).
-	deleteErr := s.deleter(infoHash, params, fileIndex, frameIndex)
+	deleteErr := s.deleter.DeleteFrame(infoHash, params, fileIndex, frameIndex)
 	if deleteErr != nil && !errors.Is(deleteErr, core.ErrSheetStale) {
 		return FileDetail{}, deleteErr
 	}
@@ -1350,6 +1376,125 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 		return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}, deleteErr
 	}
 	return detail, deleteErr
+}
+
+// ClearFile removes everything one file has on disk and answers with what it
+// has left, gathered exactly as GET /runs/{infohash}/files/{index} gathers it
+// - so a page re-renders from disk truth rather than from its own idea of
+// what a clear did (TOR-183, the same contract DeleteFrame above keeps).
+//
+// EMPTY params MEANS EVERY SET, and that is the decision this function
+// exists to carry. The control that reaches here sits on a FILE's row in a
+// torrent's file list, and the grid under that row is the merged grid of
+// every result set the torrent holds for the file (TOR-69, fileDetail) - so
+// "clear this file's frames" cannot honestly mean one of the sets a person is
+// looking at the frames of, and the button's own requirement, that it
+// disappear once there is nothing left to clear, is only decidable against
+// that same merged view. A named params still clears exactly one set, which
+// is what makes the per-set primitive reachable and testable on its own.
+//
+// It is deliberately NOT resolveSet's rule, which TopUp applies to the same
+// ambiguity one level up (one directory, or refuse). The two differ because
+// the acts differ: topping up every set at once would START N runs and spend
+// on each, so guessing there is unaffordable, while clearing every set is one
+// well-defined outcome - this file has nothing on this torrent afterwards -
+// that a person can read off the row before pressing anything.
+//
+// NOTHING TO CLEAR IS A 200, not a 404. The postcondition asked for already
+// holds, and the honest answer to "make sure this file has no frames" for a
+// file that has none is the file's own detail, which is what makes a second
+// press from a stale page harmless instead of an error about the state
+// somebody wanted.
+//
+// A PARTIAL FAILURE COMES BACK AS AN ERROR ALONGSIDE THE DETAIL, wrapping
+// core.ErrClearIncomplete, exactly as a stale sheet does for DeleteFrame: the
+// clear happened, the file is out of what the result claims to hold, and some
+// bytes are still there. Only a clear where NO set got as far as its own
+// commit point is returned as a failure with no detail - see the count below.
+func (s *Server) ClearFile(infoHash, params string, fileIndex int) (FileDetail, error) {
+	if s.deleter == nil || s.cfg.OutputRoot == "" {
+		return FileDetail{}, errDeleteUnavailable
+	}
+	if !validInfoHash(infoHash) || fileIndex < 0 {
+		return FileDetail{}, fmt.Errorf("%w: no file %d under %s",
+			core.ErrNoSuchFile, fileIndex, infoHash)
+	}
+
+	sets := []string{params}
+	if params == "" {
+		sets = s.setsHoldingFrames(infoHash, fileIndex)
+	} else if !validParams(params) {
+		return FileDetail{}, fmt.Errorf("%w: %q is not a result set", errBadRequest, params)
+	}
+
+	// Nothing on disk anywhere. The detail is answered rather than a
+	// refusal - see this function's own heading - and no set's run record is
+	// touched, because a record that lists a frameless file as complete is a
+	// repair somebody else's ticket owns, not something a clear should do
+	// silently to a set it was not given.
+	if len(sets) == 0 {
+		return s.fileDetailOrEmpty(infoHash, fileIndex), nil
+	}
+
+	// cleared counts the sets that reached their commit point, which is what
+	// decides whether this answers with a body at all: one that did means the
+	// file is out of that result set whatever else failed, and a page that
+	// was refused would go on showing frames the record no longer claims.
+	cleared := 0
+	var problems []error
+	for _, set := range sets {
+		err := s.deleter.ClearFile(infoHash, set, fileIndex)
+		switch {
+		case err == nil:
+			cleared++
+		case errors.Is(err, core.ErrClearIncomplete):
+			cleared++
+			problems = append(problems, err)
+		default:
+			problems = append(problems, err)
+		}
+	}
+	if cleared == 0 {
+		// Nothing changed anywhere, so this is the ordinary failure a status
+		// is chosen for (deleteStatus) rather than a warning beside a file.
+		return FileDetail{}, errors.Join(problems...)
+	}
+
+	warning := errors.Join(problems...)
+	// WRAPPED ONLY IF IT IS NOT ALREADY, which is a correction the browser
+	// found rather than any test here: core.ClearFile's own partial failure
+	// arrives already carrying this sentinel, so wrapping unconditionally
+	// printed the sentence twice - "the file was cleared and something of it
+	// is still on disk: the file was cleared and something of it is still on
+	// disk: remove the contact sheet..." - in a warning a person reads beside
+	// their file.
+	//
+	// The wrap still earns its place for the other shape: one set cleared
+	// while another was refused OUTRIGHT. No single error there says "partly
+	// happened", and yet it did - the file is out of one result set - so the
+	// sentinel has to be added, because it is what makes the handler answer
+	// 200 with the file's detail instead of refusing and leaving frames on
+	// screen that nothing accounts for.
+	if warning != nil && !errors.Is(warning, core.ErrClearIncomplete) {
+		warning = fmt.Errorf("%w: %w", core.ErrClearIncomplete, warning)
+	}
+	return s.fileDetailOrEmpty(infoHash, fileIndex), warning
+}
+
+// fileDetailOrEmpty is fileDetail with its ok=false turned into an explicitly
+// empty detail, which is what a clear has to answer with: a file that now has
+// nothing is precisely the case fileDetail reports as "no such file to show",
+// and 404 is the wrong answer to the request that emptied it (the reasoning
+// DeleteFrame already carried inline for its own last-frame case).
+//
+// Explicitly empty rather than left nil for the reason stated there too: the
+// page replaces its grid from these lists, and a JSON null reads as "no
+// answer" where what is meant is "no frames".
+func (s *Server) fileDetailOrEmpty(infoHash string, fileIndex int) FileDetail {
+	if detail, ok := s.fileDetail(infoHash, fileIndex); ok {
+		return detail
+	}
+	return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}
 }
 
 // SendToWatchDir copies one run's saved .torrent into the watch directory, so

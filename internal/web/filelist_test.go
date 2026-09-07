@@ -294,9 +294,15 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 
 	// The detail's own elements app.js takes off screen, as the property
 	// assignments themselves - so an element that stops being hidden drops
-	// out of this list rather than failing it. Both receivers, because a
-	// per-file element is reached through its own fentry.
-	hidden := regexp.MustCompile(`(?:entry|fentry)\.([A-Za-z]+)\.hidden = `).FindAllStringSubmatch(js, -1)
+	// out of this list rather than failing it. THREE receivers, because the
+	// page hides elements through three bags of them: a run's own entry, a
+	// file's fentry, and - since TOR-183 - a file's row in the picker list,
+	// which is an entry.pickerRows value and is called `row` at every point
+	// of use. Widening this rather than adding rows to the alias table below
+	// is what keeps the scan the DEFAULT: a `row.x.hidden` the alias table
+	// did not know about would have been invisible here, which is exactly the
+	// failure mode TOR-182 found on .run-progress.
+	hidden := regexp.MustCompile(`(?:entry|fentry|row)\.([A-Za-z]+)\.hidden = `).FindAllStringSubmatch(js, -1)
 	if len(hidden) == 0 {
 		t.Fatal("app.js hides nothing in a run's detail - this guard is anchored on it")
 	}
@@ -329,6 +335,13 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 		"metaBody": ".meta-body",
 		"links":    ".file-links",
 		"progress": ".file-progress",
+		// TOR-183, on a file's own row and in its detail: the clear this
+		// ticket adds, the sentence beside it that reports a clear which only
+		// partly happened, and the reach strip a clear takes off screen
+		// because there are no frames left for it to be about.
+		"clear": ".picker-clear",
+		"note":  ".picker-note",
+		"reach": ".reach",
 	}
 
 	seen := map[string]bool{}

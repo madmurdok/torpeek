@@ -1337,6 +1337,85 @@ button:disabled { opacity: .5; }
 .picker-state:empty,
 .picker-summary:empty { display: none; }
 
+/* CLEAR FRAMES (TOR-183): the one control on this page that deletes a whole
+   file's results, at the end of the row it belongs to, on screen only while
+   somebody has un-ticked a finished file (app.js's updateFileCosts).
+
+   SIZED DOWN FROM THE SHARED CONTROL, the way .picker-open above is: this
+   file's `select, button` rule gives every button .45rem of padding, which is
+   most of a list row's height, and a chip that made the row taller would move
+   every name below it the moment an offer appeared. Same .74rem as the
+   figures beside it, so the row's end reads as one strip.
+
+   --bad, AND IT IS THE ONLY THING ON THIS PAGE THAT WEARS IT AS TEXT. The
+   semantic three are kept apart from each other on purpose (:root): --warn is
+   "this is about to cost you", which the price on this same row already says,
+   and this is not about cost - traffic already spent is not recoverable and
+   pressing this recovers none of it. What it is about is loss, which is what
+   --bad means here and on .thumb-delete's own hover. Contrast computed
+   against the surfaces it actually sits on rather than recalled: --bad reads
+   7.31 against --s1 (the detail cell's ground) and 6.69 against the --s2 this
+   button's own background comes from, both clear of AA's 4.5.
+
+   AND COLOUR IS NOT WHAT SAYS IT, the rule every row in this section keeps:
+   the label states the act and the count ("Clear 12 frames"), the title
+   states what goes and what survives, and the button is not there at all
+   until a deliberate un-tick asks for it. Three carriers before the colour.
+
+   HOVER OVERRIDES THE SHARED ACCENT, and the specificity is the load-bearing
+   part rather than the order. `button:hover:not(:disabled)` earlier in this
+   file sets border-color to var(--accent) and weighs (0,2,1); this weighs
+   (0,3,0), which wins on the class column and therefore wins wherever it
+   sits. Written with :not(:disabled) for exactly that reason and not for the
+   behaviour - a button in flight should not light up either way. Without it
+   the destructive control would turn cyan under the pointer, and the accent
+   means "this is live, or this is where you are" and wears nothing else. */
+.picker-clear {
+  flex: 0 0 auto;
+  padding: .05rem .4rem;
+  font-size: .74rem;
+  background: var(--s2);
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  cursor: pointer;
+}
+.picker-clear:hover:not(:disabled) {
+  background: var(--bad-dim);
+  border-color: var(--bad);
+}
+.picker-clear:focus-visible { outline: 2px solid var(--bad); outline-offset: 1px; }
+/* No `display` above, deliberately, so the `hidden` attribute app.js sets is
+   never beaten by this rule at equal specificity - the trap this file has now
+   paid for six times (see .file-detail's own note). The companion is
+   redundant TODAY and kept for the same reason it is kept there: this is the
+   obvious place for a later ticket to write `display: inline-flex`, and the
+   cost of that mistake is a delete button that cannot be put away. */
+.picker-clear[hidden] { display: none; }
+
+/* WHAT A CLEAR THAT ONLY PARTLY HAPPENED LEFT BEHIND (TOR-183), beside the
+   file it is about rather than in the page's own error line at the top -
+   which for a torrent of twenty-five rows would not say which file.
+
+   Indented onto .file-detail's own rail below, because it belongs to the row
+   above it exactly as that slot does, and reads as a sentence about it rather
+   than as a new list item.
+
+   --bad, like the button it reports on, and at prose size rather than the
+   row's figure size: this is the only thing on the row somebody has to READ.
+   7.31 against the --s1 this section draws on. */
+.picker-note {
+  margin: .1rem 0 .4rem 1.05rem;
+  font-size: .78rem;
+  color: var(--bad);
+  /* A clear can report more than one thing at once - several result sets, or
+     one set with more than one artefact stuck - and errors.Join separates
+     them with a newline. pre-line renders those as the lines they are while
+     still wrapping the long paths inside each one, so two problems read as
+     two problems rather than as one run-on sentence. */
+  white-space: pre-line;
+}
+.picker-note[hidden] { display: none; }
+
 /* A ROW WHOSE BOX CANNOT BE CLICKED is not a row that should light up under
    the pointer or wear one. Two of them: a file this row has already asked
    for (the box is checked and disabled - un-ticking cannot un-start a

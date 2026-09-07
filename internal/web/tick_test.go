@@ -938,9 +938,22 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 	css := stylesheet(t)
 
 	fn := jsFunc(t, js, "updateFileCosts")
-	if !strings.Contains(fn, "row.box.disabled = asked || !entry.tickable") {
-		t.Fatal("a box is not disabled for a file already asked for, or on a row the " +
-			"server would refuse - a live box the server then refuses is a control that lies")
+	// TOR-183 gave the asked-for arm ONE live case and left the other arm
+	// alone, so this is asserted as the two arms rather than as the single
+	// expression TOR-181 wrote. A box that is not asked for is still live
+	// only where the server says a tick would be accepted; a box that IS
+	// asked for is live only where un-ticking it means "offer to clear the
+	// frames" (clearable), which is the whole of that ticket's gate.
+	if !strings.Contains(fn, "row.box.disabled = asked ? !clearable : !entry.tickable") {
+		t.Fatal("a box is not disabled for a file already asked for that cannot be cleared, " +
+			"or on a row the server would refuse a tick on - a live box the server then " +
+			"refuses is a control that lies, and a live box on a file mid-fetch offers a " +
+			"cancel this page cannot perform (TOR-184)")
+	}
+	if !strings.Contains(fn, "const clearable = asked && FINAL.has(entry.state) && framesOnDisk(entry, index) > 0") {
+		t.Error("the one live asked-for box is not gated on all three of asked, settled and " +
+			"having frames on disk - dropping the settled test offers a destructive button " +
+			"on a file mid-capture, and dropping the frame test offers to clear nothing")
 	}
 	if !strings.Contains(fn, "row.row.title = entry.tickRefusal") {
 		t.Error("a disabled box carries no reason - the server sends its own sentence " +

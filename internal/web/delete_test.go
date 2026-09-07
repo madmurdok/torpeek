@@ -20,13 +20,26 @@ import (
 // directory they address.
 const deleteParams = "aaaa1111bbbb2222"
 
-// realDeleter wires the real core.DeleteFrame, not a fake, so these tests
-// prove the whole path a browser takes: the route, the guards, and the delete
-// itself with every cache rule it has to keep.
+// realDeleter wires the real core.DeleteFrame and core.ClearFile, not fakes,
+// so these tests prove the whole path a browser takes: the route, the guards,
+// and the removal itself with every cache rule it has to keep.
+//
+// It is the same pair cli/web.go's outputDeleter wires for the running
+// program, spelled here rather than shared, because a test that borrowed the
+// production type would stop being able to substitute one half of it - which
+// is exactly what TestAClearWhoseFramesCannotAllGoStillHappened needs.
 func realDeleter(root string) Deleter {
-	return func(infoHash, params string, fileIndex, frameIndex int) error {
-		return core.DeleteFrame(root, infoHash, params, fileIndex, frameIndex)
-	}
+	return coreDeleter{root: root}
+}
+
+type coreDeleter struct{ root string }
+
+func (d coreDeleter) DeleteFrame(infoHash, params string, fileIndex, frameIndex int) error {
+	return core.DeleteFrame(d.root, infoHash, params, fileIndex, frameIndex)
+}
+
+func (d coreDeleter) ClearFile(infoHash, params string, fileIndex int) error {
+	return core.ClearFile(d.root, infoHash, params, fileIndex)
 }
 
 // deleteFrame issues the request the page's cross issues. query is appended
