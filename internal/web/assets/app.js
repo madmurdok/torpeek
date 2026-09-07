@@ -1129,6 +1129,13 @@ function newRunEntry(id) {
       '</span>' +
     "</header>" +
     '<p class="run-detail-error" hidden></p>' +
+    // The torrent's own confirmed name, filled in and unhidden by
+    // metadata_ready/needs_action (below). TOR-178: it used to also state how
+    // many of the torrent's video files this run had picked ("N of M ...
+    // selected") - that half is gone, so this paragraph carries the name
+    // alone now. The torrent's own file count (M) did not go with it; see
+    // the "Torrent files" spec onFileStarted adds to each file's own
+    // Metadata disclosure.
     '<p class="torrent-summary" hidden></p>' +
     // What Save .torrent (now in the header above) left behind: sending the
     // same file to a watch directory on this host, and the note reporting
@@ -1629,10 +1636,17 @@ function renderAgain(entry) {
   // the run reaches a final state.
   const settled = entry.disk || FINAL.has(entry.state);
   const canTopUp = settled && !!t && !t.refused && t.remaining > 0;
+  // t.complete is the one refusal that says nothing a person does not
+  // already have: the row's own DONE/PARTIAL badge already carries "every
+  // frame this run asked for is already on disk" (TOR-178), so that refusal
+  // draws no line here at all - the block collapses rather than repeating
+  // it. Every other refusal reason is a genuine fact about the record (a
+  // stale one, or files missing from disk) and still gets drawn below.
+  const showRefusal = settled && !!t && !!t.refused && !t.complete;
 
   entry.againRetry.hidden = !canRetry;
   entry.againGo.hidden = !canTopUp;
-  entry.againEl.hidden = !canRetry && !canTopUp && !(settled && t && t.refused);
+  entry.againEl.hidden = !canRetry && !canTopUp && !showRefusal;
 
   if (canTopUp) {
     const short = t.files.filter((f) => f.captured < f.planned).length;
@@ -1668,7 +1682,7 @@ function renderAgain(entry) {
     return;
   }
 
-  if (t && t.refused) {
+  if (showRefusal) {
     entry.againLine.textContent = t.refused;
     entry.againCost.textContent = "";
     entry.againCost.title = "";
@@ -2387,6 +2401,17 @@ function onFileStarted(entry, ev) {
   updateFileSummary(fentry);
 
   fentry.specs.replaceChildren();
+  // TOR-178: how many video files the TORRENT holds (M), not this one file's
+  // own specs - the fact "N of M ... selected" used to state on the summary
+  // line above, before the owner asked for that line gone. There is no
+  // torrent-scoped disclosure anywhere in this detail to move it to - the
+  // Metadata accordion this spec lands in is the only one that exists, and
+  // it is otherwise scoped to one file - so this reuses it rather than
+  // inventing new chrome for one fact. It is repeated once per file for the
+  // same reason: cheaper than building a place that says it exactly once,
+  // and every file's own Metadata is where a person already goes looking
+  // for facts about the file's container.
+  addSpec(fentry.specs, "Torrent files", entry.videos.length ? String(entry.videos.length) : "");
   addSpec(fentry.specs, "Resolution", ev.width && ev.height ? ev.width + "×" + ev.height : "");
   addSpec(fentry.specs, "Video",
     [ev.codec, ev.profile, ev.fps ? ev.fps.toFixed(2) + " fps" : "", bitrateLabel(ev.video_bitrate)]
@@ -3716,13 +3741,21 @@ function apply(ev) {
     case "metadata_ready":
       noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
+      // TOR-178: entry.videos used to be set only by needs_action (the
+      // undecided path, renderPicker). metadata_ready is the OTHER path - a
+      // torrent whose selection was already made - and its own video list
+      // is stored here the same way, so a file's Metadata disclosure
+      // (onFileStarted's "Torrent files" spec) has an answer on both paths,
+      // not only the one that happens to park on a picker first.
+      entry.videos = ev.videos || [];
       entry.torrentSummary.hidden = false;
-      // videos is the list itself, not a count: TOR-66 replaced the bare
-      // number with {index, path, length} per file so a picker has something
-      // to pick from. Only the count is wanted here - what a file is called
-      // and how big it is belongs to the picker (TOR-67), not this line.
-      entry.torrentSummary.textContent =
-        ev.name + " — " + ev.selected.length + " of " + ev.videos.length + " video file(s) selected";
+      // TOR-178: this used to also state how many of the torrent's video
+      // files this run had picked ("N of M ... selected"). The owner asked
+      // for that gone - the row's own badge (DONE/PARTIAL) already carries
+      // whether this run's selection came out whole. This paragraph's other
+      // job, carrying the torrent's name, is untouched - see
+      // .torrent-summary's own doc in the detail template.
+      entry.torrentSummary.textContent = ev.name;
       syncEntry(entry);
       logFor(entry, "metadata: " + ev.name + " (" + ev.infohash + ")");
       break;

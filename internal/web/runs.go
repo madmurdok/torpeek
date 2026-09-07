@@ -511,9 +511,19 @@ type TopUp struct {
 
 	// Refused is why this set cannot be topped up at all, empty when it can.
 	// A sentence rather than a code: every one of these is a dead end a
-	// person has to read and act on themselves, and there is nothing for a
-	// client to branch on.
+	// person has to read and act on themselves, and (Complete aside) there
+	// is nothing for a client to branch on.
 	Refused string `json:"refused,omitempty"`
+	// Complete is the one exception, and the only thing a client branches on:
+	// true exactly for the refusal that means "there is nothing wrong here,
+	// the set is simply whole" (out.Remaining == 0 below), as opposed to
+	// every other Refused reason, which explains an actual defect in the
+	// record (a stale one, or files missing from disk) that a person needs
+	// to read. TOR-178: the run detail's DONE/PARTIAL badge already says a
+	// whole set is whole, so the page uses this flag to drop that one
+	// redundant sentence instead of drawing it - the other refusals still
+	// get drawn in full, because nothing else already says them.
+	Complete bool `json:"complete,omitempty"`
 }
 
 // TopUpFile is one video file's standing in the set: how many of the plan's
@@ -628,6 +638,7 @@ func topUpFor(root, infoHash, params string, roofBytes int64) (TopUp, bool) {
 	}
 	if out.Remaining == 0 {
 		out.Refused = "every frame this run asked for is already on disk"
+		out.Complete = true
 		return out, true
 	}
 
