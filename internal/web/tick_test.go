@@ -963,8 +963,48 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 				"row that looks like it does something", sel)
 		}
 	}
-	if got := cssRule(t, css, `.picker-item[data-tick="asked"] .picker-file,`); !strings.Contains(got, "cursor: default") {
-		t.Errorf("an unclickable row's cursor rule is %q, want cursor: default", got)
+	// THE ROW'S CURSOR IS NOT THIS TEST'S TO CLAIM ANY MORE, and saying so is
+	// the point of this block rather than an omission.
+	//
+	// TOR-181 wrote this as "cursor: default", which was true when a row that
+	// had already been asked for was inert. TOR-182 made such a row OPEN ITS
+	// OWN DETAIL, and gave it `cursor: pointer` back in a later rule of equal
+	// specificity (.picker-item[data-detail="true"] > .picker-file), so later
+	// wins and the effective cursor on an asked row is pointer. The row is
+	// clickable, because clicking it now does something.
+	//
+	// Asserting `cursor: default` here would still have PASSED - cssRule reads
+	// one rule, not the cascade - while describing the opposite of what a
+	// person's mouse does. A test that passes and describes the wrong outcome
+	// is worse than no test, so the claim is narrowed to what is still true:
+	// the BOX cannot be ticked and says why, which is what this test is named
+	// for. The row's own cursor is TOR-182's to state, and
+	// TestAVideoFileOpensItsOwnDetailOneLevelIn is where it is stated.
+	if got := cssRule(t, css, `.picker-item[data-detail="true"] > .picker-file`); !strings.Contains(got, "cursor: pointer") {
+		t.Errorf("a row with a detail should look clickable, because it is; its cursor rule is %q, "+
+			"want cursor: pointer", got)
+	}
+	// AND THE ORDER IS THE LOAD-BEARING PART, so it is asserted rather than
+	// described. Both selectors weigh (0,3,0), so the cascade is decided by
+	// position alone: the detail rule must come AFTER the data-tick rules or an
+	// asked row goes back to looking inert while still opening its detail.
+	//
+	// This assertion exists because the first version of this block checked
+	// only that the pointer rule SAYS cursor: pointer, and its own error
+	// message promised that a reordering would be caught. It would not have
+	// been - cssRule reads one rule's text, never the cascade - and moving the
+	// rule above the others left the test green. A message claiming a
+	// guarantee the assertion does not provide is the same defect this block
+	// was written to remove, one level up.
+	detailAt := strings.Index(css, `.picker-item[data-detail="true"] > .picker-file`)
+	inertAt := strings.Index(css, `.picker-item[data-tick="asked"] .picker-file,`)
+	if detailAt < 0 || inertAt < 0 {
+		t.Fatalf("cannot locate both cursor rules: detail at %d, inert at %d", detailAt, inertAt)
+	}
+	if detailAt < inertAt {
+		t.Errorf("the data-detail cursor rule is at byte %d, before the data-tick rules at %d; "+
+			"at equal specificity the later rule wins, so an asked row that opens a detail would "+
+			"render cursor: default and look inert while being clickable", detailAt, inertAt)
 	}
 }
 
