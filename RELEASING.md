@@ -89,6 +89,21 @@ release that got it wrong.
    sheets and manifests that came out. `make archive-check` is the same pair
    of arms by hand, against an archive already unpacked.
 
+   **The pair of arms is what makes the pass evidence rather than a tick.**
+   The second one deletes the bundled ffmpeg and requires the run to fail;
+   without it a green first arm could mean the runner's own ffmpeg was on
+   PATH after all. Read both.
+
+   **And read what this step does NOT cover.** It runs ONE torrent against a
+   loopback seeder. It says nothing about anything a release changed in the
+   swarm layer: 1.2.0 made several torrents fetch at once out of one client,
+   put a private torrent on a client of its own, bounded them with a port set
+   and a client-wide roof - and a green archive check on all four platforms
+   exercised none of it. That coverage comes from `make acceptance` and from
+   unit tests. A release whose feature lives below the archive should say so
+   in its notes rather than letting four green ticks imply a breadth they do
+   not have.
+
 8. **Publish, if this release is for anybody else.** A GitHub release from
    the tag, with the per-platform archives and their checksums, and notes a
    person who has never read the tracker can act on - not a paste of the
