@@ -292,6 +292,7 @@ func (e *Engine) run(ctx context.Context, cfg Config, src swarm.Source, bus *Bus
 		InfoHash: torrent.InfoHash(),
 		Private:  torrent.Private(),
 		Videos:   videos,
+		Files:    torrent.Files(),
 		Selected: indicesOf(selected),
 		BlindDHT: attachment.WentOnlineBlind(),
 	})
@@ -1051,6 +1052,7 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 			Sequential: cfg.Sequential,
 		},
 		Videos:   make([]cache.File, 0, len(videos)),
+		Files:    recordFiles(torrent.Files()),
 		Selected: mergeIndices(prior.Selected, indicesOf(selected)),
 		Complete: mergeIndices(prior.Complete, finished),
 		// Not merged with prior, unlike the two above: see the field's own
@@ -1064,6 +1066,24 @@ func saveRunRecord(cfg Config, layout output.Layout, torrent *swarm.Torrent, vid
 		})
 	}
 	return cache.SaveRun(layout.RunDir(), record)
+}
+
+// recordFiles is the torrent's whole file list in the record's own shape
+// (TOR-180). Nil in stays nil out, deliberately, the way claimedPairs below
+// keeps nil: cache.Run.Files distinguishes "this record cannot say" from "the
+// torrent holds nothing", and writing an empty array for a torrent whose file
+// list was never handed in would be the second of those claims.
+func recordFiles(files []swarm.FileInfo) []cache.File {
+	if len(files) == 0 {
+		return nil
+	}
+	out := make([]cache.File, 0, len(files))
+	for _, f := range files {
+		out = append(out, cache.File{
+			Index: f.Index, Path: f.Path, Bytes: f.Length, Offset: f.Offset,
+		})
+	}
+	return out
 }
 
 // claimedPairs flattens swarm's named ranges into the record's pair array.

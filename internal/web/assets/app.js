@@ -1176,17 +1176,35 @@ function newRunEntry(id) {
       '</p>' +
       '<p class="run-again-note"></p>' +
     '</section>' +
-    // The picker sits between the torrent's own summary line and its files:
-    // the one gap in this pane, and both of its neighbours are already
-    // scoped to this entry, so a second torrent's picker cannot land in it.
+    // WHAT THE TORRENT HOLDS (TOR-180), and since that ticket the row's
+    // ordinary content rather than a state one run happens to be in: this
+    // list is on screen in every state that knows a file list, not only for
+    // a torrent parked waiting to be picked from. It sits between the
+    // torrent's own summary line and its per-file blocks: the one gap in
+    // this pane, and both of its neighbours are already scoped to this
+    // entry, so a second torrent's list cannot land in it.
+    //
+    // The .picker-* class names are kept on purpose even though this is no
+    // longer only a picker. Three of them (.picker-go, .picker-cost,
+    // .picker-list) are named in TOR-181..184 as the things those tickets
+    // move, remove or hang a per-file figure on, and renaming furniture
+    // mid-epic would make four open tickets describe selectors that no
+    // longer exist - a rename is worth its churn once the epic has settled,
+    // not in its first step.
     '<section class="picker" hidden>' +
       '<p class="picker-head">' +
         '<span class="picker-title"></span>' +
-        '<button type="button" class="picker-all">Select all</button>' +
-        '<button type="button" class="picker-none">Select none</button>' +
+        '<button type="button" class="picker-all" hidden>Select all</button>' +
+        '<button type="button" class="picker-none" hidden>Select none</button>' +
       '</p>' +
       '<ul class="picker-list"></ul>' +
-      '<p class="picker-foot">' +
+      // Head buttons and foot both start hidden and are shown only while
+      // this torrent is actually waiting to be picked from (syncFileList):
+      // "Take frames" on a run that is already running, finished or on disk
+      // would be a control that either does nothing or is refused by the
+      // server (handleDecideRun answers only a parked run), and Select
+      // all/none only ever stage a decision for it.
+      '<p class="picker-foot" hidden>' +
         '<button type="button" class="picker-go">Take frames</button>' +
         '<span class="picker-cost"></span>' +
       '</p>' +
@@ -1275,11 +1293,40 @@ function newRunEntry(id) {
     // (TOR-140: one torrent, one row).
     claiming: false,
     fileEntries: new Map(),
-    // videos is the file list a needs_action record brought, and picked the
-    // indices ticked in it. Both are empty for every torrent that never
-    // parked - a single-file one, or any run started with a selection
-    // already in it (Regenerate).
+    // videos is the CAPTURABLE files this torrent holds - the only indices a
+    // selection may name (the server validates a decision against exactly
+    // this list, runEntry.holdsFile) - and fileList is EVERY file it holds,
+    // video or not (TOR-180). Both arrive on the same two messages, a live or
+    // replayed metadata_ready and a parked torrent's needs_action.
+    //
+    // fileList IS EMPTY FOR TWO DIFFERENT REASONS and the renderer treats
+    // them the way this page treats any absent reading: nothing has arrived
+    // yet (a queued row, whose metadata has not been fetched), or the
+    // message carried no "files" key at all - a replay of a run recorded
+    // before cache.Run.Files existed. Neither means "this torrent holds no
+    // files", so renderFileList falls back to videos rather than drawing an
+    // empty torrent.
+    //
+    // NOT `files`, and the name matters: entry.files above is already GET
+    // /runs' own per-row COUNT of video files (RunSummary.Files), read by
+    // badgeState and metaLabel. Calling this one `files` too put two
+    // different things under one key in the same object literal, where the
+    // second silently won and took the badge's completeness arithmetic with
+    // it - caught by a mutation run, not by reading. The wire key stays
+    // "files" (it is one message type's own key, and metadata_ready has no
+    // count for it to collide with there); it is this object that cannot
+    // afford the overload.
     videos: [],
+    fileList: [],
+    // fileListKnown tells the two apart: true only when a message actually
+    // carried a "files" key, so fileListTitle can say "5 files, 1 video"
+    // where the whole truth is known and fall back to the video count alone
+    // where it is not, rather than reporting one list's length as the
+    // other's - which is a misreport a reader has no way to check.
+    fileListKnown: false,
+    // picked is the ticked indices. It is seeded from the run's own selection
+    // for a torrent whose files are already decided, and starts empty for one
+    // still parked - nothing is pre-ticked there on purpose (renderFileList).
     picked: new Set(),
     // Set once this run's first file block is built, so every file after it
     // defaults to collapsed - only the first one earns the auto-expand.
@@ -1321,6 +1368,7 @@ function newRunEntry(id) {
     pickerList: detailEl.querySelector(".picker-list"),
     pickerAll: detailEl.querySelector(".picker-all"),
     pickerNone: detailEl.querySelector(".picker-none"),
+    pickerFoot: detailEl.querySelector(".picker-foot"),
     pickerGo: detailEl.querySelector(".picker-go"),
     pickerCost: detailEl.querySelector(".picker-cost"),
     filesEl: detailEl.querySelector(".files"),
@@ -1404,11 +1452,13 @@ function resetRunContent(entry) {
   entry.progress = "";
   entry.framesDone = 0;
   entry.framesTotal = 0;
-  // The picker goes with everything else this run has shown. It comes back
-  // from the replayed needs_action that follows in the same history, so a
-  // reconnecting page rebuilds it rather than keeping a stale copy of a list
-  // the server may since have moved past.
+  // The file list goes with everything else this run has shown. It comes back
+  // from the replayed metadata_ready or needs_action that follows in the same
+  // history, so a reconnecting page rebuilds it rather than keeping a stale
+  // copy of a list the server may since have moved past.
   entry.videos = [];
+  entry.fileList = [];
+  entry.fileListKnown = false;
   entry.picked.clear();
   entry.pickerList.replaceChildren();
   entry.pickerEl.hidden = true;
@@ -1522,11 +1572,10 @@ function syncEntry(entry) {
   entry.detailCancel.toggleAttribute("data-idle", entry.disk || !cancellable(entry.state));
   entry.detailError.hidden = !entry.error;
   entry.detailError.textContent = entry.error || "";
-  // One rule for whether the picker is on screen, and it is the run's own
-  // state: the needs_action record arrives just before the run_state that
-  // announces the parking, and the run_state that ends the parking (queued,
-  // or cancelled) is what takes it away again.
-  entry.pickerEl.hidden = !(entry.state === "needs-action" && entry.videos.length > 0);
+  // The file list, and which of its controls this row's state earns
+  // (TOR-180). This used to be one rule reading `state === "needs-action"`,
+  // which is what made the list a state rather than the row's content.
+  syncFileList(entry);
   // TOR-152, in this order on purpose: draw whatever answer this row already
   // has, then ask for a newer one if the row has moved on. Drawing first is
   // what keeps the section from flickering empty on every event between two
@@ -2015,63 +2064,201 @@ async function setPriority(entry, priority) {
 }
 
 // ---------------------------------------------------------------------------
-// The picker: what a multi-file torrent shows instead of starting (TOR-67).
-// The server has fetched the metadata, given the queue slot back and parked
-// the torrent; nothing at all happens until someone says which files to
-// capture, so this is the whole of the run's UI while it waits.
+// WHAT THE TORRENT HOLDS. Since TOR-180 this list is a row's ordinary
+// content: every file the torrent carries, video or not, in every state that
+// knows a file list rather than only while a multi-file torrent is parked
+// waiting to be picked from (TOR-67).
+//
+// The non-video files are here because they answer the question a count
+// never could - "what did I actually download" - and because they are how a
+// person finds out that the film they were after is a .nfo, some artwork and
+// a sample. They cannot be ticked: swarm.SelectVideos decides what frames
+// can be taken from, the server validates a decision against exactly that
+// list (runEntry.holdsFile), and offering a tick the server would refuse
+// would be a control that lies.
+//
+// SAYING SO WITHOUT COLOUR. They read in --ink-2 (never --ink-3, which
+// TOR-158 took off text for failing AA on every surface), and grey alone
+// must not be what carries "you cannot tick this" - somebody who cannot
+// separate the two greys still has to know. Two more carriers do it, and
+// neither is a colour: the checkbox is ABSENT, and where it would have sat
+// there is an em dash instead, which is this page's own established mark for
+// a reading that is not there (every absent metric cell in the run table
+// draws one). The row's title says why in prose for a pointer or a screen
+// reader that reads one.
 
 function basename(path) {
   const parts = String(path || "").split("/");
   return parts[parts.length - 1] || path || "";
 }
 
-// renderPicker builds the tick list from a needs_action record.
+// WHY_NOT_VIDEO is the prose on a row that cannot be ticked. It names both
+// reasons a file can be missing from the video list, because the page cannot
+// tell them apart and must not guess: the extension is not one swarm tries,
+// OR it is (a .mkv, say) and the file is a sample - small beside the largest
+// video in the same torrent, which swarm.looksLikeSample drops on purpose.
+// Wording that said only "not a video" would be a plain lie on the second
+// case, which is the one this list exists to reveal.
+const WHY_NOT_VIDEO =
+  "torpeek takes no frames from this file — either its extension is not one " +
+  "it opens, or it is a sample or trailer beside a much larger video";
+
+// renderFileList draws the torrent's whole file list, from a metadata_ready
+// or a needs_action - the two messages that carry one.
 //
-// Nothing is ticked to begin with, and "Take frames" stays disabled until
-// something is. A torrent reaches this screen precisely because it holds
-// several video files, and pre-ticking them all would put the most expensive
-// possible run one careless click away - the count is per file, so six
-// variants at 20 frames is 120 captures (TOR-50). Select all is right there
-// for the person who does mean all of it.
-function renderPicker(entry, ev) {
+// TICKS COME FROM THE RUN'S OWN SELECTION, not from nothing: a row whose
+// files are already decided shows which of them this run is working on
+// (ev.selected), which is real information the page had and threw away
+// before. A parked torrent is the exception and starts with NOTHING ticked -
+// it reaches that state precisely because it holds several video files, and
+// pre-ticking them all would put the most expensive possible run one
+// careless click away, since the count is per file and six variants at 20
+// frames is 120 captures (TOR-50). Select all is right there for the person
+// who does mean all of it.
+//
+// The boxes are not interactive outside a parked row yet; syncFileList
+// disables them, and TOR-181 is the ticket that gives a tick its meaning in
+// every state.
+function renderFileList(entry, ev) {
   entry.videos = ev.videos || [];
-  entry.picked = new Set();
-  entry.pickerTitle.textContent =
-    entry.videos.length + " video file(s) — pick what to capture";
+  // ABSENT IS NOT EMPTY. A message with no "files" key cannot say what the
+  // torrent holds - a replay of a run recorded before cache.Run.Files
+  // existed is exactly that - so the video list stands in rather than the
+  // page claiming an empty torrent. Every row is then tickable, which is
+  // true of that list by construction.
+  entry.fileListKnown = !!ev.files;
+  entry.fileList = ev.files || entry.videos;
+  // A parked torrent has decided nothing yet, and its own record carries no
+  // "selected" (server.go's needsActionRecordLocked deliberately omits it),
+  // so this is empty exactly there.
+  entry.picked = new Set(ev.selected || []);
 
-  entry.pickerList.replaceChildren(...entry.videos.map((video) => {
+  const tickable = new Set(entry.videos.map((video) => video.index));
+
+  entry.pickerList.replaceChildren(...entry.fileList.map((file) => {
     const item = document.createElement("li");
-    const label = document.createElement("label");
-    label.className = "picker-file";
+    item.className = "picker-item";
+    const video = tickable.has(file.index);
+    // The styling hook, and the one thing app.css keys the grey off - the
+    // colour itself lives in :root, never here (TestEveryColourComesFrom
+    // AToken).
+    item.dataset.video = String(video);
 
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.value = String(video.index);
-    box.addEventListener("change", () => {
-      if (box.checked) entry.picked.add(video.index);
-      else entry.picked.delete(video.index);
-      updatePickerCost(entry);
-    });
+    // A <label> only for a row that has a control to label; a label wrapping
+    // no input is furniture pretending to be interactive.
+    const row = document.createElement(video ? "label" : "span");
+    row.className = "picker-file";
+
+    let box = null;
+    if (video) {
+      box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = String(file.index);
+      box.checked = entry.picked.has(file.index);
+      box.addEventListener("change", () => {
+        if (box.checked) entry.picked.add(file.index);
+        else entry.picked.delete(file.index);
+        updatePickerCost(entry);
+      });
+    } else {
+      // The em dash, in the column the checkbox would have occupied: the
+      // non-colour half of "you cannot tick this", and aria-hidden because
+      // a screen reader reading "em dash" learns nothing - the row's title
+      // below is what carries the reason in words.
+      box = document.createElement("span");
+      box.className = "picker-mark";
+      box.textContent = "—";
+      box.setAttribute("aria-hidden", "true");
+      row.title = WHY_NOT_VIDEO;
+    }
 
     const name = document.createElement("span");
     name.className = "picker-name";
-    name.textContent = basename(video.path);
-    name.title = video.path;
+    name.textContent = basename(file.path);
+    // The whole path, since the list shows base names and a season pack's
+    // files can share one. Not overwritten for a non-video row: that row's
+    // title is on .picker-file, one level up, so both answers survive.
+    name.title = file.path;
 
     const size = document.createElement("span");
     size.className = "picker-size";
-    size.textContent = bytesLabel(video.length);
+    size.textContent = bytesLabel(file.length);
 
-    label.append(box, name, size);
-    item.append(label);
+    row.append(box, name, size);
+    item.append(row);
     return item;
   }));
 
+  syncFileList(entry);
+}
+
+// syncFileList decides what this row's state earns: whether the list is on
+// screen at all, and which of its controls are.
+//
+// Called from syncEntry, so it re-runs on every event - the list has to
+// survive a row moving from parked to queued to running to done, changing
+// only what it offers, and the one thing that must NOT be re-decided here is
+// whether the row is expanded (setRunExpanded owns that; see its own doc).
+function syncFileList(entry) {
+  // Hidden only when there is nothing to list, never because of the state.
+  // Two rows legitimately have nothing: a queued one, whose metadata has not
+  // been fetched (choosing what to fetch cannot be offered before the
+  // torrent has said what it holds), and a disk row whose replay has not
+  // arrived or failed. Both are "not known yet", which an empty framed box
+  // would state as "holds nothing".
+  entry.pickerEl.hidden = entry.fileList.length === 0;
+
+  // PARKED is the one state in which a tick still decides anything: nothing
+  // has been fetched, and the server accepts a selection for this run
+  // (handleDecideRun refuses any other state). Everything that stages or
+  // sends a decision is scoped to it, and the frame around the list is too -
+  // .picker's --warn border says "this is blocking, nothing happens until
+  // you act", which would be a false alarm on a run already going.
+  const parked = entry.state === "needs-action";
+  entry.pickerEl.dataset.parked = String(parked);
+  entry.pickerAll.hidden = !parked;
+  entry.pickerNone.hidden = !parked;
+  entry.pickerFoot.hidden = !parked;
+  entry.pickerTitle.textContent = fileListTitle(entry, parked);
+
+  // A tick outside a parked row is a reading, not a control, so it is a real
+  // disabled state rather than a live box that silently does nothing - the
+  // same choice .run-priority-up/-down make at the ends of their band. TOR-181
+  // is what makes ticking mean something in the other states, and dropping
+  // this line is most of that change.
+  for (const box of entry.pickerList.querySelectorAll("input[type=checkbox]")) {
+    box.disabled = !parked;
+  }
+
+  // The foot's own two jobs - what pressing the button would cost, and
+  // whether it may be pressed at all - are one function, and it has to run
+  // here as well as on every tick: a row that has just reached the parked
+  // state has a foot that has never been drawn, and "Take frames" must not
+  // arrive live with nothing ticked behind it.
   updatePickerCost(entry);
+}
+
+// fileListTitle says what the list is, and it must not report the video
+// count as the torrent's own: a torrent of one film, a sample, a .nfo and
+// two images holds five files and offers one, and "1 file(s)" was the shape
+// of that misreport before TOR-180.
+//
+// The fallback wording is deliberately different rather than a count of a
+// list that stood in: a message with no "files" key cannot say how many
+// files the torrent holds, and claiming the video count as the total would
+// be the same misreport in a place a reader could not check.
+function fileListTitle(entry, parked) {
+  const suffix = parked ? " — pick what to capture" : "";
+  if (!entry.fileListKnown) {
+    return entry.videos.length + " video file(s)" + suffix;
+  }
+  return entry.fileList.length + " file(s), " + entry.videos.length + " video" + suffix;
 }
 
 function setAllPicked(entry, picked) {
   entry.picked = new Set(picked ? entry.videos.map((video) => video.index) : []);
+  // Only the boxes, which exist only on the tickable rows - a non-video file
+  // has none, so "all" cannot reach one however it is written.
   for (const box of entry.pickerList.querySelectorAll("input[type=checkbox]")) {
     box.checked = picked;
   }
@@ -3803,12 +3990,17 @@ function apply(ev) {
       noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
       // TOR-178: entry.videos used to be set only by needs_action (the
-      // undecided path, renderPicker). metadata_ready is the OTHER path - a
-      // torrent whose selection was already made - and its own video list
-      // is stored here the same way, so a file's Metadata disclosure
-      // (onFileStarted's "Torrent files" spec) has an answer on both paths,
-      // not only the one that happens to park on a picker first.
-      entry.videos = ev.videos || [];
+      // undecided path). metadata_ready is the OTHER path - a torrent whose
+      // selection was already made - and its own file lists are stored the
+      // same way, so a file's Metadata disclosure (onFileStarted's "Torrent
+      // files" spec) has an answer on both paths, not only the one that
+      // happens to park first.
+      //
+      // TOR-180 renders the list from here too, which is what makes it the
+      // row's ordinary content: this event is the one every state that has
+      // a file list goes through - a live run, and the replay a disk row's
+      // reopen produces.
+      renderFileList(entry, ev);
       entry.torrentSummary.hidden = false;
       // TOR-178: this used to also state how many of the torrent's video
       // files this run had picked ("N of M ... selected"). The owner asked
@@ -3823,16 +4015,16 @@ function apply(ev) {
 
     case "needs_action":
       // Not a core event and deliberately not a metadata_ready: no run is
-      // running. The torrent's name and file list arrive here, and the
-      // run_state that follows this record is what actually shows the
-      // picker (syncEntry).
+      // running. The torrent's name and file lists arrive here, and the
+      // run_state that follows this record is what turns the list's own
+      // controls on (syncFileList).
       noteConfirmedName(entry, ev.name);
       entry.name = ev.name;
       if (ev.infohash) entry.infohash = ev.infohash;
       entry.torrentSummary.hidden = false;
       entry.torrentSummary.textContent =
         ev.name + " — " + (ev.videos || []).length + " video file(s), none captured yet";
-      renderPicker(entry, ev);
+      renderFileList(entry, ev);
       syncEntry(entry);
       logFor(entry, "waiting for a file selection: " + (ev.videos || []).length + " video file(s)");
       break;
@@ -4303,11 +4495,15 @@ el.form.addEventListener("submit", async (event) => {
   }
 });
 
-// The cost line beside "Take frames" reads the intake's count, so a picker
-// on screen has to follow it while it is being typed in.
+// The cost line beside "Take frames" reads the intake's count, so a foot on
+// screen has to follow it while it is being typed in.
+//
+// Keyed off the FOOT, not the section: since TOR-180 the file list itself is
+// on screen for every row that knows one, and only a parked row carries the
+// button and the figure this updates.
 el.count.addEventListener("input", () => {
   for (const entry of state.runs.values()) {
-    if (!entry.pickerEl.hidden) updatePickerCost(entry);
+    if (!entry.pickerFoot.hidden) updatePickerCost(entry);
   }
 });
 
