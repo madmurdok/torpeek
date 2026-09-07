@@ -987,19 +987,65 @@ button:disabled { opacity: .5; }
 
 .run-detail-header { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
 .run-detail-title { overflow-wrap: anywhere; }
-.run-detail-cancel { margin-left: auto; }
+
+/* Save .torrent and Cancel share this one pinned group rather than each
+   pinning itself (TOR-169). They are not the mutually-exclusive pair the
+   happy path (queued -> running -> done) suggests: a top-up (server.go's
+   `again`) re-arms Cancel with reset: false specifically so the .torrent a
+   run already finished with is NOT cleared, so both can be on screen at
+   once, and the order below has to hold in that case too.
+   Cancel is last, flush against the header's own right edge - exactly
+   where a bare margin-left: auto on .run-detail-cancel alone already put
+   it before this ticket, so this move changes nothing about where Cancel
+   sits. Save sits to its left, and position: sticky (below) is what keeps
+   the whole group from pinning itself to the ROW's right edge when that
+   is wider than what .run-table-wrap's overflow-x: auto (TOR-157) is
+   currently showing - the same primitive .run-table thead th already uses,
+   on the vertical axis, to stay in view rather than travel with content
+   the viewport has scrolled past. */
+.run-detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-left: auto;
+  position: sticky;
+  right: 0;
+  background: var(--s1);
+}
+/* Reserved, not removed, when idle: [hidden]'s display: none - the rule
+   every other toggle in this file relies on (see .run-detail-cell's own
+   comment on why nothing here fights that rule with a class) - would pull
+   Cancel out of the flow and let Save slide over to take its place, which
+   is the "control that jumps sideways under the cursor" this ticket exists
+   to stop. visibility keeps Cancel's box in the flow with nothing drawn in
+   it, so Save's own position next to it never depends on whether a
+   cancellable run is what is currently showing - the same reasoning
+   .run-priority-up/-down (.run-priority above) already follow with
+   `disabled` instead of `hidden`, for the same kind of neighbour. */
+.run-detail-cancel[data-idle] { visibility: hidden; }
 .run-detail-error { color: var(--bad); }
 
-/* The run's own .torrent (TOR-73), under the summary line it belongs to.
-   The link is styled as a button rather than as text: it and the send button
-   are two ways of doing the same thing to the same file, and one looking like
-   prose beside a control would read as the lesser of them. */
+/* What's left of the run's own .torrent (TOR-73) once Save .torrent moves
+   into the header above (TOR-169): sending the same file to a watch
+   directory on this host, and the note reporting what a send did. Both
+   stay under the summary rather than following Save up - see app.js's own
+   comment on this block for why - so .torrent-actions is only shown when
+   there is something in it to show (a .torrent AND a watch directory), not
+   whenever the run merely has a .torrent. */
 .torrent-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: .5rem 0 0; }
+/* Chrome matches Cancel's, its neighbour in .run-detail-header-actions
+   above: --edge and a hard corner, not the --rule border and .35rem radius
+   this carried back when it sat alone under the summary rather than beside
+   a button drawn from this file's shared `button` rule. Still styled as a
+   button rather than as text, for the reason it always was: it and Send to
+   my client (below) are two ways of doing the same thing to the same file,
+   and one looking like prose beside a control would read as the lesser of
+   them. */
 .torrent-save {
   padding: .45rem .7rem;
   font-size: .85rem;
-  border: 1px solid var(--rule);
-  border-radius: .35rem;
+  border: 1px solid var(--edge);
+  border-radius: 0;
   color: inherit;
   text-decoration: none;
 }

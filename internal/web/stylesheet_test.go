@@ -808,3 +808,111 @@ func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 			"it belongs in the panel's top strip, off the picture", tab, view)
 	}
 }
+
+// ---- TOR-169: Save .torrent moves up to sit level with the name. ----
+
+// TestSaveTorrentSitsInTheHeaderBesideCancel guards the move itself. Save
+// .torrent used to live two blocks below the header, inside .torrent-actions,
+// after .torrent-summary. It now belongs in the header's own
+// .run-detail-header-actions group, ahead of Cancel - and .torrent-actions
+// must no longer contain the save link at all, or the control would render
+// twice.
+//
+// This reads app.js as served text, the same way
+// TestLightboxScalingAndPanAreWiredInTheServedScript does: there is no JS
+// runner here, so it cannot build the template and inspect the DOM, only
+// confirm the markup and its order are what TOR-169 asked for.
+func TestSaveTorrentSitsInTheHeaderBesideCancel(t *testing.T) {
+	js := appJS(t)
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
+	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
+
+	header := strings.Index(live, `'<header class="run-detail-header">'`)
+	if header < 0 {
+		t.Fatal("app.js has no .run-detail-header template to check")
+	}
+	headerEnd := strings.Index(live[header:], `"</header>"`)
+	if headerEnd < 0 {
+		t.Fatal("the .run-detail-header template is never closed")
+	}
+	headerBlock := live[header : header+headerEnd]
+
+	actionsIdx := strings.Index(headerBlock, `class="run-detail-header-actions"`)
+	saveIdx := strings.Index(headerBlock, `class="torrent-save"`)
+	cancelIdx := strings.Index(headerBlock, `class="run-detail-cancel"`)
+	if actionsIdx < 0 {
+		t.Fatal("the header template has no .run-detail-header-actions group - Save .torrent and " +
+			"Cancel each need a fixed slot in it, not their own separate pinning")
+	}
+	if saveIdx < 0 || cancelIdx < 0 {
+		t.Fatalf("the header template is missing torrent-save (index %d) or run-detail-cancel "+
+			"(index %d)", saveIdx, cancelIdx)
+	}
+	if !(actionsIdx < saveIdx && saveIdx < cancelIdx) {
+		t.Errorf("the header's controls are not in the order .run-detail-header-actions, "+
+			"torrent-save, run-detail-cancel (actions=%d save=%d cancel=%d) - Cancel has to come "+
+			"last so it stays flush against the header's own right edge regardless of Save",
+			actionsIdx, saveIdx, cancelIdx)
+	}
+	if !strings.Contains(headerBlock, `class="run-detail-cancel" type="button" data-idle>`) {
+		t.Error(`Cancel's template markup does not start with data-idle - it must not start ` +
+			`hidden via the [hidden] attribute, or its box leaves the flow and Save slides over ` +
+			`to take its place the moment a run is not cancellable`)
+	}
+
+	actionsBlockStart := strings.Index(live, `'<p class="torrent-actions" hidden>'`)
+	if actionsBlockStart < 0 {
+		t.Fatal("app.js has no .torrent-actions template to check")
+	}
+	actionsBlockEnd := strings.Index(live[actionsBlockStart:], `'</p>'`)
+	if actionsBlockEnd < 0 {
+		t.Fatal("the .torrent-actions template is never closed")
+	}
+	actionsBlock := live[actionsBlockStart : actionsBlockStart+actionsBlockEnd]
+	if strings.Contains(actionsBlock, "torrent-save") {
+		t.Error(".torrent-actions still contains torrent-save - Save .torrent moved into the " +
+			"header (TOR-169) and must not also render here, or the same control shows twice")
+	}
+	if !strings.Contains(actionsBlock, "torrent-send") {
+		t.Error(".torrent-actions lost torrent-send along with torrent-save - only the save " +
+			"link was meant to move, not the whole group")
+	}
+}
+
+// TestSaveAndCancelStayPinnedRegardlessOfEachOther is TOR-169's CSS half.
+// Cancel is reserved rather than removed when it does not apply, so Save's
+// own position beside it never depends on whether a cancellable run is what
+// is currently showing (see .run-detail-cancel[data-idle]'s own comment),
+// and the whole group tracks the table's visible scrollport rather than the
+// row's full width, which .run-table-wrap's overflow-x: auto (TOR-157) can
+// make wider than the pane.
+func TestSaveAndCancelStayPinnedRegardlessOfEachOther(t *testing.T) {
+	css := stylesheet(t)
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+
+	actions := block(t, css, ".run-detail-header-actions {")
+	if got := actions["margin-left"]; got != "auto" {
+		t.Errorf(".run-detail-header-actions margin-left is %q, want auto - it has to sit flush "+
+			"against the header's own right edge when there is nothing to scroll", got)
+	}
+	if got := actions["position"]; got != "sticky" {
+		t.Errorf(".run-detail-header-actions position is %q, want sticky - margin-left: auto alone "+
+			"pins the group to the ROW's own right edge, which .run-table-wrap's overflow-x: auto "+
+			"can put off screen; sticky is what keeps it on the visible pane instead, the same "+
+			"primitive .run-table thead th already uses on the vertical axis", got)
+	}
+	if got := actions["right"]; got != "0" {
+		t.Errorf(".run-detail-header-actions right is %q, want 0 - the edge sticky measures the "+
+			"scrollport against", got)
+	}
+
+	if !regexp.MustCompile(`(?s)\.run-detail-cancel\[data-idle\]\s*\{[^}]*visibility:\s*hidden`).MatchString(live) {
+		t.Error("no .run-detail-cancel[data-idle] { visibility: hidden } rule - an idle Cancel " +
+			"has to keep its box in the flow (visibility, not [hidden]'s display: none) or Save " +
+			"slides sideways into the space it leaves the moment Cancel stops applying")
+	}
+	if regexp.MustCompile(`(?s)\.run-detail-cancel\[data-idle\]\s*\{[^}]*display:\s*none`).MatchString(live) {
+		t.Error(".run-detail-cancel[data-idle] sets display: none - that removes Cancel from the " +
+			"flow, which is exactly what reserving its box with visibility was meant to avoid")
+	}
+}
