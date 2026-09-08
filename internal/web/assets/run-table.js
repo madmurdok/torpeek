@@ -47,11 +47,12 @@
 //     mint, and is set by the page. One attribute each, on the same button,
 //     for the same reason the line falls where it does.
 //
-// WHAT THAT LEAVES app.js HOLDING is one el. entry queried by tag, three
-// methods (newRow, bindRow, syncRow), two called from its own accordion and
-// nothing else. And what this element may NOT do is reach for a detail: every
-// entry field it writes is a row element, which is checkable by reading
-// syncRow rather than by trusting this paragraph.
+// WHAT THAT LEAVES app.js HOLDING is one el. entry queried by tag and four
+// methods on it: newRow and bindRow when a run appears, syncRow on every
+// redraw, and setRunExpanded from its own toggleRun and began(). And what this
+// element may NOT do is reach for a detail: every entry field it writes is a
+// row element, which is checkable by reading syncRow rather than by trusting
+// this paragraph.
 // ---------------------------------------------------------------------------
 //
 // LISTENERS AND WHAT ACTUALLY HAS TO BE TAKEN OFF AGAIN. The pattern says
@@ -59,12 +60,13 @@
 // the same function object, and frame-panel.js's own note says why: a resize
 // handler on `window` outlives the element and keeps measuring it. That is the
 // reason, and it is what decides which listeners are fields here rather than
-// how many there are. Nine headers, nine drag handles and two per row is a
-// tally in the hundreds, every one of them on a node THIS ELEMENT CREATED
-// INSIDE ITSELF - they go when the DOM goes, and holding a field for each
-// would be bookkeeping that buys nothing. The two that outlive the element are
-// fields: the window resize, and the one-second stall ticker, which is worse
-// than a leak - it walks state.runs and writes into cells nobody can see.
+// how many there are. Two per header, six per drag handle and four per row is
+// a tally that grows with the torrent list, every one of them on a node THIS
+// ELEMENT CREATED INSIDE ITSELF - they go when the DOM goes, and holding a
+// field for each would be bookkeeping that buys nothing. The two that outlive
+// the element ARE fields: the window resize, and the one-second stall ticker -
+// which is worse than a leak, because it walks state.runs and writes into
+// cells nobody can see.
 
 import {
   PRIORITY_HIGH,
