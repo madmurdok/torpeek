@@ -238,6 +238,14 @@ link or drop a `.torrent` onto the page: it receives the same events `-json`
 writes, over a WebSocket, and fills a live grid of frames as they land, next
 to a summary panel of tracks and quality.
 
+The page is built out of custom elements and ES modules, and there is **no
+JavaScript toolchain** anywhere in the build - no node, no bundler, no build
+step, which is why `make cross` still produces all four platforms from a Go
+toolchain alone and the file the browser runs is the file in the repository.
+[docs/front-end.md](docs/front-end.md) records that decision, what it
+preserves, what a bundler would cost, and the element pattern a new element
+should follow.
+
 Every public torrent shares one long-lived BitTorrent client, on one port,
 and that client outlives any single run: a run attaches to a torrent and
 detaches from it again, and the server is what closes the client — so a run
