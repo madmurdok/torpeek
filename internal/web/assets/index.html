@@ -116,6 +116,13 @@
      exactly the same place one keypress later and the eye compares against
      its own afterimage. Everything that DOES change on a flip - which arm is
      live - is either a colour or sits below the picture. -->
+<!-- TOR-193: the dialog's BEHAVIOUR lives in compare-dialog.js as a custom
+     element, following the frame panel's pattern; its structure stays here,
+     wrapped and not re-indented, so the comment above about what must not
+     move on a flip stays next to the markup it constrains. Light DOM for the
+     reason frame-panel.js sets out: compare.css's rules would not reach
+     inside a shadow root. -->
+<compare-dialog>
 <dialog id="compare" class="compare">
   <button id="compare-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
   <header class="compare-head">
@@ -149,6 +156,7 @@
   <p id="compare-note" class="compare-note"></p>
   <p class="compare-keys">← → position · space, ↑ ↓ or click flips · 1 2 pick a set · esc closes</p>
 </dialog>
+</compare-dialog>
 
 <!-- The frame, full size (TOR-172). The panel is HUD chrome in the reference
      sheet's language - hard corners, three L-brackets, one chamfered corner,

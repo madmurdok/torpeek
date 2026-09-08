@@ -447,14 +447,21 @@ func framePanelJS(t *testing.T) string {
 // have shaped the element around its test instead of the other way round.
 func jsMethod(t *testing.T, js, name string) string {
 	t.Helper()
-	head := "\n  " + name + "("
-	i := strings.Index(js, head)
+	// Both spellings, because a method that awaits carries `async` in front of
+	// its name and the first version of this helper matched only the bare one
+	// - so it reported "no open() method" for a module whose open() is right
+	// there, one keyword away. A helper that cannot find what it is pointed at
+	// fails the test for the wrong reason, which is worse than not finding it.
+	i := strings.Index(js, "\n  "+name+"(")
 	if i < 0 {
-		t.Fatalf("frame-panel.js has no %s() method", name)
+		i = strings.Index(js, "\n  async "+name+"(")
+	}
+	if i < 0 {
+		t.Fatalf("no %s() method in the module under test", name)
 	}
 	end := strings.Index(js[i+1:], "\n  }\n")
 	if end < 0 {
-		t.Fatalf("frame-panel.js's %s() is never closed", name)
+		t.Fatalf("%s() is never closed", name)
 	}
 	return js[i : i+1+end]
 }
@@ -1325,6 +1332,208 @@ func TestEveryPositionDecidedPairStaysInOneFile(t *testing.T) {
 			t.Errorf("%s: in %s the override is at byte %d, BEFORE the grouped rule at %d; "+
 				"at equal specificity the later rule wins, so the override no longer "+
 				"overrides anything and %s", p.what, groupedIn, o, g, p.breakage)
+		}
+	}
+}
+
+// compareDialogJS returns the embedded compare-dialog.js source. TOR-193 moved
+// the flipbook's behaviour out of app.js into its own custom element.
+func compareDialogJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/compare-dialog.js")
+	if err != nil {
+		t.Fatalf("reading the embedded compare-dialog.js: %v", err)
+	}
+	return string(b)
+}
+
+// TestTheFlipbookIsWiredInTheServedScript is a guard that did not exist before
+// TOR-193, and its absence is the finding worth recording: moving 337 lines -
+// the whole of TOR-109's design, its no-partner note included - out of app.js
+// into a new module broke not one test. compare_test.go is 541 lines of
+// SERVER tests covering the pairing; the front end that draws it had nothing.
+//
+// So a silent loss was available on every item the ticket listed as
+// must-survive, and this is what closes that. It cannot tell whether the
+// picture actually holds still on a flip - only a browser can, by measuring
+// the same rectangle twice, which TOR-193's report records - but it can catch
+// each mechanism being deleted, renamed or regated.
+func TestTheFlipbookIsWiredInTheServedScript(t *testing.T) {
+	js := compareDialogJS(t)
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
+	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
+
+	// THE FLIP IS A VISIBILITY TOGGLE, not a fetch. Both arms get a src for
+	// every position whichever is live, and a src is re-assigned only when it
+	// actually changes - that pair of facts is what makes flipping back and
+	// forth free, and either one alone does not.
+	shot := jsMethod(t, live, "setShot")
+	if !strings.Contains(shot, `if (img.getAttribute("src") !== href) img.src = href;`) {
+		t.Error("setShot assigns src unconditionally - flipping back and forth would " +
+			"re-decode the picture each time, and the whole design rests on the flip " +
+			"being a toggle over pixels the browser already has")
+	}
+	position := jsMethod(t, live, "renderPosition")
+	for _, want := range []string{
+		"this.setShot(this.shotA, position.a,",
+		"this.setShot(this.shotB, position.b,",
+	} {
+		if !strings.Contains(position, want) {
+			t.Errorf("renderPosition does not contain %q - BOTH arms must be given their "+
+				"picture at every position, whichever is live, or the flip becomes a fetch", want)
+		}
+	}
+
+	// THE SHAPE COMES FROM THE ARMS' RESOLUTION, once per comparison and never
+	// per position: a stage that re-shaped itself as pictures arrived would
+	// move the picture, which is the one thing this must not do.
+	render := jsMethod(t, live, "renderComparison")
+	if !strings.Contains(render, "--compare-aspect") {
+		t.Error("renderComparison no longer sets --compare-aspect - the stage's shape would " +
+			"then come from whichever image happened to arrive first")
+	}
+	if strings.Contains(position, "--compare-aspect") {
+		t.Error("renderPosition sets --compare-aspect - the shape belongs to the COMPARISON, " +
+			"not to a position; setting it per position re-shapes the stage as the " +
+			"flipbook is walked and slides the picture")
+	}
+	aspect := jsMethod(t, live, "aspectOf")
+	if !strings.Contains(aspect, "String(arm.width / arm.height)") {
+		t.Error("aspectOf no longer returns a bare number - compare.css multiplies this " +
+			"inside a calc() to bound the stage's height without breaking its shape, and " +
+			"only a number can be multiplied")
+	}
+
+	// THE NO-PARTNER NOTE, which the ticket named as the thing easiest to lose
+	// in a move. Both arms, and the count for each, or a person who counted
+	// twenty frames in the grid is left wondering where they went.
+	// Each arm is asserted as its WHOLE clause, gate and text together, not as
+	// the field name: `data.b.unpaired` occurs twice in its own line (once as
+	// the gate, once in the sentence), so a check for the bare name stays
+	// green while the gate is disabled - which is what a falsification run
+	// showed, on the arm this guard exists for. A guard weaker than its own
+	// error message is the defect it was written to catch, one level up.
+	note := jsMethod(t, live, "comparisonNote")
+	for _, want := range []string{
+		`if (data.a.unpaired) orphans.push(data.a.unpaired + " of set 1's " + data.a.points);`,
+		`if (data.b.unpaired) orphans.push(data.b.unpaired + " of set 2's " + data.b.points);`,
+		"capture points have no partner in the other set",
+	} {
+		if !strings.Contains(note, want) {
+			t.Errorf("comparisonNote does not contain %q - the pairing's leftovers have to be "+
+				"said out loud, per arm and with its count, rather than silently dropped", want)
+		}
+	}
+	if !strings.Contains(note, `data.basis === "time"`) {
+		t.Error("comparisonNote no longer says when the pairing fell back to timecode - a " +
+			"comparison paired by absolute time rather than by fraction of duration is a " +
+			"weaker claim, and the page has to admit which one it is making")
+	}
+
+	// STEPPING WRAPS. The flipbook is short and a person walking it with one
+	// finger should not have to turn round.
+	step := jsMethod(t, live, "step")
+	if !strings.Contains(step, "% positions.length") {
+		t.Error("step no longer wraps - the modulo is what lets one finger walk the whole " +
+			"flipbook in either direction")
+	}
+
+	// THE KEYS. 1 and 2 pick an arm outright, the arrows step, and the pickers
+	// keep their own arrows - a select is being used to choose a set, not to
+	// steer the flipbook.
+	keys := jsMethod(t, live, "dialogKeydown")
+	for _, want := range []string{
+		`case "1": this.showArm("a");`,
+		`case "2": this.showArm("b");`,
+		`case "ArrowLeft": this.step(-1);`,
+		`case "ArrowRight": this.step(1);`,
+		"this.flip();",
+	} {
+		if !strings.Contains(keys, want) {
+			t.Errorf("the flipbook's keydown handler does not contain %q", want)
+		}
+	}
+	if !strings.Contains(keys, `tag === "select"`) {
+		t.Error("the keydown handler no longer exempts a focused select - arrow keys belong " +
+			"to the picker while someone is choosing a set with it")
+	}
+	if !strings.Contains(keys, `tag === "button" && event.key === " "`) {
+		t.Error("the keydown handler no longer exempts space on a focused button - space is " +
+			"that button's own activation, so intercepting it flips twice for one press")
+	}
+	if strings.Contains(keys, "Escape") {
+		t.Error("the keydown handler mentions Escape - the dialog closes itself on Escape " +
+			"for free, and a handler that touches it is how that gets lost")
+	}
+
+	// ONE MODAL AT A TIME, which TOR-193 established is not automatic: the
+	// platform allows two, and this page could reach it because open() awaits
+	// a fetch before showModal().
+	open := jsMethod(t, live, "open")
+	if !strings.Contains(open, `document.querySelectorAll("dialog[open]")`) {
+		t.Error("open() no longer closes any other open dialog - two modal dialogs can be " +
+			"open at once (measured, on a bare pair), and this page can reach that state " +
+			"because open() awaits a fetch before showModal()")
+	}
+	if !strings.Contains(open, "this.dialog.showModal();") {
+		t.Error("open() never calls showModal - it is the only entry point the page has " +
+			"into the flipbook")
+	}
+
+	// THE SERVICES, injected because they cannot move: url() carries the base
+	// path and the token, log() writes to the page's activity log.
+	if !strings.Contains(live, "function setServices(services)") {
+		t.Error("compare-dialog.js exports no setServices - url() and log() belong to the " +
+			"page's bootstrap, and an element that reached for them directly could not be " +
+			"loaded without it")
+	}
+	if !strings.Contains(live, `throw new Error("compare-dialog: setServices needs a "`) {
+		t.Error("setServices accepts a missing service silently - the failure it forecloses " +
+			"is a request built without the base path, which breaks only behind a reverse " +
+			"proxy and only in production")
+	}
+	if !strings.Contains(live, `customElements.define("compare-dialog", CompareDialog)`) {
+		t.Error("compare-dialog.js never registers the element - the tag in index.html " +
+			"would be inert and pressing Compare would throw on a null dialog")
+	}
+}
+
+// TestTheFlipbookMarkupIsInsideItsElement is the companion to
+// TestLightboxMarkupHoldsTheWindowAndItsChrome, and exists for the same
+// reason: compare-dialog.js finds every part with this.querySelector, so
+// markup outside the element is markup it cannot see, and app.js reaches the
+// element as document.querySelector("compare-dialog").
+func TestTheFlipbookMarkupIsInsideItsElement(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+	page := string(html)
+
+	wrap := strings.Index(page, "<compare-dialog>")
+	wrapEnd := strings.Index(page, "</compare-dialog>")
+	if wrap < 0 || wrapEnd < 0 {
+		t.Fatalf("index.html has no <compare-dialog> element (open=%d close=%d)", wrap, wrapEnd)
+	}
+
+	// Every selector the element queries, checked against the markup rather
+	// than assumed: this list is the element's constructor read out loud, and
+	// a class where the markup carries only an id resolves to null.
+	for _, sel := range []string{
+		`class="compare"`, `class="compare-stage"`, `id="compare-a"`, `id="compare-b"`,
+		`id="compare-shot-a"`, `id="compare-shot-b"`, `class="compare-gap-code"`,
+		`id="compare-prev"`, `id="compare-next"`, `class="compare-flip"`,
+		`id="compare-close"`, `class="compare-place"`, `class="compare-times"`,
+		`class="compare-note"`,
+	} {
+		at := strings.Index(page, sel)
+		if at < 0 {
+			t.Errorf("index.html has no %s - compare-dialog.js queries for it and would get null", sel)
+			continue
+		}
+		if at < wrap || at > wrapEnd {
+			t.Errorf("%s is at %d, outside <compare-dialog> (%d..%d) - the element only "+
+				"searches inside itself", sel, at, wrap, wrapEnd)
 		}
 	}
 }

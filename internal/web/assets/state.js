@@ -92,6 +92,29 @@ function bytesLabel(n) {
   return (i === 0 ? value : value.toFixed(1)) + " " + units[i];
 }
 
+// timecode is where a frame came from, as a person reads a video position:
+// mm:ss, growing an hours field only when the film is that long. It is what
+// a frame's caption says now - the frame INDEX cannot label a merged grid,
+// since every result set numbers its own frames from zero, so two different
+// moments would both read "#3" (TOR-69).
+function timecode(ms) {
+  if (!ms && ms !== 0) return "";
+  const total = Math.round(ms / 1000);
+  const s = String(total % 60).padStart(2, "0");
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  return h > 0 ? h + ":" + String(m).padStart(2, "0") + ":" + s : String(m).padStart(2, "0") + ":" + s;
+}
+
+// basename is the last path segment. Here rather than in app.js since
+// TOR-193: it labels a result set in the compare picker and a file in the
+// list, so two modules read it, and it is a pure string function with no DOM
+// and no message shape - which is exactly what this file is for.
+function basename(path) {
+  const parts = String(path || "").split("/");
+  return parts[parts.length - 1] || path || "";
+}
+
 // stallDuration is "how long" for a stall reading - the load-bearing part of
 // TOR-141's own acceptance criterion. Distinct from seconds() above: that one
 // prints a single measurement to a tenth of a second ("21.3s"), useful for a
@@ -1332,6 +1355,8 @@ export {
   shortId,
   seconds,
   bytesLabel,
+  timecode,
+  basename,
   waitingForMetadata,
   cancellable,
   badgeState,
