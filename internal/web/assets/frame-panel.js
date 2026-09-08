@@ -211,6 +211,14 @@ class FramePanel extends HTMLElement {
   // fresh picture shows it already panned for the frame or two before the
   // first layout runs.
   open(src, caption) {
+    // ONE MODAL AT A TIME (TOR-193 established this; compare-dialog.js's
+    // open() carries the full reasoning). Two modal <dialog>s can be open
+    // together - the platform allows it and this page could reach it - and
+    // the result is one painted over the other. Their keys do not fight, so
+    // this is a line rather than a mechanism.
+    for (const other of document.querySelectorAll("dialog[open]")) {
+      if (other !== this.dialog) other.close();
+    }
     this.zoomed = false;
     this.fit = 1;
     this.x = 0;
