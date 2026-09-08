@@ -286,6 +286,14 @@ which is what makes the result a measurement rather than a coincidence:
     brandFonts  Torpeek Sans  status "unreferenced" tokens []  ->  "ok"  ["--sans"]
                 Torpeek Mono  status "unreferenced" tokens []  ->  unchanged
 
+Confirmed after normalising --mono to the trailing form and re-reading: it is
+now `kind: "font"` with `annotation: "font"`, and BOTH faces report
+
+    brandFonts  Torpeek Sans  status "ok"  tokens ["--sans"]
+                Torpeek Mono  status "ok"  tokens ["--mono"]
+
+with `--compare-aspect` still `other` throughout - the control never moved.
+
 So the annotation does not merely relabel a token: it is what links a font FACE
 to the token that names it. Both faces load and are fully indexed either way,
 but an un-annotated family is reported as referenced by nothing.
