@@ -28,6 +28,18 @@ type MetadataReady struct {
 	Private  bool
 	// Videos are every video file the torrent holds, in torrent order.
 	Videos []swarm.FileInfo
+	// Files is EVERY file the torrent holds, in torrent order - Contents.Files'
+	// own list, on the event stream (TOR-180), so a client can show what the
+	// torrent actually contains rather than only the part of it this program
+	// will take frames from.
+	//
+	// NIL IS "CANNOT SAY", NOT "HOLDS NOTHING", and it is a state that really
+	// occurs: a replay rebuilds this event from a run record on disk
+	// (cache.Run), and a record written before that field existed carries no
+	// file list at all. A consumer must fall back to Videos there rather than
+	// draw an empty torrent - the same absent-is-not-zero rule this project
+	// has now drawn eight times (the tally is in web/listing.go's Live).
+	Files []swarm.FileInfo
 	// Selected are the torrent indices actually being worked on. It equals
 	// every entry of Videos unless the run named a subset; a client showing
 	// progress needs the number it is counting towards, not the number the

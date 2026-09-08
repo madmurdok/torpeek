@@ -693,10 +693,12 @@ button:disabled { opacity: .5; }
   cursor: pointer;
 }
 
-/* The disclosure triangle, deliberately the same object as .file-toggle-icon
-   one level down: opening a torrent and opening one of its files are the same
-   gesture, so they should not be two different marks. A fixed width, so the
-   name starts at the same x whichever way the triangle points. */
+/* The disclosure triangle, deliberately the same object as .picker-open one
+   level down (TOR-182 moved that mark onto the file's own row in the list,
+   from the .file-toggle-icon that used to sit on each file card's title
+   line): opening a torrent and opening one of its files are the same gesture,
+   so they should not be two different marks. A fixed width, so the name
+   starts at the same x whichever way the triangle points. */
 .run-toggle-icon {
   flex: 0 0 auto;
   width: .7em;
@@ -949,7 +951,39 @@ button:disabled { opacity: .5; }
    edge would either be clipped or add a scrollbar. */
 .run-detail {
   min-width: 0;
-  position: relative;
+  /* TOR-174: sticky, not relative. .run-detail sits in a colspanned <td>
+     that is, by construction, as wide as the TABLE (every column's summed
+     width) rather than as wide as the PANE (.run-table-wrap's own visible
+     width) - table-layout: fixed (TOR-157) is exactly what lets those two
+     diverge, the moment a drag or a narrow window makes the columns sum to
+     more than the pane shows. `left: 0` pins this element's left edge to
+     the pane's own left edge as .run-table-wrap scrolls sideways under it -
+     the same primitive .run-table thead th already uses on top (vertical
+     axis) and .run-detail-header-actions already uses on right, both
+     resolving against this same scrolling ancestor.
+     VERIFIED LIVE, NOT ASSUMED: sticky inside table structures is exactly
+     the kind of thing the spec says one way and a browser does another (the
+     ticket's own warning). Checked in a real Chrome, on a real replayed run,
+     at two narrow panes (592px and 432px) and after a real column drag that
+     pushed the table to 1399px: dragging .run-table-wrap's own scrollbar
+     left this element's getBoundingClientRect() exactly unchanged - it does
+     not travel with the table underneath it. It holds.
+     THE TRAP: sticky constrains OFFSET, never SIZE. Without the `width`
+     below, this element would still be exactly as wide as its containing
+     block (the <td>, i.e. the table), and everything past the pane's own
+     right edge - the top-up figure among it - would just be dragged along
+     for the ride instead of left behind at scroll 0. `width` and
+     `box-sizing: border-box` are therefore not decoration; delete them and
+     the fix silently reverts to "sticky but still table-wide". app.js's
+     syncRunDetailWidth() is what keeps --run-detail-w current - see its own
+     comment for the three places that call it. The 100% fallback is what
+     this element is before that first runs (there is no visible row before
+     a row is expanded, and expansion is exactly when it does run, but the
+     fallback keeps a detached/test DOM sane too). */
+  position: sticky;
+  left: 0;
+  width: var(--run-detail-w, 100%);
+  box-sizing: border-box;
   padding: .9rem 1rem 1.2rem;
   /* Back to the page's own body size. The detail is inside .run-table now,
      and the table's .82rem is meant for the one-line torrent rows, not for a
@@ -1031,8 +1065,17 @@ button:disabled { opacity: .5; }
    stay under the summary rather than following Save up - see app.js's own
    comment on this block for why - so .torrent-actions is only shown when
    there is something in it to show (a .torrent AND a watch directory), not
-   whenever the run merely has a .torrent. */
+   whenever the run merely has a .torrent.
+
+   THE FIFTH INSTANCE OF THE [hidden] TRAP, found by TOR-182 the same way
+   .file-links was, one block down: `display: flex` here beat the UA's own
+   `[hidden] { display: none }` at equal specificity, so every one of the
+   three places app.js hides this paragraph (syncEntry, showTorrent,
+   loadDefaults) did nothing and the row kept an empty <p> and its .5rem of
+   margin. The Send button inside it declares no display of its own, so IT
+   was hidden correctly all along - which is exactly why nobody saw this. */
 .torrent-actions { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin: .5rem 0 0; }
+.torrent-actions[hidden] { display: none; }
 /* Chrome matches Cancel's, its neighbour in .run-detail-header-actions
    above: --edge and a hard corner, not the --rule border and .35rem radius
    this carried back when it sat alone under the summary rather than beside
@@ -1062,12 +1105,14 @@ button:disabled { opacity: .5; }
    (.run-cell-actions) and would squeeze the torrent's name to fit a fourth
    control - and it is where the run's other verbs already are.
 
-   One rung up from the detail's own --s1 ground rather than bordered like
-   the picker below: the picker is a BLOCKING state - nothing happens until
-   somebody ticks a box, which is what earns it a --warn frame - while this
-   is an offer on a finished row, and framing the two the same way would say
-   this row is waiting for something. --ink-2 on --s2 measures 6.75, well
-   clear of AA (see :root's ink table). */
+   One rung up from the detail's own --s1 ground rather than framed in
+   --warn like the file list below when that list is a BLOCKING state -
+   nothing happens there until somebody ticks a box, which is what earns
+   the amber frame - while this is an offer on a finished row, and framing
+   the two the same way would say this row is waiting for something. Since
+   TOR-180 the list itself is on screen in every state and only wears that
+   frame while parked, for exactly this reason. --ink-2 on --s2 measures
+   6.75, well clear of AA (see :root's ink table). */
 .run-again {
   margin: .7rem 0 0;
   border: 1px solid var(--rule);
@@ -1104,16 +1149,48 @@ button:disabled { opacity: .5; }
 .run-again-cost:empty,
 .run-again-note:empty { display: none; }
 
-/* The picker a multi-file torrent parks on (TOR-67): nothing has been
-   downloaded beyond the metadata, and nothing will be until someone ticks a
-   box here. It sits between the torrent's summary line and its (still
-   empty) file list. */
-.picker { margin-top: .8rem; border: 1px solid var(--warn); border-radius: .4rem; padding: .6rem .7rem; }
+/* WHAT THE TORRENT HOLDS (TOR-180). Since that ticket this is a row's
+   ordinary content in every state that knows a file list, not only the
+   screen a multi-file torrent parks on (TOR-67) - so the frame cannot be
+   the parked state's frame any more.
+
+   Quiet by default and --warn only while parked, which is the same
+   distinction .run-again's own comment draws one section up: a --warn frame
+   says "this is BLOCKING, nothing happens until somebody ticks a box", and
+   wearing it on a run that is already fetching would be an alarm about
+   nothing. data-parked is written by app.js's syncFileList from the run's
+   own state; the colours themselves stay here in the tokens, as
+   TestEveryColourComesFromAToken requires. */
+.picker {
+  margin-top: .8rem;
+  border: 1px solid var(--rule);
+  border-radius: .4rem;
+  padding: .6rem .7rem;
+}
+.picker[data-parked="true"] { border-color: var(--warn); }
 
 .picker-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: 0 0 .5rem; }
 .picker-title { font-weight: 500; margin-right: auto; }
 
-.picker-list { list-style: none; margin: 0; padding: 0; max-height: 18rem; overflow-y: auto; }
+/* NO HEIGHT CAP, AND NO SCROLLER OF ITS OWN, and that is a deliberate loss
+   rather than an oversight (TOR-182). This list used to be `max-height: 18rem;
+   overflow-y: auto` so that a season pack's twenty-five names could not push
+   the rest of the detail off screen. Since TOR-182 the list CONTAINS each
+   file's own detail, so that cap is a cap on the frame grid inside it: a
+   contact sheet read through an 18rem window, with the page's own scrollbar
+   and the list's own fighting over the wheel, is worse than a long page.
+
+   The two candidates that would have kept both were rejected. Lifting the cap
+   only while something is open moves every row above the one just clicked, so
+   the row travels out from under the pointer - the failure
+   .run-detail-cancel[data-idle] above exists to avoid. Capping the DETAIL
+   instead of the list puts the scroller around exactly the thing it must not
+   be around.
+
+   What replaces it is the level above: a torrent's whole row closes in one
+   click (setRunExpanded), which is a bound on the page's height that works at
+   every depth rather than only on this one list. */
+.picker-list { list-style: none; margin: 0; padding: 0; }
 
 .picker-file {
   display: flex;
@@ -1127,68 +1204,318 @@ button:disabled { opacity: .5; }
 .picker-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .picker-size { flex: 0 0 auto; font-family: var(--mono); font-size: .76rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
-.picker-foot { display: flex; align-items: center; gap: .6rem; margin: .6rem 0 0; }
-/* The cost of pressing the button, shown before it is spent: frames are per
-   file, so this is the number that surprises people (TOR-50). */
-.picker-cost {
-  font-family: var(--mono);
-  font-size: .82rem;
-  color: var(--accent);
-  text-shadow: var(--glow);
-  font-variant-numeric: tabular-nums;
+/* A FILE NO FRAME CAN BE TAKEN FROM: the .nfo, the artwork, the subtitles,
+   and the sample swarm.SelectVideos drops on purpose. Listed because that is
+   how a person finds out what they actually downloaded, and not tickable
+   because the server validates a selection against the video list alone
+   (runEntry.holdsFile) - a tick here would be refused.
+
+   --ink-2, NEVER --ink-3: TOR-158 took the third ink level off text
+   altogether after measuring it at 3.14-4.14 against the surfaces it was
+   painted on, under AA's 4.5 on every one of them. --ink-2 measures 6.75
+   against --s2 and 7.37 against --s1 (see :root's ink table), so this row is
+   quieter than its siblings and still fully legible.
+
+   AND COLOUR IS NOT WHAT SAYS IT. Somebody who cannot separate the two greys
+   still has to know they cannot tick this, so two carriers that are not
+   colours do the saying: the checkbox is ABSENT (app.js builds a <span>
+   rather than a <label> with an input), and .picker-mark draws an em dash in
+   the column it would have occupied - the same mark every absent metric cell
+   in the run table already uses for "no reading here". The cursor is the
+   default arrow rather than a pointer for the same reason: nothing here
+   responds to a click. */
+.picker-item[data-video="false"] .picker-file { color: var(--ink-2); cursor: default; }
+/* No hover lift either: a row that lights up under the pointer is a row that
+   looks like it does something. */
+.picker-item[data-video="false"] .picker-file:hover { background: none; }
+/* Sized and centred to sit exactly where a checkbox sits, so the names below
+   a tickable row line up with the names below an untickable one and the
+   column reads as one column. */
+.picker-mark {
+  flex: 0 0 auto;
+  width: 1rem;
+  text-align: center;
+  color: var(--ink-2);
 }
 
-/* One block per torrent file: its summary panel, its progress, its grid -
-   collapsed to a single clickable row by default (TOR-63), except the first
-   file of the torrent, which opens expanded. */
-.files { display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem; }
+/* THE DISCLOSURE ON A FILE'S ROW (TOR-182): the same triangle the torrent's
+   own row wears one level up (.run-toggle-icon), because opening a torrent
+   and opening one of its files are the same gesture and should not be two
+   different marks. It is stripped back to a mark rather than dressed as a
+   control - this file's shared `select, button` rule gives every button a
+   ground, a border and .45rem of padding, all of which would make a chip out
+   of something that has to sit inside a list row.
 
-.file { border-top: 1px solid var(--rule); padding-top: .5rem; }
+   RESERVED ON EVERY ROW, DRAWN ON SOME. Its box is always there, so the names
+   of twenty-five files line up whether or not each one has frames yet - the
+   same reasoning .picker-mark above follows for the checkbox column, and
+   .run-detail-cancel[data-idle] for Cancel. `visibility` rather than
+   `display` is what reserves it: it also takes the button out of the tab
+   order and out of the accessibility tree, so a row with nothing to open
+   offers nothing to open, by one declaration instead of a `disabled` flag
+   that app.js would have to keep in step.
 
-.file-title { margin: 0; font-size: 1rem; }
-
-/* The whole collapsed row is the click target - name plus whatever of
-   resolution/frame-count is already known, so a file can be chosen by
-   without opening it first. */
-.file-toggle {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: .25rem .6rem;
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0;
-  padding: .3rem .35rem;
-  border: none;
-  border-radius: .35rem;
-  background: none;
-  font: inherit;
-  font-weight: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.file-toggle:hover { background: var(--hover); }
-.file-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-
-.file-toggle-icon {
+   data-detail is written by fileBlock and by nothing else - it is set at the
+   one moment a detail actually exists behind the triangle. */
+.picker-open {
   flex: 0 0 auto;
   width: .7em;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
   opacity: .6;
+  visibility: hidden;
+  cursor: pointer;
 }
-.file-toggle-icon::before { content: "▸"; }
-.file-toggle[aria-expanded="true"] .file-toggle-icon::before { content: "▾"; }
+.picker-item[data-detail="true"] .picker-open { visibility: visible; }
+.picker-open::before { content: "▸"; }
+.picker-open[aria-expanded="true"]::before { content: "▾"; }
+.picker-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.file-name { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+/* WHAT ONE TICK WILL SPEND, on that file's own row (TOR-181).
 
-.file-summary { flex: 0 0 auto; font-family: var(--mono); font-size: .74rem; color: var(--ink-2); }
+   This was the foot's cost line, beside a "Take frames" button that no
+   longer exists. Both moved for one reason: a tick is now the decision, so
+   a figure sitting under the list was a price shown where nobody was
+   deciding anything. The count is per video file, which is the whole of
+   TOR-50's trap - a torrent of six quality variants costs six times the
+   intake's number - and this is the column where that multiplication is
+   about to be agreed to, one row at a time.
 
-.file-body { padding: .5rem .35rem 0; }
+   --warn, NOT --accent, and that is a change of meaning rather than of
+   taste. The accent means "this is live, or this is where you are" and
+   wears nothing else (:root); this is a caution about somebody's allowance,
+   which is exactly what .run-again-cost one section up already uses --warn
+   for. Six accented, glowing figures down a season pack would also have
+   read as six things happening. Contrast computed, not recalled: --warn
+   measures 11.77 against the --s1 this section actually draws on (the
+   detail cell's own background, .run-detail-cell) and 10.77 against --s2,
+   so it clears AA on either. */
+.picker-cost {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: .76rem;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}
+/* The one thing a ticked row says in words: that this tick did NOT join the
+   pass in flight and starts when it ends (app.js's updateFileCosts). Quiet,
+   because the ticked box beside it already carries "asked for" - this span
+   only ever holds the exception. --ink-2 measures 7.37 against this
+   section's --s1 ground, 6.75 against --s2 - the same figures :root's ink
+   table gives, and the reason TOR-158 left --ink-2 on text while taking
+   --ink-3 off it. */
+.picker-state {
+  flex: 0 0 auto;
+  font-size: .76rem;
+  color: var(--ink-2);
+}
+/* WHAT THE FILE ALREADY GOT, in the column the price vacates (TOR-182).
+
+   This is the .file-summary that used to sit on each file card's own title
+   line - resolution and frame count, kept current by updateFileSummary - and
+   it keeps that rule's type exactly: mono, .74rem, --ink-2, which measures
+   7.37 against the --s1 this section draws on (see :root's ink table).
+
+   Deliberately NOT --warn, unlike .picker-cost beside it: this is a figure
+   about what has already been spent, and the amber on this page means "this
+   is about to cost you". A row cannot show both (a file with frames has been
+   asked for, and updateFileCosts clears the price of an asked-for file), so
+   the two share one place at the row's end rather than each keeping a column
+   half-empty. */
+.picker-summary {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-2);
+}
+/* Neither span costs its own gap when it has nothing to say, and exactly one
+   of the two is ever filled. */
+.picker-cost:empty,
+.picker-state:empty,
+.picker-summary:empty { display: none; }
+
+/* CLEAR FRAMES (TOR-183): the one control on this page that deletes a whole
+   file's results, at the end of the row it belongs to, on screen only while
+   somebody has un-ticked a finished file (app.js's updateFileCosts).
+
+   SIZED DOWN FROM THE SHARED CONTROL, the way .picker-open above is: this
+   file's `select, button` rule gives every button .45rem of padding, which is
+   most of a list row's height, and a chip that made the row taller would move
+   every name below it the moment an offer appeared. Same .74rem as the
+   figures beside it, so the row's end reads as one strip.
+
+   --bad, AND IT IS THE ONLY THING ON THIS PAGE THAT WEARS IT AS TEXT. The
+   semantic three are kept apart from each other on purpose (:root): --warn is
+   "this is about to cost you", which the price on this same row already says,
+   and this is not about cost - traffic already spent is not recoverable and
+   pressing this recovers none of it. What it is about is loss, which is what
+   --bad means here and on .thumb-delete's own hover. Contrast computed
+   against the surfaces it actually sits on rather than recalled: --bad reads
+   7.31 against --s1 (the detail cell's ground) and 6.69 against the --s2 this
+   button's own background comes from, both clear of AA's 4.5.
+
+   AND COLOUR IS NOT WHAT SAYS IT, the rule every row in this section keeps:
+   the label states the act and the count ("Clear 12 frames"), the title
+   states what goes and what survives, and the button is not there at all
+   until a deliberate un-tick asks for it. Three carriers before the colour.
+
+   HOVER OVERRIDES THE SHARED ACCENT, and the specificity is the load-bearing
+   part rather than the order. `button:hover:not(:disabled)` earlier in this
+   file sets border-color to var(--accent) and weighs (0,2,1); this weighs
+   (0,3,0), which wins on the class column and therefore wins wherever it
+   sits. Written with :not(:disabled) for exactly that reason and not for the
+   behaviour - a button in flight should not light up either way. Without it
+   the destructive control would turn cyan under the pointer, and the accent
+   means "this is live, or this is where you are" and wears nothing else. */
+.picker-clear {
+  flex: 0 0 auto;
+  padding: .05rem .4rem;
+  font-size: .74rem;
+  background: var(--s2);
+  color: var(--bad);
+  border: 1px solid var(--bad);
+  cursor: pointer;
+}
+.picker-clear:hover:not(:disabled) {
+  background: var(--bad-dim);
+  border-color: var(--bad);
+}
+.picker-clear:focus-visible { outline: 2px solid var(--bad); outline-offset: 1px; }
+/* No `display` above, deliberately, so the `hidden` attribute app.js sets is
+   never beaten by this rule at equal specificity - the trap this file has now
+   paid for six times (see .file-detail's own note). The companion is
+   redundant TODAY and kept for the same reason it is kept there: this is the
+   obvious place for a later ticket to write `display: inline-flex`, and the
+   cost of that mistake is a delete button that cannot be put away. */
+.picker-clear[hidden] { display: none; }
+
+/* WHAT A CLEAR THAT ONLY PARTLY HAPPENED LEFT BEHIND (TOR-183), beside the
+   file it is about rather than in the page's own error line at the top -
+   which for a torrent of twenty-five rows would not say which file.
+
+   Indented onto .file-detail's own rail below, because it belongs to the row
+   above it exactly as that slot does, and reads as a sentence about it rather
+   than as a new list item.
+
+   --bad, like the button it reports on, and at prose size rather than the
+   row's figure size: this is the only thing on the row somebody has to READ.
+   7.31 against the --s1 this section draws on. */
+.picker-note {
+  margin: .1rem 0 .4rem 1.05rem;
+  font-size: .78rem;
+  color: var(--bad);
+  /* A clear can report more than one thing at once - several result sets, or
+     one set with more than one artefact stuck - and errors.Join separates
+     them with a newline. pre-line renders those as the lines they are while
+     still wrapping the long paths inside each one, so two problems read as
+     two problems rather than as one run-on sentence. */
+  white-space: pre-line;
+}
+.picker-note[hidden] { display: none; }
+
+/* A ROW WHOSE BOX CANNOT BE CLICKED is not a row that should light up under
+   the pointer or wear one. Two of them: a file this row has already asked
+   for (the box is checked and disabled - un-ticking cannot un-start a
+   fetch), and a row the server would refuse a tick on at all, whose reason
+   is on the row's title (run_state's tick_refusal). The third,
+   [data-video="false"], has its own rule above and no data-tick at all. */
+.picker-item[data-tick="asked"] .picker-file,
+.picker-item[data-tick="closed"] .picker-file { cursor: default; }
+.picker-item[data-tick="asked"] .picker-file:hover,
+.picker-item[data-tick="closed"] .picker-file:hover { background: none; }
+
+/* AND A ROW WITH A DETAIL EARNS BOTH BACK (TOR-182), which is why these come
+   after the two rules above rather than being folded into them.
+
+   The rules above are about the TICK - "a box that cannot be clicked is not a
+   row that should light up under the pointer" - and they were the whole truth
+   while a tick was the only thing a row did. Since TOR-182 a row also opens
+   that file's own detail, and every row that can is one of the two above by
+   construction: a file has a detail exactly when it has been asked for, and
+   an asked-for row's box is disabled (updateFileCosts). So leaving those
+   rules as the last word would draw a default arrow over the one row on the
+   list that certainly does something.
+
+   Equal specificity to the rules above ([attr] and a class both count as a
+   class), so ORDER is what decides this, and the order is not decoration:
+   move this block up and the pointer disappears from every open-able row.
+   data-detail's only writer is fileBlock, which runs when the detail exists,
+   so nothing here can light up a row with an empty slot under it. */
+.picker-item[data-detail="true"] > .picker-file { cursor: pointer; }
+.picker-item[data-detail="true"] > .picker-file:hover { background: var(--hover); }
+
+/* SELECT ALL, ARMED: it has been pressed once, it is saying what it would
+   cost, and it is waiting for the press that spends it (app.js's
+   armSelectAll). --warn for the reason .picker-cost above wears it - this is
+   the largest sum on the page - and the colour is the THIRD carrier, never
+   the only one: the label changes to name the total, and .picker-armed
+   states the arithmetic and the ask beside it. */
+.picker-all[data-armed="true"] {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+/* The sentence: what the second press starts, and how to back out. It is the
+   new information, so it is not quiet - plain --ink at the head's own size. */
+.picker-armed { font-size: .8rem; }
+.picker-armed:empty { display: none; }
+
+/* ONE FILE'S DETAIL, ONE LEVEL IN (TOR-182): its metadata disclosure, its
+   progress line, its reach strip, its frame grid and its buttons, in a slot
+   under the file's own row in the list above.
+
+   It replaces the `.files` column of `.file` cards that used to sit below the
+   list, and with them go the four rules that made a card look like one: the
+   flex column and its 1rem gap, the card's own top rule, the `.file-title`
+   line, and the `.file-toggle` button that line held. Nothing was lost with
+   them - the list's own rows are that title line now, one per file, and they
+   already carry a name, a size and (since this ticket) a summary. What did
+   have to move is the reason `.file-toggle` existed at all, and it moved to
+   `.picker-file` and `.picker-open` above: the whole row is the click
+   target, and the triangle says it opens.
+
+   INDENTED BY A RULE, NOT BY PADDING, and the choice is about width. This is
+   the innermost of three levels inside a colspanned cell whose own width is
+   pinned to the pane (TOR-174), and the widest thing on the page - a frame
+   grid - is what lands here. So the nesting is said with a 1px line and
+   .6rem of room beside it rather than with the ~1.4rem a matching inset
+   would have cost the grid at every window size.
+
+   No `display` of its own, deliberately: collapse is the `hidden` attribute
+   alone, and a class rule declaring display would beat the UA's `[hidden]`
+   at equal specificity - the trap this file has now paid for SIX times. Three
+   were known (.drop-overlay[hidden], the corner-bracket gate, and TOR-181's
+   .picker-foot); three more were standing when TOR-182 asked the question of
+   every element app.js hides, and each has its own note where it sits:
+   .torrent-actions, .file-links and .run-progress.
+   The [hidden] companion below is therefore redundant TODAY and kept anyway:
+   this container is the obvious place for a later ticket to write
+   `display: grid`, and the cost of that mistake is a detail that will not
+   close. */
+.file-detail {
+  margin: .2rem 0 .5rem 1.05rem;
+  padding: .1rem 0 .3rem .6rem;
+  border-left: 1px solid var(--rule);
+}
+.file-detail[hidden] { display: none; }
+
+/* AN OPEN ROW, dressed the way an open torrent's row is one level up
+   (.run-row[data-expanded="true"]): the same accent rail, so the row and the
+   detail hanging off it read as one block rather than as a row and a loose
+   panel under it. Quieter than the torrent's - no ground of its own - because
+   this rail is already inside the accented one that frame draws, and two
+   filled grounds nested would read as a third level of chrome nobody asked
+   for. */
+.picker-item[data-expanded="true"] > .picker-file {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 
 /* The metadata accordion, one level inside a file's own (TOR-71): resolution,
    codec, tracks - collapsed by default with no auto-expand exception, since
    the frames are what the file was opened for and this is a detail on top of
-   that. Same idiom as .file-body: collapse is the `hidden` attribute alone,
+   that. Same idiom as .file-detail: collapse is the `hidden` attribute alone,
    and nothing here sets `display` on .meta-body, so the UA rule for
    `[hidden]` is never beaten by a class selector (see .drop-overlay[hidden]
    below for what that trap looks like when a rule does). */
@@ -1244,7 +1571,20 @@ button:disabled { opacity: .5; }
 .track-group ul { margin: 0; padding-left: 1.1rem; font-family: var(--mono); font-size: .8rem; color: var(--ink-2); }
 .track-group li { margin: .1rem 0; }
 
+/* THE FOURTH TIME, and this one had been on screen since the rule was
+   written. app.js builds this paragraph with the `hidden` attribute set and
+   only clears it when a file actually finishes with a contact sheet to
+   offer (onFileDone) - but `display: flex` here beats the UA's own
+   `[hidden] { display: none }` at equal specificity, so it was never hidden
+   at all: every file card carried an empty <p> and its default paragraph
+   margins, top and bottom, for its whole life. TOR-182 found it by asking
+   the general question of every element app.js hides (see the test named
+   after that question) rather than by looking at this rule.
+
+   The companion below is the whole fix, and it is the same one
+   .drop-overlay[hidden] and .torrent-actions[hidden] carry. */
 .file-links { font-size: .8rem; display: flex; gap: 1rem; }
+.file-links[hidden] { display: none; }
 .file-links a { color: inherit; }
 
 .file-progress { font-family: var(--mono); font-size: .78rem; color: var(--ink-2); margin: .5rem 0; font-variant-numeric: tabular-nums; }
@@ -1289,6 +1629,23 @@ button:disabled { opacity: .5; }
   border-radius: .1rem;
   overflow: hidden;
 }
+/* THE SIXTH INSTANCE OF THE [hidden] TRAP, and the one that hid the longest,
+   found by TOR-182 while widening the guard that names it (see
+   TestEverythingHiddenFromJSCanActuallyBeHidden). `display: flex` above beats
+   the UA's own `[hidden] { display: none }` at equal specificity, so
+   renderRunProgress's `el.hidden = true` - the line that is supposed to take
+   this bar off a finished, failed or disk row - never did.
+
+   NOTHING WAS VISIBLE, which is exactly why it lasted this long: the bar is
+   .28rem tall, has no ground of its own, and its segments are emptied in the
+   same breath, so all it left behind was its own .25rem of margin. What it
+   also left behind was the accessibility tree: renderRunProgress sets
+   role="progressbar" and the aria-value* attributes when it shows the bar and
+   removes none of them when it hides it, on the reasonable assumption that
+   `hidden` takes the element out of the tree altogether. With `hidden`
+   working again it does, so this one line fixes both halves and no JS
+   changes. */
+.run-progress[hidden] { display: none; }
 .run-progress-seg {
   flex: 1 1 0;
   min-width: 1px;
@@ -1513,28 +1870,43 @@ button:disabled { opacity: .5; }
    key/value column, and the accent-on-everything colouring - see the palette
    note below.
 
-   THE PALETTE, which is the real decision here rather than a detail. The
-   reference wears its accent decoratively, everywhere; :root says --accent
-   means "this is live or this is where you are" and that nothing decorative
-   may wear it, because before TOR-113 one green served as both the accent and
-   "done". This panel is NOT an exception to that rule - it did not need to
-   be. The whole of the chrome is drawn in --edge (the resting-border token
-   TOR-159 measured, 3.83 against --s1) over --s1, with --ink-2 text and a
-   dashed tick run in the same --edge, and the accent is spent on exactly
-   one thing, which does carry meaning: THE ZOOM STATE. At fit the picture is all of itself and
-   nothing is live; at 100% the panel is a window onto a bigger picture and
-   where you are inside it is the one fact the chrome has to tell you - so
-   that is when the brackets take --accent and the state pill fills with it.
-   A frame that already fits at 100% never lights up: nothing is live there
-   either, because there is nowhere else to be.
+   THE PALETTE (TOR-176 revises this from TOR-172's original call). TOR-172
+   read :root's "nothing decorative wears --accent" rule as binding here too,
+   and built the whole resting chrome from --edge - a correct, restrained
+   dialog that then sat next to the owner's HUD reference and was, in their
+   words, "вообще не похож на референс". The reference's whole character is
+   that its chrome is LOUD: brackets a quarter of the edge long, doubled
+   strokes with a gap, visible glow, saturated colour as the frame rather than
+   as a marker. Three treatments were built side by side on a real frame with
+   the live tokens; VARIANT B, WITH VARIANT A'S HINT COLOUR, is what is here.
+
+   The accent is now spent on three things, not one: the three corner
+   brackets (34px at 2px, glowing, at rest - no longer gated on the zoom
+   state), the zoom-state pill, and the key-hint line. Edges, the FRAME label
+   tab and the dashed tick run stay on ink and --edge - the panel does not
+   become accent-coloured throughout, and the chamfer stroke (below) is left
+   off the accent list on purpose, same as the label and the ticks.
+
+   This does trade something away: :root's "nothing decorative wears --accent"
+   rule exists because before TOR-113 one green served as both the accent and
+   "done", and an always-accent hint line spends the token on instruction
+   rather than state. That is accepted here as the owner's call, made with
+   both variants in front of them, for a MODAL panel over a scrim - there are
+   no neighbours in this view whose attention the loud chrome could steal,
+   which is not true of the rest of the page and is not an argument for
+   spending --accent more freely there. What it obliges: THE ZOOM STATE - the
+   only thing in this panel that actually changes - has to stay distinguishable
+   now that it is no longer the only accent on the surface. It still is: the
+   pill is a FILLED box with a glow at 100%, not just another accent stroke
+   among several, so the state reads from its shape and not merely its colour.
+   Checked in a browser at both zoom states, not only against this claim.
 
    THE GLOWS, both of them, and the difference is the trap .run-detail::before
    records: box-shadow follows an element's BOX, so on an L drawn from two
-   borders it paints a glowing rectangle over the shape. The brackets and the
-   notch stroke are stroke-drawn, so their glow is filter: var(--stroke-glow);
-   the state pill is a filled box, so its glow is box-shadow: var(--glow).
-   Neither appears at rest - both are accent-tinted, and a permanently glowing
-   panel would be the furniture-spending --accent's own rule exists to stop.
+   borders it paints a glowing rectangle over the shape. The brackets are
+   stroke-drawn, so their glow is filter: var(--stroke-glow); the state pill
+   is a filled box, so its glow is box-shadow: var(--glow). The chamfer stroke
+   stays --edge and unglowed, along with the label and the ticks.
 
    WHAT SITS OVER THE PICTURE, and why it carries its own ground. The close
    control and the caption are on the picture by design: the close belongs at
@@ -1576,33 +1948,74 @@ button:disabled { opacity: .5; }
      so nothing of the frame is ever lost to it, and no backdrop shows through
      anywhere the picture reaches. */
   clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+  /* TOR-177: a <dialog> defaults to overflow: auto, and nobody had put
+     anything on the PANEL itself - TOR-172's overflow: hidden below is on
+     .lightbox-view, the picture's own window, one level in. Left at the
+     default, a feedback loop follows: the panel's true content (714px tall
+     on the measuring frame) came out 1px wider and 13px taller than the
+     panel's own client box for reasons that have nothing to do with real
+     overflow (see .lightbox-marks::after below for the 1px), scrollbars
+     appeared, each ate 15px of client box, and the now-smaller client box
+     made the same content overflow even more - so the bars, once summoned,
+     had no way to go away on their own. overflow: hidden makes "nothing
+     leaves the panel" (rule 4, TOR-172) structurally true at this level too,
+     the same way .lightbox-view's own overflow: hidden makes it true for the
+     picture - and it also stops that feedback loop from ever being able to
+     start, which matters beyond cosmetics: app.js's availableBox() reads its
+     maximum off .lightbox-view's resolved box, and a scrollbar-narrowed
+     ancestor is exactly the kind of thing that number must never depend on. */
+  overflow: hidden;
 }
 .lightbox::backdrop { background: var(--scrim-strong); }
 
 /* THREE CORNER BRACKETS AND A CHAMFER STROKE, the reference's frame
    vocabulary, drawn the way .run-detail::before draws its own: two borders
-   per corner, so each is an L rather than a rectangle. They sit inside the
-   panel's top and bottom label strips, which is what keeps them off the
-   picture entirely - a hairline in one colour over arbitrary footage is
-   TOR-122's problem all over again, and a bracket cannot carry a scrim.
+   per corner, so each is an L rather than a rectangle. TOR-176 (variant B)
+   makes the three brackets loud rather than restrained: 34px, a quarter of
+   the panel's own edge, at 2px, permanently in --accent with a stroke glow -
+   no longer gated on the zoom state, because the reference's whole character
+   comes from the chrome being loud everywhere, and a modal panel over a
+   scrim has no neighbours whose attention that could steal. They still sit
+   inside the panel's top and bottom label strips, clear of the picture
+   itself - a hairline in one colour over arbitrary footage is TOR-122's
+   problem all over again, and a bracket cannot carry a scrim.
    .lightbox-marks exists because a corner needs a pseudo-element of its own
-   and one element has two. */
+   and one element has two.
+
+   TOR-177 asked, while fixing the panel's own scrolling, whether this still
+   needs to span the WHOLE panel (inset: 0 below) rather than sit as a 34px
+   box at its one corner the way .lightbox::before/::after do. Measured
+   (not guessed): a bare .lightbox-marks with both its pseudo-elements
+   suppressed contributes zero scrollable overflow of its own - inset: 0
+   lands it exactly on the panel's padding box, flush. So spanning the panel
+   is not what needed fixing (.lightbox's own overflow: hidden above is), and
+   there is a real reason to leave it spanning: it is the one host for TWO
+   pseudo-elements that reach two different corners - ::before bottom-left,
+   ::after (the chamfer stroke, further down) bottom-right - and shrinking
+   the host to 34px at one corner would leave the other with no box to
+   measure its offsets from, forcing it to depend on the panel's own
+   dimensions by hand instead of by "the far edge of my own containing
+   block" - exactly the kind of fragile-by-construction arithmetic that
+   pseudo-element's own comment (below) describes moving away from once
+   already. Left spanning, on purpose. */
 .lightbox::before, .lightbox::after, .lightbox-marks::before {
   content: "";
   position: absolute;
-  width: 12px;
-  height: 12px;
+  width: 34px;
+  height: 34px;
   pointer-events: none;
 }
 .lightbox::before {
   top: 4px; left: 4px;
-  border-top: 1px solid var(--edge);
-  border-left: 1px solid var(--edge);
+  border-top: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  filter: var(--stroke-glow);
 }
 .lightbox::after {
   top: 4px; right: 4px;
-  border-top: 1px solid var(--edge);
-  border-right: 1px solid var(--edge);
+  border-top: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  filter: var(--stroke-glow);
 }
 .lightbox-marks {
   position: absolute;
@@ -1611,39 +2024,66 @@ button:disabled { opacity: .5; }
 }
 .lightbox-marks::before {
   bottom: 4px; left: 4px;
-  border-bottom: 1px solid var(--edge);
-  border-left: 1px solid var(--edge);
+  border-bottom: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  filter: var(--stroke-glow);
 }
 /* The stroke along the chamfer, without which the cut reads as a rendering
-   fault rather than as a corner somebody drew. 17px is the 10px notch's own
-   diagonal; the clip-path trims whatever half of the 2px bar falls outside
-   the panel, leaving a hairline flush with the cut. */
+   fault rather than as a corner somebody drew. Left on --edge, unglowed, on
+   purpose: TOR-176 spends --accent on exactly three things (the brackets
+   above, the state pill below, and the key-hint line further down) and the
+   chamfer is not one of them, same as the label tab and the tick run.
+
+   Positioned so its whole THICKNESS lands on the panel's side of the cut,
+   rather than straddling the cut as it did before TOR-176. Not "fully inside
+   the panel", which is what this comment claimed until TOR-177 measured it:
+   the bar's rotated bounding box still pokes about 0.7px past the panel's
+   right edge, and that 0.7px WAS the 1px horizontal overflow TOR-177 was sent
+   to explain. The arithmetic, so nobody has to re-measure: right -2.5px on a
+   17px box puts the centre 6px inside, and a 17x2 bar rotated -45 degrees has
+   an axis-aligned width of (17+2)/sqrt(2) = 13.4px, so it reaches 6.7px each
+   way from that centre - 0.7px of it beyond the edge. Harmless now only
+   because .lightbox itself clips (see its own overflow rule); do not read this
+   as the stroke being contained. The notch's own
+   diagonal (two 10px legs) is ~14.14px; this bar is 17px so it overhangs
+   both ends slightly for a flush join, and its centre sits 1px further into
+   the panel than the cut line itself (bottom-right in un-rotated space:
+   right -2.5px, bottom 5px puts the rotated bar's centre at (6, 6) rather
+   than the line's own midpoint at (5, 5)), so the whole 2px thickness lands
+   on the panel's own side. Previously it was centred ON the cut and relied
+   on .lightbox's clip-path to trim whichever half fell outside - correct in
+   the result, but a stroke depending on being cut in half by an unrelated
+   property is fragile in a way this avoids.
+
+   TOR-177: this is THE SOURCE of the panel's 1px horizontal overflow (882
+   against 881 on the measuring frame), confirmed by counterfactual in a real
+   browser rather than assumed - hiding only this pseudo-element (not the
+   other two brackets, not .lightbox-marks itself) took the panel's
+   scrollWidth-clientWidth from 1 to 0, and zeroing just its `right` offset
+   (rotation kept) did the same, while un-rotating it (offset kept) made the
+   overflow WORSE (1px to 2px). The `right: -2.5px` above is deliberately
+   outside .lightbox-marks's own box - that is what lets the un-rotated bar
+   overhang the cut for a flush join, per this comment's own math - and the
+   -45deg rotation shrinks that box's horizontal extent (a 17x2 rectangle
+   rotated 45 degrees bounds to roughly 13.4x13.4) without shrinking it to
+   zero, so about a pixel still pokes past the panel's right edge after
+   rounding. Neither .lightbox-marks's own inset: 0 nor the fitted picture's
+   rounded width contributes anything here (both measured at exactly 0).
+   Harmless now that .lightbox carries its own overflow: hidden (above,
+   TOR-177) - the stroke still draws exactly where this comment says, just
+   clipped a pixel short of AN ancestor's edge nobody will ever see - but
+   worth naming so the next person does not mistake .lightbox-marks's SPAN
+   for the cause, the way it looks like it should be. */
 .lightbox-marks::after {
   content: "";
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  right: -2.5px;
+  bottom: 5px;
   width: 17px;
   height: 2px;
   background: var(--edge);
-  transform: translate(50%, 50%) rotate(-45deg);
+  transform: rotate(-45deg);
   pointer-events: none;
-}
-
-/* THE ONE PLACE THE ACCENT IS SPENT: at 100% the panel is a window onto a
-   bigger picture, and which part of it you are looking at is live. The
-   colours arrive as border-*-color longhands on purpose - .run-detail::before
-   records what a shorthand costs here, having painted in the wrong colour
-   since TOR-113 because `border-top: 2px solid` later in the file reset the
-   border-color a previous rule had set. A longhand cannot do that to anyone. */
-.lightbox[data-zoom="full"]::before,
-.lightbox[data-zoom="full"]::after,
-.lightbox[data-zoom="full"] .lightbox-marks::before {
-  border-top-color: var(--accent);
-  border-right-color: var(--accent);
-  border-bottom-color: var(--accent);
-  border-left-color: var(--accent);
-  filter: var(--stroke-glow);
 }
 
 /* The panel's top strip: the label tab, then a dashed tick run filling
@@ -1684,7 +2124,11 @@ button:disabled { opacity: .5; }
    "100%". Filled with the accent at 100% (a filled box, so box-shadow is the
    right glow for it - see :root's two glow tokens), --bg text on it, which is
    the reference's own filled-label-with-dark-text motif and measures 12.4
-   against --accent. */
+   against --accent. Unchanged by TOR-176, and now doing a heavier job than it
+   was: with the brackets and the key-hint line both accent too, the pill's
+   FILLED box at 100% versus its outline at rest is what still marks the zoom
+   state as its own fact rather than one more accent stroke among several -
+   checked in a browser at both states, not only asserted here. */
 .lightbox-zoom {
   padding: 0 .25rem;
   border: 1px solid var(--edge);
@@ -1705,20 +2149,20 @@ button:disabled { opacity: .5; }
     var(--edge) 0 4px, transparent 4px 10px);
 }
 
-/* Only the chrome that changes with the zoom state animates, and it is a
-   colour crossfade rather than motion. The reduced-motion block comes after
-   it rather than before: a media query adds no specificity, so with the two
-   the other way round the transition would win and the preference would do
-   nothing. */
-.lightbox::before, .lightbox::after,
-.lightbox-marks::before, .lightbox-zoom {
+/* Only the state pill still changes with the zoom state, so it is the only
+   thing left in this list to animate - the brackets were the other member
+   before TOR-176 made them unconditionally accent, and a transition with
+   nothing to cross-fade is just dead declarations. The reduced-motion block
+   comes after it rather than before: a media query adds no specificity, so
+   with the two the other way round the transition would win and the
+   preference would do nothing. */
+.lightbox-zoom {
   transition: border-color .12s ease-in-out, background-color .12s ease-in-out,
     color .12s ease-in-out, filter .12s ease-in-out;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lightbox::before, .lightbox::after,
-  .lightbox-marks::before, .lightbox-zoom { transition: none; }
+  .lightbox-zoom { transition: none; }
 }
 
 /* THE WINDOW ONTO THE PICTURE, and rule 4's structural half. Its box is the
@@ -1823,7 +2267,21 @@ button:disabled { opacity: .5; }
 /* The keys, in the panel's bottom strip. Same shape as .compare-keys, for the
    same reason: one line, fixed height, nowrap, so nothing it says can change
    the panel's height. The side margins clear the bottom-left bracket and the
-   chamfer. */
+   chamfer.
+
+   Colour is TOR-176 (variant B, with variant A's own contribution): full-
+   strength --accent, the owner's specific request after seeing the three
+   treatments side by side, in place of TOR-172's --ink-2. --accent on --s1
+   measures 11.60:1, so nothing here needs weakening - variant A's rule
+   carried opacity: .85 on top of the same colour, and that is deliberately
+   NOT repeated: opacity multiplies against whatever the token already
+   measures, which is exactly the invisible-failure shape TOR-158 removed
+   from this file (.lightbox-close/.lightbox-caption's own comment, and
+   TestLightboxControlsOverThePictureCarryTheirOwnGround, record the same
+   trap for this dialog already). This does spend the accent on instruction
+   rather than state, which is a real trade against :root's "nothing
+   decorative wears --accent" rule - see the palette comment above .lightbox
+   for why that is accepted here. */
 .lightbox-keys {
   height: var(--lb-keys);
   margin: var(--lb-gap) 1.1rem 0;
@@ -1835,7 +2293,7 @@ button:disabled { opacity: .5; }
   overflow: hidden;
   text-overflow: ellipsis;
   text-align: center;
-  color: var(--ink-2);
+  color: var(--accent);
 }
 
 /* COMPARING TWO RUNS BY FLIPPING (TOR-109).

@@ -420,26 +420,36 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// decideRequest is a picker's answer: this run, these files, this many
-// frames each.
+// decideRequest is one tick: this run, these files, this many frames each.
+//
+// It was a picker's whole ANSWER before TOR-181 - everything somebody had
+// staged, sent once by a button under the list - and the route is unchanged
+// because the shape is: the page still sends a set rather than a single
+// index, so a tick that raced a lost message, or a "Select all", is one
+// call. What changed is that the server ADDS the set to what the row is
+// already fetching instead of replacing a selection nobody had committed
+// yet (Server.DecideRun).
 //
 // It names the run by id rather than by infohash, unlike the reopen request
-// next to it: this is about one entry in this process's registry - the one
-// parked and waiting - not about a torrent's results on disk, and the same
-// torrent may well have been added twice.
+// next to it: this is about one entry in this process's registry - the row
+// whose run is being grown - not about a torrent's results on disk, and the
+// same torrent may well have been added twice.
 type decideRequest struct {
 	ID    string   `json:"id"`
 	Files []string `json:"files"`
-	// Count is the intake's frames-per-file at the moment the button was
-	// pressed, so the number a person was looking at while ticking boxes is
-	// the number the run uses. Absent (or zero) leaves the run with whatever
-	// the original request carried.
+	// Count is the intake's frames-per-file at the moment the box was
+	// ticked, so the number a person was looking at beside that file is the
+	// number the run uses. Absent (or zero) leaves the run with whatever the
+	// original request carried, and a count on a tick that joins a pass
+	// already forming is ignored - see DecideRun on why the figure locks to
+	// the tick that opened it.
 	Count int `json:"count,omitempty"`
 }
 
-// handleDecideRun puts a parked torrent back in the queue with the files
-// someone ticked (TOR-67). The answer is the same {id, state} shape POST
-// /runs gives, because that is what this is: the moment the run someone
+// handleDecideRun starts a ticked file's frames on the row that holds it
+// (TOR-181), which for a parked torrent is the moment it leaves needs-action
+// and rejoins the queue (TOR-67). The answer is the same {id, state} shape
+// POST /runs gives, because that is what this is: the moment the run someone
 // asked for actually becomes a run.
 func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
 	var req decideRequest
@@ -455,6 +465,50 @@ func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
+// untickRequest is one box moved the other way: this run, this one file.
+//
+// ONE file where decideRequest carries a set, and the asymmetry is the two
+// acts' own rather than an inconsistency. A tick can arrive from Select all,
+// which is every video file in one press; an un-tick is always a single box,
+// because TOR-181 removed Select none for saying it could stop things it
+// could not, and nothing on the page sends more than one.
+//
+// The file is a string rather than an int for the reason RunRequest.Files is
+// a []string: a file spec is what swarm.Select understands, and an index is
+// one shape of it. Server.UntickFile only ever accepts an index (holdsFile
+// refuses everything else), so this cannot smuggle a pattern in - it simply
+// does not invent a second vocabulary for a field that already has one.
+type untickRequest struct {
+	ID   string `json:"id"`
+	File string `json:"file"`
+}
+
+// handleUntickFile takes one file back out of what a row will fetch
+// (TOR-184), which is only ever the file no pass has been handed yet. See
+// Server.UntickFile for why the file the engine is already fetching is
+// /runs/cancel's job instead, and refuseUntick for the sentence this answers
+// with when somebody asks anyway.
+//
+// 200 rather than the 202 the decide route answers with, and the difference
+// is real: a tick accepts something that will happen later, while by the time
+// this returns the file is already out of the entry's list under the lock
+// this call took. handleSetPriority answers the same way for the same reason.
+func (s *Server) handleUntickFile(w http.ResponseWriter, r *http.Request) {
+	var req untickRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.UntickFile(req.ID, req.File)
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"id": info.ID, "state": string(info.State)})
 }
 
 // priorityRequest is a reorder: this run, at this level.
@@ -498,11 +552,11 @@ func (s *Server) handleSetPriority(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// decideStatus maps a decision's four failures: a run this server does not
-// hold, a request that does not name a selection this torrent can satisfy, a
-// server that has closed, and - everything left - a run that is not waiting
-// to be told anything, which is the same conflict CancelRun reports for a
-// run that has already ended.
+// decideStatus maps a tick's four failures: a run this server does not hold,
+// a request that does not name a selection this torrent can satisfy, a
+// server that has closed, and - everything left - a run with nothing left
+// for a tick to grow (refuseTick), which is the same conflict CancelRun
+// reports for a run that has already ended.
 //
 // handleSetPriority answers through it too, because a reorder fails in
 // exactly those same four ways and means the same thing by each: an id this
@@ -510,6 +564,14 @@ func (s *Server) handleSetPriority(w http.ResponseWriter, r *http.Request) {
 // that is not waiting for a slot - which for a reorder is the preemption
 // refusal, and a 409 is the right shape for it (the request was understood,
 // the run is simply not in a state this can act on).
+//
+// And handleUntickFile since TOR-184, which is the same four once more: an id
+// this server does not hold, a file this torrent does not have, a closed
+// server, and - the 409 - a file no un-tick can reach because the engine is
+// already fetching it (refuseUntick). The last one is worth naming: the
+// request was understood perfectly and the row is simply past the point where
+// one file of it can be stopped, which is what a conflict means everywhere
+// else on this list.
 func decideStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrNoSuchRun):
@@ -645,12 +707,66 @@ func (s *Server) handleDeleteFrame(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
-// deleteStatus maps a delete's three failures: nothing there to remove, a
-// request that does not name a frame, and a server with no way to remove one.
-// Anything else is a write that failed, which is the server's problem.
+// handleClearFile removes everything one file has on disk and answers with
+// that file's refreshed detail - the same body the GET on it returns and the
+// same body the per-frame DELETE beside it answers with, recomputed after the
+// clear, so a page re-renders from disk truth (TOR-183).
+//
+// A SIBLING ROUTE, not a special case of the one below it: DELETE on
+// .../frames clears the file, DELETE on .../frames/{frame} removes one of
+// them. Two patterns, two handlers, no argument standing in for a mode - a
+// frame index of -1 meaning "all of them" would be exactly the overloaded
+// parameter that makes a destructive call one typo away from a different act.
+//
+// params is OPTIONAL here, where the per-frame delete requires it, and
+// Server.ClearFile argues why: absent means every result set this torrent
+// holds frames of this file in, which is what the row's merged grid shows and
+// what the button beside it offers to clear. It stays a query parameter for
+// the reason handleDeleteFrame gives - the set is part of the address, not a
+// payload, and a DELETE with a body is awkward on both sides.
+//
+// A partial failure is a 200 carrying "warning", exactly as it is for one
+// frame: the clear happened, the file is out of what the result claims to
+// hold, and refusing to re-render would leave frames on screen that the
+// record no longer accounts for (TOR-78).
+func (s *Server) handleClearFile(w http.ResponseWriter, r *http.Request) {
+	index, err := strconv.Atoi(r.PathValue("index"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "no such file")
+		return
+	}
+
+	detail, err := s.ClearFile(r.PathValue("infohash"),
+		strings.TrimSpace(r.URL.Query().Get("params")), index)
+	if err != nil && !errors.Is(err, core.ErrClearIncomplete) {
+		writeError(w, deleteStatus(err), err.Error())
+		return
+	}
+
+	// Wrapped under the same "file" key the GET and the per-frame DELETE both
+	// answer with, so a page can read any of the three the same way.
+	body := map[string]any{"file": detail}
+	if err != nil {
+		// The clear happened; some of what it was meant to remove is still
+		// there. Answering 200 says the first and the warning says the
+		// second - where a 500 would say neither truthfully.
+		body["warning"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// deleteStatus maps a removal's failures: nothing there to remove (a frame or
+// a whole file), a request that does not name one, and a server with no way
+// to remove anything. Anything else is a write that failed, which is the
+// server's problem.
+//
+// Shared by both DELETE routes rather than duplicated, which is the argument
+// core.ErrNoSuchFile's own doc makes from the other side: the two sentinels
+// exist so a MESSAGE can name the right noun, and they were never two
+// statuses.
 func deleteStatus(err error) int {
 	switch {
-	case errors.Is(err, core.ErrNoSuchFrame):
+	case errors.Is(err, core.ErrNoSuchFrame), errors.Is(err, core.ErrNoSuchFile):
 		return http.StatusNotFound
 	case errors.Is(err, errBadRequest):
 		return http.StatusBadRequest

@@ -30,8 +30,12 @@ func populated() Manifest {
 		Subtitles: []Subtitle{{Index: 2, Language: "eng", Format: "subrip",
 			Title: "Full", Forced: false, Default: true}},
 		Frames: []Frame{
+			// The captured point carries where in the file it came from; the
+			// failed one below deliberately does not, since there is no frame
+			// for a provenance to belong to (ByteRanges' own doc).
 			{Index: 0, RequestedMS: 44400, ActualMS: &actual,
-				Path: "frames/000.jpg", Shift: ShiftNone, Width: 2048, Height: 872},
+				Path: "frames/000.jpg", Shift: ShiftNone, Width: 2048, Height: 872,
+				ByteRanges: [][2]int64{{0, 1 << 20}, {14 << 20, 18 << 20}}},
 			{Index: 1, RequestedMS: 86500, Shift: ShiftFailed, Error: "unavailable"},
 		},
 		Cost: Cost{DownloadedBytes: 49806540, ElapsedMS: 102900,
@@ -304,5 +308,101 @@ func TestResolvedWithoutAPresenceCheck(t *testing.T) {
 	}
 	if got.Frames[1].Path != "/results/original/00-episode-1/frames/001.jpg" {
 		t.Errorf("absolute path read as %q", got.Frames[1].Path)
+	}
+}
+
+// TOR-179: where in the file each frame came from, recorded on the frame.
+
+// TestFrameByteRangesAreCompactPairsOnDisk pins the ON-DISK shape, because the
+// shape is the reason the field is affordable: one of these rides on every
+// frame of every manifest, so the pair array is a quarter of what a struct per
+// range would weigh (the same costing cache.Run.Claimed carries in full).
+func TestFrameByteRangesAreCompactPairsOnDisk(t *testing.T) {
+	raw, err := json.Marshal(populated())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Bare numbers under the key, not objects with named fields.
+	want := `"byte_ranges":[[0,1048576],[14680064,18874368]]`
+	if !strings.Contains(string(raw), want) {
+		t.Errorf("the frame record does not carry %s:\n%s", want, raw)
+	}
+}
+
+// TestAFailedPointWritesNoByteRangesAtAll keeps absent and zero different
+// answers on disk. A point that produced nothing has no frame for a provenance
+// to belong to, so it writes no field rather than an empty array - and a
+// reader must not mistake that silence for ignorance about the file, which is
+// why the record also carries the shift and the error that say what happened.
+func TestAFailedPointWritesNoByteRangesAtAll(t *testing.T) {
+	raw, err := json.Marshal(populated().Frames[1])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "byte_ranges") {
+		t.Errorf("a failed point wrote a byte_ranges field:\n%s", raw)
+	}
+	if !strings.Contains(string(raw), `"shift":"unavailable"`) {
+		t.Errorf("the failed point lost the marker that says why it has no ranges:\n%s", raw)
+	}
+}
+
+// TestAFrameRecordWithoutByteRangesReadsAsUnknown is the TOR-52 trap for this
+// field, at the level the trap actually lives: the field was added WITHOUT
+// bumping Version (Frame.Path's doc records why - a bump turns every manifest
+// already on disk into a miss rather than an older shape to read), so a record
+// written before it existed must decode with the field simply absent. Nil, not
+// an empty slice: a reader has to be able to tell "cannot say" from "came from
+// nowhere", and those are the only two shapes it has to do it with.
+func TestAFrameRecordWithoutByteRangesReadsAsUnknown(t *testing.T) {
+	// A frame record in the shape every release before this one wrote.
+	const older = `{
+      "index": 0,
+      "requested_ms": 2000,
+      "actual_ms": 2000,
+      "path": "frames/000.jpg",
+      "shift": "",
+      "width": 640,
+      "height": 360,
+      "error": ""
+    }`
+
+	var f Frame
+	if err := json.Unmarshal([]byte(older), &f); err != nil {
+		t.Fatalf("an older frame record does not decode: %v", err)
+	}
+	if f.ByteRanges != nil {
+		t.Errorf("an older record claims to have come from %v; it cannot know", f.ByteRanges)
+	}
+	if f.Path != "frames/000.jpg" || f.ActualMS == nil || *f.ActualMS != 2000 {
+		t.Errorf("adding ByteRanges cost the older record its other fields: %+v", f)
+	}
+}
+
+// TestByteRangesSurviveTheTwoPathConversions is what makes the record durable
+// rather than merely written. Relative and Resolved are the only two seams a
+// manifest passes through (Frame.Path's doc), they rebuild the frame records to
+// rewrite one field, and a provenance dropped there would vanish on the way to
+// disk or on the way back off it - which is precisely the failure this field
+// exists to prevent.
+func TestByteRangesSurviveTheTwoPathConversions(t *testing.T) {
+	want := populated().Frames[0].ByteRanges
+	if len(want) == 0 {
+		t.Fatal("the fixture frame carries no ranges, so this test proves nothing")
+	}
+
+	recorded := populated().Relative("/results/00-sintel")
+	if got := recorded.Frames[0].ByteRanges; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Relative lost the frame's ranges: %v, want %v", got, want)
+	}
+
+	back := recorded.Resolved("/elsewhere/00-sintel", func(string) bool { return true })
+	if got := back.Frames[0].ByteRanges; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("Resolved lost the frame's ranges: %v, want %v", got, want)
+	}
+	// And the failed point still has none: neither conversion may invent one.
+	if got := back.Frames[1].ByteRanges; got != nil {
+		t.Errorf("a failed point came back claiming to have come from %v", got)
 	}
 }

@@ -166,6 +166,71 @@ type Frame struct {
 	// Error is the typed code when the point failed, empty otherwise. The
 	// shift marker says a point was lost; this says what lost it.
 	Error string `json:"error"`
+
+	// ByteRanges is WHERE IN THIS FILE the frame came from: the stretches of
+	// it that were ordered from the swarm while this one capture point was
+	// being taken, as ascending, non-touching, half-open [begin, end) byte
+	// offsets from the start of the file (TOR-179).
+	//
+	// WHY IT IS ON THE FRAME rather than in the run record. The run record
+	// already carries a spatial figure - cache.Run.Claimed, one traversal's
+	// piece ranges - and it cannot answer this question, for three reasons
+	// that all point the same way. It is overwritten by whichever run wrote
+	// last, so a top-up (TOR-152), which works only the points an earlier run
+	// missed, replaces twenty frames' worth of spread with the two pieces it
+	// needed itself. It is torrent-wide and per-run, so nothing in it can be
+	// attributed to a particular frame. And it says nothing at all once the
+	// pieces are discarded. A record on the frame has none of those
+	// properties: it lives in the manifest, so it survives DiscardPieces and
+	// a copy of the results tree (Path's own doc explains why the tree may
+	// move); it accumulates with no merging rule at all, because a reused
+	// frame carries its own record with it (core.reusableFrames copies the
+	// whole record); and it answers "where did this screenshot come from"
+	// directly instead of by inference.
+	//
+	// WHY BYTES AND NOT PIECES, which is the one real choice here. A piece
+	// index is a fact about the TORRENT's geometry - the piece length and
+	// this file's offset within it - while a frame is a fact about the FILE.
+	// The same file re-packed into another torrent keeps these offsets and
+	// loses those indices. Worse for a record that has to stand alone: the
+	// axis a strip is drawn on is pieces counted from the file's FIRST piece,
+	// and that origin comes from cache.File.Offset, which is in the run
+	// record and not in this file - so recording pieces here would bake in a
+	// conversion out of data this manifest does not carry. web.Reach already
+	// carries FirstPiece, Pieces and PieceBytes, so the conversion costs one
+	// division at render time, and it is exact rather than lossy in either
+	// direction: a claim is always whole pieces, so clipping it to the file
+	// and expanding it back yields the very same pieces.
+	//
+	// WHAT IT IS NOT: the bytes the picture itself decodes from. It is what
+	// the swarm was ASKED for on this point's behalf, which includes the
+	// container header every ffprobe call re-reads (internal/bridge's Fetch
+	// is where all of it arrives). That is deliberate - it is what was paid
+	// for because of this frame, and it is what makes the union over a set's
+	// frames comparable with a run's own claim log rather than a narrower
+	// figure that looks like one.
+	//
+	// A pair array rather than a struct per range, for the size reason
+	// cache.Run.Claimed costs out in full: [[0,262144],[734003200,738197504]]
+	// against [{"begin":0,"end":262144},...] on a record carrying one of
+	// these per frame.
+	//
+	// ABSENT MEANS UNKNOWN, NEVER ZERO, and Version is deliberately not
+	// bumped for it - Path's doc above records why (the TOR-52 trap: bumping
+	// turns every manifest already on disk into a miss rather than an older
+	// shape to read). A manifest written before this field must therefore
+	// render as "we do not know where these came from", not as a run that
+	// touched none of the file and not as one that touched all of it. That is
+	// the seventh place this project draws that line; web.Live keeps the
+	// tally of the first six.
+	//
+	// EMPTY ON A FAILED POINT, and that absence is not ignorance about the
+	// file. A point that produced nothing has no frame for this to be the
+	// provenance OF, and it is already marked as such by Shift and Error
+	// (ShiftFailed: "Path is empty and Error says why") - so a reader asks
+	// this question only of the points that produced something, and one that
+	// did not is not evidence either way.
+	ByteRanges [][2]int64 `json:"byte_ranges,omitempty"`
 }
 
 // Cost is what the run had spent by the time this file was finished. It is the

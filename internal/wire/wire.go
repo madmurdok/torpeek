@@ -48,11 +48,33 @@ func Event(run string, ev core.Event) map[string]any {
 func event(ev core.Event) map[string]any {
 	switch e := ev.(type) {
 	case core.MetadataReady:
-		return map[string]any{
+		m := map[string]any{
 			"type": "metadata_ready", "name": e.Name, "infohash": e.InfoHash,
-			"private": e.Private, "videos": VideoFiles(e.Videos), "blind_dht": e.BlindDHT,
+			"private": e.Private, "videos": FileList(e.Videos), "blind_dht": e.BlindDHT,
 			"selected": e.Selected,
 		}
+		// "files" is EVERY file the torrent holds and "videos" the subset
+		// frames can be taken from (TOR-180). Two keys rather than one list
+		// with a per-entry flag, because which files are capturable is
+		// swarm.SelectVideos' judgement and not a property of a path - a
+		// .mkv small enough beside its siblings is a sample and is
+		// deliberately not in "videos" - so a client is told the answer
+		// instead of re-deriving it from an extension table of its own.
+		//
+		// ABSENT, NOT EMPTY, when the list is unknown, and that is why this
+		// key is added conditionally while "videos" is not. An empty array
+		// is a real answer for "videos" (a torrent that holds no video is
+		// the engine's own failure to report), but for this key it would
+		// claim the torrent holds no files at all - which is never true, and
+		// is exactly what a replay of a pre-TOR-180 run record would say if
+		// nil rendered as []. Same discipline as "swarm" and "stall" on the
+		// progress event below, and the eighth time this project has drawn
+		// the absent-is-not-zero line (the tally lives on web/listing.go's
+		// Live).
+		if e.Files != nil {
+			m["files"] = FileList(e.Files)
+		}
+		return m
 	case core.FileStarted:
 		tm := core.ToneMapOf(e.Media.Video)
 		// The summary panel (REQUIREMENTS.md section 3.3) needs more than the
@@ -215,21 +237,26 @@ func event(ev core.Event) map[string]any {
 	}
 }
 
-// VideoFiles renders every video file the torrent holds, so a picker can be
-// built from the same event that used to only report a count.
+// FileList renders a list of the torrent's files, so a client can show what
+// a torrent holds from the same event that used to only report a count.
 //
 // index, path and length are all of swarm.FileInfo the run knows at this
 // point - Offset is an internal detail no client needs, and anything else
 // (duration, resolution) only exists after probing, which costs traffic a
-// picker should not have to spend before someone has even chosen a file.
+// file list should not have to spend before someone has even chosen a file.
 //
-// Exported because metadata_ready is no longer the only message that carries
-// this list: a torrent parked for someone to choose files (needs_action,
-// TOR-67) sends the very same one, and that record is the web server's own
-// rather than a core event, so it is built outside this package. Two hand-
-// written shapes for one list would drift exactly the way this package
-// exists to prevent - and the page would then need two ways to read a file.
-func VideoFiles(files []swarm.FileInfo) []map[string]any {
+// ONE SHAPE FOR EVERY SUCH LIST, which is why it is named for the shape
+// rather than for one of its callers (it was VideoFiles until TOR-180 gave
+// metadata_ready a second list, "files", beside "videos"). A per-file object
+// that differed between the two keys would make a client read a file two
+// ways, and then three when the next list appears.
+//
+// Exported because metadata_ready is not the only message that carries one:
+// a torrent parked for someone to choose files (needs_action, TOR-67) sends
+// the same lists, and that record is the web server's own rather than a core
+// event, so it is built outside this package. Two hand-written shapes for
+// one list would drift exactly the way this package exists to prevent.
+func FileList(files []swarm.FileInfo) []map[string]any {
 	out := make([]map[string]any, len(files))
 	for i, f := range files {
 		out[i] = map[string]any{"index": f.Index, "path": f.Path, "length": f.Length}

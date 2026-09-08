@@ -212,6 +212,13 @@ func (t *Torrent) Claim(file int, off, length int64, p Profile) (*Window, error)
 		t.t.Piece(i).SetPriority(torrent.PiecePriorityNow)
 	}
 	t.noteClaimed(pieces)
+	// The same order, recorded a second way and for a different question:
+	// noteClaimed counts what the RUN ordered, this attributes it to whatever
+	// capture point is open on this file (StartClaimLog). Two records because
+	// the two are not derivable from each other - the counter is deliberately
+	// de-duplicated across the whole run, so a header piece re-read at every
+	// point would belong to the first point alone if this reused it.
+	t.logClaim(file, pieces)
 
 	return &Window{t: t, pieces: pieces}, nil
 }
@@ -246,6 +253,72 @@ func (t *Torrent) noteClaimed(pieces PieceRange) {
 		t.claimedSeen[i] = struct{}{}
 		t.claimedByte += t.pieceBytes(i)
 	}
+}
+
+// logClaim attributes one order to the capture point currently open on that
+// file (StartClaimLog), in the file's own byte offsets. A no-op when no log is
+// open - the container inspection at the start of a file, and anything a read
+// does between points, belongs to no frame.
+//
+// It records the order UNCONDITIONALLY, unlike noteClaimed above, which skips
+// a piece the run has already claimed. That difference is the point rather
+// than an inconsistency: the counter is asking how much the run ordered in
+// total, where this is asking what each point ordered, and every ffprobe call
+// re-reads the container header. De-duplicating here would hand the header to
+// whichever point happened to be taken first and tell the rest they came from
+// nowhere near it.
+func (t *Torrent) logClaim(file int, pieces PieceRange) {
+	t.claimMu.Lock()
+	defer t.claimMu.Unlock()
+
+	if _, open := t.claimLog[file]; !open {
+		return
+	}
+	begin, end, ok := t.fileBytesOf(file, pieces)
+	if !ok {
+		return
+	}
+	t.claimLog[file] = append(t.claimLog[file], [2]int64{begin, end})
+}
+
+// fileBytesOf clips a claimed piece range onto one file's own byte
+// coordinates, reporting ok=false when the two do not overlap at all.
+//
+// Pieces do not respect file boundaries - a torrent's files are laid end to
+// end and a piece spanning the join belongs to both - so the first and last
+// piece of a claim commonly reach outside the file being read from. Clipping
+// rather than dropping those is what keeps the record honest in the direction
+// that matters: the bytes of THIS file that a claim covered, which is what
+// the frame is a fact about. Nothing is lost by it, because a claim is whole
+// pieces and expanding the clipped range back out lands on the very same ones
+// (manifest.Frame.ByteRanges argues the round trip).
+//
+// Answered from the geometry cached at construction, so the arithmetic stays
+// testable without a client - the same reason pieceBytes below is.
+func (t *Torrent) fileBytesOf(file int, pieces PieceRange) (begin, end int64, ok bool) {
+	if file < 0 || file >= len(t.files) || t.pieceLength <= 0 {
+		return 0, 0, false
+	}
+	f := t.files[file]
+	if f.Length <= 0 {
+		return 0, 0, false
+	}
+
+	begin = int64(pieces.Begin)*t.pieceLength - f.Offset
+	end = int64(pieces.End)*t.pieceLength - f.Offset
+	if begin < 0 {
+		begin = 0
+	}
+	if end > f.Length {
+		end = f.Length
+	}
+	if end <= begin {
+		// Entirely outside this file: a claim over one of the torrent's other
+		// files, which is a real thing to see here because the claim funnel
+		// is the torrent's and a run captures several files at once.
+		return 0, 0, false
+	}
+	return begin, end, true
 }
 
 // pieceBytes is what one piece actually weighs: pieceLength for every piece

@@ -78,6 +78,34 @@ type Run struct {
 	// run worked on. Without it a rerun could not tell "all files" from "the
 	// files that happened to be asked for last time" while staying offline.
 	Videos []File `json:"videos"`
+	// Files is EVERY file the torrent holds, video or not, in torrent order
+	// (TOR-180). Videos above is the subset frames can be taken from; this is
+	// what the torrent actually contains, which is what a person opening a
+	// finished run wants to see - including the .nfo and the sample that
+	// explain why the file they were after is not in Videos.
+	//
+	// NIL IS "THIS RECORD CANNOT SAY", NOT "THE TORRENT HOLDS NOTHING" -
+	// exactly Selected's rule below, for exactly its reason: every record
+	// written before this field existed reads back nil, and a reader must
+	// fall back to Videos there rather than report an empty torrent.
+	//
+	// Version is deliberately NOT bumped for it. LoadRun treats a record
+	// whose version it does not know as a miss, so a bump would turn every
+	// run already on disk into "no cached run" - the TOR-52 trap, recorded on
+	// manifest.Frame.Path and followed again by TOR-179. Adding an optional
+	// field a reader can tell absent from empty is precisely the change that
+	// does not need one.
+	//
+	// omitempty, like Claimed below and unlike Videos above, and the two
+	// differ for a reason rather than by accident: Videos is written by
+	// every run there has ever been, so its key is always there and `null`
+	// never appears in it, while this one is absent from a whole release's
+	// worth of records already on disk. "Absent" is therefore the shape a
+	// reader has to handle anyway - so a run that cannot say writes nothing
+	// rather than inventing a second spelling of it (`"files": null`) that
+	// means exactly the same thing and only gives a reader two shapes to
+	// check.
+	Files []File `json:"files,omitempty"`
 	// Selected lists every file index any run recorded in this directory has
 	// ever asked for - not only this run's own selection. Without it, a file
 	// index absent from Complete is ambiguous: never picked, or picked and
@@ -111,6 +139,28 @@ type Run struct {
 	// union across reruns would report a spread no single run achieved -
 	// exactly the wrong answer for a picture of what one run cost. It follows
 	// Plan, which is likewise simply overwritten by whichever run wrote last.
+	//
+	// NOTHING RENDERS THIS ANY MORE, and that is a correction rather than a
+	// deprecation (TOR-179). The piece strip was drawn from it (TOR-111 by
+	// way of web.reachOf) and could not be, for a reason the paragraph above
+	// states without noticing the consequence: a top-up (TOR-152) works only
+	// the points an earlier run missed, so the last writer's traversal is the
+	// two pieces it needed while twenty frames sit on disk describing the
+	// whole file. The strip stood beside a frame grid that IS cumulative, and
+	// the two disagreed by construction. It now draws from
+	// manifest.Frame.ByteRanges instead - a record on each frame, which
+	// accumulates because the frames do and survives the pieces being
+	// discarded.
+	//
+	// WHAT IT IS STILL FOR, and why it is kept rather than deleted along with
+	// its one reader: it is the only durable record of what ONE traversal
+	// ordered, torrent-wide, and that includes every read no frame owns - the
+	// container inspection at the start of each file, and anything the bridge
+	// served between capture points. The per-frame ranges cannot express that
+	// and should not try to; they are file-scoped and frame-scoped by
+	// definition. The two are not two answers to one question, and a reader
+	// choosing between them has this rule: what did this run cost, here; and
+	// where did this frame come from, on the frame.
 	Claimed [][2]int `json:"claimed,omitempty"`
 }
 

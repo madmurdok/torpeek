@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,20 +306,40 @@ type Runner func(ctx context.Context, req RunRequest) (<-chan core.Event, error)
 // rather than by what a fresh run would be asked to do.
 type Replayer func(infoHash, params string) <-chan core.Event
 
-// Deleter removes one frame of one result set from disk - the record in the
-// file's manifest and the frame file both - and reports whether it could.
+// Deleter removes results from under the output root on a page's behalf: one
+// frame of one file, or everything one file has in one result set.
 //
 // It is injected for the same reason Runner and Replayer are: this package
 // does not decide what a run is and does not write under the output root.
-// core.DeleteFrame is the one real implementation, and everything that makes
-// a delete safe (the manifest written before the file is unlinked, survivors
-// never renumbered, a file whose last frame is gone taken out of run.json's
-// Complete) lives there with the cache rules it has to keep. Here there is
-// only an address to validate.
+// core owns both implementations, and everything that makes either safe - the
+// manifest written before a frame file is unlinked, survivors never
+// renumbered, the run record edited before a byte goes - lives there with the
+// cache rules it has to keep. Here there is only an address to validate.
 //
-// It takes no context: like a replay, this is a handful of local file
-// operations with nothing worth cancelling.
-type Deleter func(infoHash, params string, fileIndex, frameIndex int) error
+// AN INTERFACE RATHER THAN TWO INJECTED FUNCS, which it was until TOR-183
+// added the second operation. The alternative was a seventh positional
+// argument to Start and newServer, and the cost of that lands on the callers
+// that want neither: `newServer(ctx, cfg, runner, nil, nil, nil, nil)` is
+// four consecutive nils nobody can read, and a delete silently wired into the
+// lister's slot is the kind of mistake positional arguments make possible
+// rather than unlikely. Two methods on one capability also state the true
+// thing - both remove results from the same tree, under the same rules, for
+// the same reason - where two func types would have said they were unrelated.
+//
+// Neither method takes a context: like a replay, both are a handful of local
+// file operations with nothing worth cancelling.
+type Deleter interface {
+	// DeleteFrame removes one frame - the record in the file's manifest and
+	// the frame file both - leaving the rest of the run servable.
+	// core.DeleteFrame is the one real implementation (TOR-70).
+	DeleteFrame(infoHash, params string, fileIndex, frameIndex int) error
+	// ClearFile removes everything one file has in this result set - its
+	// frames, its contact sheet, its manifest - and drops it from that run
+	// record's Complete while leaving Selected alone. core.ClearFile is the
+	// one real implementation and argues that split, the order of the
+	// removals and what a partial failure means (TOR-183).
+	ClearFile(infoHash, params string, fileIndex int) error
+}
 
 // Lister reports what a torrent holds - its name, its infohash and its video
 // files - without capturing anything from it.
@@ -360,8 +381,11 @@ var errBadRequest = errors.New("web: malformed request")
 
 // errDeleteUnavailable is DELETE's counterpart to errReplayUnavailable: a
 // server built with no Deleter, or with no output root to delete from,
-// refuses rather than pretending it removed something.
-var errDeleteUnavailable = errors.New("web: deleting a frame is not available")
+// refuses rather than pretending it removed something. One sentinel for both
+// of the Deleter's methods (TOR-183), because the condition is the same
+// condition - there is nothing wired up to remove anything with - and the
+// message says removing rather than naming one of the two.
+var errDeleteUnavailable = errors.New("web: removing results from disk is not available")
 
 // errWatchUnavailable is what SendToWatchDir returns on a server started
 // without -watch-dir. The page does not show the button at all in that case
@@ -615,7 +639,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/retry", s.authGuard(s.handleRetryRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
+	// The tick's inverse, and NOT a cancel by another name (TOR-184): it
+	// reaches exactly the file no pass has been handed yet. Un-ticking one the
+	// engine is already fetching is /runs/cancel, because that is the only
+	// stop core.Engine has - see Server.UntickFile.
+	mux.HandleFunc("POST /runs/untick", s.authGuard(s.handleUntickFile))
 	mux.HandleFunc("POST /runs/priority", s.authGuard(s.handleSetPriority))
+	// The whole file, and one of its frames. Two patterns rather than one
+	// with an argument that means "all of them" - see handleClearFile.
+	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames", s.authGuard(s.handleClearFile))
 	mux.HandleFunc("DELETE /runs/{infohash}/files/{index}/frames/{frame}", s.authGuard(s.handleDeleteFrame))
 	mux.HandleFunc("GET /files/{id}", s.authGuard(s.handleFile))
 	mux.HandleFunc("POST /files/{id}/watch", s.authGuard(s.handleWatchTorrent))
@@ -940,6 +972,10 @@ func (s *Server) listThenRun(ctx context.Context, cancel context.CancelFunc, ent
 	entry.listed = true
 	if err == nil {
 		entry.contents = &contents
+		// The indices a tick may name, kept beside contents rather than read
+		// out of it, because the other path to a video list never populates
+		// contents at all (runEntry.videos).
+		entry.videos = videoIndices(contents.Videos)
 		// The same tie metadata_ready makes for a live run: the infohash is
 		// what joins this entry to the record its run will leave on disk.
 		entry.infoHash = contents.InfoHash
@@ -1332,7 +1368,7 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 	// handler answers with both, and a person is told what happened rather
 	// than being told the delete failed and left to discover otherwise on a
 	// reload (TOR-78).
-	deleteErr := s.deleter(infoHash, params, fileIndex, frameIndex)
+	deleteErr := s.deleter.DeleteFrame(infoHash, params, fileIndex, frameIndex)
 	if deleteErr != nil && !errors.Is(deleteErr, core.ErrSheetStale) {
 		return FileDetail{}, deleteErr
 	}
@@ -1345,6 +1381,125 @@ func (s *Server) DeleteFrame(infoHash, params string, fileIndex, frameIndex int)
 		return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}, deleteErr
 	}
 	return detail, deleteErr
+}
+
+// ClearFile removes everything one file has on disk and answers with what it
+// has left, gathered exactly as GET /runs/{infohash}/files/{index} gathers it
+// - so a page re-renders from disk truth rather than from its own idea of
+// what a clear did (TOR-183, the same contract DeleteFrame above keeps).
+//
+// EMPTY params MEANS EVERY SET, and that is the decision this function
+// exists to carry. The control that reaches here sits on a FILE's row in a
+// torrent's file list, and the grid under that row is the merged grid of
+// every result set the torrent holds for the file (TOR-69, fileDetail) - so
+// "clear this file's frames" cannot honestly mean one of the sets a person is
+// looking at the frames of, and the button's own requirement, that it
+// disappear once there is nothing left to clear, is only decidable against
+// that same merged view. A named params still clears exactly one set, which
+// is what makes the per-set primitive reachable and testable on its own.
+//
+// It is deliberately NOT resolveSet's rule, which TopUp applies to the same
+// ambiguity one level up (one directory, or refuse). The two differ because
+// the acts differ: topping up every set at once would START N runs and spend
+// on each, so guessing there is unaffordable, while clearing every set is one
+// well-defined outcome - this file has nothing on this torrent afterwards -
+// that a person can read off the row before pressing anything.
+//
+// NOTHING TO CLEAR IS A 200, not a 404. The postcondition asked for already
+// holds, and the honest answer to "make sure this file has no frames" for a
+// file that has none is the file's own detail, which is what makes a second
+// press from a stale page harmless instead of an error about the state
+// somebody wanted.
+//
+// A PARTIAL FAILURE COMES BACK AS AN ERROR ALONGSIDE THE DETAIL, wrapping
+// core.ErrClearIncomplete, exactly as a stale sheet does for DeleteFrame: the
+// clear happened, the file is out of what the result claims to hold, and some
+// bytes are still there. Only a clear where NO set got as far as its own
+// commit point is returned as a failure with no detail - see the count below.
+func (s *Server) ClearFile(infoHash, params string, fileIndex int) (FileDetail, error) {
+	if s.deleter == nil || s.cfg.OutputRoot == "" {
+		return FileDetail{}, errDeleteUnavailable
+	}
+	if !validInfoHash(infoHash) || fileIndex < 0 {
+		return FileDetail{}, fmt.Errorf("%w: no file %d under %s",
+			core.ErrNoSuchFile, fileIndex, infoHash)
+	}
+
+	sets := []string{params}
+	if params == "" {
+		sets = s.setsHoldingFrames(infoHash, fileIndex)
+	} else if !validParams(params) {
+		return FileDetail{}, fmt.Errorf("%w: %q is not a result set", errBadRequest, params)
+	}
+
+	// Nothing on disk anywhere. The detail is answered rather than a
+	// refusal - see this function's own heading - and no set's run record is
+	// touched, because a record that lists a frameless file as complete is a
+	// repair somebody else's ticket owns, not something a clear should do
+	// silently to a set it was not given.
+	if len(sets) == 0 {
+		return s.fileDetailOrEmpty(infoHash, fileIndex), nil
+	}
+
+	// cleared counts the sets that reached their commit point, which is what
+	// decides whether this answers with a body at all: one that did means the
+	// file is out of that result set whatever else failed, and a page that
+	// was refused would go on showing frames the record no longer claims.
+	cleared := 0
+	var problems []error
+	for _, set := range sets {
+		err := s.deleter.ClearFile(infoHash, set, fileIndex)
+		switch {
+		case err == nil:
+			cleared++
+		case errors.Is(err, core.ErrClearIncomplete):
+			cleared++
+			problems = append(problems, err)
+		default:
+			problems = append(problems, err)
+		}
+	}
+	if cleared == 0 {
+		// Nothing changed anywhere, so this is the ordinary failure a status
+		// is chosen for (deleteStatus) rather than a warning beside a file.
+		return FileDetail{}, errors.Join(problems...)
+	}
+
+	warning := errors.Join(problems...)
+	// WRAPPED ONLY IF IT IS NOT ALREADY, which is a correction the browser
+	// found rather than any test here: core.ClearFile's own partial failure
+	// arrives already carrying this sentinel, so wrapping unconditionally
+	// printed the sentence twice - "the file was cleared and something of it
+	// is still on disk: the file was cleared and something of it is still on
+	// disk: remove the contact sheet..." - in a warning a person reads beside
+	// their file.
+	//
+	// The wrap still earns its place for the other shape: one set cleared
+	// while another was refused OUTRIGHT. No single error there says "partly
+	// happened", and yet it did - the file is out of one result set - so the
+	// sentinel has to be added, because it is what makes the handler answer
+	// 200 with the file's detail instead of refusing and leaving frames on
+	// screen that nothing accounts for.
+	if warning != nil && !errors.Is(warning, core.ErrClearIncomplete) {
+		warning = fmt.Errorf("%w: %w", core.ErrClearIncomplete, warning)
+	}
+	return s.fileDetailOrEmpty(infoHash, fileIndex), warning
+}
+
+// fileDetailOrEmpty is fileDetail with its ok=false turned into an explicitly
+// empty detail, which is what a clear has to answer with: a file that now has
+// nothing is precisely the case fileDetail reports as "no such file to show",
+// and 404 is the wrong answer to the request that emptied it (the reasoning
+// DeleteFrame already carried inline for its own last-frame case).
+//
+// Explicitly empty rather than left nil for the reason stated there too: the
+// page replaces its grid from these lists, and a JSON null reads as "no
+// answer" where what is meant is "no frames".
+func (s *Server) fileDetailOrEmpty(infoHash string, fileIndex int) FileDetail {
+	if detail, ok := s.fileDetail(infoHash, fileIndex); ok {
+		return detail
+	}
+	return FileDetail{Index: fileIndex, Sets: []FrameSet{}, Frames: []FrameRef{}}
 }
 
 // SendToWatchDir copies one run's saved .torrent into the watch directory, so
@@ -1539,29 +1694,68 @@ func (s *Server) CancelRun(id string) (RunInfo, error) {
 	}
 }
 
-// DecideRun answers the question a parked torrent asked: these are the files
-// to capture. The entry goes back into the queue - the same entry, so one
-// torrent stays one row and one history, needs-action to queued to running -
-// and returns to the runner with the selection in its request.
+// DecideRun is what a tick means: capture these files, now (TOR-181).
 //
-// Only an entry in RunNeedsAction can be decided. Anything else is either a
-// run this server does not hold (ErrNoSuchRun, a 404) or one that is not
-// waiting to be told anything (a 409, matching how CancelRun answers a run
-// that has already ended).
+// It was the picker's ANSWER before that ticket - one call, carrying the
+// whole selection somebody had staged, sent by a "Take frames" button under
+// the list. That button is gone, so this arrives once per tick instead, and
+// the question it answers changed with it: not "which files did you choose"
+// but "add this file to what this row is fetching".
 //
-// files is checked against the video files the listing actually found rather
-// than passed through to the run. Otherwise a page left open across two
-// different torrents would send an index this one does not have, and
-// swarm.Select's ErrNoFileMatch would surface minutes later as a failed run
-// instead of immediately as a 400 about the request that was wrong. An empty
-// selection is refused for a different reason: it means "every file" to
-// cfg.Files, and a person looking at a picker who wants everything can tick
-// everything - reading a blank answer as "all of it" is how a torrent gets
-// captured six times over (TOR-50).
+// A TICK GROWS ONE RUN. It never starts a second run beside the first, and
+// that is the decision the ticket left open. Three windows, one row, one
+// entry throughout - so a torrent stays one row and one history (TOR-140),
+// needs-action to queued to running:
 //
-// count carries the intake's frames-per-file when the page sends one, so the
-// number chosen while looking at the picker is the number the run uses. Zero
-// leaves whatever the request already had, which is the server's own -n.
+//   - PARKED (needs-action). Nothing has been fetched and nothing is
+//     decided. The tick puts the file in the request and the entry back in
+//     the queue, exactly as the old button did. This is the window the
+//     ticket is written about.
+//   - QUEUED. The pass has been accepted and has not started, so its request
+//     is still ours to edit: the file joins it IN PLACE, and the entry keeps
+//     the queue position it already waited for rather than being re-stamped
+//     to the back of its level (enqueueWaitingLocked's own doc explains why
+//     that stamp exists, and why re-arriving would be wrong here - the
+//     torrent already queued, a person only widened what it will take).
+//   - RUNNING. The engine is working from a plan it was handed; there is no
+//     way to add a file to it. So the file goes to entry.pending and pump
+//     re-arms THIS ENTRY with it the moment the pass in flight ends. The
+//     passes are therefore strictly sequential, which is what keeps the
+//     ceiling arithmetic honest: at most one per-run budget is live for this
+//     torrent at a time, each scaled to the files that pass actually asks
+//     for (core.budgetFor, core.DefaultBudget), where N runs started per
+//     tick would stand N ceilings side by side - the multiplication
+//     core.Roof exists to bound (TOR-131, and Budget's own doc: "a season
+//     pack should not multiply the limit by twenty").
+//
+// AND THREE IT REFUSES, each with the reason as a sentence (refuseTick):
+// a row whose torrent has not said what it holds, a replay, and a row that
+// has settled - a finished run is not a run a tick can grow, and asking for
+// one more file there is a NEW run with a new ceiling, which is precisely
+// what a tick must not spend silently. That is the intake line's job, or
+// Regenerate's for a file already taken.
+//
+// files is checked against the video files this torrent actually holds
+// (holdsFile) rather than passed through to the run. Otherwise a page left
+// open across two different torrents would send an index this one does not
+// have, and swarm.Select's ErrNoFileMatch would surface minutes later as a
+// failed run instead of immediately as a 400 about the request that was
+// wrong. An empty selection is refused for a different reason: it means
+// "every file" to cfg.Files, and reading a blank answer as "all of it" is
+// how a torrent gets captured six times over (TOR-50).
+//
+// A tick that names only files this row has already asked for is accepted
+// and changes nothing - a double click, or a page catching up. Idempotent on
+// purpose: the alternative is a refusal a person cannot act on.
+//
+// count is the intake's frames-per-file, and it is LOCKED BY THE TICK THAT
+// OPENS A PASS. A later tick joining the same pass carries whatever the
+// intake now shows and is ignored, because the figure this page put beside
+// the first file it ticked has to still be true when that pass runs -
+// re-pricing a pass under a person who has since typed a different number
+// would make the row's own promise retroactively false. run_state carries
+// the locked figure back (runStateFieldsLocked's "count") so the row's
+// remaining files are priced at what they will actually get.
 func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -1585,10 +1779,10 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 		s.mu.Unlock()
 		return RunInfo{}, ErrNoSuchRun
 	}
-	if entry.state != RunNeedsAction || entry.contents == nil {
+	if refusal := entry.refuseTick(); refusal != "" {
 		info := s.infoLocked(entry)
 		s.mu.Unlock()
-		return info, fmt.Errorf("run %s is not waiting for a file selection, it is %s", entry.id, info.State)
+		return info, errors.New(refusal)
 	}
 
 	chosen := make([]string, 0, len(files))
@@ -1601,19 +1795,86 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 		chosen = append(chosen, spec)
 	}
 
-	entry.req.Files = chosen
-	if count > 0 {
-		entry.req.Count = count
+	// A ROW THAT NAMES NO FILES HAS ASKED FOR ALL OF THEM. An empty
+	// RunRequest.Files means every video file the torrent holds - the same
+	// as leaving -file off on the command line - so a single-video torrent,
+	// or any run started without a selection, is already capturing whatever
+	// this tick names. Accepted and changed nothing, which is the idempotent
+	// case again: writing the index in would NARROW the run from every video
+	// to that one, the exact opposite of what a tick means.
+	//
+	// A parked row is the exception, and it is why this cannot simply be
+	// "empty means all": needs-action's empty selection is the UNDECIDED
+	// state, which is what the whole state exists to represent.
+	if entry.asksEveryVideo() {
+		info := s.infoLocked(entry)
+		s.mu.Unlock()
+		return info, nil
 	}
-	entry.state = RunQueued
-	// A decided torrent joins the queue now, not when it was first accepted:
-	// enqueueWaitingLocked stamps it with a fresh arrival, so it waits behind
-	// everything already queued at its level exactly as the plain append it
-	// replaces did. Its priority, if someone set one while it was parked,
-	// is what it comes back at (TOR-140).
-	s.enqueueWaitingLocked(entry)
+
+	// Recorded before the windows below rather than inside each of them, so
+	// this row's own history of ticks cannot be forgotten in one branch -
+	// see runEntry.asked for why req.Files cannot answer that question.
+	entry.asked = withFiles(entry.asked, chosen)
+
+	// Which window this is, decided once, under the lock that makes the
+	// answer true - the same discipline listThenRun's own switch follows.
+	parked := entry.state == RunNeedsAction
+	inFlight := entry.state == RunRunning
+
+	var moved []queuedState
+	switch {
+	case inFlight:
+		// The pass in flight already has these; a tick naming one of them is
+		// the idempotent case above, not a second capture of the same file.
+		want := withoutFiles(chosen, entry.req.Files)
+		opens := len(entry.pending) == 0
+		grown := withFiles(entry.pending, want)
+		if len(grown) == len(entry.pending) {
+			info := s.infoLocked(entry)
+			s.mu.Unlock()
+			return info, nil
+		}
+		entry.pending = grown
+		if count > 0 && opens {
+			entry.req.Count = count
+		}
+
+	default:
+		opens := len(entry.req.Files) == 0
+		grown := withFiles(entry.req.Files, chosen)
+		if len(grown) == len(entry.req.Files) && !parked {
+			info := s.infoLocked(entry)
+			s.mu.Unlock()
+			return info, nil
+		}
+		// A NEW SLICE, never an append in place, and that is load-bearing
+		// rather than style: RunRequest is copied by value into the runner
+		// but its Files slice is not, so growing one the engine already
+		// holds could rewrite a plan mid-run through a shared backing array
+		// (withFiles is what guarantees the fresh allocation).
+		entry.req.Files = grown
+		if count > 0 && opens {
+			entry.req.Count = count
+		}
+		if parked {
+			entry.state = RunQueued
+			// A decided torrent joins the queue now, not when it was first
+			// accepted: enqueueWaitingLocked stamps it with a fresh arrival,
+			// so it waits behind everything already queued at its level
+			// exactly as the plain append it replaces did. Its priority, if
+			// someone set one while it was parked, is what it comes back at
+			// (TOR-140).
+			s.enqueueWaitingLocked(entry)
+			moved = s.queueRecordsLocked(entry)
+		}
+		// A queued entry is deliberately NOT re-enqueued: it is already in
+		// the waiting list at a position it has waited for, and re-stamping
+		// it would send it to the back of its level for the act of asking
+		// for one more file.
+	}
+
 	rec := s.runStateRecordLocked(entry, false)
-	moved := s.queueRecordsLocked(entry)
 	s.mu.Unlock()
 
 	s.hub.publish(entry.id, rec)
@@ -1630,28 +1891,300 @@ func (s *Server) DecideRun(id string, files []string, count int) (RunInfo, error
 	return info, nil
 }
 
-// holdsFile reports whether spec names one of the video files this entry's
-// listing found.
+// refuseTick reports why a tick cannot be taken on this entry right now, as
+// the sentence to answer with - empty when it can.
+//
+// One place rather than a switch inside DecideRun, because the PAGE has to
+// ask the same question before it draws a live checkbox: run_state carries
+// the answer as "tickable" (runStateFieldsLocked), so a box that cannot be
+// acted on arrives as a real disabled control with the reason on it instead
+// of a live one the server then refuses. Two copies of this rule is how the
+// two would come to disagree.
+//
+// The caller must hold s.mu: every field it reads is written under it.
+func (e *runEntry) refuseTick() string {
+	// Before the metadata pass there is no list to name an index out of, so
+	// there is nothing to validate a tick against - not a refusal about the
+	// state, which is why it is asked first.
+	if len(e.videos) == 0 {
+		return "run " + e.id + " has not been told what its torrent holds yet, so there is " +
+			"nothing to tick - the file list arrives with the torrent's metadata"
+	}
+
+	switch e.state {
+	case RunNeedsAction, RunQueued:
+		return ""
+
+	case RunRunning:
+		// The one thing a deferred tick cannot survive: an uploaded
+		// .torrent's staged copy is removed the moment its run's stream ends
+		// (pump's cleanup call), well before the next pass would be
+		// dispatched, so the pass this tick asks for would fail to open its
+		// own source. Refused rather than queued to fail later - the same
+		// call RetryRun makes for the same file, in the same words.
+		if e.req.Label != "" {
+			return "this torrent was dropped onto the page as a file, and the staged copy " +
+				"is removed when its run ends - so a file ticked while it is running has " +
+				"nothing left to start from. Tick before the run starts, or drop it again"
+		}
+		return ""
+
+	case RunReplaying:
+		return "run " + e.id + " is being read back from disk rather than fetched, so " +
+			"there is no run for a tick to grow"
+
+	default:
+		return "run " + e.id + " is " + string(e.state) + ", so there is no run left for a " +
+			"tick to grow - one more file now is a new run with a new traffic ceiling, " +
+			"which is the intake line's job, or Regenerate's for a file already taken"
+	}
+}
+
+// UntickFile takes one file back out of what this row will fetch (TOR-184).
+//
+// IT IS THE TICK'S INVERSE AND NOT A CANCEL, and the whole of this ticket is
+// that those are two different acts on one control. It reaches exactly the
+// file DecideRun could not put in the plan - one ticked while a pass was
+// already in flight, waiting on the entry for the next one (runEntry.pending)
+// - and taking it out of that list is exact: nothing was asked of the swarm
+// for it, no budget was sized for it, no goroutine is holding it. So it stops
+// that one file and touches nothing else, spends nothing, and deletes nothing.
+//
+// WHAT IT REFUSES IS THE FILE THE ENGINE IS ALREADY FETCHING, and that is a
+// limit of the engine rather than a choice made here. core.Engine.Run hands
+// back an event channel and nothing else: its only handle is the context it
+// was started with, every file's goroutine is given that SAME context
+// (core.Engine.run passes one runCtx to every processFile), the run's traffic
+// budget is sized once from len(selected) before the clock starts, and
+// core.haltReason answers one question for the whole run. There is no per-file
+// stop to reach for. So the honest answer there is the run-scoped one -
+// CancelRun - and refuseUntick says so in the sentence a page can show,
+// rather than accepting the call and stopping more than was asked.
+//
+// NO CONFIRMATION, HERE OR ON THE PAGE, and the asymmetry with Select all's
+// armed second press is deliberate rather than an oversight. Select all
+// SPENDS - twenty files of traffic on one click - and this page reserves its
+// one confirmation gesture for spending. Stopping spends nothing and destroys
+// nothing: traffic already sent is not recoverable whatever happens next, the
+// frames already written stay on disk (CancelRun's own promise, section 2.10),
+// and a file dropped here can be ticked again at no cost. A speed bump in
+// front of a harmless, reversible act only teaches people to click through
+// the one in front of the harmful one.
+//
+// ONE FILE rather than a set, unlike DecideRun beside it: a tick can arrive
+// from Select all, which is twenty files in one press, while an un-tick is
+// always one box - TOR-181 removed Select none precisely because a control
+// that takes twenty things back cannot say which twenty.
+func (s *Server) UntickFile(id, spec string) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+	spec = strings.TrimSpace(spec)
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	// The same check a tick goes through, for the same reason: a page left
+	// open across two torrents would name an index this one does not hold,
+	// and that is a fact about the request rather than about the row's state
+	// - so it is answered as a 400 before refuseUntick is consulted at all.
+	if !entry.holdsFile(spec) {
+		s.mu.Unlock()
+		return RunInfo{}, fmt.Errorf("%w: %q is not a video file of this torrent", errBadRequest, spec)
+	}
+	if refusal := entry.refuseUntick(spec); refusal != "" {
+		info := s.infoLocked(entry)
+		s.mu.Unlock()
+		return info, errors.New(refusal)
+	}
+
+	// BOTH LISTS, and the second is what makes the gesture visible at all.
+	//
+	// pending is where the file actually waits, so dropping it there is what
+	// stops it. asked is every file this row has EVER been asked to capture
+	// and never shrinks on its own (runEntry.asked), and tickedLocked unions
+	// the two - so leaving it there would report the file as still ticked, the
+	// box would snap straight back to checked, and the un-tick would read as a
+	// control that does nothing.
+	//
+	// Safe because pending and req.Files are disjoint by construction:
+	// DecideRun's running window adds only withoutFiles(chosen, req.Files),
+	// and pendingPass nils pending before its files become the next pass's
+	// req.Files. So the only reason this spec is in asked is the very tick
+	// that put it in pending, and taking it out of both undoes exactly that
+	// tick - never a tick an earlier pass already captured, whose file is in
+	// req.Files or in asked alone and is refused above.
+	//
+	// New slices, never an edit in place, the rule withFiles exists for: the
+	// engine may be holding req.Files by reference and these slices share
+	// this file's own allocation discipline.
+	drop := []string{spec}
+	entry.pending = withoutFiles(entry.pending, drop)
+	entry.asked = withoutFiles(entry.asked, drop)
+
+	rec := s.runStateRecordLocked(entry, false)
+	info := s.infoLocked(entry)
+	s.mu.Unlock()
+
+	// No dispatch call, unlike DecideRun's: nothing new can start because of
+	// this, and the pass in flight is exactly as it was. The only thing that
+	// changed is what the NEXT pass will ask for, which pendingPass reads at
+	// the end of the current stream.
+	s.hub.publish(entry.id, rec)
+	return info, nil
+}
+
+// refuseUntick reports why this file cannot be taken back out of what the row
+// will fetch, as the sentence to answer with - empty when it can.
+//
+// refuseTick's shape, one act over, and for the identical reason: the PAGE has
+// to ask the same question before it draws a live checkbox, so the rule lives
+// here once instead of being copied into app.js where the two would come to
+// disagree. It differs in taking a FILE, because the answer differs file by
+// file on one row - the pass in flight and the tick waiting behind it sit in
+// the same list on screen - which is why the page is told the two sets
+// (run_state's "deferred" and "fetching") rather than one verdict per row.
+//
+// The caller must hold s.mu: every field it reads is written under it.
+func (e *runEntry) refuseUntick(spec string) string {
+	// The one case that says yes, and it is asked first: a file waiting for
+	// the next pass is not being fetched by anything, whatever the row's own
+	// state says about the pass that IS in flight.
+	if containsFile(e.pending, spec) {
+		return ""
+	}
+
+	// The file the engine holds. asksEveryVideo is folded in because an empty
+	// RunRequest.Files means every video file rather than none, so on a
+	// running row it is the widest possible pass rather than an idle one.
+	if e.state == RunRunning && (e.asksEveryVideo() || containsFile(e.req.Files, spec)) {
+		return "file " + spec + " is in the pass run " + e.id + " is fetching now, and the " +
+			"engine works from the plan it was handed - one file of it cannot be stopped on " +
+			"its own. Cancelling the run is what stops it, and the frames it has already " +
+			"written stay on disk for a later run to reuse"
+	}
+
+	// A replay is read back off disk and fetches nothing, so there is nothing
+	// here to stop - refuseTick's own words for the same state, and asked
+	// before the queued case below because a replay's request does carry
+	// files and the sentence there would call them "the pass it will start
+	// with", which a replay never has.
+	if e.state == RunReplaying {
+		return "run " + e.id + " is being read back from disk rather than fetched, so " +
+			"there is no fetch for this to stop"
+	}
+
+	// A pass accepted and not started. Narrowing it is the one thing that
+	// cannot be done in place, and the trap is the reason rather than an
+	// excuse: a request narrowed to NO files means every video file the
+	// torrent holds (asksEveryVideo), so dropping the last of them would
+	// widen this run from one file to twenty instead of stopping it. Refused
+	// as a whole rather than only on the last one, so the answer does not
+	// depend on how many boxes somebody has already pressed.
+	if !e.state.final() && containsFile(e.req.Files, spec) {
+		return "run " + e.id + " is " + string(e.state) + " with file " + spec + " in the " +
+			"pass it will start with, and a pass narrowed to nothing means every video " +
+			"file rather than none - so this cannot take one file back out of it. Cancel " +
+			"the run and ask for the files you want"
+	}
+
+	if e.state.final() {
+		return "run " + e.id + " is " + string(e.state) + ", so there is nothing left for " +
+			"it to fetch and nothing for this to stop - what file " + spec + " has on disk " +
+			"goes with a clear (Clear frames on its row), not with an un-tick"
+	}
+
+	return "run " + e.id + " is not waiting to fetch file " + spec + " - only a file ticked " +
+		"while a pass was already in flight can be taken back out before it starts"
+}
+
+// withFiles returns have plus every spec of want it does not already carry,
+// in that order, ALWAYS AS A NEW SLICE.
+//
+// The allocation is the point, not a side effect: the slice it grows may be
+// one a running engine is holding by reference (see DecideRun), and appending
+// into spare capacity there would edit a plan mid-run.
+func withFiles(have, want []string) []string {
+	out := make([]string, len(have), len(have)+len(want))
+	copy(out, have)
+	for _, spec := range want {
+		if !containsFile(out, spec) {
+			out = append(out, spec)
+		}
+	}
+	return out
+}
+
+// withoutFiles returns every spec of want that have does not already carry.
+func withoutFiles(want, have []string) []string {
+	out := make([]string, 0, len(want))
+	for _, spec := range want {
+		if !containsFile(have, spec) {
+			out = append(out, spec)
+		}
+	}
+	return out
+}
+
+func containsFile(files []string, spec string) bool {
+	for _, have := range files {
+		if have == spec {
+			return true
+		}
+	}
+	return false
+}
+
+// holdsFile reports whether spec names one of this torrent's capturable
+// files.
 //
 // Only a torrent index, never the path patterns swarm.Select also accepts. A
-// picker sends back the indices it was handed in the needs_action record, so
-// anything else arriving here is a page guessing rather than a person
-// choosing - and a pattern would have to be matched twice, loosely here and
-// for real in swarm.Select, which is how the two would come to disagree
-// about what was picked.
+// page sends back the indices it was handed in the needs_action or
+// metadata_ready record, so anything else arriving here is a page guessing
+// rather than a person choosing - and a pattern would have to be matched
+// twice, loosely here and for real in swarm.Select, which is how the two
+// would come to disagree about what was picked.
 //
-// The caller must hold the server's lock: contents is written under it.
+// It reads e.videos rather than e.contents.Videos, and that is TOR-181's
+// change rather than a tidy-up: contents exists only for an entry that paid
+// for a listing, so a tick on any other live row - a Regenerate, a top-up, a
+// retry, all of which name their files up front and never list - would have
+// nil-checked its way to a refusal about a file list the page had been
+// showing all along.
+//
+// The caller must hold the server's lock: videos is written under it.
 func (e *runEntry) holdsFile(spec string) bool {
 	index, err := strconv.Atoi(spec)
 	if err != nil {
 		return false
 	}
-	for _, video := range e.contents.Videos {
-		if video.Index == index {
+	for _, known := range e.videos {
+		if known == index {
 			return true
 		}
 	}
 	return false
+}
+
+// videoIndices reduces a video list to the numbers a selection names its
+// entries by. core.indicesOf does the same thing one package down; it is not
+// exported, and a three-line loop is a cheaper answer than widening core's
+// surface for it.
+func videoIndices(videos []swarm.FileInfo) []int {
+	out := make([]int, 0, len(videos))
+	for _, video := range videos {
+		out = append(out, video.Index)
+	}
+	return out
 }
 
 // SetRunPriority changes where one waiting torrent sits in the queue,
@@ -2026,6 +2559,16 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 			s.mu.Lock()
 			entry.infoHash = e.InfoHash
 			entry.name = e.Name
+			// TOR-181: and the video list, which for a run that skipped the
+			// listing arrives ONLY here - the engine reports every video the
+			// torrent holds on this event, not just the ones this run was
+			// narrowed to (core.MetadataReady.Videos against .Selected). It
+			// is what a tick on such a row is validated against, and without
+			// it every one of them would be refused for a list the page was
+			// already showing. Overwritten rather than filled in once: the
+			// engine's answer is about the torrent, so both paths agree, and
+			// a re-armed entry re-learns it the same way.
+			entry.videos = videoIndices(e.Videos)
 			s.mu.Unlock()
 		case core.Progress:
 			// The only place a live row's figures come from. Everything
@@ -2124,8 +2667,66 @@ func (s *Server) pump(entry *runEntry, events <-chan core.Event) {
 	entry.cancel()
 	s.hub.publish(entry.id, rec)
 
+	// TOR-181: THE FILES TICKED WHILE THIS PASS WAS FETCHING. One could not
+	// join the plan the engine was already working from, so it waited on the
+	// entry; this is the first moment it can start, and it starts on THIS
+	// entry - same id, same row, same history - which is what makes a tick
+	// grow one run rather than open a second one beside it.
+	//
+	// AFTER the final run_state above rather than instead of it: the pass
+	// that just ended really did end, and a page never told so would show
+	// one long run where there were two. again() publishes the queued state
+	// that follows, so the row reads pass, end, queued, pass.
+	//
+	// A failure here is swallowed on purpose, and only two are reachable.
+	// The server is closing (errClosed), where there is nobody left to tell
+	// and nothing left to run; or this entry has been re-armed underneath us
+	// already - a top-up landing in the same instant - and the pending files
+	// are then still on the entry for THAT pass's own ending to pick up, so
+	// nothing is lost either way.
+	// infoHash is the copy taken under the lock above, not entry.infoHash
+	// read again out here: every other field of the entry this function
+	// touches outside s.mu is one only pump itself writes, and that one is
+	// not (listThenRun and pump's own MetadataReady case both write it under
+	// the lock). Reading the local is free and is the rule this file keeps.
+	if req, ok := s.pendingPass(entry); ok {
+		_, _ = s.again(entry.id, infoHash, req)
+	}
+
 	s.trim()
 	s.dispatch()
+}
+
+// pendingPass claims the files ticked while this entry's run was in flight
+// and shapes the request that captures them, reporting whether there are any.
+//
+// It EMPTIES entry.pending, so the pass it describes is claimed exactly once
+// however often this is called - pump calls it at the end of every stream,
+// including the stream of the pass it itself started.
+func (s *Server) pendingPass(entry *runEntry) (RunRequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(entry.pending) == 0 || entry.cancelled || s.stopped {
+		// A CANCEL ANSWERS THE TICKS TOO. Somebody asked this torrent to
+		// stop, and starting the next pass is the one thing they said not to
+		// do - so the pending files are dropped rather than held for a
+		// restart nobody asked for. Dropping them is also what keeps the
+		// row's own report true: run_state stops saying "in the next pass"
+		// about files that will never be fetched.
+		entry.pending = nil
+		return RunRequest{}, false
+	}
+
+	req := entry.req
+	req.Files = entry.pending
+	entry.pending = nil
+	// Deliberately reset rather than carried, in RetryRun's own words: a
+	// raise is consented to once, for one question the server priced off
+	// disk (TopUp.request). This pass is an ordinary one, and its ceiling is
+	// whatever core.budgetFor scales to the files it actually asks for.
+	req.MaxBytes = 0
+	return req, true
 }
 
 // trim drops the oldest finished runs past keepFinishedRuns, with their
@@ -2308,7 +2909,171 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 			m["provisional_name"] = dn
 		}
 	}
+	// TOR-181: WHAT THIS ROW HAS BEEN ASKED TO CAPTURE, and whether it can
+	// be asked for more. The file list itself arrives on metadata_ready or
+	// needs_action (TOR-180); what changes tick by tick is this, and it
+	// rides on run_state for the reason the queue's own two fields do: the
+	// hub replays a run's LAST run_state to a page that reconnects, so a
+	// field overwritten by the run's own next state can never go stale,
+	// where a message of its own would be replayed exactly as it was sent.
+	//
+	// "tickable" is sent on EVERY run_state, true or false, because it is
+	// the answer to a question the page has to ask before it draws a live
+	// checkbox at all - and a key omitted when false would be indistinguish-
+	// able from a run this page has not heard a state for yet, which is the
+	// one case that must default to "no". It is refuseTick's own verdict
+	// rather than a second copy of that rule up here (see its doc), and
+	// "tick_refusal" carries the sentence so a disabled box says exactly
+	// what the POST would have answered.
+	refusal := entry.refuseTick()
+	m["tickable"] = refusal == ""
+	if refusal != "" {
+		m["tick_refusal"] = refusal
+	}
+	// The two lists are absent rather than empty when nothing has been
+	// asked for, which is the same rule "swarm" and "files" follow
+	// elsewhere on the wire - and here it costs nothing to read, because for
+	// a LIVE entry the server always knows the answer, so absent and empty
+	// mean the same thing to the page. (This is not another absent-is-not-
+	// zero case, and it is deliberately not counted as one in listing.go's
+	// tally: nothing replays a run_state off disk, so there is no older
+	// shape whose silence could be mistaken for a fact.)
+	if ticked := entry.tickedLocked(); len(ticked) > 0 {
+		m["ticked"] = ticked
+	}
+	if deferred := fileIndices(entry.pending); len(deferred) > 0 {
+		m["deferred"] = deferred
+	}
+	// TOR-184: WHICH OF THEM THE ENGINE IS ACTUALLY HOLDING, which is the one
+	// fact that decides what un-ticking a box means - and the page cannot
+	// derive it from the two lists above.
+	//
+	// "ticked" is cumulative and "deferred" is what waits for the next pass,
+	// so ticked minus deferred is the pass in flight PLUS every file an
+	// earlier pass already captured (runEntry.asked keeps those). Those two
+	// need opposite answers: un-ticking a file being fetched stops the run,
+	// and un-ticking one a previous pass finished must not, because the run it
+	// would stop is fetching something else entirely. Sent as its own set so
+	// the page never has to guess which of the two a row's file is.
+	//
+	// Present only while the row is running, the same absent-is-not-empty line
+	// the queue's own fields draw: a queued pass has been accepted and not
+	// started, a parked one is undecided, a finished one is over, and in none
+	// of those is anything being fetched at all.
+	if fetching := entry.fetchingLocked(); len(fetching) > 0 {
+		m["fetching"] = fetching
+	}
+	// The frames-per-file this row's request carries, so the page can price
+	// the files it has NOT ticked at what they would actually get rather
+	// than at whatever the intake box now shows - DecideRun locks the figure
+	// to the tick that opened the pass, and this is how the row finds out.
+	// Zero is "the server's own -n", which the intake box already displays
+	// (GET /defaults), so it is left off rather than sent as a number that
+	// is not one.
+	if entry.req.Count > 0 {
+		m["count"] = entry.req.Count
+	}
 	return m
+}
+
+// tickedLocked is every torrent index this row has been asked to capture:
+// the pass it is running or forming, plus anything waiting for the next one.
+//
+// Only the specs that are INDICES. RunRequest.Files also accepts the path
+// patterns swarm.Select understands, which is how the command line names
+// files, and a pattern is not something this page can tick or untick - so it
+// is left out rather than reported as an index it is not. Every selection a
+// tick makes is an index by construction (holdsFile refuses anything else).
+//
+// The caller must hold s.mu.
+func (e *runEntry) tickedLocked() []int {
+	// Every video, when the request narrows to none of them: that is what an
+	// empty RunRequest.Files means, and reporting it as "nothing ticked"
+	// would draw a single-file torrent's row with an empty checkbox beside
+	// the very file it is downloading.
+	if e.asksEveryVideo() {
+		out := append([]int(nil), e.videos...)
+		sort.Ints(out)
+		return out
+	}
+	// All three, because each holds something the others do not: asked is
+	// every tick this row has ever taken (including ones an earlier pass has
+	// already captured and dropped out of req.Files), req.Files is the pass
+	// in flight or forming - which for a run that named its own files is the
+	// ONLY record there is - and pending is what is waiting for the next one.
+	all := append([]string(nil), e.asked...)
+	all = append(all, e.req.Files...)
+	all = append(all, e.pending...)
+	return fileIndices(all)
+}
+
+// fetchingLocked is every torrent index the pass THIS ROW IS RUNNING was
+// handed: the files core.Engine is working from at this moment, and nothing
+// else (TOR-184).
+//
+// NOT tickedLocked minus pending, which is the shape it looks like and would
+// be wrong in one direction: that includes every file an earlier pass on this
+// row already captured (runEntry.asked never shrinks), and those are files
+// nothing is fetching. Reading req.Files is the honest answer, because that
+// is literally the slice handed to the runner.
+//
+// Empty for every state but running, and that is the point rather than a
+// shortcut: a queued row's req.Files is a plan nobody has started, so a page
+// told those were "being fetched" would offer to stop a fetch that has not
+// begun.
+//
+// The caller must hold s.mu.
+func (e *runEntry) fetchingLocked() []int {
+	if e.state != RunRunning {
+		return nil
+	}
+	// The widest pass rather than an empty one: an empty RunRequest.Files
+	// means every video file the torrent holds, which is exactly what the
+	// engine was handed and therefore exactly what it is fetching.
+	if e.asksEveryVideo() {
+		out := append([]int(nil), e.videos...)
+		sort.Ints(out)
+		return out
+	}
+	return fileIndices(e.req.Files)
+}
+
+// asksEveryVideo reports whether this row's request narrows to no files and
+// therefore takes all of them (RunRequest.Files).
+//
+// The state check is the whole subtlety: needs-action also carries an empty
+// selection, and there it means the opposite - nothing has been decided yet.
+// Two readings of one empty slice, told apart by the only thing that can
+// tell them apart.
+//
+// The caller must hold s.mu.
+func (e *runEntry) asksEveryVideo() bool {
+	return e.state != RunNeedsAction && len(e.req.Files) == 0
+}
+
+// fileIndices turns file specs into the indices among them, deduplicated and
+// sorted, so the wire order is stable for a reader comparing two messages.
+//
+// The dedupe is not tidiness: tickedLocked unions three lists that overlap by
+// design (a file in the pass in flight is also in asked), and a repeated
+// index on the wire would be a page's evidence for two of something there is
+// one of.
+func fileIndices(specs []string) []int {
+	seen := make(map[int]bool, len(specs))
+	out := make([]int, 0, len(specs))
+	for _, spec := range specs {
+		index, err := strconv.Atoi(strings.TrimSpace(spec))
+		if err != nil {
+			continue
+		}
+		if seen[index] {
+			continue
+		}
+		seen[index] = true
+		out = append(out, index)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // needsActionRecordLocked is the file list a parked torrent is waiting on.
@@ -2325,17 +3090,29 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 // backlog, so a page opened or reconnected an hour later replays it and
 // rebuilds the picker without asking the server for anything.
 //
-// The per-file shape is wire.VideoFiles, the same one metadata_ready uses,
-// so the page has exactly one notion of what a video file is.
+// The per-file shape is wire.FileList, the same one metadata_ready uses, so
+// the page has exactly one notion of what a file is.
+//
+// It carries BOTH lists metadata_ready carries (TOR-180): "videos" is what
+// can be captured and what a tick may name, "files" is everything the
+// torrent holds. A parked torrent is the one place a person is actually
+// choosing, so it is the last place that should show only part of what is
+// there - the .nfo and the sample are how they find out that the file they
+// wanted is not a film. Absent rather than empty when the listing could not
+// say, for wire.go's own reason on that key.
 //
 // The caller must hold s.mu: every field read here is written under it.
 func (s *Server) needsActionRecordLocked(entry *runEntry) record {
 	contents := entry.contents
-	return record{data: encode(map[string]any{
+	m := map[string]any{
 		"type": "needs_action", "run": entry.id,
 		"name": contents.Name, "infohash": contents.InfoHash,
-		"private": contents.Private, "videos": wire.VideoFiles(contents.Videos),
-	})}
+		"private": contents.Private, "videos": wire.FileList(contents.Videos),
+	}
+	if contents.Files != nil {
+		m["files"] = wire.FileList(contents.Files)
+	}
+	return record{data: encode(m)}
 }
 
 // connectRecord is the first thing any client is sent: an idle run_state

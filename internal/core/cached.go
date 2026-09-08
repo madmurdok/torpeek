@@ -147,16 +147,33 @@ func (e *Engine) Replay(root, infoHash, params string) <-chan Event {
 	return events
 }
 
-// videosFromRecord rebuilds the torrent's file list from what a run recorded,
-// in the shape swarm.Select and MetadataReady both expect.
+// videosFromRecord rebuilds the torrent's video list from what a run
+// recorded, in the shape swarm.Select and MetadataReady both expect.
 func videosFromRecord(record cache.Run) []swarm.FileInfo {
-	videos := make([]swarm.FileInfo, 0, len(record.Videos))
-	for _, f := range record.Videos {
-		videos = append(videos, swarm.FileInfo{
+	return fileInfoFrom(record.Videos)
+}
+
+// filesFromRecord rebuilds the torrent's WHOLE file list (TOR-180), and
+// answers nil for a record written before cache.Run.Files existed rather
+// than an empty list - that field's own rule, carried through to
+// MetadataReady.Files, which draws the same distinction for the same reason.
+// A replay of an older run therefore publishes no file list at all, and the
+// page falls back to the videos, instead of being told the torrent is empty.
+func filesFromRecord(record cache.Run) []swarm.FileInfo {
+	if record.Files == nil {
+		return nil
+	}
+	return fileInfoFrom(record.Files)
+}
+
+func fileInfoFrom(files []cache.File) []swarm.FileInfo {
+	out := make([]swarm.FileInfo, 0, len(files))
+	for _, f := range files {
+		out = append(out, swarm.FileInfo{
 			Index: f.Index, Path: f.Path, Length: f.Bytes, Offset: f.Offset,
 		})
 	}
-	return videos
+	return out
 }
 
 // cacheHit is a selection of files from a run record that has already been
@@ -250,6 +267,10 @@ func (h cacheHit) publish(videos []swarm.FileInfo, bus *Bus, started time.Time) 
 		InfoHash: h.record.InfoHash,
 		Private:  h.record.Private,
 		Videos:   videos,
+		// Off the record rather than off `videos`: the two lists are not the
+		// same thing (TOR-180), and this one is absent for a record that
+		// predates the field - see filesFromRecord.
+		Files:    filesFromRecord(h.record),
 		Selected: indicesOf(h.selected),
 	})
 

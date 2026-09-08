@@ -72,9 +72,17 @@ func TestTheSwarmReadingIsAChipAndNeverAFillOnTheStrip(t *testing.T) {
 
 // TestARunWithNoClaimsRecordedRendersAsNeitherFullNorEmpty carries over the
 // other half of TOR-142's guard. Before TOR-153, an unknown extent hatched
-// the now-removed track; the track is gone, but a run that hasn't recorded a
-// claim for a file yet still has nothing to say about WHERE it reached, and
-// the merged row must not lie about that by rendering full or empty.
+// the now-removed track; the track is gone, but a set that hasn't recorded
+// where its frames came from still has nothing to say about WHERE it
+// reached, and the merged row must not lie about that by rendering full or
+// empty.
+//
+// WHICH unknown that is has moved since, though the guard has not: TOR-179
+// re-sourced the strip from each frame's own record in the manifest
+// (manifest.Frame.ByteRanges), so the unknown case is now a set captured
+// before that field existed rather than a run.json written before TOR-119
+// kept a claim log. Same rendering, same reason, a different record behind
+// it - and web.reachOf is where the two are told apart.
 //
 // It also must not go back to hiding the whole row the way TOR-111's strip
 // used to when nothing had been claimed: the swarm chip now lives on this

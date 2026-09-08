@@ -30,6 +30,14 @@ type Torrent struct {
 	claimMu     sync.Mutex
 	claimedSeen map[int]struct{}
 	claimedByte int64
+
+	// The capture point currently being taken from each file, keyed by file
+	// index, holding the byte ranges of that file ordered since it opened
+	// (StartClaimLog). Present-with-nil is a real state - a point that has
+	// ordered nothing yet - so membership is what says a log is open, never
+	// the length. Written by logClaim under the same lock as claimedSeen,
+	// since both hang off the one funnel Claim is.
+	claimLog map[int][][2]int64
 }
 
 func newTorrent(t *torrent.Torrent) *Torrent {
@@ -239,6 +247,101 @@ func (t *Torrent) ClaimedRanges() []PieceRange {
 			continue
 		}
 		out = append(out, PieceRange{Begin: i, End: i + 1})
+	}
+	return out
+}
+
+// StartClaimLog begins recording, for one file, the stretches of THAT FILE
+// ordered from the swarm - the footprint of the one capture point about to be
+// taken from it (TOR-179). EndClaimLog stops it and reports them.
+//
+// WHY A WINDOW AROUND EACH POINT rather than a reading taken at the end. Both
+// figures this type already publishes - Claimed and ClaimedRanges - are
+// cumulative across the whole torrent and across the whole run, on purpose
+// (see Claimed's own doc: what a run ordered at least once is the part that is
+// deterministic). Nothing in either can be attributed to a particular capture
+// point after the fact, so the only moment a point's own footprint exists is
+// while it is being taken. That is what this pair opens.
+//
+// KEYED BY FILE, because a run captures several files at once (core.Config's
+// Parallelism) through one torrent and therefore one claim funnel: without the
+// key, one file's reads would be recorded as another file's provenance. One
+// open log per file is all that is ever needed - a file's capture points are
+// taken one after another (core.processFile's loop) - so opening a second log
+// for the same file simply starts it clean rather than nesting, and a log
+// nobody ends is replaced by the next point rather than leaking.
+//
+// The ranges are the file's own byte offsets, not piece indices, for the
+// reasons manifest.Frame.ByteRanges argues at length - it is where these end
+// up.
+func (t *Torrent) StartClaimLog(file int) {
+	t.claimMu.Lock()
+	defer t.claimMu.Unlock()
+
+	if t.claimLog == nil {
+		t.claimLog = make(map[int][][2]int64, 1)
+	}
+	// Present with no ranges yet: a point that has ordered nothing so far is
+	// a different answer from a point nobody is recording.
+	t.claimLog[file] = nil
+}
+
+// EndClaimLog closes the log StartClaimLog opened for one file and reports
+// what was ordered while it was open: ascending, non-touching, half-open
+// [begin, end) byte ranges within that file.
+//
+// Nil when nothing was ordered, and nil for a file with no log open at all.
+// The caller cannot tell those apart and does not need to: it is the one that
+// opened the log, and a capture point that ordered nothing has no provenance
+// to record either way (manifest.Frame.ByteRanges: absent means unknown).
+func (t *Torrent) EndClaimLog(file int) [][2]int64 {
+	t.claimMu.Lock()
+	spans, open := t.claimLog[file]
+	delete(t.claimLog, file)
+	t.claimMu.Unlock()
+
+	if !open {
+		return nil
+	}
+	return coalesceSpans(spans)
+}
+
+// coalesceSpans sorts byte ranges and merges the ones that touch or overlap,
+// so the result reads as a picture of where a point reached rather than as a
+// bag of every read it made.
+//
+// Touching counts as overlapping (end == begin merges), the same rule
+// ClaimedRanges applies to piece indices, and for the same reason: a window
+// claimed immediately after the one before it is one stretch of the file, not
+// two. The merging is what keeps the record small - a point commonly re-reads
+// the container header several times over, and every one of those is the same
+// few kilobytes.
+func coalesceSpans(spans [][2]int64) [][2]int64 {
+	if len(spans) == 0 {
+		return nil
+	}
+
+	sorted := make([][2]int64, len(spans))
+	copy(sorted, spans)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i][0] != sorted[j][0] {
+			return sorted[i][0] < sorted[j][0]
+		}
+		return sorted[i][1] < sorted[j][1]
+	})
+
+	out := [][2]int64{sorted[0]}
+	for _, s := range sorted[1:] {
+		last := &out[len(out)-1]
+		if s[0] <= last[1] {
+			// Overlaps or touches. Max rather than assignment: a short range
+			// wholly inside a longer earlier one must not shorten it.
+			if s[1] > last[1] {
+				last[1] = s[1]
+			}
+			continue
+		}
+		out = append(out, s)
 	}
 	return out
 }
