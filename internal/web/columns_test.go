@@ -75,6 +75,26 @@ func appJS(t *testing.T) string {
 	return string(b)
 }
 
+// runTableJS returns the embedded run-table.js source. TOR-194 moved the
+// table's behaviour out of app.js into its own custom element, so most of this
+// file's own subjects - LIVE_COLUMNS, the header build, the column widths and
+// every row cell - now live there. Read from the embedded FS for the reason
+// appJS is: that is the copy that ships.
+//
+// WHICH MODULE EACH TEST READS is now a three-way question, and the answer
+// follows the split rather than the ticket: a DERIVATION over an entry is
+// state.js's (sortValue, compareEntries, the cell helpers), the ROW it is
+// drawn into is run-table.js's, and what is left in app.js is the requests
+// and the detail a row opens onto.
+func runTableJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/run-table.js")
+	if err != nil {
+		t.Fatalf("reading the embedded run-table.js: %v", err)
+	}
+	return string(b)
+}
+
 // extractJSFunction pulls one top-level function's EXACT source out of one of
 // the shipped modules, by name - the same "match the closing brace at the start
 // of a line" shape TestAbsentValuesSortToTheEndRegardlessOfDirection already
@@ -126,18 +146,19 @@ func extractJSConst(t *testing.T, js, name string) string {
 // the date column instead of by its own figure). A column present in one and
 // not the other is a column that looks wired but is not.
 //
-// THE TWO HALVES NOW SIT IN TWO FILES (TOR-191): the header list is the
-// page's (app.js) and the sort switch is a derivation over an entry
-// (state.js). That makes this test's own subject more likely rather than
-// less - a column can now be added to one file by somebody who never opens
-// the other - so it reads both and says which half is missing.
+// THE TWO HALVES SIT IN TWO FILES: the header list is the table element's
+// (run-table.js, TOR-194 - it was app.js's when TOR-191 first split this test
+// in two) and the sort switch is a derivation over an entry (state.js). That
+// makes this test's own subject more likely rather than less - a column can
+// now be added to one file by somebody who never opens the other - so it
+// reads both and says which half is missing.
 func TestLiveColumnsAreWiredIntoBothHeadersAndSorting(t *testing.T) {
-	headers := appJS(t)
+	headers := runTableJS(t)
 	sorting := stateJS(t)
 
 	for _, key := range []string{"peers", "seeds", "download_bps", "upload_bps", "availability", "priority"} {
 		if !strings.Contains(headers, `key: "`+key+`"`) {
-			t.Errorf("app.js's LIVE_COLUMNS declares no %q column - it would have no header cell, so nothing to click", key)
+			t.Errorf("run-table.js's LIVE_COLUMNS declares no %q column - it would have no header cell, so nothing to click", key)
 		}
 		if !strings.Contains(sorting, `case "`+key+`":`) {
 			t.Errorf("state.js's sortValue() has no case for %q - its header would exist but clicking it would fall "+
@@ -153,14 +174,14 @@ func TestLiveColumnsAreWiredIntoBothHeadersAndSorting(t *testing.T) {
 // unit has to be on the page itself, not only in a title attribute nobody
 // hovers over lookng for it.
 func TestAvailabilityHeaderNamesItsUnitOnThePage(t *testing.T) {
-	js := appJS(t)
+	js := runTableJS(t)
 
-	// unit: "..." is what buildLiveColumnHeaders() (app.js) turns into a
+	// unit: "..." is what buildLiveColumnHeaders() (run-table.js) turns into a
 	// second, visible line under the "Avail" label - see LIVE_COLUMNS and
 	// .run-th-unit in app.css. A tooltip-only mention would not satisfy this:
 	// the whole point is that a person never has to open one.
 	if !regexp.MustCompile(`key:\s*"availability"[^}]*unit:\s*"copies/piece"`).MatchString(js) {
-		t.Error(`app.js's availability column declares no unit: "copies/piece" - the header would show only ` +
+		t.Error(`run-table.js's availability column declares no unit: "copies/piece" - the header would show only ` +
 			`"Avail" with nothing to say the figure is not a percentage`)
 	}
 }
@@ -591,10 +612,11 @@ func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T)
 	page := appJS(t)
 	events := eventsJS(t)
 	derive := stateJS(t)
+	table := runTableJS(t)
 	// The retirement below has to hold across the WHOLE front end, not just
 	// wherever the derivation used to live - a split is a fine place to
-	// smuggle one back in.
-	all := page + "\n" + events + "\n" + derive
+	// smuggle one back in, and TOR-194 made a fourth file for one to hide in.
+	all := page + "\n" + events + "\n" + derive + "\n" + table
 
 	// The derived version has to be GONE, not merely unused: two notions of
 	// queue position is exactly what a reorder makes disagree, which is the
@@ -667,25 +689,42 @@ func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T)
 // reaches them; that was checked in a browser instead, and is recorded at the
 // bottom of this file.
 func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
-	js := appJS(t)
+	// TWO MODULES SINCE TOR-194, and this test is the clearest case of the
+	// line the ticket drew: the two BUTTONS are row elements and the table
+	// builds and binds them; what a press DOES is a POST and stays in app.js,
+	// which hands setPriority to the element as a service. Both halves are
+	// read, and each assertion says which file it expects its half in.
+	table := runTableJS(t)
+	page := appJS(t)
 
 	for _, want := range []string{
 		`raise.className = "run-priority run-priority-up";`,
 		`lower.className = "run-priority run-priority-down";`,
 		"setPriority(entry, entry.priority + 1)",
 		"setPriority(entry, entry.priority - 1)",
-		`await post("runs/priority", { id: entry.id, priority: want });`,
 	} {
-		if !strings.Contains(js, want) {
-			t.Errorf("app.js does not contain %q - a waiting row would have no way to change its own place in "+
-				"the queue, which is the whole of this ticket", want)
+		if !strings.Contains(table, want) {
+			t.Errorf("run-table.js does not contain %q - a waiting row would have no way to change its own "+
+				"place in the queue, which is the whole of this ticket", want)
 		}
+	}
+	if !strings.Contains(page, `await post("runs/priority", { id: entry.id, priority: want });`) {
+		t.Error(`app.js's setPriority() no longer POSTs runs/priority - the buttons would be wired to ` +
+			"something that asks the server for nothing")
+	}
+	// And the two are actually joined: the element refuses an incomplete set
+	// of services, so a rename on either side fails at wiring time - but only
+	// if the wiring names it at all.
+	if !strings.Contains(page, "setRunTableServices({ toggleRun, cancelRun, setPriority, detailShown: refreshAgain });") {
+		t.Error("app.js does not hand setPriority to the table element - the ▲/▼ buttons would call an " +
+			"injected service that was never injected, and setServices' own check is what turns that into " +
+			"a failure at load rather than at the first press")
 	}
 
 	// The level sent must be ABSOLUTE, clamped to the band, never a step: two
 	// clicks against a stale row would otherwise walk a torrent somewhere
 	// nobody asked for, and a retried request would apply the step twice.
-	if !strings.Contains(js, "const want = Math.max(PRIORITY_LOW, Math.min(PRIORITY_HIGH, priority));") {
+	if !strings.Contains(page, "const want = Math.max(PRIORITY_LOW, Math.min(PRIORITY_HIGH, priority));") {
 		t.Error("app.js's setPriority() does not clamp to an absolute level in the band - it may be sending a " +
 			"step, which is not idempotent against a stale view")
 	}
@@ -693,7 +732,7 @@ func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
 	// The reorder buttons must not also toggle the row open, the same way
 	// Cancel must not: a person moving three torrents around would otherwise
 	// leave three details expanded behind them.
-	block := regexp.MustCompile(`(?s)raise\.addEventListener\("click".*?\}\);`).FindString(js)
+	block := regexp.MustCompile(`(?s)entry\.rowRaise\.addEventListener\("click".*?\}\);`).FindString(table)
 	if !strings.Contains(block, "event.stopPropagation();") {
 		t.Errorf("the raise button's click handler does not stop propagation, so reordering a row would also "+
 			"expand or collapse it: %q", block)
@@ -701,39 +740,48 @@ func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
 }
 
 // TestExactlyOneThPerColumnIsEverBuilt guards TOR-157's own precondition
-// before its own tests get to it: the detail row's colspan (RUN_TABLE_COLUMNS,
-// read off "#run-table thead th" at load) is only ever correct if nothing
-// past buildLiveColumnHeaders() creates another <th> - a resize handle that
-// turned out to be a header cell of its own, say, rather than a plain <span>
-// living inside one, would inflate the count RUN_TABLE_COLUMNS reads without
-// TestLiveColumnsAreWiredIntoBothHeadersAndSorting or anything else here
-// noticing, since both still agree on nine sortable columns either way.
+// before its own tests get to it: the detail row's colspan (this.columns,
+// read off "#run-table thead th" in connectedCallback) is only ever correct
+// if nothing past buildLiveColumnHeaders() creates another <th> - a resize
+// handle that turned out to be a header cell of its own, say, rather than a
+// plain <span> living inside one, would inflate the count this.columns reads
+// without TestLiveColumnsAreWiredIntoBothHeadersAndSorting or anything else
+// here noticing, since both still agree on nine sortable columns either way.
 func TestExactlyOneThPerColumnIsEverBuilt(t *testing.T) {
-	js := appJS(t)
+	js := runTableJS(t)
 
 	if n := strings.Count(js, `document.createElement("th")`); n != 1 {
-		t.Errorf(`app.js calls document.createElement("th") %d times, want exactly 1 (inside `+
+		t.Errorf(`run-table.js calls document.createElement("th") %d times, want exactly 1 (inside `+
 			"buildLiveColumnHeaders) - a second call would add a column the detail row's colspan "+
 			"was never told about", n)
+	}
+	// And nothing OUTSIDE the element may build one either, which is new with
+	// TOR-194: the header row is the table's own part now, so a <th> minted
+	// anywhere else would be a column that reached neither LIVE_COLUMNS, nor
+	// sorting, nor the width tokens, nor this.columns.
+	if strings.Contains(appJS(t), `document.createElement("th")`) {
+		t.Error(`app.js builds a <th> of its own - since TOR-194 the header row belongs to the table ` +
+			"element, and a column added from outside it would be invisible to every mechanism that " +
+			"reads the header row")
 	}
 }
 
 // TestColumnWidthsKeyOffElSortHeaders is TOR-157's own version of the
-// LIVE_COLUMNS "one list rather than two" guard: el.sortHeaders (already
+// LIVE_COLUMNS "one list rather than two" guard: this.sortHeaders (already
 // exactly the nine resizable headers - the actions column carries no
 // data-sort) is what decides which columns get a width to persist. A second,
 // hand-written list of column keys here could drift from LIVE_COLUMNS the
 // header set actually came from, the same way a hard-coded colspan drifted
-// from the header count before RUN_TABLE_COLUMNS existed.
+// from the header count before this.columns was read off the header row.
 func TestColumnWidthsKeyOffElSortHeaders(t *testing.T) {
-	js := appJS(t)
+	js := runTableJS(t)
 
-	if !strings.Contains(js, `Array.from(el.sortHeaders, (th) => th.dataset.sort)`) {
-		t.Error("app.js's resizableColumnKeys() does not derive its column list from el.sortHeaders - a " +
-			"hand-written list here could silently drift from the headers buildLiveColumnHeaders() actually built")
+	if !strings.Contains(js, `Array.from(this.sortHeaders, (th) => th.dataset.sort)`) {
+		t.Error("run-table.js's resizableColumnKeys() does not derive its column list from this.sortHeaders - " +
+			"a hand-written list here could silently drift from the headers buildLiveColumnHeaders() actually built")
 	}
 	if !strings.Contains(js, `th.style.width = "var(--col-w-" + key + ")";`) {
-		t.Error(`app.js does not set each sortable header's own width from its --col-w-* token - without this ` +
+		t.Error(`run-table.js does not set each sortable header's own width from its --col-w-* token - without this ` +
 			`table-layout: fixed would have nothing but the CSS default to size that column with, and a stored or ` +
 			`dragged width would never reach the page`)
 	}
@@ -747,12 +795,13 @@ func TestColumnWidthsKeyOffElSortHeaders(t *testing.T) {
 // file's opening note); what a real browser did with an actually-corrupt
 // value is recorded in the summary at the bottom of this file instead.
 func TestStoredColumnWidthsDegradeGracefully(t *testing.T) {
-	js := appJS(t)
+	js := runTableJS(t)
 
-	m := regexp.MustCompile(`(?s)function loadColumnWidths\(\) \{.*?\n\}`).FindString(js)
-	if m == "" {
-		t.Fatal("app.js has no loadColumnWidths() function to check")
-	}
+	// A METHOD SINCE TOR-194, so it closes at two spaces rather than at column
+	// zero - jsMethod is the helper for that shape (stylesheet_test.go), and
+	// using it rather than a looser regex is what keeps this anchored on the
+	// whole function instead of on whatever the next `\n}` happens to be.
+	m := jsMethod(t, js, "loadColumnWidths")
 
 	for _, want := range []string{
 		// Unreadable localStorage (private window, site data blocked) and a
@@ -766,14 +815,14 @@ func TestStoredColumnWidthsDegradeGracefully(t *testing.T) {
 		// but isn't a map of columns).
 		`if (!parsed || typeof parsed !== "object") return {};`,
 		// THE ticket's own named case: a key from an older column set.
-		"const known = new Set(resizableColumnKeys());",
+		"const known = new Set(this.resizableColumnKeys());",
 		"if (!known.has(key)) continue;",
 		// A width that doesn't parse as a finite number (corrupted, or not
 		// a number at all) is dropped rather than applied as NaN.
 		"if (Number.isFinite(width)) widths[key] = clampColumnWidth(width);",
 	} {
 		if !strings.Contains(m, want) {
-			t.Errorf("app.js's loadColumnWidths() does not contain %q - a stored value could render a broken "+
+			t.Errorf("run-table.js's loadColumnWidths() does not contain %q - a stored value could render a broken "+
 				"table instead of degrading to the default widths: %q", want, m)
 		}
 	}
@@ -782,20 +831,35 @@ func TestStoredColumnWidthsDegradeGracefully(t *testing.T) {
 	// just the JSON.parse - since localStorage.getItem itself is what throws
 	// in a private window.
 	if !strings.Contains(m, "localStorage.getItem(COLUMN_WIDTHS_KEY)") {
-		t.Error("app.js's loadColumnWidths() does not read COLUMN_WIDTHS_KEY from localStorage at all")
+		t.Error("run-table.js's loadColumnWidths() does not read COLUMN_WIDTHS_KEY from localStorage at all")
 	}
 
-	// savePanelWidth's own try/catch pattern, reused for the column map:
-	// a write that throws (private window, quota) must not crash the drag
-	// it was trying to persist.
-	if !strings.Contains(js, "function saveColumnWidths(widths) {") ||
+	// The same try/catch on the way back out: a write that throws (private
+	// window, quota) must not crash the drag it was trying to persist.
+	if !strings.Contains(js, "  saveColumnWidths(widths) {") ||
 		!strings.Contains(js, "localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(widths));") {
-		t.Error("app.js's saveColumnWidths() does not write the whole widths map back to COLUMN_WIDTHS_KEY as JSON")
+		t.Error("run-table.js's saveColumnWidths() does not write the whole widths map back to " +
+			"COLUMN_WIDTHS_KEY as JSON")
+	}
+
+	// AND THE MAP IS LOADED AT ALL. loadColumnWidths degrading correctly is
+	// worth nothing if nothing calls it: TOR-194 moved the call from a
+	// top-level `const columnWidths = loadColumnWidths()` into
+	// connectedCallback, which is a place a later edit can drop it from
+	// without touching one line this test would otherwise read.
+	if !strings.Contains(js, "this.columnWidths = this.loadColumnWidths();") {
+		t.Error("run-table.js's connectedCallback does not load the stored column widths - every stored " +
+			"width would be discarded on load and the table would open at the defaults every time")
+	}
+	if !strings.Contains(js,
+		"for (const [key, px] of Object.entries(this.columnWidths)) this.applyColumnWidth(key, px);") {
+		t.Error("run-table.js loads the stored widths and never applies them - the map would be in memory " +
+			"with no --col-w-* token written, so the table would still render at the defaults")
 	}
 }
 
 // TestColumnDragNeverTriggersSort is the trap this ticket names directly:
-// every header is a sort control (TOR-139), so the resize handle app.js
+// every header is a sort control (TOR-139), so the resize handle run-table.js
 // appends inside each one sits inside a click target that reorders the
 // table. TOR-140's raise/lower buttons hit the identical problem for the
 // accordion and fixed it with stopPropagation; this checks the same fix
@@ -804,22 +868,23 @@ func TestStoredColumnWidthsDegradeGracefully(t *testing.T) {
 // separate click event that pointerdown's own stopPropagation does not
 // touch.
 func TestColumnDragNeverTriggersSort(t *testing.T) {
-	js := appJS(t)
+	js := runTableJS(t)
 
-	// el.sortHeaders is walked twice in app.js - once to wire up sorting
-	// (click/keydown, near updateSortIndicators) and once, here, to build
-	// the resize handles - so the match is anchored on `const key =
-	// th.dataset.sort;`, unique to this second loop, rather than on the
-	// `for (const th of el.sortHeaders)` line the two share.
-	block := regexp.MustCompile(`(?s)for \(const th of el\.sortHeaders\) \{\n  const key = th\.dataset\.sort;.*?\n\}`).
-		FindString(js)
-	if block == "" {
-		t.Fatal("app.js has no `for (const th of el.sortHeaders) { ... }` block wiring up the resize handles")
-	}
+	// SINCE TOR-194 the two loops over this.sortHeaders are two named methods
+	// (wireSorting and wireColumnResizers), so the block this test is about
+	// can be asked for by name instead of being told apart from its twin by a
+	// line inside it. jsMethod bounds it at the two-space close.
+	block := jsMethod(t, js, "wireColumnResizers")
 
 	if !strings.Contains(block, `handle.className = "col-resizer";`) {
-		t.Fatal("app.js's el.sortHeaders loop does not create a .col-resizer handle - nothing below would be " +
-			"testing what this test thinks it is")
+		t.Fatal("run-table.js's wireColumnResizers does not create a .col-resizer handle - nothing below " +
+			"would be testing what this test thinks it is")
+	}
+	// The other half of what made this loop the right subject: the handles go
+	// inside the very headers wireSorting made into sort controls.
+	if !strings.Contains(block, "for (const th of this.sortHeaders) {") {
+		t.Fatal("run-table.js's wireColumnResizers no longer walks this.sortHeaders - the handles would not " +
+			"be sitting inside a sort control at all, which is the collision this test exists for")
 	}
 
 	for _, want := range []string{
@@ -865,19 +930,15 @@ func TestColumnDragNeverTriggersSort(t *testing.T) {
 // Text assertions cannot see a pointer actually move or a capture actually
 // get lost - that is the browser pass recorded right below, not this test.
 func TestColumnDragEndsWhenPointerCaptureIsLost(t *testing.T) {
-	js := appJS(t)
+	js := runTableJS(t)
 
-	block := regexp.MustCompile(`(?s)for \(const th of el\.sortHeaders\) \{\n  const key = th\.dataset\.sort;.*?\n\}`).
-		FindString(js)
-	if block == "" {
-		t.Fatal("app.js has no `for (const th of el.sortHeaders) { ... }` block wiring up the resize handles")
-	}
+	block := jsMethod(t, js, "wireColumnResizers")
 
 	// Half one: lostpointercapture is the event that fires when the capture
 	// set in pointerdown ends WITHOUT a pointerup/pointercancel reaching the
 	// handle. Nothing listened for it before this fix.
 	if !strings.Contains(block, `handle.addEventListener("lostpointercapture", endColumnDrag);`) {
-		t.Error(`app.js's resize-handle wiring does not end the drag on "lostpointercapture" - a capture lost ` +
+		t.Error(`run-table.js's resize-handle wiring does not end the drag on "lostpointercapture" - a capture lost ` +
 			"any way other than pointerup/pointercancel on the handle itself would leave the handle lit and " +
 			"dragging forever")
 	}
@@ -889,11 +950,17 @@ func TestColumnDragEndsWhenPointerCaptureIsLost(t *testing.T) {
 	// makes ANY future way of losing the pointer harmless instead of sticky,
 	// not just the lostpointercapture case above.
 	if !strings.Contains(block, "if (!(event.buttons & 1)) {") {
-		t.Error("app.js's pointermove handler does not check event.buttons for the primary button - a hover " +
+		t.Error("run-table.js's pointermove handler does not check event.buttons for the primary button - a hover " +
 			"with no button held would be computed as though it were a continued drag")
 	}
-	if !strings.Contains(block, "endColumnDrag(event);\n      return;") {
-		t.Error("app.js's pointermove handler does not end the drag when event.buttons shows no button held - " +
+	// Anchored on the GUARD rather than on the two statements' own indentation,
+	// which TOR-194 changed by two spaces when this became a method - a check
+	// that reddens on a re-indent is a check nobody trusts the next time. The
+	// regex is also the stronger claim: it says the end-and-return belongs to
+	// the no-button branch, not merely that both appear somewhere.
+	if !regexp.MustCompile(`if \(!\(event\.buttons & 1\)\) \{\s*endColumnDrag\(event\);\s*return;`).
+		MatchString(block) {
+		t.Error("run-table.js's pointermove handler does not end the drag when event.buttons shows no button held - " +
 			"it would keep reading a stale start point instead of stopping")
 	}
 }
@@ -951,7 +1018,7 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 	} {
 		token := "--col-w-" + key + ":"
 		if !strings.Contains(css, token) {
-			t.Errorf("app.css declares no %q token in :root - app.js's applyColumnWidth(%q, ...) would be "+
+			t.Errorf("app.css declares no %q token in :root - run-table.js's applyColumnWidth(%q, ...) would be "+
 				"setting a custom property nothing in the stylesheet ever reads a default from", token, key)
 		}
 	}
@@ -963,7 +1030,7 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 	// trick existed to solve for exactly one column.
 	if !regexp.MustCompile(`\.run-table\s*\{[^}]*table-layout:\s*fixed`).MatchString(css) {
 		t.Error("app.css's .run-table rule does not set table-layout: fixed - a column's width would still be " +
-			"whatever its content wants regardless of what app.js sets --col-w-* to")
+			"whatever its content wants regardless of what run-table.js sets --col-w-* to")
 	}
 
 	// The actions column has no data-sort and so no --col-w-* token of its

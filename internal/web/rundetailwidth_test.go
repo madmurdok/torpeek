@@ -43,7 +43,7 @@ func TestExpandedDetailIsStickyAndTracksThePaneWidth(t *testing.T) {
 		t.Errorf(".run-detail width is %q (present: %v), want a var(--run-detail-w, ...) - "+
 			"THE TRAP: sticky constrains offset, never size, so without this the element "+
 			"stays exactly as wide as its colspanned <td> (the table), not the pane. "+
-			"app.js's syncRunDetailWidth() is what keeps the token current", got, ok)
+			"run-table.js's syncRunDetailWidth() is what keeps the token current", got, ok)
 	}
 	// Without border-box, --run-detail-w's px value would be the CONTENT box
 	// and .run-detail's own horizontal padding would add on top of it,
@@ -72,52 +72,85 @@ func TestExpandedDetailIsStickyAndTracksThePaneWidth(t *testing.T) {
 // deleted or a hook silently dropped during a later refactor; it does not
 // prove the number syncRunDetailWidth computes is correct in a real layout -
 // TOR-174's own report is the real-browser check for that.
+//
+// SINCE TOR-194 IT READS run-table.js, and all three causes moved there
+// together, which is the point rather than an inconvenience: the pane whose
+// width this measures is one of the table element's own parts, and so is
+// every one of the three things that can change it. Nothing in app.js sets
+// --run-detail-w any more, which the last check here is about.
 func TestSyncRunDetailWidthIsWiredToEveryPlaceThePaneCanChange(t *testing.T) {
-	b, err := embedded.ReadFile("assets/app.js")
+	b, err := embedded.ReadFile("assets/run-table.js")
 	if err != nil {
-		t.Fatalf("reading the embedded app.js: %v", err)
+		t.Fatalf("reading the embedded run-table.js: %v", err)
 	}
 	js := string(b)
 
-	fn := jsFunc(t, js, "syncRunDetailWidth")
-	if !strings.Contains(fn, "runTableWrap") || !strings.Contains(fn, "clientWidth") {
-		t.Error("syncRunDetailWidth does not read el.runTableWrap's clientWidth - " +
-			"that is the pane's own visible width, and the whole point of this function")
+	// A METHOD NOW, so it closes at two spaces rather than at column zero.
+	fn := jsMethod(t, js, "syncRunDetailWidth")
+	if !strings.Contains(fn, "this.wrap") || !strings.Contains(fn, "clientWidth") {
+		t.Error("syncRunDetailWidth does not read this.wrap's clientWidth - that is the " +
+			"pane's own visible width (.run-table-wrap, found in connectedCallback), and " +
+			"the whole point of this function")
 	}
 	if !strings.Contains(fn, "--run-detail-w") {
-		t.Error("syncRunDetailWidth never sets --run-detail-w - app.css's .run-detail " +
+		t.Error("syncRunDetailWidth never sets --run-detail-w - detail.css's .run-detail " +
 			"reads exactly that token for its width")
 	}
 
-	if !strings.Contains(js, `window.addEventListener("resize", syncRunDetailWidth)`) {
-		t.Error("app.js does not call syncRunDetailWidth on window resize - the pane " +
-			"narrows and widens with the window, and the detail's width must follow it")
+	// CAUSE ONE: the window. The listener has to be the bound instance field,
+	// not an inline arrow - disconnectedCallback removes the same function
+	// object, and a resize handler left on `window` keeps measuring a table
+	// that is no longer on the page.
+	for _, want := range []string{
+		"this.onResize = () => this.syncRunDetailWidth();",
+		`window.addEventListener("resize", this.onResize);`,
+		`window.removeEventListener("resize", this.onResize);`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("run-table.js does not contain %q - the pane narrows and widens with the "+
+				"window, the detail's width must follow it, and the listener has to come off "+
+				"again with the element", want)
+		}
 	}
 
-	expanded := jsFunc(t, js, "setRunExpanded")
-	if !strings.Contains(expanded, "syncRunDetailWidth()") {
+	// CAUSE TWO: a row opening or closing.
+	expanded := jsMethod(t, js, "setRunExpanded")
+	if !strings.Contains(expanded, "this.syncRunDetailWidth()") {
 		t.Error("setRunExpanded never calls syncRunDetailWidth - opening or closing a " +
 			"row can add or remove the page's own scrollbar, changing the pane under an " +
 			"already-open row")
 	}
 
-	// endColumnDrag is declared INSIDE the per-header for loop (a closure
-	// over that iteration's th/handle), not at column zero, so jsFunc's
-	// "closing brace at column zero" convention does not bound it - this
-	// slices instead, from its own declaration to the addEventListener call
-	// that registers it a few lines later, which is a real anchor rather
-	// than a guessed offset.
+	// CAUSE THREE: the end of a column drag. endColumnDrag is declared INSIDE
+	// wireColumnResizers' per-header loop (a closure over that iteration's
+	// th/handle), so neither jsFunc's column-zero convention nor jsMethod's
+	// two-space one bounds it - this slices instead, from its own declaration
+	// to the addEventListener call that registers it a few lines later, which
+	// is a real anchor rather than a guessed offset.
 	dragStart := strings.Index(js, "function endColumnDrag(event) {")
 	if dragStart < 0 {
-		t.Fatal("app.js has no endColumnDrag(event) function")
+		t.Fatal("run-table.js has no endColumnDrag(event) function")
 	}
 	dragEnd := strings.Index(js[dragStart:], `handle.addEventListener("pointerup", endColumnDrag);`)
 	if dragEnd < 0 {
 		t.Fatal("endColumnDrag is never registered on pointerup")
 	}
 	drag := js[dragStart : dragStart+dragEnd]
-	if !strings.Contains(drag, "syncRunDetailWidth()") {
+	if !strings.Contains(drag, "this.syncRunDetailWidth()") {
 		t.Error("endColumnDrag never calls syncRunDetailWidth - TOR-157's column drag " +
 			"changes the table's width, and the ticket's report asks for a recheck here too")
+	}
+
+	// AND ONE PLACE IT MUST NOT BE. Two modules writing --run-detail-w would
+	// be two answers to "how wide is the pane", and the one that lost the race
+	// would be the one on screen.
+	page, err := embedded.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatalf("reading the embedded app.js: %v", err)
+	}
+	if strings.Contains(string(page), "--run-detail-w") {
+		t.Error("app.js writes --run-detail-w - since TOR-194 the pane belongs to the table " +
+			"element, which is the only thing that may measure it; a second writer is a " +
+			"second answer to the same question")
 	}
 }

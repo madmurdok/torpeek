@@ -30,16 +30,21 @@
 // NO BUILD STEP: all three are served straight out of the embedded assets and
 // loaded natively as ES modules. index.html's own <script> is what says so,
 // and it has to say `type="module"` or none of this parses at all.
+//
+// AND THEN THE ELEMENTS (TOR-192, TOR-193, TOR-194), each imported below for
+// its side effect: frame-panel.js, compare-dialog.js and run-table.js. They
+// are not a fourth layer - they sit beside app.js, in its half of the split,
+// and what they took is the DRAWING of one thing each. What is left in this
+// file is the intake, the requests, the log, the socket's own address, the
+// wiring at the bottom, and the run detail a table row opens onto - which is
+// TOR-195's, and the last one.
 
 import {
   ABSENT,
   FINAL,
   PRIORITY_HIGH,
   PRIORITY_LOW,
-  arrivalOrdinal,
-  availabilityCellText,
   availabilityCellTitle,
-  availabilityMetaText,
   availabilityReading,
   badgeLabel,
   basename,
@@ -48,37 +53,21 @@ import {
   cancellable,
   capturedCells,
   claimReopenedRun,
-  compareEntries,
   displayName,
   ensureRun,
   framesOnDisk,
   gridCells,
-  hasLive,
   hasPriority,
-  metaLabel,
-  metaTitle,
   newFileState,
   newRunState,
   passCount,
-  peersCellText,
-  peersCellTitle,
-  priorityLabel,
-  queueCellMetaText,
-  queueCellText,
-  queueCellTitle,
-  rateCellText,
-  rateCellTitle,
   seconds,
-  seedsCellText,
-  seedsCellTitle,
   setFileFactory,
   setRunFactory,
   shortId,
   state,
   timecode,
   untickedVideos,
-  waitingForMetadata,
-  whenLabel,
 } from "./state.js";
 import { connect, setView } from "./events.js";
 // Imported for its side effect and nothing else: the module's last statement
@@ -95,6 +84,17 @@ import "./frame-panel.js";
 // called at the bootstrap below rather than here, because url() closes over
 // TOKEN and TOKEN is read further down this file.
 import { setServices as setCompareServices } from "./compare-dialog.js";
+// Imported for the same side effect, and wired the same way (TOR-194). Its
+// four services are all things only this file can do - three POSTs and one
+// redraw of the detail a row opens onto - and, like the compare dialog's, they
+// are handed over at the bootstrap below.
+//
+// THE SIDE EFFECT MATTERS MORE HERE THAN FOR EITHER DIALOG: the element's
+// connectedCallback is what builds the six live columns, so the header row is
+// three columns wide until this import has evaluated and nine afterwards.
+// Every import runs before the first line of this file, which is why the
+// el. lookup below can count on an element whose parts are already found.
+import { setServices as setRunTableServices } from "./run-table.js";
 
 // TOKEN is this page's proof of authorization when the server was started
 // with one (TOR-30): the URL printed at startup carries it as a query
@@ -109,72 +109,6 @@ import { setServices as setCompareServices } from "./compare-dialog.js";
 // the tab - is accepted rather than worked around (see server.go's Config.Token).
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 
-// ---------------------------------------------------------------------------
-// THE SIX LIVE COLUMNS (TOR-139): peers, seeds, both rates, availability and
-// queue position, added to the table TOR-137 moved into the right pane and
-// TOR-138 made expandable.
-//
-// LIVE_COLUMNS builds both the header cells (below) and, by the same keys,
-// state.js's sortValue() switch - one list rather than two, so a column
-// added here cannot forget to be wired into sorting or the reverse. The two
-// halves now sit in two files, which is why each has a test naming the other
-// (TestLiveColumnsAreWiredIntoBothHeadersAndSorting).
-// unit, when present, is shown on its own line under the label: the
-// availability column needs it (its figure is copies per piece, not a
-// percentage, and commonly exceeds 1.0) to be legible without a tooltip
-// nobody opens, per this ticket's own acceptance criterion.
-const LIVE_COLUMNS = [
-  { key: "peers", label: "Peers",
-    title: "Connected peers. A dash means this torrent has no client (queued, needs-action, or a row read off disk) - not zero peers." },
-  { key: "seeds", label: "Seeds",
-    title: "Connected seeds. A dash means no client, not zero seeds." },
-  { key: "download_bps", label: "Down",
-    title: "Download speed. A dash means no reading yet - before a run's second heartbeat a rate cannot be computed - never 0 B/s." },
-  { key: "upload_bps", label: "Up",
-    title: "Upload speed. A dash means no reading yet, never 0 B/s." },
-  { key: "availability", label: "Avail", unit: "copies/piece",
-    title: "Swarm availability, in copies per piece - not a percentage. Below 1.0 means pieces are missing from the swarm; above 1.0 (commonly) means it is healthy. A dash means this torrent has not been asked for bytes yet, so nothing has reported what the swarm holds." },
-  { key: "priority", label: "Queue",
-    title: "The order torrents were added to this server: 1 is the first one you added, and the number never changes - not when a torrent finishes, not when you reprioritise it, not when you pick its files. Under it, while a row is still waiting, is its place in the queue as the server actually holds it (\"#2\" means one torrent is ahead of it), which is the number that moves. Use ▲ and ▼ at the end of a waiting row to change that; priority orders the torrents that are WAITING and never interrupts one that is already downloading. A dash means this row was added by an earlier run of the server, so this session never gave it a number - the Added column is what dates it." },
-];
-
-// buildLiveColumnHeaders inserts the six <th>s into the existing thead row,
-// before the (headerless) actions column, so RUN_TABLE_COLUMNS below and
-// el.sortHeaders' own querySelectorAll both see them without index.html ever
-// naming them by hand - this file owns every column past the three the page
-// shipped with (name, added, status).
-function buildLiveColumnHeaders() {
-  const headRow = document.querySelector("#run-table thead tr");
-  const actionsHeader = document.querySelector("#run-table thead th.run-actions-header");
-  if (!headRow || !actionsHeader) return;
-  const frag = document.createDocumentFragment();
-  for (const col of LIVE_COLUMNS) {
-    const th = document.createElement("th");
-    th.scope = "col";
-    th.tabIndex = 0;
-    th.setAttribute("role", "button");
-    th.setAttribute("aria-sort", "none");
-    th.dataset.sort = col.key;
-    th.className = "run-cell-metric-header" +
-      (col.key === "availability" ? " run-cell-availability-header" : "") +
-      (col.key === "priority" ? " run-cell-queue-header" : "");
-    th.title = col.title;
-    const label = document.createElement("span");
-    label.className = "run-th-label";
-    label.textContent = col.label;
-    th.append(label);
-    if (col.unit) {
-      const unit = document.createElement("span");
-      unit.className = "run-th-unit";
-      unit.textContent = col.unit;
-      th.append(unit);
-    }
-    frag.append(th);
-  }
-  headRow.insertBefore(frag, actionsHeader);
-}
-buildLiveColumnHeaders();
-
 const el = {
   status: document.getElementById("status"),
   form: document.getElementById("start"),
@@ -186,9 +120,6 @@ const el = {
   dropzone: document.getElementById("dropzone"),
   fileInput: document.getElementById("file-input"),
   dropOverlay: document.getElementById("drop-overlay"),
-  runList: document.getElementById("run-list"),
-  runListEmpty: document.getElementById("run-list-empty"),
-  sortHeaders: document.querySelectorAll("#run-table thead [data-sort]"),
   log: document.getElementById("log"),
   // ONE entry where there were six (TOR-192). The panel's parts belong to the
   // panel now: it finds them inside itself, and this file is handed the
@@ -203,10 +134,17 @@ const el = {
   // asked for, and nothing here needs to know it contains a
   // <dialog id="compare">.
   compareDialog: document.querySelector("compare-dialog"),
-  // No id on this one in index.html - it is the scroll wrapper, not a
-  // control, and TOR-174 is the first thing that needs to read it from JS
-  // (syncRunDetailWidth, below).
-  runTableWrap: document.querySelector(".run-table-wrap"),
+  // ONE entry where there were four (TOR-194): the tbody, the empty-state
+  // paragraph, the nine sortable headers and the scroll wrap all belong to the
+  // table now, which finds them inside itself. Queried by TAG for the same
+  // reason the two above are - the element IS what is being asked for, and
+  // nothing here needs to know it contains a <table id="run-table">.
+  //
+  // Nothing in this file writes a row cell any more. What it asks the table
+  // for is three things (newRow, bindRow, syncRow) plus the accordion's own
+  // setRunExpanded; see run-table.js's header for where the line between the
+  // two halves falls and why.
+  runTable: document.querySelector("run-table"),
 };
 
 function url(path) {
@@ -258,147 +196,13 @@ function langLabel(code) {
   return code && code !== "und" ? code : "unknown language";
 }
 
-// renderRunProgress draws a run's progress as a segmented bar in its row
-// (TOR-123). Segments with gaps rather than a smooth fill, because torpeek
-// deals in discrete captures and a percentage would be a shape borrowed from
-// software that deals in bytes.
-//
-// WHAT IT MEASURES: frames landed out of frames planned, which is the only
-// denominator known from the first moment and the only one that answers "how
-// much is left". Pieces would answer "is it moving" better - a run can sit at
-// 4 of 20 frames while steadily pulling data - but the claimed-piece figures
-// do not travel live: they reach core.Done and the run record, not the
-// progress heartbeat. Choosing them would have meant inventing a measurement
-// to draw, and the bar sits directly beneath the line reading "4/20 frames",
-// which is what keeps a stalled bar legible as a slow frame rather than as a
-// bar measuring the wrong thing. The bytes and peers on the file block's own
-// progress line are what say the run is alive meanwhile.
-//
-// WHERE IT IS: the panel row only, not the detail pane. In the detail the grid
-// is already this graphic - since TOR-110 every planned point has a cell from
-// the first moment and they fill in place - so a bar above it would measure
-// the same thing twice, and the two would disagree for a second at every
-// frame. One graphic per fact.
-//
-// NOT ON A FINISHED RUN, which the criterion asks for: a full bar on a done
-// run tells nobody anything, and an empty one on a failed run reads like a
-// second failure.
-//
-// WHERE entry.framesDone/entry.framesTotal COME FROM is applyFrameProgress,
-// not this function - by the time a redraw is asked for, both are already
-// the most complete reading available (TOR-167). This function only ever
-// turns them into segments; it never reads the wire directly.
-function renderRunProgress(entry) {
-  const el = entry.rowProgress;
-  if (!el) return;
-
-  const total = entry.framesTotal || 0;
-  if (!cancellable(entry.state) || entry.disk || total <= 0) {
-    el.hidden = true;
-    el.replaceChildren();
-    return;
-  }
-
-  const done = Math.max(0, Math.min(total, entry.framesDone || 0));
-  const segments = Math.min(total, MAX_PROGRESS_SEGMENTS);
-  const per = total / segments;
-
-  const frag = document.createDocumentFragment();
-  for (let i = 0; i < segments; i++) {
-    // How much of THIS segment's share of the plan is done. At one frame per
-    // segment it is 0 or 1; above the cap a segment stands for several and
-    // fills proportionally, the same way the piece strip aggregates - and the
-    // exact count is in the line above, so nothing is lost by grouping.
-    const from = i * per;
-    const filled = Math.max(0, Math.min(1, (done - from) / per));
-    const seg = document.createElement("span");
-    seg.className = "run-progress-seg";
-    seg.style.setProperty("--fill", filled.toFixed(3));
-    frag.append(seg);
-  }
-  el.replaceChildren(frag);
-  el.hidden = false;
-  el.setAttribute("role", "progressbar");
-  el.setAttribute("aria-valuemin", "0");
-  el.setAttribute("aria-valuemax", String(total));
-  el.setAttribute("aria-valuenow", String(done));
-  el.setAttribute("aria-label", done + " of " + total + " frames captured");
-}
-
-// MAX_PROGRESS_SEGMENTS is where one segment per frame stops fitting in a
-// panel row. A plan of twenty is the common case and draws one each; a plan of
-// two hundred would ask for segments a third of a pixel wide.
-const MAX_PROGRESS_SEGMENTS = 24;
-
-// reorderRuns moves every row's existing element into sorted order without
-// rebuilding anything - appendChild on a node already in the table just
-// relocates it, so a row that has not moved costs a no-op reflow, never a
-// rebuild. Called whenever a row is added or anything a sort key reads
-// (name, status, when) changes, so the table always reflects the active
-// sort - including under the default "when" sort, where a status change
-// never touches when, so re-running this never moves that row.
-//
-// TWO rows per entry since TOR-138: the torrent's own line and, directly
-// under it, the row its detail renders in. They move together, in that order,
-// which is the whole of what keeps a detail attached to the torrent it
-// belongs to under every sort - append() takes both at once, so there is no
-// window in which a re-sort has moved one and not the other.
-function reorderRuns() {
-  const rows = Array.from(state.runs.values()).sort(compareEntries);
-  for (const entry of rows) el.runList.append(entry.rowEl, entry.detailRowEl);
-}
-
-function updateSortIndicators() {
-  for (const th of el.sortHeaders) {
-    if (th.dataset.sort === state.sort.key) {
-      th.setAttribute("aria-sort", state.sort.dir === "asc" ? "ascending" : "descending");
-    } else {
-      th.setAttribute("aria-sort", "none");
-    }
-  }
-}
-
-// setSort is what clicking (or activating with the keyboard) a column header
-// does: the same column reverses direction, a different one is sorted
-// ascending - except "when", which starts descending (newest first), the
-// same default the table opens with, since that is the more useful way to
-// first look at dates.
-function setSort(key) {
-  if (state.sort.key === key) {
-    state.sort.dir = state.sort.dir === "asc" ? "desc" : "asc";
-  } else {
-    state.sort.key = key;
-    state.sort.dir = key === "when" ? "desc" : "asc";
-  }
-  updateSortIndicators();
-  reorderRuns();
-}
-
-for (const th of el.sortHeaders) {
-  th.addEventListener("click", () => setSort(th.dataset.sort));
-  th.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    event.preventDefault();
-    setSort(th.dataset.sort);
-  });
-}
-
 // ---------------------------------------------------------------------------
-// Run entries: one per torrent, live or on disk. Each owns TWO adjacent rows
-// in the torrent table - its own line, and the row its detail renders in
-// directly beneath it (TOR-138) - both built once and updated in place.
-// Opening or closing a torrent never rebuilds anything; it only shows and
-// hides what is already there, exactly as showing one of several detail panes
-// used to.
+// Run entries: the DETAIL half, which is what is left of newRunEntry after
+// TOR-194 took the rows (see run-table.js's header for exactly where the line
+// falls). The table builds both <tr>s and hands back every element in them,
+// the colspanned detailCell included; this function mounts the run's detail
+// into that cell and wires the controls inside it.
 //
-// WHY A SECOND <tr> RATHER THAN SOMETHING INSIDE THE FIRST. A detail nested in
-// a data cell would inherit that cell's own click target, and a click anywhere
-// in the detail - a picker checkbox, a thumbnail - would bubble to the row's
-// handler and collapse the thing being used. A sibling row cannot: the row's
-// listener is on the row, and the detail is not in it. It also keeps the
-// table's own column widths the only thing deciding the columns, and it stays
-// valid markup, which a <div> between two <tr>s would not be.
-
 // detailSeq only exists to give each detail container a unique id, which the
 // row's toggle needs for aria-controls: a disclosure control has to name the
 // region it opens, and there are now as many regions as there are torrents -
@@ -407,140 +211,21 @@ for (const th of el.sortHeaders) {
 // for both depths on purpose: what it has to guarantee is uniqueness across
 // the document, which two counters would each only guarantee within their
 // own prefix.
+//
+// It stays on this side of the split because both things it numbers are
+// details. The table's own half never mints an id.
 let detailSeq = 0;
 
-// RUN_TABLE_COLUMNS is how far the detail row has to span, read off the
-// header rather than written as a literal - TOR-139 added six more columns to
-// the three the page shipped with, via buildLiveColumnHeaders() above, and a
-// hard-coded count here would have gone wrong silently the moment it did: a
-// short colspan leaves an empty cell at the end of the detail row and narrows
-// the detail by a column. Reading it after that function has already run
-// (both are top-level statements, in source order) is what keeps this correct
-// without the two having to be kept in sync by hand.
-const RUN_TABLE_COLUMNS = document.querySelectorAll("#run-table thead th").length || 1;
-
 function newRunEntry(id) {
-  const row = document.createElement("tr");
-  row.className = "run-row";
-
-  const nameCell = document.createElement("td");
-  nameCell.className = "run-cell-name";
-  const main = document.createElement("button");
-  main.type = "button";
-  main.className = "run-row-main";
-  // The same disclosure triangle a video file's own row wears one level down
-  // (.picker-open, since TOR-182), for the same reason: an accordion that
-  // gives no sign it opens is a table.
-  const icon = document.createElement("span");
-  icon.className = "run-toggle-icon";
-  icon.setAttribute("aria-hidden", "true");
-  const name = document.createElement("span");
-  name.className = "run-name";
-  main.append(icon, name);
-  nameCell.append(main);
-
-  const whenCell = document.createElement("td");
-  whenCell.className = "run-cell-when";
-
-  const statusCell = document.createElement("td");
-  statusCell.className = "run-cell-status";
-  const badge = document.createElement("span");
-  badge.className = "run-badge";
-  const meta = document.createElement("span");
-  meta.className = "run-meta";
-  // Progress as a graphic (TOR-123), directly under the line that says what
-  // it is counting - the bar is the glance and the text is the number.
-  const bar = document.createElement("span");
-  bar.className = "run-progress";
-  bar.hidden = true;
-  statusCell.append(badge, meta, bar);
-
-  // The six live columns (TOR-139), in the same order as LIVE_COLUMNS'
-  // headers above. peers/seeds/down/up are one text node each; availability
-  // carries a second, muted line for "N unavailable" the same way the status
-  // cell's own badge carries .run-meta under it.
-  const peersCell = document.createElement("td");
-  peersCell.className = "run-cell-metric run-cell-peers";
-  const seedsCell = document.createElement("td");
-  seedsCell.className = "run-cell-metric run-cell-seeds";
-  const downCell = document.createElement("td");
-  downCell.className = "run-cell-metric run-cell-down";
-  const upCell = document.createElement("td");
-  upCell.className = "run-cell-metric run-cell-up";
-  const availCell = document.createElement("td");
-  availCell.className = "run-cell-metric run-cell-availability";
-  const availValue = document.createElement("span");
-  availValue.className = "run-cell-availability-value";
-  const availMeta = document.createElement("span");
-  availMeta.className = "run-meta run-cell-availability-meta";
-  availCell.append(availValue, availMeta);
-  // The queue cell is two lines, the same shape the availability cell uses:
-  // the position on top, the priority level under it when it is not the
-  // default (TOR-140). It stays a pure FIGURE column - the two buttons that
-  // change the level live in the actions cell below, beside Cancel, because
-  // .run-cell-metric's own rule in app.css is "narrow, monospace,
-  // tabular-nums, right-aligned, figures meant to be compared straight down
-  // a column", and putting controls in one would break that for every cell
-  // in the row.
-  const queueCell = document.createElement("td");
-  queueCell.className = "run-cell-metric run-cell-queue";
-  const queueValue = document.createElement("span");
-  queueValue.className = "run-cell-queue-value";
-  const queueMeta = document.createElement("span");
-  queueMeta.className = "run-meta run-cell-queue-meta";
-  queueCell.append(queueValue, queueMeta);
-
-  const actionsCell = document.createElement("td");
-  actionsCell.className = "run-cell-actions";
-  // The two verbs a WAITING torrent has, in the column the row's verbs
-  // already live in: move it up the queue, move it down. Absent - not
-  // disabled - for every row the queue has nothing to say about, the same
-  // way Cancel is absent on a finished one: a control that cannot do
-  // anything is worse than no control, because it invites the click.
-  const raise = document.createElement("button");
-  raise.type = "button";
-  raise.className = "run-priority run-priority-up";
-  raise.textContent = "▲";
-  raise.hidden = true;
-  const lower = document.createElement("button");
-  lower.type = "button";
-  lower.className = "run-priority run-priority-down";
-  lower.textContent = "▼";
-  lower.hidden = true;
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.className = "run-cancel";
-  cancel.title = "Cancel";
-  cancel.textContent = "✕";
-  cancel.hidden = true;
-  actionsCell.append(raise, lower, cancel);
-
-  row.append(nameCell, whenCell, statusCell, peersCell, seedsCell, downCell, upCell, availCell, queueCell, actionsCell);
-
-  // The detail's own row, and the ONE thing collapse touches: its `hidden`
-  // attribute, nothing else. Same rule the file and metadata accordions
-  // already follow - no rule in app.css sets `display` on .run-detail-row, so
-  // the UA's own [hidden] rule is never beaten by a class selector at equal
-  // specificity. That trap has already cost this codebase twice (see
-  // .drop-overlay[hidden] and the corner-bracket gate in app.css), and the
-  // gate itself is gone now: there is no .detail-empty to gate on any more,
-  // because a torrent that is not open simply has no detail on screen.
-  const detailRow = document.createElement("tr");
-  detailRow.className = "run-detail-row";
-  detailRow.hidden = true;
-  const detailCell = document.createElement("td");
-  detailCell.className = "run-detail-cell";
-  detailCell.colSpan = RUN_TABLE_COLUMNS;
-  detailRow.append(detailCell);
-
-  el.runList.append(row, detailRow);
-  el.runListEmpty.hidden = true;
+  const rowParts = el.runTable.newRow();
 
   const detailEl = document.createElement("div");
   detailEl.className = "run-detail";
   detailEl.id = "run-detail-" + (++detailSeq);
-  main.setAttribute("aria-expanded", "false");
-  main.setAttribute("aria-controls", detailEl.id);
+  // aria-expanded is the row's own state and is set by the table; this is the
+  // other half of the same button's wiring, and it is here because the id it
+  // has to name is minted two lines up.
+  rowParts.rowToggle.setAttribute("aria-controls", detailEl.id);
   detailEl.innerHTML =
     '<header class="run-detail-header">' +
       '<span class="run-badge"></span>' +
@@ -655,18 +340,26 @@ function newRunEntry(id) {
       '</p>' +
       '<ul class="picker-list"></ul>' +
     '</section>';
-  detailCell.append(detailEl);
+  rowParts.detailCell.append(detailEl);
 
   const entry = {
     // The data half, which state.js owns (newRunState) - every field a row
     // KNOWS, with nothing in it that a browser has to exist for. What follows
     // is this file's half: the elements it is drawn in.
     //
-    // ONE OBJECT, TWO LITERALS, so a key declared below still shadows the
-    // same key in there, silently, exactly as two keys in one literal always
-    // did (TOR-180). TestNoRunEntryFieldIsDeclaredTwice scans the union of
-    // both rather than either alone.
+    // ONE OBJECT, THREE LITERALS SINCE TOR-194, so a key declared below still
+    // shadows the same key in either of the others, silently, exactly as two
+    // keys in one literal always did (TOR-180).
+    // TestNoRunEntryFieldIsDeclaredTwice scans the union of all three rather
+    // than any one alone - state.js's newRunState, run-table.js's newRow, and
+    // this.
     ...newRunState(id),
+    // The row's own elements, built by the table (run-table.js's newRow) and
+    // spread in here rather than reached for later, so an entry is still ONE
+    // object: the rows are the table's to create and to write, and every
+    // field they contribute is a row element. detailCell is the one the line
+    // below spends - the cell this run's detail is mounted in.
+    ...rowParts,
     // pickerRows maps a torrent index to the elements of its row, so
     // syncFileList can re-state every box's checked/disabled state and every
     // figure without rebuilding the list - the list is rebuilt only when the
@@ -686,13 +379,6 @@ function newRunEntry(id) {
     // updateFileCosts, and the only thing state.js would be able to say about
     // it is that it exists.
     pickerRows: new Map(),
-    rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
-    rowWhen: whenCell, rowCancel: cancel, rowToggle: main,
-    rowPeers: peersCell, rowSeeds: seedsCell, rowDown: downCell, rowUp: upCell,
-    rowAvail: availValue, rowAvailMeta: availMeta, rowAvailCell: availCell,
-    rowQueue: queueValue, rowQueueMeta: queueMeta, rowQueueCell: queueCell,
-    rowRaise: raise, rowLower: lower,
-    detailRowEl: detailRow,
     detailEl,
     detailBadge: detailEl.querySelector(".run-detail-header .run-badge"),
     detailTitle: detailEl.querySelector(".run-detail-title"),
@@ -716,34 +402,13 @@ function newRunEntry(id) {
     pickerArmed: detailEl.querySelector(".picker-armed"),
   };
 
-  // One listener on the row, not the name button alone: a click anywhere in
-  // the row toggles it (a table row is a natural click target), and a
-  // keyboard activation of the name button still reaches it too, since a
-  // button's click event bubbles the same way a mouse click does. The cancel
-  // button stops its own click from bubbling here, so a cancel never also
-  // opens the row it sits in.
-  //
-  // The detail's row carries no listener at all, which is the reason it is a
-  // separate <tr>: everything inside a detail - a picker checkbox, a
-  // thumbnail, Compare - is outside this row, so using the detail cannot
-  // close it.
-  row.addEventListener("click", () => toggleRun(entry));
-  cancel.addEventListener("click", (event) => {
-    event.stopPropagation();
-    cancelRun(entry.id);
-  });
-  // Same stopPropagation the cancel button needs, for the same reason:
-  // reordering the queue must not also open or close the row it was done
-  // from - a person moving three torrents around would otherwise leave three
-  // details expanded behind them.
-  raise.addEventListener("click", (event) => {
-    event.stopPropagation();
-    setPriority(entry, entry.priority + 1);
-  });
-  lower.addEventListener("click", (event) => {
-    event.stopPropagation();
-    setPriority(entry, entry.priority - 1);
-  });
+  // The row's four controls, bound now that there is an entry for them to
+  // close over - which is why the table splits building a row from binding it
+  // (run-table.js's bindRow). Nothing about them is decided here: the table
+  // says which element carries which gesture, and the services app.js wired
+  // say what each gesture does.
+  el.runTable.bindRow(entry);
+
   entry.detailCancel.addEventListener("click", () => cancelRun(entry.id));
 
   entry.pickerAll.addEventListener("click", () => armSelectAll(entry));
@@ -803,95 +468,23 @@ function resetRunView(entry) {
   renderTorrent(entry);
 }
 
+// syncEntry is one redraw of one torrent, and since TOR-194 it is two halves
+// called in order: the table redraws the row (every cell, the six live
+// figures, the queue column, the progress bar, and the re-sort that may move
+// it), then this function redraws what the row opens onto.
+//
+// THE TWO HALVES DO NOT SHARE A COMPUTATION, deliberately, even though both
+// need displayName(entry): each reads it from state itself rather than one
+// handing the other its answer. That is the same rule the whole split rests
+// on - a renderer reads state, never another renderer's leftovers - and the
+// price is one call to a pure derivation.
+//
+// events.js names this hook and nothing below it, so the order lives here
+// rather than in the event layer.
 function syncEntry(entry) {
-  entry.rowEl.dataset.state = badgeState(entry);
-  entry.rowBadge.textContent = badgeLabel(entry);
-  entry.rowBadge.dataset.state = badgeState(entry);
-  // The cell truncates, so the whole name has to be reachable some other way
-  // than by widening the panel - a tooltip costs nothing and answers "which
-  // Sintel is this" without moving the divider.
+  el.runTable.syncRow(entry);
+
   const shown = displayName(entry);
-  entry.rowName.textContent = shown.text;
-  entry.rowName.title = shown.provisional
-    ? shown.text + " — from the magnet link, not yet confirmed by the torrent's own metadata"
-    : shown.text;
-  // run-name-provisional is the visible marker TOR-117 requires: a dn=-
-  // derived name must never read the same as a confirmed one. The rule this
-  // toggles styles by lives beside the row cells it is scoped next to in
-  // app.css, not duplicated here.
-  entry.rowName.classList.toggle("run-name-provisional", shown.provisional);
-  entry.rowMeta.textContent = metaLabel(entry);
-  entry.rowMeta.title = metaTitle(entry);
-  // Styling hook for app.css - a stalled or still-waiting-on-metadata row
-  // reads in the same amber the queue and "needs a decision" already use
-  // (--warn), so it does not look like the same plain, quiet text a normal
-  // "4/20 frames" or "queued" line does. See TestEveryColourComesFromAToken:
-  // the colour itself lives in app.css's :root, never here.
-  entry.rowMeta.dataset.stall = String(!!entry.stall || waitingForMetadata(entry));
-  renderRunProgress(entry);
-  entry.rowWhen.textContent = whenLabel(entry.when);
-  entry.rowWhen.title = entry.when ? new Date(entry.when).toString() : "";
-  entry.rowCancel.hidden = entry.disk || !cancellable(entry.state);
-
-  // The six live columns (TOR-139). Each pair of lines below is a text and a
-  // title, and every one of them can legitimately be ABSENT rather than a
-  // number - see this block's own helpers (peersCellText and friends,
-  // state.js, beside sortValue) for what decides which.
-  entry.rowPeers.textContent = peersCellText(entry);
-  entry.rowPeers.title = peersCellTitle(entry);
-  entry.rowPeers.dataset.absent = String(!hasLive(entry));
-  entry.rowSeeds.textContent = seedsCellText(entry);
-  entry.rowSeeds.title = seedsCellTitle(entry);
-  entry.rowSeeds.dataset.absent = String(!hasLive(entry));
-  const downBps = hasLive(entry) ? entry.live.download_bps : null;
-  entry.rowDown.textContent = rateCellText(downBps);
-  entry.rowDown.title = rateCellTitle(entry, downBps, "Download speed");
-  entry.rowDown.dataset.absent = String(downBps == null);
-  const upBps = hasLive(entry) ? entry.live.upload_bps : null;
-  entry.rowUp.textContent = rateCellText(upBps);
-  entry.rowUp.title = rateCellTitle(entry, upBps, "Upload speed");
-  entry.rowUp.dataset.absent = String(upBps == null);
-  entry.rowAvail.textContent = availabilityCellText(entry);
-  entry.rowAvailMeta.textContent = availabilityMetaText(entry);
-  entry.rowAvailCell.title = availabilityCellTitle(entry);
-  entry.rowAvailCell.dataset.absent = String(!availabilityReading(entry));
-  // The queue column, and the two controls that change it (TOR-140). Note
-  // what is NOT here any more: a pass over every other queued row to repaint
-  // its rank. TOR-139 needed one, because dequeuing #1 silently made #2 into
-  // #1 and only this page knew it; now the server publishes a run_state to
-  // every row whose position moved (server.go's queueRecordsLocked), so each
-  // row's own sync is the whole of it and no row's cell depends on another
-  // row's last update being right.
-  entry.rowQueue.textContent = queueCellText(entry);
-  entry.rowQueueMeta.textContent = queueCellMetaText(entry);
-  entry.rowQueueCell.title = queueCellTitle(entry);
-  // absent tracks the FIGURE, which since TOR-156 is the arrival ordinal -
-  // so the cell is only dimmed for a row this session never numbered, not
-  // for every row that happens not to be waiting. That was the visible half
-  // of the complaint: at queue width 5 almost nothing waits, so almost every
-  // cell was dimmed and the column read as broken.
-  entry.rowQueueCell.dataset.absent = String(arrivalOrdinal(entry) === null);
-  const canReorder = !entry.disk && hasPriority(entry);
-  entry.rowRaise.hidden = !canReorder;
-  entry.rowLower.hidden = !canReorder;
-  if (canReorder) {
-    // Disabled at the ends of the band rather than hidden there: a button
-    // that vanishes when you reach the top makes the pair jump sideways
-    // under the cursor, and the row is the one place a person is aiming.
-    entry.rowRaise.disabled = entry.priority >= PRIORITY_HIGH;
-    entry.rowLower.disabled = entry.priority <= PRIORITY_LOW;
-    entry.rowRaise.title = entry.rowRaise.disabled
-      ? "already at high priority - the front of the queue"
-      : "move up the queue (to " + priorityLabel(entry.priority + 1) + " priority)";
-    entry.rowLower.title = entry.rowLower.disabled
-      ? "already at low priority - behind everything else waiting"
-      : "move down the queue (to " + priorityLabel(entry.priority - 1) + " priority)";
-    entry.rowRaise.setAttribute("aria-label", "Move this torrent up the queue");
-    entry.rowLower.setAttribute("aria-label", "Move this torrent down the queue");
-  }
-
-  reorderRuns();
-
   entry.detailBadge.textContent = badgeLabel(entry);
   entry.detailBadge.dataset.state = badgeState(entry);
   entry.detailTitle.textContent = shown.text;
@@ -1151,110 +744,6 @@ async function retryRun(entry) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// THE DETAIL'S OWN WIDTH (TOR-174). app.css's .run-detail explains WHAT this
-// is for (sticky pins the offset, this sets the size) - this is WHERE the
-// number comes from and WHEN it gets recomputed.
-//
-// One shared custom property (--run-detail-w) on :root, the same pattern
-// applyColumnWidth already uses for --col-w-* - every open .run-detail reads
-// the same var(), so one write here keeps all of them current at once
-// instead of walking the open rows by hand.
-//
-// Called from three places, each somewhere the PANE's own width can change:
-//   - window resize, the obvious one;
-//   - setRunExpanded, because opening or closing a row changes the PAGE's
-//     height, which can add or remove the document's own vertical scrollbar
-//     and, with it, a few pixels of the viewport width .run-table-wrap was
-//     counting on;
-//   - endColumnDrag (below), because TOR-157 dragging a column changes the
-//     TABLE's width, not the pane's - .run-table-wrap's clientWidth is not
-//     expected to move from that alone, but a table that crosses the
-//     overflow threshold can gain or lose a horizontal scrollbar, and that
-//     is a real (if rare) way the pane's own box changes. Recomputing here
-//     costs one comparison and closes that gap rather than assume it never
-//     happens.
-// Deliberately NOT hooked to pointermove mid-drag: the pane's width does not
-// track a border being dragged frame by frame, only (rarely) the moment a
-// scrollbar appears or disappears, which the drag's end already covers.
-//
-// KNOWN GAP, and it is the cost of hooking three named causes rather than
-// watching the pane itself. The table's wrap does not scroll vertically - the
-// PAGE does (see .run-table-wrap's own comment) - so the page's scrollbar
-// appearing or vanishing changes this pane's clientWidth. During a live run
-// the frame grid grows as frames land, which can bring that scrollbar in
-// without a resize, an expand or a column drag, and the open detail then sits
-// ~15px wider than the pane until one of the three fires. A ResizeObserver on
-// the pane would catch every cause instead of these three; it was not used
-// because the three above are verified live and cannot oscillate, and a
-// scrollbar-driven feedback path deserves its own browser check rather than
-// being introduced in review. The 15px is a sliver at the right edge, and the
-// one thing that must never be off-screen - the top-up figure - is far from
-// that edge, which is why this is recorded rather than fixed.
-function syncRunDetailWidth() {
-  if (!el.runTableWrap) return;
-  const width = el.runTableWrap.clientWidth;
-  // 0 while the wrap is display:none or not yet laid out - leave the
-  // previous value (or app.css's own 100% fallback) rather than pin every
-  // open detail to zero.
-  if (width > 0) {
-    document.documentElement.style.setProperty("--run-detail-w", width + "px");
-  }
-}
-window.addEventListener("resize", syncRunDetailWidth);
-
-// ---------------------------------------------------------------------------
-// THE ACCORDION (TOR-138). A torrent's detail lives in its own row, and this
-// is the only function that may put one on screen or take it off.
-//
-// SEVERAL ROWS MAY BE OPEN AT ONCE, and that is the decision the ticket asks
-// for rather than a side effect of how this is written. Three reasons, in the
-// order they matter:
-//
-//   1. Closing one to open another would DESTROY WORK IN PROGRESS. A live run
-//      streaming frames into its grid is the case this whole release is
-//      about; a person who opens a second torrent to see what it is would
-//      lose sight of the first one mid-run, and get it back scrolled to the
-//      top with its file accordions as they were left only by luck.
-//   2. This codebase has already made this decision twice, one and two levels
-//      down, and written down why: a file's accordion and its metadata
-//      accordion both change state ONLY from their own toggle, precisely so a
-//      person's click "can neither be collapsed out from under them nor have
-//      the expansion stolen back to file zero" (fileBlock). Auto-closing a
-//      sibling here would be the same theft, at the level above.
-//   3. It costs nothing that the old shape was not already paying. Every
-//      entry's detail DOM has always existed and has always been updated
-//      whether or not it was on screen - applyFrame and renderFrames never
-//      checked - so N open details is N grids laid out, not N grids kept up
-//      to date. The thumbnails are loading="lazy", so an open row scrolled
-//      off screen fetches nothing.
-//
-// What it costs, said plainly: two expanded live runs are two grids doing
-// layout on every frame_ready, and a page with every row open is as tall as
-// its contents. Both are the person's own choice, made one click at a time,
-// and reversible with the same click.
-function setRunExpanded(entry, expanded) {
-  entry.expanded = expanded;
-  // TOR-174: either direction can change the page's own height (a detail
-  // coming on or off screen), which can add or remove the document's
-  // vertical scrollbar and with it a few pixels of .run-table-wrap's own
-  // width - see syncRunDetailWidth's own comment.
-  syncRunDetailWidth();
-  // TOR-152: opening a row is when its top-up standing is worth reading off
-  // disk - here rather than in toggleRun, because this is the one function
-  // that may put a detail on screen (see this block's own heading) and
-  // several paths reach it: a click, and began() for a run just started.
-  // refreshAgain is a no-op for a row that is not settled, has no infohash,
-  // or was already asked this question, so calling it on every expansion
-  // costs a comparison.
-  if (expanded) refreshAgain(entry);
-  // The row's `hidden` attribute and nothing else - no rule in app.css sets
-  // display on .run-detail-row, so the UA rule wins uncontested.
-  entry.detailRowEl.hidden = !expanded;
-  entry.rowEl.dataset.expanded = String(expanded);
-  entry.rowToggle.setAttribute("aria-expanded", String(expanded));
-}
-
 // toggleRun is what clicking a row does. A live or already-live-again entry
 // just opens and closes. A disk-only entry has nothing to show until it is
 // replayed (TOR-55): opening it asks the server to read it back from disk
@@ -1268,14 +757,14 @@ function setRunExpanded(entry, expanded) {
 // exactly the property a collapsed file block already has.
 function toggleRun(entry) {
   if (!entry.disk) {
-    setRunExpanded(entry, !entry.expanded);
+    el.runTable.setRunExpanded(entry, !entry.expanded);
     return;
   }
   if (entry.expanded) {
-    setRunExpanded(entry, false);
+    el.runTable.setRunExpanded(entry, false);
     return;
   }
-  setRunExpanded(entry, true);
+  el.runTable.setRunExpanded(entry, true);
   if (entry.reopening) return;
   reopenRun(entry);
 }
@@ -3376,7 +2865,6 @@ async function loadFileDetail(entry, fentry, index) {
   }
 }
 
-
 // renderFileLinks draws the one artefact link a finished file offers, from
 // fentry.sheetURL.
 //
@@ -3486,26 +2974,6 @@ async function sendTorrent(entry) {
     entry.torrentSend.disabled = false;
   }
 }
-
-// TOR-141: a stall's (or a metadata wait's) own "how long" would otherwise
-// only refresh when a new heartbeat happens to redraw this row - every
-// stallHeartbeatInterval (5s) at best, or not at all while metadata is still
-// being waited for, since nothing else touches this row in the meantime.
-// That reads as broken rather than as "nothing new to report" - a duration
-// standing visibly still is indistinguishable from one that stopped being
-// tracked. This recomputes just the one line every second, from numbers
-// already on the entry (stallPhrase's own since_ms + observedAt, or
-// runningSince) - it never invents a reading a heartbeat has not itself
-// reported, only keeps the display of one honest between heartbeats.
-function refreshStallDurations() {
-  const now = Date.now();
-  for (const entry of state.runs.values()) {
-    if (!entry.stall && !waitingForMetadata(entry)) continue;
-    entry.rowMeta.textContent = metaLabel(entry, now);
-    entry.rowMeta.title = metaTitle(entry, now);
-  }
-}
-setInterval(refreshStallDurations, 1000);
 
 // socketAddress is the events socket's own URL, and the reason events.js asks
 // the page for one instead of building it: url() resolves against
@@ -3751,7 +3219,7 @@ function began(info) {
   entry.disk = false;
   if (!known) entry.state = info.state;
   syncEntry(entry);
-  setRunExpanded(entry, true);
+  el.runTable.setRunExpanded(entry, true);
 }
 
 el.form.addEventListener("submit", async (event) => {
@@ -3828,190 +3296,13 @@ document.addEventListener("drop", async (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Column widths: a drag-a-border-and-remember-it pattern, once per column -
-// one localStorage entry holding a { key: px, ... } map rather than nine
-// separate ones, since a stale-column check (below) needs to see the whole
-// set at once to decide what to drop.
-//
-// Every key here is a column's own data-sort value - el.sortHeaders already
-// is exactly the nine resizable headers (name/when/status plus the six
-// LIVE_COLUMNS keys; the unlabelled actions column has no data-sort and
-// keeps the plain 3.8rem app.css always gave it, see .run-actions-header) -
-// so this reuses it rather than keeping a second list of column names that
-// could drift from the first, the same reason LIVE_COLUMNS itself is one
-// list rather than two.
-//
-// localStorage is read through a try/catch on purpose, same as the panel
-// width above: it throws in a private window or with site data blocked, and
-// a stored value can also simply be malformed JSON from a build that wrote
-// it differently. Either way the page must still render at the defaults
-// app.css declares (--col-w-name and its siblings) rather than break.
-const COLUMN_WIDTHS_KEY = "torpeek.columnWidths";
-const COLUMN_MIN_WIDTH = 44;
-const COLUMN_MAX_WIDTH = 640;
-
-function clampColumnWidth(px) {
-  return Math.min(COLUMN_MAX_WIDTH, Math.max(COLUMN_MIN_WIDTH, px));
-}
-
-function resizableColumnKeys() {
-  return Array.from(el.sortHeaders, (th) => th.dataset.sort);
-}
-
-// A column that no longer exists - the table shipped fewer or differently-
-// named columns when the value was stored - is dropped rather than kept:
-// nothing on the current page would ever read it, and rendering the OTHER
-// columns from a partly-stale map is still exactly the graceful fallback the
-// acceptance criterion asks for. Malformed JSON, a non-object, or a width
-// that doesn't parse as a finite number all fall back to the same empty map,
-// which is indistinguishable from "nothing was ever stored" - the table then
-// simply renders at app.css's own defaults for every column.
-function loadColumnWidths() {
-  try {
-    const raw = localStorage.getItem(COLUMN_WIDTHS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const known = new Set(resizableColumnKeys());
-    const widths = {};
-    for (const key of Object.keys(parsed)) {
-      if (!known.has(key)) continue; // a column this page no longer has
-      const width = parseFloat(parsed[key]);
-      if (Number.isFinite(width)) widths[key] = clampColumnWidth(width);
-    }
-    return widths;
-  } catch (err) {
-    return {};
-  }
-}
-
-function saveColumnWidths(widths) {
-  try {
-    localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(widths));
-  } catch (err) {
-    // Best-effort only - the default widths still work.
-  }
-}
-
-// Mirrors applyPanelWidth: one custom property per column, on :root, so the
-// header's own inline width (set once below, as `var(--col-w-KEY)`) picks
-// up every later drag without needing to be touched again itself.
-function applyColumnWidth(key, px) {
-  document.documentElement.style.setProperty("--col-w-" + key, px + "px");
-}
-
-// columnWidths holds only the entries a drag (or a valid stored value) has
-// actually produced - same shape loadPanelWidth's null-until-touched state
-// has, kept as a map here instead of a single value because saving has to
-// write back the whole set, not just the one column that just moved.
-const columnWidths = loadColumnWidths();
-for (const [key, px] of Object.entries(columnWidths)) applyColumnWidth(key, px);
-
-// Every sortable header gets its width from the matching --col-w-* token
-// (app.css declares the defaults; the loop above already overrode any that
-// were stored) and a drag handle at its own right edge - the border between
-// it and the next column. The actions header is deliberately excluded: it
-// is not in el.sortHeaders (no data-sort), so its width stays the plain
-// 3.8rem app.css gives .run-actions-header and it grows no handle of its
-// own, since there is no column past it for a border to belong to.
-for (const th of el.sortHeaders) {
-  const key = th.dataset.sort;
-  th.style.width = "var(--col-w-" + key + ")";
-
-  const handle = document.createElement("span");
-  handle.className = "col-resizer";
-  handle.setAttribute("aria-hidden", "true");
-  th.append(handle);
-
-  // drag holds this handle's own in-progress drag - { startX, startWidth } -
-  // or null when it isn't dragging. Keeping the start point and width in one
-  // object that is null between drags (instead of two bare variables that
-  // just keep whatever the last drag left in them) means there is one place
-  // that says whether THIS handle is dragging, instead of that fact living
-  // only in the "dragging" CSS class - which pointermove used to trust
-  // blindly. Scoped inside this loop iteration, so each handle already gets
-  // its own binding and one handle's drag can never read another's start
-  // point.
-  let drag = null;
-
-  // stopPropagation on every one of the handle's own events, not just
-  // pointerdown: the handle sits inside a <th> that is itself a sort
-  // control (el.sortHeaders' own click listener, wired above), and without
-  // this a drag - or even a plain click that lands on the handle - would
-  // bubble up and also reorder the table, the same trap TOR-140's ▲/▼
-  // buttons stopPropagation against so a reorder did not also toggle the
-  // accordion.
-  handle.addEventListener("pointerdown", (event) => {
-    if (event.button !== undefined && event.button !== 0) return;
-    event.stopPropagation();
-    event.preventDefault();
-    drag = { startX: event.clientX, startWidth: th.getBoundingClientRect().width };
-    handle.classList.add("dragging");
-    handle.setPointerCapture(event.pointerId);
-  });
-
-  handle.addEventListener("pointermove", (event) => {
-    if (!drag) return;
-    // A move with no button held is an ordinary hover, not a drag - the
-    // primary button bit (1) must still be set in event.buttons. Without
-    // this, any way the drag's pointerup/pointercancel never reaches the
-    // handle (lostpointercapture below covers the one this repo can name,
-    // but not necessarily every one a future browser or code change adds)
-    // leaves the next hover computing against a stale start point, which is
-    // exactly the "handle stays lit and dragging creeps on hover" bug.
-    if (!(event.buttons & 1)) {
-      endColumnDrag(event);
-      return;
-    }
-    event.stopPropagation();
-    const width = clampColumnWidth(drag.startWidth + (event.clientX - drag.startX));
-    columnWidths[key] = width;
-    applyColumnWidth(key, width);
-  });
-
-  function endColumnDrag(event) {
-    if (!drag) return;
-    drag = null;
-    event.stopPropagation();
-    handle.classList.remove("dragging");
-    try {
-      handle.releasePointerCapture(event.pointerId);
-    } catch (err) {
-      // Already released (e.g. on pointercancel, or because capture was
-      // already lost - see lostpointercapture below) - nothing more to do.
-    }
-    saveColumnWidths(columnWidths);
-    // TOR-174: see syncRunDetailWidth's own comment for why a column drag,
-    // which changes the TABLE's width rather than the pane's, still gets a
-    // recheck here.
-    syncRunDetailWidth();
-  }
-  handle.addEventListener("pointerup", endColumnDrag);
-  handle.addEventListener("pointercancel", endColumnDrag);
-  // lostpointercapture fires whenever the capture set in pointerdown ends
-  // some way other than pointerup/pointercancel reaching the handle itself -
-  // per spec, at minimum whenever the captured element leaves the document.
-  // (buildLiveColumnHeaders() only builds this table's header once today, so
-  // that specific trigger is not a live path here yet - but a real drag can
-  // still lose capture other ways, e.g. an automated or synthetic pointer
-  // sequence, as TOR-165's own browser repro found without any header
-  // rebuild involved.) Nothing else here listens for it, so before this the
-  // "dragging" class - and the stale start point above - just stayed put.
-  handle.addEventListener("lostpointercapture", endColumnDrag);
-  // A plain click - no drag, pointerdown and pointerup on the same spot -
-  // still bubbles to the header's own click listener unless stopped here
-  // too; pointerdown's stopPropagation only stops the pointerdown event
-  // itself, not the separate click event the browser dispatches afterwards.
-  handle.addEventListener("click", (event) => event.stopPropagation());
-}
-
-// ---------------------------------------------------------------------------
 // THE WIRING (TOR-191), and it sits here rather than at the top of the file
 // for a reason that can be checked rather than trusted: nothing above it
-// reaches the store or the socket. The header build, the element lookups, the
-// sort and drag listeners, the intake handlers, the drop handlers and the
-// column widths are every top-level statement in this file, and not one of
-// them calls ensureRun or connect - so registering at the last possible
+// reaches the store or the socket. The element lookups, the intake handlers
+// and the drop handlers are every top-level statement left in this file -
+// TOR-194 took the header build, the sort listeners, the column widths and
+// the stall ticker into the table element's own connectedCallback - and not
+// one of them calls ensureRun or connect, so registering at the last possible
 // moment cannot be too late, and beside the bootstrap it enables is where a
 // reader goes looking for it.
 //
@@ -4039,6 +3330,17 @@ setFileFactory(fileBlock);
 // setServices refuses a missing one, so a future rename fails here rather
 // than at the first press of Compare.
 setCompareServices({ url, log });
+// THE RUN TABLE'S FOUR SERVICES (TOR-194), same shape and same reason. Three
+// of them are requests this file owns (a cancel, a priority change, and the
+// reopen a click on a disk row triggers), and the fourth is the redraw of the
+// detail a row has just opened onto - which is a detail concern, so the table
+// is handed it rather than naming it.
+//
+// detailShown: refreshAgain is the one alias in the set, and it is deliberate:
+// the table's own contract is "tell me what to do when a detail comes on
+// screen", and TOR-195 will move what that IS without this line changing
+// shape.
+setRunTableServices({ toggleRun, cancelRun, setPriority, detailShown: refreshAgain });
 setView({
   log: logFor,
   note: log,
@@ -4055,7 +3357,6 @@ setView({
   renderTorrent,
 });
 
-updateSortIndicators();
 loadDefaults();
 loadRuns();
 connect();

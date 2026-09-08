@@ -65,11 +65,12 @@ func TestTopUpProgressReadsLandedFramesNotJustTheHeartbeat(t *testing.T) {
 			"a top-up's replayed frames need a way to raise it too (TOR-167)")
 	}
 
-	// And the row's bar reads those two fields rather than a message, which is
-	// the half that stayed in app.js.
-	if bar := jsFunc(t, appJS(t), "renderRunProgress"); !strings.Contains(bar, "entry.framesTotal") ||
+	// And the row's bar reads those two fields rather than a message. The bar
+	// lives in the row's status cell, so since TOR-194 it is the table
+	// element's - a method now, hence jsMethod rather than jsFunc.
+	if bar := jsMethod(t, runTableJS(t), "renderRunProgress"); !strings.Contains(bar, "entry.framesTotal") ||
 		!strings.Contains(bar, "entry.framesDone") {
-		t.Error("app.js's renderRunProgress no longer draws from entry.framesDone/framesTotal - " +
+		t.Error("run-table.js's renderRunProgress no longer draws from entry.framesDone/framesTotal - " +
 			"the bar and the line above it would be two readings of one thing again")
 	}
 }
