@@ -116,6 +116,20 @@ type jsRunSnapshot struct {
 	Stall         string `json:"stall"`
 	Peers         int    `json:"peers"`
 	HasLive       bool   `json:"hasLive"`
+	// The four TOR-202 texts: what the real cell functions (state.js's
+	// peersCellText/seedsCellText/rateCellText) render for this row RIGHT
+	// NOW, as opposed to Peers/HasLive above, which read entry.live raw and
+	// are deliberately left alone so the pre-TOR-202 assertion at line ~985
+	// keeps meaning what it always meant. hasLive above is the same raw
+	// !!entry.live TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing
+	// and its neighbours already rely on; LiveReading is hasLive() as TOR-202
+	// left it - !!entry.live && !FINAL.has(entry.state) - the one a header's
+	// cell actually asks.
+	LiveReading  bool   `json:"liveReading"`
+	PeersText    string `json:"peersText"`
+	SeedsText    string `json:"seedsText"`
+	DownloadText string `json:"downloadText"`
+	UploadText   string `json:"uploadText"`
 	// The page's own flags for a row expecting an id it does not hold yet: a
 	// disk row being replayed (TOR-55) and a run the server re-armed (TOR-152).
 	Reopening bool `json:"reopening"`
@@ -210,6 +224,19 @@ function snapshot() {
       stall: e.stall ? e.stall.code : "",
       peers: e.live ? e.live.peers : -1,
       hasLive: !!e.live,
+      // TOR-202: the real reader-side answers, run through the shipped
+      // functions rather than re-derived here - what a header cell would
+      // actually show this instant, live reading or none. downBps/upBps
+      // mirror run-table.js's own syncRow exactly (gated on hasLive(e), not
+      // on the raw e.live) - rateCellText takes a bps, not an entry, so the
+      // absence decision has to be made at the call site the same way the
+      // real renderer makes it, or this driver would be checking a call
+      // nothing on the page actually performs.
+      liveReading: S.hasLive(e),
+      peersText: S.peersCellText(e),
+      seedsText: S.seedsCellText(e),
+      downloadText: S.rateCellText(S.hasLive(e) ? e.live.download_bps : null),
+      uploadText: S.rateCellText(S.hasLive(e) ? e.live.upload_bps : null),
       filesType: typeof e.files,
       fileListArray: Array.isArray(e.fileList),
       fileEntries: Object.fromEntries([...e.fileEntries].map(([i, f]) => [String(i), {
@@ -1414,6 +1441,101 @@ func TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing(t *testing.T) {
 	}
 	if entry.Disk {
 		t.Error("the row is still marked disk after a run_state claimed it")
+	}
+}
+
+// TestALiveReadingIsAbsentOnceARunReachesAFinalState is TOR-202's own
+// acceptance criteria 1-3 and 5, run through the real event layer rather than
+// matched as text: a live "progress" heartbeat is the only thing that ever
+// writes entry.live, and nothing on the wire tells this page to blank it back
+// to null when a run ends - run_state, the message that announces
+// done/failed/cancelled, carries no live figures at all (see applyRunState's
+// own doc, which lists exactly what it does and does not touch). So the last
+// reading a running torrent had would simply sit on the entry forever unless
+// the READER, not the writer, refuses to show it once the row is final.
+//
+// TWO CASES, DELIBERATELY BOTH PRESENT (criterion 3's own text: the guard
+// "must distinguish the two cases in point 2"):
+//
+//   - a RUNNING torrent that genuinely found nobody (peers=0, seeds=0, rates
+//     0) must still read "0" - that is a real reading, and the whole point of
+//     ABSENT IS NOT ZERO is that this looks different from having no client
+//     at all.
+//   - the SAME torrent, once it reaches done/failed/cancelled, must read
+//     absent - the reading is not stale, it no longer has a client to have
+//     read anything from.
+//
+// A guard that only checked the second case could pass by making hasLive()
+// return false unconditionally (or FINAL.has(entry.state) alone, dropping the
+// entry.live check) - which would also zero out the first case's real "0"
+// reading. Asserting both in one test is what rules that shape out.
+func TestALiveReadingIsAbsentOnceARunReachesAFinalState(t *testing.T) {
+	progress := func(run string, peers, seeds int) map[string]any {
+		return event(map[string]any{
+			"type": "progress", "run": run, "file": 0,
+			"frames_done": 1, "frames_total": 1, "downloaded": 0,
+			"peers": peers, "seeds": seeds,
+			"download_bps": 0, "upload_bps": 0,
+		})
+	}
+
+	// Case 2: running, genuinely alone. A real zero reading, not absence.
+	lonely := runApply(t, []map[string]any{
+		runStateFor("r1", "running", nil),
+		progress("r1", 0, 0),
+	})
+	r1, ok := lonely.Runs["r1"]
+	if !ok {
+		t.Fatalf("no row for r1 after a run_state and a progress event; runs: %v", lonely.runIDs())
+	}
+	if !r1.LiveReading {
+		t.Error("a running torrent with a live reading of 0 peers/0 seeds reads as having no client at all - " +
+			"a real zero reading must not be treated as absent")
+	}
+	if r1.PeersText != "0" || r1.SeedsText != "0" || r1.DownloadText != "0 B/s" || r1.UploadText != "0 B/s" {
+		t.Errorf("a running torrent that genuinely found nobody must render 0, not absent: "+
+			"peers=%q seeds=%q download=%q upload=%q", r1.PeersText, r1.SeedsText, r1.DownloadText, r1.UploadText)
+	}
+
+	// Cases 1 and 5: the same sequence, but the run then reaches each of the
+	// three final states (done, failed, cancelled - runs.go's RunState.final,
+	// mirrored by state.js's own FINAL). Every one of them must go absent -
+	// this is the criterion that fails without the fix: entry.live still
+	// holds peers:5/seeds:3/rates:100 from the progress event below, and
+	// nothing on the wire clears it.
+	for _, final := range []string{"done", "failed", "cancelled"} {
+		t.Run(final, func(t *testing.T) {
+			got := runApply(t, []map[string]any{
+				runStateFor("r2", "running", nil),
+				progress("r2", 5, 3),
+				runStateFor("r2", final, nil),
+			})
+			r2, ok := got.Runs["r2"]
+			if !ok {
+				t.Fatalf("no row for r2 after reaching %q; runs: %v", final, got.runIDs())
+			}
+			if r2.State != final {
+				t.Fatalf("r2 state = %q, want %q - run_state did not land", r2.State, final)
+			}
+			// entry.live itself (the raw field) is still non-null here - that
+			// is exactly the bug's mechanism, and worth confirming rather than
+			// assuming, since a fix that instead CLEARED entry.live on
+			// run_state would make this assertion fail for the wrong reason.
+			if !r2.HasLive || r2.Peers != 5 {
+				t.Fatalf("entry.live was cleared by run_state (hasLive=%v peers=%d) - this test's premise (the "+
+					"stale reading survives on the entry) does not hold, so it cannot be checking what it claims to",
+					r2.HasLive, r2.Peers)
+			}
+			if r2.LiveReading {
+				t.Errorf("state %q: hasLive() still reads true off a stale live reading - a finished run has no "+
+					"client any more, live or not", final)
+			}
+			if r2.PeersText != "—" || r2.SeedsText != "—" || r2.DownloadText != "—" || r2.UploadText != "—" {
+				t.Errorf("state %q: a finished run's peers/seeds/rates must render absent (—), not the stale "+
+					"reading: peers=%q seeds=%q download=%q upload=%q",
+					final, r2.PeersText, r2.SeedsText, r2.DownloadText, r2.UploadText)
+			}
+		})
 	}
 }
 

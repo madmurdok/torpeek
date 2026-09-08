@@ -157,17 +157,21 @@ func extractJSFunction(t *testing.T, js, name string) string {
 	return m
 }
 
-// extractJSConst pulls one top-level `const NAME = { ... };` declaration's
-// exact source - state, in practice, since compareEntries reads state.sort
-// and this test has to set it the same way the real page does (a click
-// handler assigning state.sort, not a parameter compareEntries takes).
+// extractJSConst pulls one top-level single-line `const NAME = ...;`
+// declaration's exact source. Two shapes are extracted: an object literal
+// (state, in practice, since compareEntries reads state.sort and this test
+// has to set it the same way the real page does - a click handler assigning
+// state.sort, not a parameter compareEntries takes) and a `new Set([...])`
+// call (FINAL, TOR-202 - hasLive() reads it now, so a harness that lifts
+// hasLive out of state.js by itself has a free variable unless this comes
+// with it).
 func extractJSConst(t *testing.T, js, name string) string {
 	t.Helper()
-	re := regexp.MustCompile(`const ` + regexp.QuoteMeta(name) + ` = \{[^\n]*\};`)
+	re := regexp.MustCompile(`const ` + regexp.QuoteMeta(name) + ` = (\{[^\n]*\}|new Set\([^\n]*\));`)
 	m := re.FindString(js)
 	if m == "" {
-		t.Fatalf("the module handed to this test has no const %s = {...}; to extract - it has to stay one "+
-			"physical line for this to lift it", name)
+		t.Fatalf("the module handed to this test has no const %s = {...}; or const %s = new Set([...]); to "+
+			"extract - it has to stay one physical line for this to lift it", name, name)
 	}
 	return m
 }
@@ -408,11 +412,19 @@ type jsSortCase struct {
 // into one flat script, with no imports and no module wrapper, so what it
 // proves is that each of these declarations is self-contained on its own
 // text - the property TOR-148 bought and this ticket had to not break.
+//
+// FINAL is pulled in alongside state as of TOR-202: hasLive() reads it
+// (!!entry.live && !FINAL.has(entry.state)) so a finished run's stale live
+// reading sinks the same way a never-had-a-client row's does, and a harness
+// that lifted hasLive without it would hand node a ReferenceError instead of
+// running the real function.
 func compareEntriesHarness(t *testing.T, js string) string {
 	t.Helper()
 
 	var b strings.Builder
 	b.WriteString(extractJSConst(t, js, "state"))
+	b.WriteString("\n")
+	b.WriteString(extractJSConst(t, js, "FINAL"))
 	b.WriteString("\n")
 	for _, name := range []string{
 		"hasLive", "availabilityReading", "arrivalOrdinal", "badgeLabel", "displayName", "shortId",

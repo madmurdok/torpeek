@@ -341,13 +341,45 @@ function whenLabel(ms) {
 // /runs is small enough that a server-side sort parameter would only add a
 // second place order is decided (TOR-62).
 
+// FINAL is the three states a run never leaves - runs.go's RunState.final,
+// read here rather than re-derived, because "can this be run again" has to
+// mean the same thing on both sides of the wire. Moved above hasLive (TOR-202)
+// because hasLive is now one of its readers, not only untickedVideos'
+// siblings further down the file.
+const FINAL = new Set(["done", "failed", "cancelled"]);
+
 // hasLive is the one question every one of the six live columns asks first:
-// does this row have a client that has spoken at all. entry.live is null
-// until it does (app.js's loadRuns copies GET /runs' own "live" object, and
-// events.js's "progress" case keeps it current), never a zeroed stand-in -
-// see this block's own opening comment.
+// does this row have a CURRENT client to read a reading off. entry.live
+// itself is null until a client has spoken at all (app.js's loadRuns copies
+// GET /runs' own "live" object, and events.js's "progress" case keeps it
+// current), never a zeroed stand-in - see this block's own opening comment.
+//
+// TOR-202: entry.live alone is not enough once a run reaches a FINAL state.
+// A live "progress" heartbeat is the only thing that ever writes
+// entry.live, and nothing on the wire tells this page to blank it back to
+// null the moment a run ends - run_state, the message that announces
+// done/failed/cancelled, carries no live figures at all (see events.js's
+// applyRunState), so the LAST reading a running torrent had simply stays on
+// the entry after the client that produced it is gone. The server-side
+// registry does not have this problem (runEntry.applyProgress replaces the
+// whole *Live pointer atomically, and server.go's pump clears it back to nil
+// the instant the run's own state turns final, wholesale rather than field
+// by field) - which is exactly why a reload, which re-fetches GET /runs
+// after that clearing has already happened, reads absent where a page that
+// was watching still reads the stale number.
+//
+// The fix keeping this a property of the READER rather than of every
+// WRITER: every place that turns a running row final (run_state's own
+// "done"/"failed"/"cancelled", and the identical arrival on a fresh
+// connection's replay) would otherwise have to remember to clear entry.live
+// itself, and this project has already been bitten once by two writers
+// answering the same question differently (this ticket's own bug is that
+// exact shape, one layer up - a Go writer that clears and a JS one that
+// never learned to). One choke point both hasLive's callers and
+// availabilityReading/sortValue already go through is the one that cannot
+// be forgotten by a future writer.
 function hasLive(entry) {
-  return !!entry.live;
+  return !!entry.live && !FINAL.has(entry.state);
 }
 
 // absentReason is the title text for a peers/seeds/rate/availability cell
@@ -355,6 +387,12 @@ function hasLive(entry) {
 // that matches what the cell actually knows rather than a bare dash.
 function absentReason(entry) {
   if (entry.disk) return "no reading - this row was read off disk, never a live client";
+  // TOR-202: a run that reached done/failed/cancelled has no client any
+  // more either, and "not yet started" would be backwards for it - the
+  // reading is not late, it is over. entry.live can still be non-null here
+  // (see hasLive's own doc for why), so this has to be its own check rather
+  // than falling out of the generic !hasLive(entry) message below.
+  if (FINAL.has(entry.state)) return "no reading - this run has finished, and no client is connected any more";
   if (!hasLive(entry)) return "no reading yet - this torrent has no client (queued, needs-action, or not yet started)";
   return "";
 }
@@ -676,11 +714,6 @@ function compareEntries(a, b) {
   if (dir === "desc") cmp = -cmp;
   return cmp;
 }
-
-// FINAL is the three states a run never leaves - runs.go's RunState.final,
-// read here rather than re-derived, because "can this be run again" has to
-// mean the same thing on both sides of the wire.
-const FINAL = new Set(["done", "failed", "cancelled"]);
 
 // untickedVideos is every capturable file this row has NOT asked for yet -
 // what a tick still has left to reach, and what Select all would start.
