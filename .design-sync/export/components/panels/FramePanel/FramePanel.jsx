@@ -20,7 +20,18 @@
  * upload compile to zero components - the class -> className conversion was
  * done and the comments were not.
  */
-import "./frame-panel.js";
+// The module is imported from ../../../modules/ rather than from beside this
+// file, and that path is load-bearing (TOR-208). Claude Design's checker takes
+// every UPPERCASE-initial export of a module it finds under components/ as a
+// COMPONENT. state.js has to travel with every element - each one imports
+// ./state.js - and its five uppercase exports (ABSENT, FINAL and the three
+// PRIORITY_* levels) are constants, not components: PRIORITY_HIGH is the
+// number 1. Shipped inside the component folders they became five entries a
+// design agent is offered and can do nothing with. Nothing outside
+// components/ is scanned - the project's own templates/ carries .js files and
+// none of them is indexed - so one shared modules/ folder keeps the index
+// honest AND ships one copy of each module instead of state.js five times.
+import "../../../modules/frame-panel.js";
 import { useEffect, useRef } from "react";
 
 export function FramePanel({ src, caption = "", open = false, onClose }) {

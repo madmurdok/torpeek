@@ -616,18 +616,97 @@ Use `setTimeout`. And the browser extension's `javascript_tool` evaluates in an
 isolated world, so a page's `window.__x` is invisible to it - put the result in
 a `data-` attribute instead.
 
-## WHAT IS STILL OPEN, and it is the upload
+## THE UPLOAD IS DONE, and the predictions this section made were WRONG
 
-**This agent had no DesignSync tool in its toolset**, so three things could not
-be done and are not claimed:
+Written when the authoring agent had no DesignSync tool. It has since been
+uploaded and the manifest read after three reopens. What it predicted, against
+what the manifest says:
 
-  - `_ds_manifest.json` was not read. Nothing here reports what the checker
-    says about the five new components, the eleven exports, or the cards.
-  - Nothing was uploaded. `finalize_plan`/`write_files` were never called.
-  - The `_ds_needs_recompile` sentinel was not written, so the app's own
-    self-check has not been armed and the project has not been reopened.
+    predicted  eleven components: six classes plus five `setServices`
+    measured   eleven components: six classes plus FIVE STATE.JS CONSTANTS
 
-The predictions this section makes about the checker are therefore PREDICTIONS:
-eleven components (six classes, five `setServices`), six cards, eight
-stylesheets, forty tokens, nine font faces. Read the manifest after the next
-reopen and correct whatever is wrong here rather than trusting it.
+The count was right by coincidence and the content was wrong in both halves.
+`setServices` is never indexed - it is lowercase, and case is the whole rule
+(see the next section). The five that ARE there come from state.js.
+
+Everything else it predicted holds: six cards with their groups and subtitles,
+all eight stylesheets in `globalCssPaths` plus `styles.css`, forty tokens with
+their kinds, nine font faces, and both brand fonts `status: "ok"`.
+
+---
+
+# The component rule, REFINED: uppercase-initial exports only (TOR-208)
+
+TOR-209 established that the checker indexes a module's named exports as
+components, on three names. Shipping five more elements gave a far stronger
+test and narrowed the rule: it indexes an exported name only when its FIRST
+LETTER IS UPPERCASE.
+
+Measured on `state.js`, which travels with every element:
+
+    54 exports in one block
+     5 uppercase-initial: ABSENT, FINAL, PRIORITY_LOW, PRIORITY_NORMAL, PRIORITY_HIGH
+    49 lowercase-initial: state, hasLive, peersCellText, setServices, ...
+
+The manifest indexed **exactly those five** and none of the 49. Forty-nine
+negatives against five positives, perfectly separated - which is what makes
+this a measurement rather than the degenerate three-name case TOR-209 had,
+where declarations, exports and capitalised names were the same three names.
+
+**So the "irreducible residue of one `setServices` per element" TOR-209
+predicted does not exist.** `setServices` is lowercase and is never indexed.
+That prediction was wrong, and the correction is the useful part: an export's
+CASE, not its role, is what decides.
+
+## Why that produced five phantom components, and why they STAY
+
+They were not fixable by narrowing an export list, the way `PAN_STEP` and
+`ARROWS` were. All five are live: ABSENT is read in 9 places, FINAL in 8,
+PRIORITY_LOW and PRIORITY_HIGH in 4 each, and PRIORITY_NORMAL five times
+inside state.js itself. (Note the trap: "no uses outside state.js" does NOT
+mean a dead export - it only means no other module imports it.)
+
+The cause was the LAYOUT. A `.jsx` imports its element module, and every
+element module imports `./state.js`, so state.js had to sit inside each
+component folder - where it is scanned. It was uploaded five times, and
+file-detail.js three times, for the same reason.
+
+**A shared `modules/` folder at the project root was tried, and it did NOT
+remove them.** Each `.jsx` now imports `../../../modules/<module>.js`, the
+modules were deleted from every component folder, and after a reopen the five
+were still there - just attributed to `modules/state.js`. So the checker does
+NOT confine its scan to `components/`.
+
+The evidence that suggested it would was WRONG, and worth naming so nobody
+leans on it again: `templates/frame-opener/` carries `ds-base.js` and
+`support.js` and neither is indexed - but that folder is a DECLARED TEMPLATE
+in the manifest (`templates[].folder`), which is why it is skipped. It is not
+evidence about paths outside `components/` in general.
+
+**So the five stand, and criterion 5 records them rather than claiming a clean
+checker.** They are not a false positive either: they are real uppercase-initial
+exports and the checker is doing exactly what it does. They are simply not
+components, and there is no way to stop them without deleting exports that nine,
+eight and four call sites depend on.
+
+## Keep the modules/ layout anyway - it fixed two other things
+
+The move stays, because the phantoms were not its only effect:
+
+  - **Attribution was wrong before it.** `FileList` and `FileDetail` were
+    reported at `components/table/RunDetail/file-list.js` and
+    `.../file-detail.js` - the copies inside ANOTHER component's folder, because
+    the checker takes the first copy it meets. Now each of the six points at its
+    own single module.
+  - **One copy of each module instead of fourteen.** state.js shipped five
+    times and file-detail.js three, and any copy could have drifted from the
+    rest.
+
+And it confirmed the compiler resolves a relative path out of a component
+folder: all six components still compile and are present.
+
+## The rule to apply when adding an element
+
+Export the class. Everything else in that block must be lowercase-initial, or
+it becomes a component. Shared modules can live anywhere - it will not save you
+from their uppercase exports.
