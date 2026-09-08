@@ -116,12 +116,31 @@ func TestARunWithNoClaimsRecordedRendersAsNeitherFullNorEmpty(t *testing.T) {
 // phrasing it a second time, so the page cannot say "no reading" one way in a
 // column and another way in the drawing six inches below it.
 func TestTheStripReusesTheColumnsOwnAvailabilitySentence(t *testing.T) {
-	js := appJS(t)
-
-	for _, fn := range []string{"availabilityReading", "availabilityCellTitle"} {
-		if strings.Count(js, fn) < 2 {
-			t.Errorf("%s is referenced fewer than twice: the strip has stopped reusing "+
-				"the columns' own wording and is phrasing the same fact itself", fn)
+	// SINCE TOR-191 both functions are state.js's - a swarm reading and the
+	// sentence about it are derivations over an entry - and the strip's chip
+	// is app.js's renderAvail. So "reused rather than re-phrased" is now
+	// checkable directly, by reading the one function that draws the chip,
+	// instead of by counting mentions in one file and hoping two of them were
+	// the definition and a call.
+	chip := jsFunc(t, appJS(t), "renderAvail")
+	for _, fn := range []string{"availabilityReading(entry)", "availabilityCellTitle(entry)"} {
+		if !strings.Contains(chip, fn) {
+			t.Errorf("renderAvail does not call %s: the strip has stopped reusing the "+
+				"columns' own wording and is phrasing the same fact itself", fn)
 		}
+	}
+
+	// And the sentence itself lives in exactly one place, so there is nothing
+	// for the chip and the column to disagree about. The distinctive clause is
+	// enough to find it: the whole sentence is long, and both readers get it
+	// from the same function.
+	const sentence = "copies per piece, on average, across the swarm"
+	if n := strings.Count(stateJS(t), sentence); n != 1 {
+		t.Errorf("state.js states %q %d times, want exactly 1 - two copies of one sentence "+
+			"is two chances to change only one of them", sentence, n)
+	}
+	if strings.Contains(appJS(t), sentence) {
+		t.Error("app.js phrases the availability sentence itself as well - the column and " +
+			"the chip six inches below it would be able to word the same fact differently")
 	}
 }

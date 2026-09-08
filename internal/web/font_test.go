@@ -176,8 +176,14 @@ func TestNoFontIsFetchedFromTheNetwork(t *testing.T) {
 	comment := regexp.MustCompile(`(?s)/\*.*?\*/`)
 	// tokens.css (TOR-189) is in this list too: it is now a served stylesheet
 	// of its own, and the design system living there is exactly the kind of
-	// file a stray @import from a font CDN could slip into unnoticed.
-	for _, name := range []string{"assets/app.css", "assets/tokens.css", "assets/index.html", "assets/app.js"} {
+	// file a stray @import from a font CDN could slip into unnoticed. state.js
+	// and events.js (TOR-191) join it for the same reason - every served asset
+	// belongs in this sweep, not only the ones that existed when it was
+	// written.
+	for _, name := range []string{
+		"assets/app.css", "assets/tokens.css", "assets/index.html",
+		"assets/app.js", "assets/state.js", "assets/events.js",
+	} {
 		b, err := embedded.ReadFile(name)
 		if err != nil {
 			continue // app.css is the one that must exist; the others are belt and braces

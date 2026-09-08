@@ -689,11 +689,15 @@ func TestTheClearSaysHowManyFramesItWillDelete(t *testing.T) {
 		t.Error("the row's summary no longer counts through capturedCells, so the button " +
 			"beside it and the figure beside that are two independent counts of one thing")
 	}
-	on := jsFunc(t, js, "framesOnDisk")
+	// framesOnDisk and capturedCells are derivations over a file's own state,
+	// so they are state.js's since TOR-191 - the count the button quotes is
+	// not a fact about the DOM.
+	derive := stateJS(t)
+	on := jsFunc(t, derive, "framesOnDisk")
 	if !strings.Contains(on, "capturedCells(fentry)") {
 		t.Error("framesOnDisk does not go through capturedCells either")
 	}
-	cells := jsFunc(t, js, "capturedCells")
+	cells := jsFunc(t, derive, "capturedCells")
 	if !strings.Contains(cells, "gridCells(fentry).filter((cell) => cell.url).length") {
 		t.Error("capturedCells no longer counts cells that have a picture - counting the " +
 			"map's size instead would report a holed run of five frames as twelve, since " +
@@ -897,14 +901,27 @@ func TestAClearedFileTakesItsReachStripWithIt(t *testing.T) {
 			"sets that are left, so the strip would go on describing a set that was cleared")
 	}
 	// AND THE CONTACT SHEET LINK, which the browser found and no text check
-	// here did: onFileDone puts it on screen from the file's own file_done and
-	// nothing else ever removes it, so after a clear it offered a picture that
-	// had just been deleted - a link whose only possible answer is a 404.
-	if !strings.Contains(fn, "fentry.links.hidden = true") ||
-		!strings.Contains(fn, "fentry.links.replaceChildren()") {
+	// here did: the file's own file_done put it on screen and nothing else
+	// ever removed it, so after a clear it offered a picture that had just
+	// been deleted - a link whose only possible answer is a 404.
+	//
+	// SINCE TOR-191 IT GOES THROUGH THE FIELD, not the element: the link is
+	// drawn from fentry.sheetURL, so emptying that and redrawing is the same
+	// act as file_done putting it there rather than a second, opposite piece
+	// of DOM handling to keep in step with the first. Both halves are
+	// checked, because the field alone with no redraw would leave the link on
+	// screen and the redraw alone with no field change would put it back.
+	if !strings.Contains(fn, `fentry.sheetURL = "";`) ||
+		!strings.Contains(fn, "renderFileLinks(fentry)") {
 		t.Error("a cleared file keeps its contact-sheet link, which now points at a file " +
-			"the clear removed - both hidden AND emptied, so nothing later unhides a " +
-			"link to something that is gone")
+			"the clear removed - the field has to be emptied AND the link redrawn from it")
+	}
+	links := jsFunc(t, js, "renderFileLinks")
+	if !strings.Contains(links, "fentry.links.hidden = links.length === 0") ||
+		!strings.Contains(links, "fentry.links.replaceChildren(") {
+		t.Error("renderFileLinks does not take the link off screen when there is no sheet " +
+			"to link - both hidden AND emptied, so nothing later unhides a link to " +
+			"something that is gone")
 	}
 	if !strings.Contains(fn, "fentry.plan = []") {
 		t.Error("the plan survives a clear, so the grid would keep laying itself out from " +
@@ -944,23 +961,46 @@ func TestTheClearIsAddressedAtTheFileRatherThanOneOfItsSets(t *testing.T) {
 // one to arrive - which for a settled row can be a queue change nobody caused.
 func TestTheClearGoesThroughTheRowsOwnState(t *testing.T) {
 	js := servedScript(t)
+	events := eventsJS(t)
+	derive := stateJS(t)
 
-	if !strings.Contains(js, "entry.picked = new Set(ev.ticked || [])") {
-		t.Fatal("run_state no longer assigns entry.picked; if that changed, the reasoning " +
-			"below about why the un-tick needs its own set has to be re-made")
+	if !strings.Contains(events, "entry.picked = new Set(ev.ticked || [])") {
+		t.Fatal("events.js's run_state handler no longer assigns entry.picked; if that " +
+			"changed, the reasoning below about why the un-tick needs its own set has to " +
+			"be re-made")
 	}
 	if regexp.MustCompile(`entry\.picked\.delete\(index\)[^\n]*\n[^\n]*unticked`).MatchString(js) {
 		t.Error("an un-tick removes the file from entry.picked - the server's own answer, " +
 			"which the next run_state would put straight back")
 	}
-	if !strings.Contains(jsFunc(t, js, "resetRunContent"), "entry.unticked.clear()") {
-		t.Error("resetRunContent does not clear the offers, so a reconnecting page would " +
+	// AND run_state MUST NOT TOUCH entry.unticked AT ALL, which is the other
+	// half and the one the split made worth stating: the handler is now a
+	// function of its own, so "it does not write this field" is a thing that
+	// can be read off one place. TestRunStateAssignsTheTicksAndNeverTouchesThe
+	// LocalUnTick (eventstate_test.go) runs the same claim for real.
+	// Comments stripped: applyRunState's own doc names this field precisely to
+	// say it does not touch it, so a substring check over the prose would
+	// answer the opposite of the question.
+	if strings.Contains(stripJSComments(jsFunc(t, events, "applyRunState")), "entry.unticked") {
+		t.Error("events.js's run_state handler writes entry.unticked - it is the one piece " +
+			"of tick state the server does not own, and anything this message did to it " +
+			"would undo a local un-tick on the very next message")
+	}
+	// Comments stripped, as everywhere a check like this reads a function body.
+	if !strings.Contains(stripJSComments(jsFunc(t, derive, "resetRunState")),
+		"entry.unticked.clear()") {
+		t.Error("resetRunState does not clear the offers, so a reconnecting page would " +
 			"keep offering to clear a file it has yet to be told anything about")
 	}
 
 	// One declaration of the field, which is what TestNoRunEntryFieldIsDeclaredTwice
 	// guards generally and what a bug found by a mutation run cost once already.
-	if n := strings.Count(js, "unticked: new Set()"); n != 1 {
-		t.Errorf("runEntry declares unticked %d times, want exactly 1", n)
+	// It is state.js's half of the entry now.
+	if n := strings.Count(derive, "unticked: new Set()"); n != 1 {
+		t.Errorf("state.js's newRunState declares unticked %d times, want exactly 1", n)
+	}
+	if strings.Contains(js, "unticked: new Set()") {
+		t.Error("app.js declares unticked as well - two halves of one object, so the " +
+			"second silently wins and a local un-tick is lost on the first render")
 	}
 }

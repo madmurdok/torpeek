@@ -443,9 +443,16 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 	fake := &fakeRun{}
 	ts := testServer(t, fake.runner)
 
+	// One needle per served asset, and since TOR-191 that is three scripts
+	// rather than one: a module that is not served is a page that does not
+	// parse, and the three needles are each distinctive to the module they
+	// are in (the socket is events.js's, the run store is state.js's, the
+	// element lookups are app.js's).
 	for _, tc := range []struct{ path, contains string }{
 		{"/", "<title>torpeek</title>"},
-		{"/app.js", "WebSocket"},
+		{"/app.js", "document.getElementById"},
+		{"/state.js", "state.runs"},
+		{"/events.js", "new WebSocket("},
 		{"/app.css", ".grid"},
 	} {
 		resp, err := http.Get(ts.URL + tc.path)
@@ -811,7 +818,14 @@ func TestWorksUnderABasePath(t *testing.T) {
 // a single leading slash in the markup would survive every test above, because
 // they all ask for the right URL themselves.
 func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
-	for _, name := range []string{"assets/index.html", "assets/app.js"} {
+	// state.js and events.js are in this list from the moment they exist
+	// (TOR-191): "/events" and "/runs" are precisely the strings the event
+	// layer deals in, so it is the likeliest of the three to grow a leading
+	// slash - and every one of them is served under the base path the same
+	// way app.js is.
+	for _, name := range []string{
+		"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
+	} {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)

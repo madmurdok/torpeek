@@ -783,17 +783,30 @@ func TestTheDropIsRolledBackIfThePassTookTheFileFirst(t *testing.T) {
 // set from what it already had would answer "stop the run" for a file an
 // earlier pass captured, and the person would lose the fetch that was going.
 func TestThePageReadsThePassInFlightFromTheServer(t *testing.T) {
-	js := servedScript(t)
-
-	if !strings.Contains(js, "entry.fetching = new Set(ev.fetching || [])") {
+	// Read out of the run_state handler itself since TOR-191, and out of the
+	// state module's own reset - and run for real, against a message carrying
+	// all three sets and then a reconnect, by
+	// TestThePassInFlightIsReadFromTheServerAndNotDerived and
+	// TestAReconnectLeavesNoStalePassBehind in eventstate_test.go. Those two
+	// are what can tell a WRONG answer from missing text; these two are what
+	// name the line that would have to change to produce one.
+	if !strings.Contains(jsFunc(t, eventsJS(t), "applyRunState"),
+		"entry.fetching = new Set(ev.fetching || [])") {
 		t.Fatal("the page no longer takes the pass in flight from run_state. Deriving it " +
 			"from picked minus deferred includes every file an earlier pass captured, and " +
 			"un-ticking one of those would stop a run fetching something else")
 	}
 	// Emptied with the rest of a run's content, so a reconnecting page cannot
 	// offer to stop a fetch from a history it is in the middle of re-reading.
-	if !strings.Contains(jsFunc(t, js, "resetRunContent"), "entry.fetching.clear()") {
-		t.Error("resetRunContent no longer clears entry.fetching - it is assigned from " +
+	//
+	// COMMENTS STRIPPED, which TOR-191's falsification run is the reason for:
+	// commenting the line out satisfied this check word for word, because a
+	// comment still contains the substring. The executable half of the same
+	// subject is TestResetRunStateEmptiesEverythingAReplayWillStateAgain,
+	// which calls the function instead of reading it.
+	if !strings.Contains(stripJSComments(jsFunc(t, stateJS(t), "resetRunState")),
+		"entry.fetching.clear()") {
+		t.Error("resetRunState no longer clears entry.fetching - it is assigned from " +
 			"every run_state, so this is what stops a stale one surviving a reconnect")
 	}
 }

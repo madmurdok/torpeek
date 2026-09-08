@@ -788,7 +788,10 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 	if !strings.Contains(costs, "row.cost.textContent = framesLabel(n)") {
 		t.Error("updateFileCosts does not write the frame count onto the row")
 	}
-	if !strings.Contains(costs, "const n = passCount(entry)") {
+	// passCount takes its fallback as an argument since TOR-191: "the server's
+	// own -n" is whatever the intake box displays, which is a DOM fact, so the
+	// page reads it (countValue) and the decision stays in state.js.
+	if !strings.Contains(costs, "const n = passCount(entry, countValue())") {
 		t.Error("updateFileCosts does not read passCount - a row with a pass already " +
 			"forming must quote the count that pass is LOCKED to, not whatever the intake " +
 			"box now shows, or the price changes under a person after they read it")
@@ -902,7 +905,7 @@ func TestATickThatIsRefusedLeavesNoBoxClaimingAFetch(t *testing.T) {
 	if !strings.Contains(fn, `await post("runs/decide"`) {
 		t.Fatal("startFiles does not post the tick")
 	}
-	if !strings.Contains(fn, "count: passCount(entry)") {
+	if !strings.Contains(fn, "count: passCount(entry, countValue())") {
 		t.Error("startFiles sends a count it did not display - the promise a price makes " +
 			"is that pressing the thing beside it costs THAT")
 	}
@@ -914,17 +917,18 @@ func TestATickThatIsRefusedLeavesNoBoxClaimingAFetch(t *testing.T) {
 			"file nothing is fetching")
 	}
 
-	// And the boxes are the server's answer, not the page's intention. Read
-	// off the whole script rather than out of apply(): these two assignments
-	// are unique in it, and the run_state handler is a block inside a
-	// function rather than a function of its own, so jsFunc has nothing to
-	// bound.
-	if !strings.Contains(js, "entry.picked = new Set(ev.ticked || [])") {
+	// And the boxes are the server's answer, not the page's intention. Since
+	// TOR-191 the run_state handler IS a function of its own (events.js's
+	// applyRunState), so these two are read out of it rather than off the
+	// whole script - which is what the note here used to have to apologise
+	// for.
+	apply := jsFunc(t, eventsJS(t), "applyRunState")
+	if !strings.Contains(apply, "entry.picked = new Set(ev.ticked || [])") {
 		t.Error("run_state's \"ticked\" is not written into entry.picked - a tick that was " +
 			"refused, or a second tab ticking the same torrent, would leave the boxes " +
 			"disagreeing with what is actually being fetched")
 	}
-	if !strings.Contains(js, "entry.tickable = !!ev.tickable") {
+	if !strings.Contains(apply, "entry.tickable = !!ev.tickable") {
 		t.Error("the page does not read the server's own tickable verdict")
 	}
 }
@@ -1064,24 +1068,30 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 // The cumulative answer is the server's, and it has one for exactly this
 // reason (runEntry.asked). The page only has to add.
 func TestASecondPassDoesNotClearTheTicksTheFirstOneTook(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	// The message's own "selected" is read where every message is read since
+	// TOR-191: events.js's applyFileList, off both metadata_ready and
+	// needs_action. TestTheTicksOfAnEarlierPassAreNotClearedByTheNextFileList
+	// (eventstate_test.go) runs the same subject against two real messages.
+	fn := jsFunc(t, eventsJS(t), "applyFileList")
 
 	if regexp.MustCompile(`entry\.picked\s*=\s*new Set\(ev\.selected`).MatchString(fn) {
-		t.Error("renderFileList assigns entry.picked from ev.selected. That is the pass " +
+		t.Error("applyFileList assigns entry.picked from ev.selected. That is the pass " +
 			"in flight, not everything this row has asked for, so a second pass's " +
 			"metadata_ready unticks whatever the first pass captured")
 	}
 	if !strings.Contains(fn, "for (const index of ev.selected || []) entry.picked.add(index)") {
-		t.Error("renderFileList does not ADD ev.selected to what this row has asked for - " +
+		t.Error("applyFileList does not ADD ev.selected to what this row has asked for - " +
 			"and it must not assign it either (see above), so there is nothing left that " +
 			"would keep a first pass's ticks on screen")
 	}
 
 	// The one thing that still empties the set, so a union cannot accumulate
 	// across a reconnect: the reset that opens a run's history.
-	if !strings.Contains(jsFunc(t, js, "resetRunContent"), "entry.picked.clear()") {
-		t.Error("resetRunContent no longer clears entry.picked - with renderFileList only " +
+	// Comments stripped: a commented-out line still contains the substring
+	// (see untick_test.go's own note on what the falsification run found).
+	if !strings.Contains(stripJSComments(jsFunc(t, stateJS(t), "resetRunState")),
+		"entry.picked.clear()") {
+		t.Error("resetRunState no longer clears entry.picked - with applyFileList only " +
 			"adding, this is the only thing that can ever empty it, and without it a " +
 			"reconnecting page would keep ticks the server has moved past")
 	}
