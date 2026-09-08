@@ -1464,11 +1464,20 @@ func TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing(t *testing.T) {
 //   - the SAME torrent, once it reaches done/failed/cancelled, must read
 //     absent - the reading is not stale, it no longer has a client to have
 //     read anything from.
+//   - a row that is NOT final and has NEVER had a client (queued, no progress
+//     event ever) must ALSO read absent - "not yet" and "over" are different
+//     situations that happen to render the same, and this is the third case.
 //
-// A guard that only checked the second case could pass by making hasLive()
-// return false unconditionally (or FINAL.has(entry.state) alone, dropping the
-// entry.live check) - which would also zero out the first case's real "0"
-// reading. Asserting both in one test is what rules that shape out.
+// THE THIRD CASE IS NOT DECORATION, and it was added after the first two were
+// MEASURED not to rule out what this comment originally claimed they did. The
+// degenerate shape to exclude is hasLive() dropping the entry.live check and
+// answering !FINAL.has(entry.state) alone. Cases one and two both PASS under
+// it - the lonely row is `running` AND holds a live reading, so a fix that
+// only looks at the state still renders its real 0, and the finished row is
+// still final either way. Only a row that is non-final with entry.live null
+// separates them: the degenerate version calls it live and then reads
+// entry.live.peers off null. Verified by applying that shape and watching
+// this test fail on this case and only this case.
 func TestALiveReadingIsAbsentOnceARunReachesAFinalState(t *testing.T) {
 	progress := func(run string, peers, seeds int) map[string]any {
 		return event(map[string]any{
@@ -1495,6 +1504,29 @@ func TestALiveReadingIsAbsentOnceARunReachesAFinalState(t *testing.T) {
 	if r1.PeersText != "0" || r1.SeedsText != "0" || r1.DownloadText != "0 B/s" || r1.UploadText != "0 B/s" {
 		t.Errorf("a running torrent that genuinely found nobody must render 0, not absent: "+
 			"peers=%q seeds=%q download=%q upload=%q", r1.PeersText, r1.SeedsText, r1.DownloadText, r1.UploadText)
+	}
+
+	// Case 3: never had a client at all. Queued, so no progress event has
+	// ever been applied to it and entry.live is null - the "not yet" case,
+	// which must read absent for a different reason than the finished row
+	// below does, and which is the only one of the three that catches a
+	// hasLive() that stopped consulting entry.live (see this test's doc).
+	fresh := runApply(t, []map[string]any{runStateFor("r3", "queued", nil)})
+	r3, ok := fresh.Runs["r3"]
+	if !ok {
+		t.Fatalf("no row for r3 after a queued run_state; runs: %v", fresh.runIDs())
+	}
+	if r3.HasLive {
+		t.Fatalf("a queued row already holds an entry.live (peers=%d) - this case's premise is that nothing "+
+			"has written one yet, so it cannot be checking what it claims to", r3.Peers)
+	}
+	if r3.LiveReading {
+		t.Error("a queued row that has never had a client reads as having a live reading - hasLive() has " +
+			"stopped consulting entry.live and is answering from the state alone")
+	}
+	if r3.PeersText != "—" || r3.SeedsText != "—" || r3.DownloadText != "—" || r3.UploadText != "—" {
+		t.Errorf("a row with no client yet must render absent (—): peers=%q seeds=%q download=%q upload=%q",
+			r3.PeersText, r3.SeedsText, r3.DownloadText, r3.UploadText)
 	}
 
 	// Cases 1 and 5: the same sequence, but the run then reaches each of the
