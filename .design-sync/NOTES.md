@@ -264,18 +264,37 @@ here.
 not "no effect".** Write the `_ds_needs_recompile` sentinel (it arms the
 refresh), then have the project opened, then read the manifest.
 
-## The pending measurement, deliberately left in place
+## THE SYNTAX, MEASURED: a trailing comment, on the declaration's own line
 
-Because the annotation SYNTAX is not documented anywhere readable - `@kind`
-came from the design agent relaying the checker, and no skill source carries it
-- `tokens.css` currently ships the marker in TWO placements on purpose, one per
-token, so that one manifest read answers which one the checker reads:
+The marker's placement was documented nowhere - `@kind` reached this repo as
+the design agent relaying the checker - so `tokens.css` shipped it in two
+placements at once, one per token, and one manifest read named the winner:
 
-    --sans: "…", sans-serif;   /* @kind font */      <- trailing, same line
+    --sans: "…", sans-serif;   /* @kind font */    -> kind FONT,  annotation "font"
     /* @kind font */
-    --mono: "…", monospace;                          <- own line, above
+    --mono: "…", monospace;                        -> kind OTHER, NO annotation field
 
-Whichever comes back as `kind: font` names the placement; if neither does, the
-marker itself is not read and the kinds have to be got some other way. Normalise
-both to the winner once it is known - shipping two placements is a measurement,
-not a style.
+So: **trailing, on the same line as the declaration.** A comment on the line
+above is not seen at all - and the manifest says so precisely, by omitting the
+`annotation` field rather than by reporting a wrong kind. That field is the
+thing to check in future: it tells you whether the marker was PARSED,
+independently of whether the kind it asked for is the kind you got.
+
+The second, independent observable moved with the first arm and not the second,
+which is what makes the result a measurement rather than a coincidence:
+
+    brandFonts  Torpeek Sans  status "unreferenced" tokens []  ->  "ok"  ["--sans"]
+                Torpeek Mono  status "unreferenced" tokens []  ->  unchanged
+
+So the annotation does not merely relabel a token: it is what links a font FACE
+to the token that names it. Both faces load and are fully indexed either way,
+but an un-annotated family is reported as referenced by nothing.
+
+`--compare-aspect` keeps its marker as a control worth leaving in: it comes back
+`kind: "other"` WITH `annotation: "other"`, an unchanged kind beside a parsed
+annotation, which is the evidence that annotating a token the checker already
+classifies correctly does no harm.
+
+One value-derived case for contrast: `--text: 14px` is `kind: "font"` with no
+annotation at all. Annotate only what the checker gets wrong.
+
