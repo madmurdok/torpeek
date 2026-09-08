@@ -1087,3 +1087,120 @@ func TestTheConcatenationOrderIsThePagesOwn(t *testing.T) {
 		}
 	}
 }
+
+// positionDecidedPairs are the rule pairs whose winner is decided by POSITION
+// rather than specificity. Each follows the same shape: a GROUPED rule sets a
+// value for several controls at once, and a later STANDALONE rule overrides it
+// for one of them. Both selectors weigh the same, so only order separates them.
+//
+// TOR-190's commit message names all four and states that each pair stayed
+// inside one file, in its original relative order, so no cross-file load order
+// can un-decide it. That statement was true when written and nothing held it
+// true afterwards: only the cursor pair had a test (tick_test.go's byte-offset
+// assertion), and that one reads stylesheet()'s concatenation, which cannot
+// tell "both rules are in filelist.css" from "they are in two files that
+// happen to be concatenated in this order".
+//
+// EACH ANCHOR IS THE RULE'S OWN TEXT, and uniqueness is asserted below rather
+// than assumed. The first version of this test anchored on the bare selectors
+// `.run-cancel` and `.run-priority`, which was inert: `.run-priority` occurs
+// seven times in table.css (:hover, :disabled, :focus-visible), so moving the
+// standalone rule to another file left the substring behind and the guard
+// passed. A guard that cannot fail is worse than none, so the anchors are the
+// full declarations and a match count that is not exactly one fails the test.
+var positionDecidedPairs = []struct {
+	what     string
+	grouped  string
+	override string
+	breakage string
+}{
+	{
+		what:     "the file picker's cursor",
+		grouped:  `.picker-item[data-tick="asked"] .picker-file,`,
+		override: `.picker-item[data-detail="true"] > .picker-file { cursor: pointer; }`,
+		breakage: "an asked row would look inert while still opening its detail (TOR-181/TOR-182)",
+	},
+	{
+		what:     "the queue arrows' opacity",
+		grouped:  ".run-cancel,\n.run-priority {",
+		override: ".run-priority { font-size: .7rem; padding: .3rem .15rem; opacity: .45; }",
+		breakage: "the arrows would take Cancel's weight, and a control that reads as " +
+			"equally weighty as the destructive one beside it is one people hesitate over",
+	},
+	{
+		what:     "the comparison dialog's step font",
+		grouped:  ".compare-step, .compare-flip {",
+		override: ".compare-step { font-family: var(--mono); }",
+		breakage: "the step label would lose its mono figures",
+	},
+	{
+		what:     "the comparison dialog's key hints",
+		grouped:  ".compare-note, .compare-keys {",
+		override: ".compare-keys { font-family: var(--mono); font-size: .72rem; }",
+		breakage: "the key hints would render in the note's font and size",
+	},
+}
+
+// TestEveryPositionDecidedPairStaysInOneFile asserts what the split's safety
+// rests on. It is deliberately a statement about FILES, not about
+// stylesheet()'s concatenated text: within one file the relative order is a
+// fact about that file and survives any reordering of index.html, which is
+// precisely the property that makes a pair safe. A pair spread across two
+// files is not necessarily wrong today - that depends on the link order - but
+// it has stopped being decided by anything local, and that is the regression.
+func TestEveryPositionDecidedPairStaysInOneFile(t *testing.T) {
+	texts := map[string]string{}
+	for _, name := range stylesheetFiles {
+		b, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Fatalf("reading the embedded %s: %v", name, err)
+		}
+		texts[name] = string(b)
+	}
+
+	// holder returns the one stylesheet containing sel, failing if the count
+	// across every served file is anything but exactly one - zero means the
+	// rule was renamed or deleted and this guard has quietly stopped guarding;
+	// more than one means the anchor is too loose to locate anything.
+	holder := func(t *testing.T, what, sel string) string {
+		t.Helper()
+		var in []string
+		total := 0
+		for _, name := range stylesheetFiles {
+			if n := strings.Count(texts[name], sel); n > 0 {
+				in = append(in, name)
+				total += n
+			}
+		}
+		if total != 1 {
+			t.Errorf("%s: %q matches %d times across %v, want exactly 1 - an anchor that "+
+				"matches nothing guards nothing, and one that matches twice cannot say "+
+				"where the rule is", what, sel, total, in)
+			return ""
+		}
+		return in[0]
+	}
+
+	for _, p := range positionDecidedPairs {
+		groupedIn := holder(t, p.what, p.grouped)
+		overrideIn := holder(t, p.what, p.override)
+		if groupedIn == "" || overrideIn == "" {
+			continue
+		}
+
+		if groupedIn != overrideIn {
+			t.Errorf("%s: the grouped rule is in %s and its override in %s, so which one wins "+
+				"is decided by index.html's link order instead of by one file's own "+
+				"contents; %s", p.what, groupedIn, overrideIn, p.breakage)
+			continue
+		}
+
+		css := texts[groupedIn]
+		g, o := strings.Index(css, p.grouped), strings.Index(css, p.override)
+		if o < g {
+			t.Errorf("%s: in %s the override is at byte %d, BEFORE the grouped rule at %d; "+
+				"at equal specificity the later rule wins, so the override no longer "+
+				"overrides anything and %s", p.what, groupedIn, o, g, p.breakage)
+		}
+	}
+}
