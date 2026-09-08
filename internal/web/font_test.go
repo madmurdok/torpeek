@@ -188,12 +188,16 @@ func TestNoFontIsFetchedFromTheNetwork(t *testing.T) {
 	// missing split file or a renamed module is exactly the kind of thing
 	// this loop exists to catch, not to excuse. It used to `continue`, which
 	// meant a typo in a name quietly checked nothing.
-	names := []string{"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
-		// TOR-195's three detail elements. The other three served modules
-		// (run-table.js, frame-panel.js, compare-dialog.js) are still absent
-		// from this sweep - see TOR-195's report; adding them is a one-line
-		// change this ticket deliberately did not make on its way past.
-		"assets/run-detail.js", "assets/file-list.js", "assets/file-detail.js"}
+	// EVERY served script, DERIVED (servedModules, web_test.go) rather than
+	// typed out. Three separate tickets in this batch each added a module to
+	// the page and forgot this list, and each time the sweep quietly covered
+	// less than it claimed - the last one even left a comment saying three
+	// modules were still missing and that adding them was a one-line change,
+	// which is exactly the one-line change nobody makes.
+	names := []string{"assets/index.html"}
+	for _, mod := range servedModules(t) {
+		names = append(names, "assets/"+mod)
+	}
 	for _, css := range stylesheetFiles {
 		names = append(names, "assets/"+css)
 	}

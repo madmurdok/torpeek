@@ -472,6 +472,8 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 		{"/run-detail.js", `customElements.define("run-detail"`},
 		{"/file-list.js", `customElements.define("file-list"`},
 		{"/file-detail.js", `customElements.define("file-detail"`},
+		{"/frame-panel.js", `customElements.define("frame-panel"`},
+		{"/compare-dialog.js", `customElements.define("compare-dialog"`},
 		{"/tokens.css", ":root"},
 		{"/base.css", "@font-face"},
 		{"/intake.css", ".dropzone"},
@@ -872,11 +874,11 @@ func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
 	// delete and its loadFileDetail each assemble a path from segments
 	// precisely so no leading slash can appear - which is the rule this test
 	// enforces, so they are the modules it most needs to read.
-	for _, name := range []string{
-		"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
-		"assets/run-table.js", "assets/frame-panel.js", "assets/compare-dialog.js",
-		"assets/run-detail.js", "assets/file-list.js", "assets/file-detail.js",
-	} {
+	names := []string{"assets/index.html"}
+	for _, mod := range servedModules(t) {
+		names = append(names, "assets/"+mod)
+	}
+	for _, name := range names {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -1904,11 +1906,7 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// which imports file-list.js, which imports file-detail.js. So a broken
 	// specifier three hops in would 404 the whole graph, and nothing but this
 	// walk would say which link broke.
-	for _, name := range []string{
-		"app.js", "state.js", "events.js",
-		"run-table.js", "frame-panel.js", "compare-dialog.js",
-		"run-detail.js", "file-list.js", "file-detail.js",
-	} {
+	for _, name := range servedModules(t) {
 		src, err := embedded.ReadFile("assets/" + name)
 		if err != nil {
 			t.Errorf("reading the embedded %s: %v - index.html or another module names it, "+
@@ -1952,8 +1950,32 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// state.js and frame-panel.js are the leaves: they import nothing, by
 	// design, and demanding a specifier from them would be demanding a
 	// dependency they are better without.
-	for _, name := range []string{"app.js", "events.js", "run-table.js", "compare-dialog.js",
-		"run-detail.js", "file-list.js", "file-detail.js"} {
+	// The two lists below stay hand-written, because which modules are LEAVES
+	// is a real decision rather than a fact to derive - a leaf imports nothing
+	// on purpose, and deriving that from the source would make the test agree
+	// with whatever the source says instead of with what was decided.
+	//
+	// What IS derived is that they cover everything. Without this, deleting a
+	// name from `importers` made the test pass MORE easily - the weakness
+	// TOR-195's report named - and a new module belonged to neither list and
+	// was simply never checked.
+	importers := []string{"app.js", "events.js", "run-table.js", "compare-dialog.js",
+		"run-detail.js", "file-list.js", "file-detail.js"}
+	leaves := []string{"state.js", "frame-panel.js"}
+	classified := map[string]bool{}
+	for _, n := range append(append([]string{}, importers...), leaves...) {
+		classified[n] = true
+	}
+	for _, name := range servedModules(t) {
+		if !classified[name] {
+			t.Errorf("%s is served but is in neither the importers nor the leaves list below, "+
+				"so nothing here checks it. Add it to whichever it is - and if it was removed "+
+				"from one of those lists to quieten a failure, that is the thing this check "+
+				"exists to catch: a shorter list is a weaker test, not a passing one", name)
+		}
+	}
+
+	for _, name := range importers {
 		if seen[name] == 0 {
 			t.Errorf("no import specifier was found in %s, which does import - so this walk did "+
 				"not read it and every check above verified nothing for it. Either the module "+
@@ -1962,11 +1984,73 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 				name)
 		}
 	}
-	for _, name := range []string{"state.js", "frame-panel.js"} {
+	for _, name := range leaves {
 		if seen[name] != 0 {
 			t.Errorf("%s has grown %d import(s). That is not wrong in itself, but it is one of "+
 				"the two leaves of the graph - nothing under it to fetch - so the fact is worth "+
 				"stating deliberately rather than discovering", name, seen[name])
+		}
+	}
+}
+
+// servedModules is every .js the binary serves, read off the embedded FS
+// rather than typed out.
+//
+// IT EXISTS BECAUSE A HAND-MAINTAINED LIST WENT WRONG THREE TIMES in one
+// batch, each time silently and each time the same way: TOR-192 and TOR-193
+// added frame-panel.js and compare-dialog.js to the page and to neither of
+// web_test.go's lists; TOR-194 added run-table.js to one of them; TOR-195
+// added its three and left a comment saying the other three were still
+// missing from font_test.go's sweep. Every one of those was a "one-line add"
+// that nobody did, and in the meantime the sweeps quietly covered less than
+// they claimed.
+//
+// A derived list also closes a weakness a hand-written one cannot: DELETING a
+// name makes a hand-written list pass more easily, so the check gets weaker in
+// exactly the direction nobody notices. There is no list here to delete from.
+func servedModules(t *testing.T) []string {
+	t.Helper()
+	entries, err := embedded.ReadDir("assets")
+	if err != nil {
+		t.Fatalf("listing the embedded assets: %v", err)
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".js") {
+			out = append(out, e.Name())
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no .js is embedded under assets/ at all - either the front end went away " +
+			"or this helper stopped seeing it, and every sweep built on it is now vacuous")
+	}
+	return out
+}
+
+// TestEveryServedModuleIsAskedForByName is the other half of
+// TestServesEmbeddedFrontend, whose table cannot be derived: each entry pairs a
+// path with a needle distinctive to THAT module, and only a person can choose
+// the needle. So the table stays hand-written and this test makes forgetting an
+// entry impossible - a new module fails here until somebody names it.
+func TestEveryServedModuleIsAskedForByName(t *testing.T) {
+	body, err := os.ReadFile("web_test.go")
+	if err != nil {
+		t.Fatalf("reading this test file: %v", err)
+	}
+	// The table lives in this file, so this reads its own source. Crude, and
+	// the honest alternative - exporting the table - would let a module be
+	// dropped from it without anything noticing, which is the failure being
+	// closed here.
+	src := string(body)
+	table := src[strings.Index(src, "func TestServesEmbeddedFrontend"):]
+	table = table[:strings.Index(table, "\n}\n")]
+
+	for _, name := range servedModules(t) {
+		if !strings.Contains(table, `{"/`+name+`"`) {
+			t.Errorf("TestServesEmbeddedFrontend never asks the server for /%s. A module the "+
+				"binary serves and no test requests is a module that can 404 in the shipped "+
+				"build while every other check passes - //go:embed assets covers the whole "+
+				"directory, so it looks right in dev", name)
 		}
 	}
 }
