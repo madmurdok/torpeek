@@ -80,7 +80,7 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 			}
 		case '*':
 			if i+1 < len(css) && css[i+1] == '/' {
-				t.Fatalf("app.css:%d: stray */ with no /* open to close - a "+
+				t.Fatalf("the stylesheet:%d: stray */ with no /* open to close - a "+
 					"comment terminator with nothing before it to terminate", line)
 			}
 		case '{':
@@ -88,7 +88,7 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 			openBraceLines = append(openBraceLines, line)
 		case '}':
 			if depth == 0 {
-				t.Fatalf("app.css:%d: unmatched } - a closing brace with no "+
+				t.Fatalf("the stylesheet:%d: unmatched } - a closing brace with no "+
 					"{ open to close it", line)
 			}
 			depth--
@@ -97,11 +97,11 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 	}
 
 	if inComment {
-		t.Fatalf("app.css:%d: /* opened here is never closed - everything "+
+		t.Fatalf("the stylesheet:%d: /* opened here is never closed - everything "+
 			"after it, to the end of the file, is silently commented out", commentOpenedAt)
 	}
 	if depth != 0 {
-		t.Fatalf("app.css:%d: { opened here is never closed (%d brace(s) "+
+		t.Fatalf("the stylesheet:%d: { opened here is never closed (%d brace(s) "+
 			"still open at end of file)", openBraceLines[0], depth)
 	}
 }
@@ -1023,5 +1023,67 @@ func TestSaveAndCancelStayPinnedRegardlessOfEachOther(t *testing.T) {
 	if regexp.MustCompile(`(?s)\.run-detail-cancel\[data-idle\]\s*\{[^}]*display:\s*none`).MatchString(live) {
 		t.Error(".run-detail-cancel[data-idle] sets display: none - that removes Cancel from the " +
 			"flow, which is exactly what reserving its box with visibility was meant to avoid")
+	}
+}
+
+// TestTheConcatenationOrderIsThePagesOwn is what the split made necessary,
+// and it defends a claim that was until now only WRITTEN DOWN.
+//
+// While there was one app.css, "later in the file wins" was a fact about the
+// file, and tick_test.go's byte-offset assertion could read it directly. The
+// split (TOR-189 for :root, TOR-190 for the rest) moved the cascade's second
+// axis out of the stylesheet and into index.html: the order of its <link>
+// elements now decides which of two equal-specificity rules in DIFFERENT
+// files wins, and stylesheet() reproduces that order from a hand-written
+// list, stylesheetFiles, so the tests can keep reading one text.
+//
+// stylesheetFiles' own comment asserts it is "in the exact order index.html
+// links them", and nothing checked that. A list that silently disagrees with
+// the page is the worst of the available failures: every CSS test keeps
+// passing, tick_test.go's byte-offset comparison still returns two numbers
+// and still compares them - against a concatenation the browser never builds.
+// That is the same defect one level up as the one tick_test.go's cursor block
+// was rewritten to remove: an assertion whose message promises a guarantee it
+// does not provide.
+//
+// So the page is the source of truth and the list is checked against it,
+// rather than the two being maintained in parallel and hoped to agree.
+func TestTheConcatenationOrderIsThePagesOwn(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+
+	// Matched in document order, which is the only order that matters here -
+	// FindAllStringSubmatch returns matches left to right, so the resulting
+	// slice IS the cascade order the browser applies.
+	re := regexp.MustCompile(`<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"`)
+	var linked []string
+	for _, m := range re.FindAllStringSubmatch(string(html), -1) {
+		linked = append(linked, m[1])
+	}
+
+	if len(linked) == 0 {
+		t.Fatal("index.html links no stylesheet at all - either the page stopped " +
+			"styling itself or this test's regex stopped matching the markup; " +
+			"both are failures, and a silent pass here would hide either")
+	}
+
+	if len(linked) != len(stylesheetFiles) {
+		t.Fatalf("index.html links %d stylesheets %v, stylesheetFiles has %d %v; "+
+			"every CSS test reads the concatenation of the latter, so a file the "+
+			"page loads and this list omits is a file no test looks at",
+			len(linked), linked, len(stylesheetFiles), stylesheetFiles)
+	}
+
+	for i, href := range linked {
+		if href != stylesheetFiles[i] {
+			t.Errorf("index.html loads %q at position %d, stylesheetFiles has %q there; "+
+				"at equal specificity the later file wins, so a list in a different "+
+				"order than the page builds a cascade the browser never applies - and "+
+				"tick_test.go's byte-offset assertion would then compare offsets "+
+				"inside a fiction and pass\nlinked: %v\nlist:   %v",
+				href, i, stylesheetFiles[i], linked, stylesheetFiles)
+		}
 	}
 }

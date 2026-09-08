@@ -48,25 +48,43 @@ func block(t *testing.T, css, sel string) map[string]string {
 	return out
 }
 
-// stylesheet returns the page's whole served stylesheet - not just app.css.
-// TOR-189 split the :root token rule out into tokens.css, loaded by its own
-// <link> ahead of app.css (see index.html), so a test that used to find
-// everything in one embedded file now has to read two and concatenate them
-// in the order the browser sees them, or every check below that looks for
-// ":root {" or a token declaration would silently stop finding it - passing
-// not because the page is right but because the test stopped looking where
-// the tokens now live.
+// stylesheetFiles is the served stylesheet, in the exact order index.html
+// links them - tokens.css first (TOR-189), then app.css's former contents
+// split by area (TOR-190). The order here has to track index.html's <link>
+// order exactly: it is what stylesheet() concatenates in, and at least one
+// pair of rules (filelist.css's .picker-item[data-tick]/[data-detail]
+// cursor rules, guarded by tick_test.go's own byte-offset assertion) relies
+// on the concatenated text preserving the browser's own cascade order.
+var stylesheetFiles = []string{
+	"tokens.css",
+	"base.css",
+	"intake.css",
+	"table.css",
+	"detail.css",
+	"filelist.css",
+	"framepanel.css",
+	"compare.css",
+}
+
+// stylesheet returns the page's whole served stylesheet - not just one file.
+// TOR-189 split the :root token rule out into tokens.css, and TOR-190 split
+// the rest of what used to be app.css into one file per area, so a test that
+// used to find everything in one embedded file now has to read all of them
+// and concatenate them in the order the browser sees them (stylesheetFiles
+// above), or every check below that looks for ":root {" or a token
+// declaration would silently stop finding it - passing not because the page
+// is right but because the test stopped looking where the rule now lives.
 func stylesheet(t *testing.T) string {
 	t.Helper()
-	tokens, err := embedded.ReadFile("assets/tokens.css")
-	if err != nil {
-		t.Fatalf("reading the embedded token stylesheet: %v", err)
+	var parts []string
+	for _, name := range stylesheetFiles {
+		b, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Fatalf("reading the embedded %s: %v", name, err)
+		}
+		parts = append(parts, string(b))
 	}
-	app, err := embedded.ReadFile("assets/app.css")
-	if err != nil {
-		t.Fatalf("reading the embedded stylesheet: %v", err)
-	}
-	return string(tokens) + "\n" + string(app)
+	return strings.Join(parts, "\n")
 }
 
 // TestThePageCommitsToOneTheme is the first half: the stylesheet must not vary

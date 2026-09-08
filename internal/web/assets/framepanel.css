@@ -1,0 +1,662 @@
+/* THE FRAME PANEL (TOR-190).
+   Split out of app.css: the live frame grid and its four cell states
+   (TOR-110), the piece-coverage strip and swarm chip (TOR-111/142/153),
+   and the full-size lightbox view (TOR-172/176/177) it opens into -
+   everything about SEEING the frames a run captured, as opposed to
+   filelist.css's job of picking which files to capture from. */
+
+/* The live frame grid: fills as frame_ready events arrive, click for full size. */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: .6rem;
+}
+.thumb { margin: 0; cursor: pointer; position: relative; }
+.thumb img {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  background: var(--s3); border-radius: .25rem;
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+/* A failed capture point (TOR-118): same box an <img> would take, so the
+   grid stays regular, with nothing drawn inside it. TOR-110 owns what a cell
+   state actually looks like - this is only the minimum that keeps the grid
+   from breaking until that lands. */
+
+/* THE PIECE STRIP (TOR-111; TOR-142's separate track and swarm chip merged
+   onto this one row by TOR-153). TOR-142 shipped a second strip above this
+   one - a track with capture-point ticks, its own "N of M pieces claimed"
+   caption - and it said nothing this strip didn't already say: the same "41
+   of 197" twice, in two words, drawn as two near-identical rows of cyan
+   marks on dark. The one genuinely new fact was the swarm chip, so that is
+   the only part of TOR-142 that survives, moved onto this row.
+
+   How much of the file the run actually ordered, as a picture rather than a
+   sentence - the sparseness is the product's whole argument and it was being
+   expressed as a number.
+
+   The accent carries it, not a semantic colour: pieces the run ordered are
+   not a warning or a fault, they are the thing the tool did. The untouched
+   remainder is a surface, so the eye reads marks on a ground rather than two
+   competing colours.
+
+   Each block is a vertical fill rather than a flag, and that is what makes
+   aggregation honest: at one piece per block --fill is 0 or 1 and the strip
+   is a map, and above that it is the fraction of that block's pieces the run
+   ordered, so a coarse strip is a density profile instead of a lie about
+   individual pieces. The caption says which it is.
+
+   THE SWARM CHIP beside the strip answers a different question - not "where
+   did this run reach" but "what does the swarm currently hold, torrent-wide"
+   (core.Progress.Swarm's own doc) - so it stays its own box in a SEMANTIC
+   colour (ok/warn/bad/unknown), never the accent and never a fill sharing
+   the strip's own axis: painting one mean copies-per-piece figure along a
+   file's span would claim a per-position resolution that figure does not
+   have, and would put "what the swarm holds" and "what this run ordered" on
+   one axis in one colour - the exact conflation avail_test.go guards against.
+
+   THE NOT-KNOWN-YET STATE. A run that has recorded no claim for this file
+   yet (no reach at all, or a pre-TOR-119 record) hatches the strip instead of
+   rendering it full or empty - either would assert a span nobody has
+   measured - and still shows the chip beside it, because the swarm reading
+   doesn't depend on this file's own claims. TOR-142's track did this by
+   hatching; the strip now does the identical thing under data-known="false".
+
+   WHERE THE FRAMES CAME FROM. TOR-142 answered "where do we take the
+   screenshots from" with its own thin ticks, positioned from the same
+   claimed piece ranges these blocks are already shaded by. Keeping both
+   would draw the identical ranges twice in one row - so this strip's blocks
+   now carry that answer alone: a filled block IS a capture point's
+   footprint, at the same resolution the ordering density is already shown
+   at, not a separate, more precise claim this strip cannot back up once the
+   blocks start aggregating past one piece each. */
+.reach { margin: .2rem 0 .8rem; }
+.reach-body {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+.reach-strip {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 1px;
+  height: 1.5rem;
+  border-radius: .2rem;
+  overflow: hidden;
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.reach-strip[data-known="false"] {
+  background-image: repeating-linear-gradient(135deg,
+    var(--s2) 0 6px, var(--s1) 6px 12px);
+}
+.reach-block {
+  flex: 1 1 0;
+  min-width: 1px;
+  /* to top: an ordered piece grows from the floor, so a partly-ordered block
+     reads as a column and a full one as a solid mark. */
+  background: linear-gradient(to top,
+    var(--accent) calc(var(--fill, 0) * 100%),
+    var(--s3) 0);
+}
+.avail-swarm {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: .3rem;
+  padding: .15rem .5rem;
+  border-radius: 1rem;
+  background: var(--s1);
+  box-shadow: inset 0 0 0 1px var(--rule);
+  font-family: var(--mono);
+  font-size: .68rem;
+  letter-spacing: .02em;
+  color: var(--ink-2);
+}
+.avail-swarm-dot {
+  width: .5rem;
+  height: .5rem;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+.avail-swarm[data-health="ok"]      .avail-swarm-dot { background: var(--ok); }
+.avail-swarm[data-health="warn"]    .avail-swarm-dot { background: var(--warn); }
+.avail-swarm[data-health="bad"]     .avail-swarm-dot { background: var(--bad); }
+.avail-swarm[data-health="unknown"] .avail-swarm-dot { background: var(--ink-3); }
+.reach-note {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--ink-2); margin-top: .3rem;
+}
+
+/* THE GRID'S FOUR STATES (TOR-110). A cell is one capture point, and the
+   states are spent unevenly on purpose.
+
+   EXACT gets nothing at all. It has no rule here, and that is the design:
+   most cells are exact, the picture is the content, and a grid that marks
+   every cell marks none of them.
+
+   PENDING is the quietest of the four. It is the normal state of a run that
+   is still working - a run is mostly waiting - so it must not read as
+   something wrong. A surface and the same hairline every thumbnail has, and
+   no animation: the progress line above already says the run is alive, and a
+   grid of twenty pulsing boxes would say it twenty times.
+
+   SHIFTED keeps the plain thumbnail and gains exactly ONE signal, a warn foot
+   under the image, echoed by the word already in its caption. The frame is
+   real and worth looking at; it just came from a neighbour.
+
+   FAILED is the only state that gets a BORDER, and that is what makes a
+   border mean something in this grid: nothing was captured here. It is also
+   the only one that puts text inside the cell, because the reason is the
+   whole content when the picture is missing. */
+
+/* The box that stands in for an image on a cell that has none. Same geometry
+   as .thumb img so the grid cannot tell them apart by size. */
+.thumb-box {
+  width: 100%; aspect-ratio: 16 / 9;
+  display: grid; place-content: center;
+  border-radius: .25rem;
+  box-sizing: border-box;
+}
+.thumb-pending .thumb-box {
+  background: var(--s2);
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+/* No figcaption override here any more (TOR-158): both used to read
+   --ink-3, a step dimmer than the base .thumb figcaption's --ink-2, as one
+   more quiet signal on top of the surface/hairline the comment above
+   describes. --ink-3 failed AA on every surface it painted text on, and
+   folding it into --ink-2 made these two rules identical to the base rule
+   they were overriding - so they were removed rather than kept as a no-op
+   that would mislead the next person into thinking a distinction still
+   lives here. The state is still carried by the box (surface+hairline for
+   pending, the dashed --bad border for failed), same as the design
+   comment above always said. */
+
+.thumb-failed .thumb-box {
+  background: var(--bad-dim);
+  border: 1px dashed var(--bad);
+}
+.thumb-code {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .02em;
+  color: var(--bad); text-align: center; padding: 0 .4rem;
+  overflow-wrap: anywhere;
+}
+
+/* The hairline every frame carries (see .thumb img) plus a foot, so the mark
+   is added to the cell rather than replacing what is already true of it. */
+.thumb-shifted img {
+  box-shadow: inset 0 0 0 1px var(--rule), inset 0 -3px 0 var(--warn);
+}
+
+/* A cell with nothing in it is not a link to anywhere. */
+.thumb-pending, .thumb-failed { cursor: default; }
+.thumb figcaption { font-family: var(--mono); font-size: .7rem; color: var(--ink-2); letter-spacing: .02em; }
+.thumb .shifted { color: var(--warn); }
+.thumb:focus-visible img { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* The delete cross. It stays out of the way until the thumbnail is hovered
+   or something inside it has focus - a grid of twenty frames each wearing a
+   permanent × reads as a row of errors - but it is never display:none, so it
+   stays reachable by keyboard and shows itself the moment it is focused. */
+.thumb-delete {
+  position: absolute;
+  top: .25rem;
+  right: .25rem;
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: var(--ink);
+  font-size: .95rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease-in-out;
+}
+.thumb:hover .thumb-delete,
+.thumb:focus-within .thumb-delete,
+.thumb-delete:focus-visible { opacity: 1; }
+.thumb-delete:hover { background: var(--bad); }
+.thumb-delete:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* THE FULL-SIZE VIEW (TOR-172): A HUD PANEL, AND A PICTURE THAT GOES TO 100%
+   WITHOUT LEAKING OUT OF IT.
+
+   WHAT CAME FROM THE REFERENCE SHEET, and what did not. Used: hard corners
+   with L-shaped brackets set just inside three of them; one NOTCHED
+   (chamfered) corner with a stroke along the cut; an uppercase, letter-spaced
+   monospace LABEL TAB riding the panel's top strip, with a chevron marker and
+   a filled state pill; a faint dashed TICK RUN along that same strip; a
+   filled label bar over the bottom of the picture. Left behind deliberately:
+   the barcode block, the dotted matrix, the giant numeral, the dot-leader
+   key/value column, and the accent-on-everything colouring - see the palette
+   note below.
+
+   THE PALETTE (TOR-176 revises this from TOR-172's original call). TOR-172
+   read :root's "nothing decorative wears --accent" rule as binding here too,
+   and built the whole resting chrome from --edge - a correct, restrained
+   dialog that then sat next to the owner's HUD reference and was, in their
+   words, "вообще не похож на референс". The reference's whole character is
+   that its chrome is LOUD: brackets a quarter of the edge long, doubled
+   strokes with a gap, visible glow, saturated colour as the frame rather than
+   as a marker. Three treatments were built side by side on a real frame with
+   the live tokens; VARIANT B, WITH VARIANT A'S HINT COLOUR, is what is here.
+
+   The accent is now spent on three things, not one: the three corner
+   brackets (34px at 2px, glowing, at rest - no longer gated on the zoom
+   state), the zoom-state pill, and the key-hint line. Edges, the FRAME label
+   tab and the dashed tick run stay on ink and --edge - the panel does not
+   become accent-coloured throughout, and the chamfer stroke (below) is left
+   off the accent list on purpose, same as the label and the ticks.
+
+   This does trade something away: :root's "nothing decorative wears --accent"
+   rule exists because before TOR-113 one green served as both the accent and
+   "done", and an always-accent hint line spends the token on instruction
+   rather than state. That is accepted here as the owner's call, made with
+   both variants in front of them, for a MODAL panel over a scrim - there are
+   no neighbours in this view whose attention the loud chrome could steal,
+   which is not true of the rest of the page and is not an argument for
+   spending --accent more freely there. What it obliges: THE ZOOM STATE - the
+   only thing in this panel that actually changes - has to stay distinguishable
+   now that it is no longer the only accent on the surface. It still is: the
+   pill is a FILLED box with a glow at 100%, not just another accent stroke
+   among several, so the state reads from its shape and not merely its colour.
+   Checked in a browser at both zoom states, not only against this claim.
+
+   THE GLOWS, both of them, and the difference is the trap .run-detail::before
+   records: box-shadow follows an element's BOX, so on an L drawn from two
+   borders it paints a glowing rectangle over the shape. The brackets are
+   stroke-drawn, so their glow is filter: var(--stroke-glow); the state pill
+   is a filled box, so its glow is box-shadow: var(--glow). The chamfer stroke
+   stays --edge and unglowed, along with the label and the ticks.
+
+   WHAT SITS OVER THE PICTURE, and why it carries its own ground. The close
+   control and the caption are on the picture by design: the close belongs at
+   the picture's corner (TOR-122 put it there) and the caption names what you
+   are looking at. TOR-122 measured that no single colour is legible against
+   every frame - the close sat near-invisible on a snow shot - so both bring
+   an opaque ground with them, and that only got more necessary once the
+   picture can pan beneath them. Everything that has to be READ rather than
+   hit - the label tab, the key hints - sits on the panel's own --s1 strips
+   instead, where its contrast is a number this file can be held to. */
+.lightbox {
+  /* The panel's arithmetic, as tokens rather than as four numbers repeated in
+     three places: the ring of ground around the picture, the two label
+     strips, and the gap between each strip and the picture. .lightbox-view's
+     max-height below subtracts exactly these from 92vh, so the panel comes to
+     92vh when the picture is as tall as it may be - and app.js reads the
+     resolved maximum back off the element (availableBox) rather than keeping
+     its own copy of these numbers, so this arithmetic has one home. */
+  --lb-pad: .65rem;
+  --lb-bar: 1.2rem;
+  --lb-keys: 1.2rem;
+  --lb-gap: .3rem;
+  border: none;
+  /* Hard corners. The reference sheet has no radii anywhere, and the notch
+     below is what a panel there has instead of a rounded corner. */
+  border-radius: 0;
+  padding: var(--lb-pad);
+  box-sizing: border-box;
+  /* Wide enough for the key-hint line even under a tiny picture, but never
+     wider than the panel's own ceiling: min-width beats max-width in the
+     cascade, so a bare 21rem would overflow a narrow phone. */
+  min-width: min(21rem, 92vw);
+  max-width: 92vw;
+  max-height: 92vh;
+  background: var(--s1);
+  color: var(--ink);
+  /* THE NOTCH: one chamfered corner. It cuts the panel's own ground only -
+     the picture's bottom edge is a whole key-hint strip above this corner -
+     so nothing of the frame is ever lost to it, and no backdrop shows through
+     anywhere the picture reaches. */
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+  /* TOR-177: a <dialog> defaults to overflow: auto, and nobody had put
+     anything on the PANEL itself - TOR-172's overflow: hidden below is on
+     .lightbox-view, the picture's own window, one level in. Left at the
+     default, a feedback loop follows: the panel's true content (714px tall
+     on the measuring frame) came out 1px wider and 13px taller than the
+     panel's own client box for reasons that have nothing to do with real
+     overflow (see .lightbox-marks::after below for the 1px), scrollbars
+     appeared, each ate 15px of client box, and the now-smaller client box
+     made the same content overflow even more - so the bars, once summoned,
+     had no way to go away on their own. overflow: hidden makes "nothing
+     leaves the panel" (rule 4, TOR-172) structurally true at this level too,
+     the same way .lightbox-view's own overflow: hidden makes it true for the
+     picture - and it also stops that feedback loop from ever being able to
+     start, which matters beyond cosmetics: app.js's availableBox() reads its
+     maximum off .lightbox-view's resolved box, and a scrollbar-narrowed
+     ancestor is exactly the kind of thing that number must never depend on. */
+  overflow: hidden;
+}
+.lightbox::backdrop { background: var(--scrim-strong); }
+
+/* THREE CORNER BRACKETS AND A CHAMFER STROKE, the reference's frame
+   vocabulary, drawn the way .run-detail::before draws its own: two borders
+   per corner, so each is an L rather than a rectangle. TOR-176 (variant B)
+   makes the three brackets loud rather than restrained: 34px, a quarter of
+   the panel's own edge, at 2px, permanently in --accent with a stroke glow -
+   no longer gated on the zoom state, because the reference's whole character
+   comes from the chrome being loud everywhere, and a modal panel over a
+   scrim has no neighbours whose attention that could steal. They still sit
+   inside the panel's top and bottom label strips, clear of the picture
+   itself - a hairline in one colour over arbitrary footage is TOR-122's
+   problem all over again, and a bracket cannot carry a scrim.
+   .lightbox-marks exists because a corner needs a pseudo-element of its own
+   and one element has two.
+
+   TOR-177 asked, while fixing the panel's own scrolling, whether this still
+   needs to span the WHOLE panel (inset: 0 below) rather than sit as a 34px
+   box at its one corner the way .lightbox::before/::after do. Measured
+   (not guessed): a bare .lightbox-marks with both its pseudo-elements
+   suppressed contributes zero scrollable overflow of its own - inset: 0
+   lands it exactly on the panel's padding box, flush. So spanning the panel
+   is not what needed fixing (.lightbox's own overflow: hidden above is), and
+   there is a real reason to leave it spanning: it is the one host for TWO
+   pseudo-elements that reach two different corners - ::before bottom-left,
+   ::after (the chamfer stroke, further down) bottom-right - and shrinking
+   the host to 34px at one corner would leave the other with no box to
+   measure its offsets from, forcing it to depend on the panel's own
+   dimensions by hand instead of by "the far edge of my own containing
+   block" - exactly the kind of fragile-by-construction arithmetic that
+   pseudo-element's own comment (below) describes moving away from once
+   already. Left spanning, on purpose. */
+.lightbox::before, .lightbox::after, .lightbox-marks::before {
+  content: "";
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  pointer-events: none;
+}
+.lightbox::before {
+  top: 4px; left: 4px;
+  border-top: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  filter: var(--stroke-glow);
+}
+.lightbox::after {
+  top: 4px; right: 4px;
+  border-top: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
+  filter: var(--stroke-glow);
+}
+.lightbox-marks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.lightbox-marks::before {
+  bottom: 4px; left: 4px;
+  border-bottom: 2px solid var(--accent);
+  border-left: 2px solid var(--accent);
+  filter: var(--stroke-glow);
+}
+/* The stroke along the chamfer, without which the cut reads as a rendering
+   fault rather than as a corner somebody drew. Left on --edge, unglowed, on
+   purpose: TOR-176 spends --accent on exactly three things (the brackets
+   above, the state pill below, and the key-hint line further down) and the
+   chamfer is not one of them, same as the label tab and the tick run.
+
+   Positioned so its whole THICKNESS lands on the panel's side of the cut,
+   rather than straddling the cut as it did before TOR-176. Not "fully inside
+   the panel", which is what this comment claimed until TOR-177 measured it:
+   the bar's rotated bounding box still pokes about 0.7px past the panel's
+   right edge, and that 0.7px WAS the 1px horizontal overflow TOR-177 was sent
+   to explain. The arithmetic, so nobody has to re-measure: right -2.5px on a
+   17px box puts the centre 6px inside, and a 17x2 bar rotated -45 degrees has
+   an axis-aligned width of (17+2)/sqrt(2) = 13.4px, so it reaches 6.7px each
+   way from that centre - 0.7px of it beyond the edge. Harmless now only
+   because .lightbox itself clips (see its own overflow rule); do not read this
+   as the stroke being contained. The notch's own
+   diagonal (two 10px legs) is ~14.14px; this bar is 17px so it overhangs
+   both ends slightly for a flush join, and its centre sits 1px further into
+   the panel than the cut line itself (bottom-right in un-rotated space:
+   right -2.5px, bottom 5px puts the rotated bar's centre at (6, 6) rather
+   than the line's own midpoint at (5, 5)), so the whole 2px thickness lands
+   on the panel's own side. Previously it was centred ON the cut and relied
+   on .lightbox's clip-path to trim whichever half fell outside - correct in
+   the result, but a stroke depending on being cut in half by an unrelated
+   property is fragile in a way this avoids.
+
+   TOR-177: this is THE SOURCE of the panel's 1px horizontal overflow (882
+   against 881 on the measuring frame), confirmed by counterfactual in a real
+   browser rather than assumed - hiding only this pseudo-element (not the
+   other two brackets, not .lightbox-marks itself) took the panel's
+   scrollWidth-clientWidth from 1 to 0, and zeroing just its `right` offset
+   (rotation kept) did the same, while un-rotating it (offset kept) made the
+   overflow WORSE (1px to 2px). The `right: -2.5px` above is deliberately
+   outside .lightbox-marks's own box - that is what lets the un-rotated bar
+   overhang the cut for a flush join, per this comment's own math - and the
+   -45deg rotation shrinks that box's horizontal extent (a 17x2 rectangle
+   rotated 45 degrees bounds to roughly 13.4x13.4) without shrinking it to
+   zero, so about a pixel still pokes past the panel's right edge after
+   rounding. Neither .lightbox-marks's own inset: 0 nor the fitted picture's
+   rounded width contributes anything here (both measured at exactly 0).
+   Harmless now that .lightbox carries its own overflow: hidden (above,
+   TOR-177) - the stroke still draws exactly where this comment says, just
+   clipped a pixel short of AN ancestor's edge nobody will ever see - but
+   worth naming so the next person does not mistake .lightbox-marks's SPAN
+   for the cause, the way it looks like it should be. */
+.lightbox-marks::after {
+  content: "";
+  position: absolute;
+  right: -2.5px;
+  bottom: 5px;
+  width: 17px;
+  height: 2px;
+  background: var(--edge);
+  transform: rotate(-45deg);
+  pointer-events: none;
+}
+
+/* The panel's top strip: the label tab, then a dashed tick run filling
+   whatever is left of the line. The side margins clear the two corner
+   brackets that live in this strip. A fixed height, like .compare-note's, so
+   .lightbox-view's max-height arithmetic above stays true whatever the tab
+   ends up containing. */
+.lightbox-bar {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  height: var(--lb-bar);
+  margin: 0 1.1rem var(--lb-gap);
+}
+.lightbox-tab {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 .3rem;
+  font-family: var(--mono);
+  font-size: .68rem;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: var(--track);
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--ink-2);
+  background: var(--s2);
+  border: 1px solid var(--edge);
+}
+/* The reference's chevron marker, in the chrome's own --edge. It is
+   aria-hidden decoration rather than text, which is why it is held to the
+   3.0 floor a UI part answers to and not text's 4.5. */
+.lightbox-chev { color: var(--edge); }
+/* The state pill, and the readout the whole panel exists to give: "fit" or
+   "100%". Filled with the accent at 100% (a filled box, so box-shadow is the
+   right glow for it - see :root's two glow tokens), --bg text on it, which is
+   the reference's own filled-label-with-dark-text motif and measures 12.4
+   against --accent. Unchanged by TOR-176, and now doing a heavier job than it
+   was: with the brackets and the key-hint line both accent too, the pill's
+   FILLED box at 100% versus its outline at rest is what still marks the zoom
+   state as its own fact rather than one more accent stroke among several -
+   checked in a browser at both states, not only asserted here. */
+.lightbox-zoom {
+  padding: 0 .25rem;
+  border: 1px solid var(--edge);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.lightbox[data-zoom="full"] .lightbox-zoom {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg);
+  box-shadow: var(--glow);
+}
+.lightbox-ticks {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 1px;
+  background-image: repeating-linear-gradient(90deg,
+    var(--edge) 0 4px, transparent 4px 10px);
+}
+
+/* Only the state pill still changes with the zoom state, so it is the only
+   thing left in this list to animate - the brackets were the other member
+   before TOR-176 made them unconditionally accent, and a transition with
+   nothing to cross-fade is just dead declarations. The reduced-motion block
+   comes after it rather than before: a media query adds no specificity, so
+   with the two the other way round the transition would win and the
+   preference would do nothing. */
+.lightbox-zoom {
+  transition: border-color .12s ease-in-out, background-color .12s ease-in-out,
+    color .12s ease-in-out, filter .12s ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lightbox-zoom { transition: none; }
+}
+
+/* THE WINDOW ONTO THE PICTURE, and rule 4's structural half. Its box is the
+   picture's FIT size, in both zoom states - app.js writes it into
+   --lb-view-w/h once per picture and never changes it on a zoom, because a
+   <dialog> is centred by the UA and a box that grows on a click re-centres
+   the whole panel and slides the picture out from under the eye (the finding
+   .compare's own block is built around).
+
+   overflow: hidden is what makes "it must never spill outside the popup"
+   structurally true whatever app.js computes. It cannot, however, catch the
+   other half of that rule - a picture panned too far leaks the panel's GROUND
+   in at an edge rather than picture out - and that half is clampPan()'s, in
+   app.js.
+
+   The maximum is stated here, in CSS, and read back from the element by
+   app.js: 92vw and 92vh less the panel's ring, its two strips and their gaps
+   (and 2px of slack, so a rounding pixel cannot push the panel past its own
+   max-height and spill a strip onto the backdrop). */
+.lightbox-view {
+  position: relative;
+  overflow: hidden;
+  margin: 0 auto;
+  max-width: calc(92vw - 2 * var(--lb-pad));
+  max-height: calc(92vh - 2 * var(--lb-pad) - var(--lb-bar) - var(--lb-keys) - 2 * var(--lb-gap) - 2px);
+  width: var(--lb-view-w, auto);
+  height: var(--lb-view-h, auto);
+  background: var(--s1);
+}
+/* The picture. app.js sets width/height in whole pixels (its drawn size, fit
+   or 1:1) and pans it with a whole-pixel transform, so the fit case lands
+   exactly on the window's edges with no half-pixel seam of ground showing.
+   max-width/max-height are turned off because those numbers are now
+   computed: a stray 88vw ceiling would silently cap the 100% state. */
+.lightbox-view img {
+  display: block;
+  max-width: none;
+  max-height: none;
+}
+/* Which state you are in, said a second way, because a cursor is where a
+   person looks for it: zoom-in at fit, zoom-out at 100%, and the plain
+   pointer on a picture that already fits, where a click has nothing to do
+   (rule 1 forbids upscaling it). */
+.lightbox[data-zoom="fit"] .lightbox-view { cursor: zoom-in; }
+.lightbox[data-zoom="full"] .lightbox-view { cursor: zoom-out; }
+.lightbox[data-zoom="none"] .lightbox-view { cursor: default; }
+/* Inside the clip, so the ring is not swallowed by overflow: hidden. */
+.lightbox-view:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* The caption, as the reference's filled label bar along the bottom of the
+   picture rather than as a line of prose under it. It is over arbitrary
+   footage, so it carries the same ground the close control does (TOR-122) -
+   --scrim-strong composites to 10.7 against --ink over even a blown-out white
+   frame, which is the number no flat colour could give.
+   No opacity on top of that: .compare-keys' own comment records why - opacity
+   multiplies against whatever the token already measures, and the pair reads
+   dimmer than either, which is the invisible-failure shape TOR-158 warned
+   about. This rule used to carry opacity: .8. */
+.lightbox-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  margin: 0;
+  padding: .25rem .5rem;
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .02em;
+  text-align: center;
+  color: var(--ink);
+  background: var(--scrim-strong);
+}
+/* Over arbitrary picture content, so it carries its own ground: no single
+   colour is legible against every frame, and this one sat as near-white on
+   the bright top edge of a snow shot with almost no contrast at all
+   (TOR-122). It was already invisible for anyone on a dark system before
+   TOR-113; committing the UI to one dark theme made it invisible for
+   everybody.
+   Deliberately the same object as .thumb-delete above - both are controls
+   laid over a frame, and they should read as one idea rather than two. */
+.lightbox-close {
+  position: absolute;
+  top: .4rem;
+  right: .5rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-content: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--scrim);
+  color: var(--ink);
+  font-size: 1.15rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.lightbox-close:hover { background: var(--bad); }
+.lightbox-close:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+
+/* The keys, in the panel's bottom strip. Same shape as .compare-keys, for the
+   same reason: one line, fixed height, nowrap, so nothing it says can change
+   the panel's height. The side margins clear the bottom-left bracket and the
+   chamfer.
+
+   Colour is TOR-176 (variant B, with variant A's own contribution): full-
+   strength --accent, the owner's specific request after seeing the three
+   treatments side by side, in place of TOR-172's --ink-2. --accent on --s1
+   measures 11.60:1, so nothing here needs weakening - variant A's rule
+   carried opacity: .85 on top of the same colour, and that is deliberately
+   NOT repeated: opacity multiplies against whatever the token already
+   measures, which is exactly the invisible-failure shape TOR-158 removed
+   from this file (.lightbox-close/.lightbox-caption's own comment, and
+   TestLightboxControlsOverThePictureCarryTheirOwnGround, record the same
+   trap for this dialog already). This does spend the accent on instruction
+   rather than state, which is a real trade against :root's "nothing
+   decorative wears --accent" rule - see the palette comment above .lightbox
+   for why that is accepted here. */
+.lightbox-keys {
+  height: var(--lb-keys);
+  margin: var(--lb-gap) 1.1rem 0;
+  font-family: var(--mono);
+  font-size: .72rem;
+  line-height: 1.2rem;
+  letter-spacing: .02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+  color: var(--accent);
+}
