@@ -464,6 +464,14 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 		{"/state.js", "state.runs"},
 		{"/events.js", "new WebSocket("},
 		{"/run-table.js", `customElements.define("run-table"`},
+		// TOR-195's three, each needled on its own registration: a module that
+		// is not served is a page that does not parse, and these three are
+		// reached only through another module's import (see
+		// TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed), so a
+		// missing one costs the whole detail tree rather than one element.
+		{"/run-detail.js", `customElements.define("run-detail"`},
+		{"/file-list.js", `customElements.define("file-list"`},
+		{"/file-detail.js", `customElements.define("file-detail"`},
 		{"/tokens.css", ":root"},
 		{"/base.css", "@font-face"},
 		{"/intake.css", ".dropzone"},
@@ -858,9 +866,16 @@ func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
 	// import specifiers. Adding a module to the page and not to these lists
 	// is the easy half of the mistake to make, which is why each list now
 	// says out loud that it is the set of SERVED scripts.
+	//
+	// TOR-195's three join for the sharpest reason of any of them: two of
+	// them BUILD PATHS. file-list.js's clear and file-detail.js's per-frame
+	// delete and its loadFileDetail each assemble a path from segments
+	// precisely so no leading slash can appear - which is the rule this test
+	// enforces, so they are the modules it most needs to read.
 	for _, name := range []string{
 		"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
 		"assets/run-table.js", "assets/frame-panel.js", "assets/compare-dialog.js",
+		"assets/run-detail.js", "assets/file-list.js", "assets/file-detail.js",
 	} {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
@@ -1883,9 +1898,16 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// TOR-193 had added modules to the page without adding them here. A
 	// module absent from this list is a module whose import specifiers
 	// nothing resolves.
+	//
+	// TOR-195's three are the first that are reached ONLY through another
+	// module's import: index.html names app.js, app.js imports run-detail.js,
+	// which imports file-list.js, which imports file-detail.js. So a broken
+	// specifier three hops in would 404 the whole graph, and nothing but this
+	// walk would say which link broke.
 	for _, name := range []string{
 		"app.js", "state.js", "events.js",
 		"run-table.js", "frame-panel.js", "compare-dialog.js",
+		"run-detail.js", "file-list.js", "file-detail.js",
 	} {
 		src, err := embedded.ReadFile("assets/" + name)
 		if err != nil {
@@ -1930,7 +1952,8 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// state.js and frame-panel.js are the leaves: they import nothing, by
 	// design, and demanding a specifier from them would be demanding a
 	// dependency they are better without.
-	for _, name := range []string{"app.js", "events.js", "run-table.js", "compare-dialog.js"} {
+	for _, name := range []string{"app.js", "events.js", "run-table.js", "compare-dialog.js",
+		"run-detail.js", "file-list.js", "file-detail.js"} {
 		if seen[name] == 0 {
 			t.Errorf("no import specifier was found in %s, which does import - so this walk did "+
 				"not read it and every check above verified nothing for it. Either the module "+

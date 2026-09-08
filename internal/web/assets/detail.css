@@ -42,6 +42,27 @@
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* TOR-195 wrapped the detail in a <run-detail> custom element whose behaviour
+   lives in run-detail.js. An unknown element is display: inline by default,
+   which would put a block-level <div class="run-detail"> inside an inline box -
+   so this one line is what keeps the wrapper invisible to layout, exactly as
+   table.css's `run-table { display: block; }` does for the table (see that
+   rule's own comment for why display: contents was not used).
+
+   IT MATTERS MORE HERE THAN THERE, because .run-detail below is `position:
+   sticky` with `width: var(--run-detail-w, 100%)`. A sticky element is
+   constrained to its CONTAINING BLOCK and sizes against it, so the wrapper has
+   to be a plain block spanning the whole colspanned cell for both of those to
+   resolve to what they did before: the cell has padding: 0, and this rule adds
+   no box of its own, so the wrapper's content box IS the cell's. The scrolling
+   ancestor sticky resolves against (.run-table-wrap) is unchanged by an extra
+   static block in between.
+
+   No [hidden] companion, unlike filelist.css's two: nothing ever hides this
+   wrapper. Collapse at this level is the `hidden` attribute on the
+   .run-detail-row <tr> above it, which is a different element entirely. */
+run-detail { display: block; }
+
 /* Corner brackets instead of a closed border - a border costing four short
    strokes rather than a rectangle, which is how the HUD vocabulary and
    "space instead of borders" turn out to agree (TOR-112). They frame the

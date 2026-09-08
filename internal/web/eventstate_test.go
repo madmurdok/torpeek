@@ -1107,7 +1107,8 @@ func TestAFrameIsOneShapeWhereverItCameFrom(t *testing.T) {
 
 	// The other end: the page resolves it exactly once, where the src is set,
 	// and the disk-shaped reader stores the same thing the socket one does.
-	page := appJS(t)
+	// Both are one FILE's since TOR-195, so both are file-detail.js's.
+	page := fileDetailJS(t)
 	if !strings.Contains(page, "img.src = url(frame.url);") {
 		t.Error("frameFigure does not resolve the frame's path when it sets the src - a bare " +
 			"path would lose the access token, and every thumbnail on an authorized page " +
@@ -1199,15 +1200,29 @@ func TestTheEventLayerNeverTouchesTheDom(t *testing.T) {
 		}
 	}
 
-	// app.js's own half of it: no renderer may read a message. One mention
-	// survives in a comment (renderFileLinks, naming the manifest field it
-	// deliberately does not keep), which is why this reads stripped code - and
-	// the match is word-bounded, because `el.comparePrev.disabled` ends in the
-	// same three characters and is not a message at all.
+	// THE RENDERERS' OWN HALF OF IT: no renderer may read a message. One
+	// mention survives in a comment (renderFileLinks, naming the manifest
+	// field it deliberately does not keep), which is why this reads stripped
+	// code - and the match is word-bounded, because `el.comparePrev.disabled`
+	// ends in the same three characters and is not a message at all.
+	//
+	// WIDENED FROM app.js ALONE BY TOR-195, which is when it started mattering
+	// most: five modules draw now, and the three the detail split into are
+	// exactly the ones a handler would be tempted to hand an `ev` to, because
+	// each of them redraws in response to one.
 	ev := regexp.MustCompile(`(^|[^A-Za-z0-9_$.])ev\.`)
-	if m := ev.FindString(stripJSComments(appJS(t))); m != "" {
-		t.Errorf("app.js reads `ev.` somewhere in code (%q) - a message has reached the page "+
-			"again, which is the coupling TOR-191 removed", m)
+	for _, mod := range []struct{ name, src string }{
+		{"app.js", appJS(t)},
+		{"run-table.js", runTableJS(t)},
+		{"run-detail.js", runDetailJS(t)},
+		{"file-list.js", fileListJS(t)},
+		{"file-detail.js", fileDetailJS(t)},
+	} {
+		if m := ev.FindString(stripJSComments(mod.src)); m != "" {
+			t.Errorf("%s reads `ev.` somewhere in code (%q) - a message has reached a renderer "+
+				"again, which is the coupling TOR-191 removed and the five extraction tickets "+
+				"after it depend on", mod.name, m)
+		}
 	}
 }
 

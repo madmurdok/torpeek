@@ -1063,13 +1063,18 @@ func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 // runner here, so it cannot build the template and inspect the DOM, only
 // confirm the markup and its order are what TOR-169 asked for.
 func TestSaveTorrentSitsInTheHeaderBesideCancel(t *testing.T) {
-	js := appJS(t)
+	// RETARGETED ONTO run-detail.js BY TOR-195: the header is what the row
+	// says about the RUN, so its template went with it. The template is still
+	// a string rather than markup in index.html for the reason that module's
+	// header sets out - there is one detail per torrent - so this check reads
+	// exactly the same way it did.
+	js := runDetailJS(t)
 	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
 	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
 
 	header := strings.Index(live, `'<header class="run-detail-header">'`)
 	if header < 0 {
-		t.Fatal("app.js has no .run-detail-header template to check")
+		t.Fatal("run-detail.js has no .run-detail-header template to check")
 	}
 	headerEnd := strings.Index(live[header:], `"</header>"`)
 	if headerEnd < 0 {
@@ -1102,7 +1107,7 @@ func TestSaveTorrentSitsInTheHeaderBesideCancel(t *testing.T) {
 
 	actionsBlockStart := strings.Index(live, `'<p class="torrent-actions" hidden>'`)
 	if actionsBlockStart < 0 {
-		t.Fatal("app.js has no .torrent-actions template to check")
+		t.Fatal("run-detail.js has no .torrent-actions template to check")
 	}
 	actionsBlockEnd := strings.Index(live[actionsBlockStart:], `'</p>'`)
 	if actionsBlockEnd < 0 {

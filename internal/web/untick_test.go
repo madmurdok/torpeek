@@ -603,8 +603,12 @@ func tickedOf(srv *Server, id string) []int {
 // is lost - which is the fear the scope will produce and the fact that makes
 // it survivable.
 func TestTheRowSaysWhichActAnUnTickWillBeBeforeItIsPressed(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "updateFileCosts")
+	// RETARGETED ONTO file-list.js BY TOR-195: the four verdicts, their four
+	// sentences and the heading that says the stop's scope on screen are all
+	// the LIST's - the middle of the three nested detail elements - and each
+	// went there as a method.
+	js := fileListJS(t)
+	fn := jsMethod(t, js, "updateFileCosts")
 
 	// The stop, and every part of the claim. Each phrase is looked for whole,
 	// so it has to sit inside ONE JS string literal - which is why the
@@ -655,7 +659,7 @@ func TestTheRowSaysWhichActAnUnTickWillBeBeforeItIsPressed(t *testing.T) {
 	// titles above are not. A title is unreachable on a touch screen and to
 	// anybody who never hovers, so the scope of the stop is also stated once
 	// for the row in the list's own heading.
-	head := jsFunc(t, js, "fileListTitle")
+	head := jsMethod(t, js, "fileListTitle")
 	if !strings.Contains(head, "entry.fetching.size > 0") {
 		t.Fatal("the file list's heading no longer changes while the row is fetching, so " +
 			"the only warning about a run-stopping box is in a hover title")
@@ -687,9 +691,9 @@ func TestTheRowSaysWhichActAnUnTickWillBeBeforeItIsPressed(t *testing.T) {
 // be ticked again for free. A speed bump in front of a harmless act only
 // trains people to click through the one in front of the harmful one.
 func TestStoppingIsOneGestureAndSpendingIsTwo(t *testing.T) {
-	js := servedScript(t)
-	stop := jsFunc(t, js, "stopFetch")
-	drop := jsFunc(t, js, "dropFile")
+	js := fileListJS(t)
+	stop := jsMethod(t, js, "stopFetch")
+	drop := jsMethod(t, js, "dropFile")
 
 	// One press. Not an arming, not a confirm, and not a revealed button of
 	// its own - the last would be the clear's shape, which works there
@@ -709,7 +713,7 @@ func TestStoppingIsOneGestureAndSpendingIsTwo(t *testing.T) {
 	// And the arming it is deliberately unlike is still there, so the
 	// asymmetry above is a live comparison rather than a claim about code that
 	// has since gone.
-	if !strings.Contains(jsFunc(t, js, "syncSelectAll"), "entry.pickerAll.dataset.armed") {
+	if !strings.Contains(jsMethod(t, js, "syncSelectAll"), "this.pickerAll.dataset.armed") {
 		t.Error("Select all no longer arms. If that changed, the argument for this " +
 			"ticket's one-press stop has to be re-made rather than left standing on a " +
 			"comparison with something that is gone")
@@ -723,8 +727,7 @@ func TestStoppingIsOneGestureAndSpendingIsTwo(t *testing.T) {
 // stay, and run_state redraws the row moments later with the box ticked and a
 // Clear frames beside it.
 func TestTheStopPutsTheBoxBackBecauseACancelDoesNotUnAskForTheFile(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "stopFetch")
+	fn := jsMethod(t, fileListJS(t), "stopFetch")
 
 	if !strings.Contains(fn, "box.checked = true") {
 		t.Error("stopFetch leaves the box cleared, so a row whose run has just been " +
@@ -753,8 +756,7 @@ func TestTheStopPutsTheBoxBackBecauseACancelDoesNotUnAskForTheFile(t *testing.T)
 // itself (Server.pendingPass), so by the time the POST lands the file IS
 // being fetched and the server refuses.
 func TestTheDropIsRolledBackIfThePassTookTheFileFirst(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "dropFile")
+	fn := jsMethod(t, fileListJS(t), "dropFile")
 
 	if !strings.Contains(fn, `post("runs/untick", { id: entry.id, file: String(index) })`) {
 		t.Fatal("dropFile no longer asks the server to take the file out of the next pass")
@@ -822,11 +824,31 @@ func TestThePageReadsThePassInFlightFromTheServer(t *testing.T) {
 // TestACancelKeepsTheFramesAndTheClearThenTakesThem above. This only fixes
 // which door the page knocks on.
 func TestTheStopStillLetsTheEngineEndOnItsOwnTerms(t *testing.T) {
-	js := servedScript(t)
-
-	if !strings.Contains(jsFunc(t, js, "cancelRun"), `post("runs/cancel", { id })`) {
+	// cancelRun stays in app.js, deliberately, and TOR-195 is what makes that
+	// worth saying: THREE controls now reach it from three different modules -
+	// the row's own ✕ (run-table.js's service), the detail header's Cancel
+	// (run-detail.js's) and an un-tick mid-fetch (file-list.js's stopFetch) -
+	// so it is injected as one service rather than spelled three times, and
+	// there is still exactly one place a cancel is sent from.
+	if !strings.Contains(jsFunc(t, appJS(t), "cancelRun"), `post("runs/cancel", { id })`) {
 		t.Fatal("cancelRun no longer posts to /runs/cancel, which is the one route that " +
 			"stops a run by cancelling its context rather than by killing it")
+	}
+	for _, mod := range []struct{ name, src string }{
+		{"run-table.js", runTableJS(t)},
+		{"run-detail.js", runDetailJS(t)},
+		{"file-list.js", fileListJS(t)},
+	} {
+		if !strings.Contains(mod.src, `"cancelRun"`) {
+			t.Errorf("%s does not name cancelRun among the services it refuses to run "+
+				"without - a control that stops a torrent would call an injected function "+
+				"that was never injected", mod.name)
+		}
+		if strings.Contains(mod.src, `post("runs/cancel"`) {
+			t.Errorf("%s sends the cancel itself instead of going through the one injected "+
+				"service - three spellings of one destructive request is three places to "+
+				"get it wrong", mod.name)
+		}
 	}
 	// core.Event is what the run ends on either way; the flag the server reads
 	// to tell a stop from a completion is the one CancelRun sets, and pump

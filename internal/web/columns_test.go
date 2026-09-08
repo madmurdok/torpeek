@@ -81,16 +81,51 @@ func appJS(t *testing.T) string {
 // every row cell - now live there. Read from the embedded FS for the reason
 // appJS is: that is the copy that ships.
 //
-// WHICH MODULE EACH TEST READS is now a three-way question, and the answer
+// WHICH MODULE EACH TEST READS is now a SIX-way question, and the answer
 // follows the split rather than the ticket: a DERIVATION over an entry is
 // state.js's (sortValue, compareEntries, the cell helpers), the ROW it is
-// drawn into is run-table.js's, and what is left in app.js is the requests
-// and the detail a row opens onto.
+// drawn into is run-table.js's, and since TOR-195 the three depths a row opens
+// onto are three more modules - run-detail.js (what the row says about the
+// RUN: its header, its error, its .torrent, its top-up offer), file-list.js
+// (every file the torrent holds, the ticks, the prices, Select all, the
+// un-tick verdicts, the clear) and file-detail.js (one file's metadata,
+// progress, reach strip and frame grid). What is left in app.js is the intake,
+// the requests, the log and the wiring.
 func runTableJS(t *testing.T) string {
 	t.Helper()
 	b, err := embedded.ReadFile("assets/run-table.js")
 	if err != nil {
 		t.Fatalf("reading the embedded run-table.js: %v", err)
+	}
+	return string(b)
+}
+
+// The three TOR-195 modules, read the same way and for the same reason: that
+// is the copy that ships. Named after the elements they define, so a test's
+// own reader says which of the three depths its subject lives at.
+func runDetailJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/run-detail.js")
+	if err != nil {
+		t.Fatalf("reading the embedded run-detail.js: %v", err)
+	}
+	return string(b)
+}
+
+func fileListJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/file-list.js")
+	if err != nil {
+		t.Fatalf("reading the embedded file-list.js: %v", err)
+	}
+	return string(b)
+}
+
+func fileDetailJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/file-detail.js")
+	if err != nil {
+		t.Fatalf("reading the embedded file-detail.js: %v", err)
 	}
 	return string(b)
 }
@@ -715,10 +750,17 @@ func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
 	// And the two are actually joined: the element refuses an incomplete set
 	// of services, so a rename on either side fails at wiring time - but only
 	// if the wiring names it at all.
-	if !strings.Contains(page, "setRunTableServices({ toggleRun, cancelRun, setPriority, detailShown: refreshAgain });") {
-		t.Error("app.js does not hand setPriority to the table element - the ▲/▼ buttons would call an " +
-			"injected service that was never injected, and setServices' own check is what turns that into " +
-			"a failure at load rather than at the first press")
+	// TOR-195 turned detailShown from an alias into a one-line call (the
+	// detail is an element now, so what it does when it comes on screen is
+	// its own method), which is why this reads the names it is about rather
+	// than the whole call verbatim - a set that grows a fifth service should
+	// not fail a test about setPriority.
+	for _, want := range []string{"setRunTableServices({", "toggleRun,", "cancelRun,", "setPriority,"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("app.js's setRunTableServices call does not contain %q - the ▲/▼ buttons would call "+
+				"an injected service that was never injected, and setServices' own check is what turns "+
+				"that into a failure at load rather than at the first press", want)
+		}
 	}
 
 	// The level sent must be ABSOLUTE, clamped to the band, never a step: two
@@ -1106,11 +1148,17 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 // there is no state for one to be drawn from. Both halves are checked, since
 // either alone could be satisfied while the other brought it back.
 func TestFileDoneNoLongerLinksManifest(t *testing.T) {
-	page := appJS(t)
+	// The link is one FILE's, so since TOR-195 it is file-detail.js's - and
+	// "there is no field to draw one from" has to be swept over every module
+	// that could hold one, which is why the negative half below reads the
+	// whole front end rather than one file.
+	page := fileDetailJS(t)
 	events := eventsJS(t)
 
+	sweep := strings.Join([]string{appJS(t), stateJS(t), events, runTableJS(t),
+		runDetailJS(t), fileListJS(t), page}, "\n")
 	for _, gone := range []string{"link(ev.manifest_url", "link(fentry.manifestURL", "manifestURL"} {
-		if strings.Contains(page+"\n"+events, gone) {
+		if strings.Contains(sweep, gone) {
 			t.Errorf("the front end still contains %q - the page should not offer a manifest link at all, "+
 				"live or reopened from disk, and should not keep the field to draw one from", gone)
 		}
@@ -1123,8 +1171,9 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 		t.Error("events.js's file_done handler no longer records the contact sheet on the file entry - " +
 			"there would be nothing for the page to draw a link from")
 	}
-	if !strings.Contains(page, `link(fentry.sheetURL, "contact sheet")`) {
-		t.Error("app.js no longer links fentry.sheetURL as \"contact sheet\" - that link should stay")
+	if !strings.Contains(page, `link(this.fentry.sheetURL, "contact sheet")`) {
+		t.Error("file-detail.js no longer links the file entry's sheetURL as \"contact sheet\" - " +
+			"that link should stay")
 	}
 }
 

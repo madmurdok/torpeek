@@ -276,10 +276,20 @@ func TestTheRunTableRefusesAnIncompleteServiceSet(t *testing.T) {
 	// And the page hands over all four. A name that exists on one side only
 	// is exactly what the throw above turns into a load-time failure - but
 	// only if the call is there to make.
-	if !strings.Contains(liveJS(t, appJS(t)),
-		"setRunTableServices({ toggleRun, cancelRun, setPriority, detailShown: refreshAgain });") {
-		t.Error("app.js does not wire the table's four services in its bootstrap - the element would " +
+	// Read as the four NAMES rather than as the call verbatim, because
+	// TOR-195 turned detailShown from an alias into a one-line call onto the
+	// detail element: the contract the table declares is unchanged, and this
+	// test is about the contract.
+	page := liveJS(t, appJS(t))
+	if !strings.Contains(page, "setRunTableServices({") {
+		t.Fatal("app.js does not wire the table's services in its bootstrap - the element would " +
 			"throw at the first row click instead")
+	}
+	for _, want := range []string{"toggleRun,", "cancelRun,", "setPriority,", "detailShown:"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("app.js's setRunTableServices call does not hand over %q - the element would "+
+				"throw at the first press of the control that needs it", want)
+		}
 	}
 }
 
@@ -319,6 +329,10 @@ func TestTheTableOwnsTheRowAndTheDetailIsNotItsBusiness(t *testing.T) {
 	// app.js's own half declares; a mention of any of them here would mean the
 	// table had started reading or writing a detail, which is the tangle
 	// TOR-195 would then have to unpick.
+	// SINCE TOR-195 THESE ARE FIELDS OF THREE OTHER ELEMENTS rather than of
+	// the entry, which makes the ban stronger rather than weaker: the table
+	// could not read one now even if it tried, and naming one here would mean
+	// somebody had put it back on the shared record.
 	for _, forbidden := range []string{
 		"detailEl", "detailBadge", "detailTitle", "detailCancel", "detailError",
 		"torrentSummary", "torrentActions", "torrentSave", "torrentSend", "torrentNote",
@@ -355,7 +369,11 @@ func TestTheTableOwnsTheRowAndTheDetailIsNotItsBusiness(t *testing.T) {
 		t.Error("app.js reaches for no row element at all, so the scan above verified nothing - the " +
 			"aria-controls line it is anchored on has either moved or been renamed")
 	}
-	if !strings.Contains(page, `rowParts.rowToggle.setAttribute("aria-controls", detailEl.id);`) {
+	// SINCE TOR-195 THE ID IS ASKED FOR rather than reached for: the detail is
+	// an element, and regionId is the one thing about it the row's half of the
+	// wiring needs. Same line, same one exception, one less field on the
+	// shared record.
+	if !strings.Contains(page, `rowParts.rowToggle.setAttribute("aria-controls", detail.regionId);`) {
 		t.Error("app.js does not name the detail's region on the row's toggle - a disclosure control " +
 			"that names nothing leaves the region it opens unannounced")
 	}
