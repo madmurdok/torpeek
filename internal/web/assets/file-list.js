@@ -1463,4 +1463,12 @@ class FileList extends HTMLElement {
 // defined before it creates the first one.
 customElements.define("file-list", FileList);
 
-export { FileList, LIST, WHY_NOT_VIDEO, framesLabel, setServices };
+// THE SURFACE IS THE CLASS PLUS setServices (TOR-209's rule, applied by
+// TOR-208). LIST, WHY_NOT_VIDEO and framesLabel were imported by nobody -
+// checked across the whole repository - and the Go tests that name them
+// (filelist_test.go's WHY_NOT_VIDEO check, tick_test.go's framesLabel one,
+// detailtree_test.go's LIST) all read this module's TEXT, which needs no
+// export. setServices stays because app.js imports it by name and it is point
+// 7 of the element pattern. See frame-panel.js's own export block for the full
+// reasoning, and for why an extra name here is not free any more.
+export { FileList, setServices };

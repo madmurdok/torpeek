@@ -1,0 +1,204 @@
+<!-- @dsCard group="Table" name="RunTable" subtitle="Nine columns, five row states, and absent is never zero" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>RunTable</title>
+<!-- The design system's own entry sheet, so this card is drawn by the same
+     rules a rendered design gets. Three of its eight files reach this
+     component: table.css draws the rows, the cells and the badges, detail.css
+     draws the hidden detail row's own cell, and intake.css carries the bare
+     `select, button` rules the queue arrows and the cancel cross inherit. -->
+<link rel="stylesheet" href="../../../styles.css">
+<style>
+  body { margin: 0; padding: 1.2rem; background: var(--bg); }
+  /* The pane the table lives in on the page, so the nine columns are measured
+     against a width rather than against the card's own. */
+  .card-pane { max-width: 74rem; margin: 0 auto; }
+</style>
+
+<!-- STATIC ON PURPOSE, AND WHAT THAT COSTS THIS PARTICULAR CARD.
+     A preview card renders WITHOUT scripts, so everything <run-table> computes
+     in connectedCallback has to be here as text:
+
+       - THE SIX LIVE COLUMN HEADERS. index.html ships three labelled headers
+         plus the unlabelled actions one; buildLiveColumnHeaders() inserts
+         Peers, Seeds, Down, Up, Avail and Queue from run-table.js's
+         LIVE_COLUMNS, before the actions header. Ten <th> in all - nine
+         sortable, plus the actions column - and that ten is the number the
+         element uses as the detail row's colSpan. Their classes, the unit
+         line under Avail and their titles are all that function's, taken from
+         it rather than written again.
+       - EVERY <th>'s WIDTH, as `width: var(--col-w-KEY)`. Not decoration:
+         .run-table is `table-layout: fixed`, which reads each column's width
+         off its <th> alone, and wireColumnResizers() is what sets these on the
+         nine sortable headers. Without them the columns come out equal and the
+         table is not the component. The actions header is deliberately
+         excluded: it carries no data-sort, so it keeps the plain 3.8rem
+         table.css gives it and grows no drag handle - there is no column past
+         it for a border to belong to.
+       - THE DRAG HANDLES (.col-resizer), one per sortable header, appended by
+         that same function.
+       - EVERY ROW. newRow() builds both <tr>s per entry and syncRow() fills
+         ten cells from state.js derivations; the five rows below are what that
+         pair writes for five different entries.
+
+     THE ROWS ARE CHOSEN TO DIFFER, because this project's most-repeated rule -
+     ABSENT IS NOT ZERO - is only visible in a mix. A queued row showing 0
+     peers at 0 KB/s would be indistinguishable from a running torrent that
+     found nobody, and those are opposite situations. So: one row with a real
+     reading in every live cell, and four with none, each absent for its own
+     reason and each saying which in that cell's own title. -->
+<div class="card-pane">
+<run-table>
+<section id="runs" class="runs">
+  <h2 class="runs-title">Torrents</h2>
+  <div class="run-table-wrap">
+    <table id="run-table" class="run-table">
+      <thead>
+        <tr>
+            <th scope="col" data-sort="name" style="width: var(--col-w-name)" tabindex="0" role="button" aria-sort="none">Name<span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="when" style="width: var(--col-w-when)" tabindex="0" role="button" aria-sort="descending">Added<span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="status" style="width: var(--col-w-status)" tabindex="0" role="button" aria-sort="none">Status<span class="col-resizer" aria-hidden="true"></span></th>
+            <!-- THE SIX BELOW ARE THE ELEMENT'S, and this is the whole reason this
+                 card carries markup index.html does not: buildLiveColumnHeaders()
+                 inserts them from run-table.js's LIVE_COLUMNS before the actions
+                 header, and a card runs no scripts. Every class, span, unit line
+                 and title here is what that function writes. -->
+            <th scope="col" data-sort="peers" class="run-cell-metric-header" style="width: var(--col-w-peers)" tabindex="0" role="button" aria-sort="none"
+                title="Connected peers. A dash means this torrent has no client (queued, needs-action, or a row read off disk) - not zero peers."><span class="run-th-label">Peers</span><span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="seeds" class="run-cell-metric-header" style="width: var(--col-w-seeds)" tabindex="0" role="button" aria-sort="none"
+                title="Connected seeds. A dash means no client, not zero seeds."><span class="run-th-label">Seeds</span><span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="download_bps" class="run-cell-metric-header" style="width: var(--col-w-download_bps)" tabindex="0" role="button" aria-sort="none"
+                title="Download speed. A dash means no reading yet - before a run&#x27;s second heartbeat a rate cannot be computed - never 0 B/s."><span class="run-th-label">Down</span><span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="upload_bps" class="run-cell-metric-header" style="width: var(--col-w-upload_bps)" tabindex="0" role="button" aria-sort="none"
+                title="Upload speed. A dash means no reading yet, never 0 B/s."><span class="run-th-label">Up</span><span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="availability" class="run-cell-metric-header run-cell-availability-header" style="width: var(--col-w-availability)" tabindex="0" role="button" aria-sort="none"
+                title="Swarm availability, in copies per piece - not a percentage. Below 1.0 means pieces are missing from the swarm; above 1.0 (commonly) means it is healthy. A dash means this torrent has not been asked for bytes yet, so nothing has reported what the swarm holds."><span class="run-th-label">Avail</span><span class="run-th-unit">copies/piece</span><span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" data-sort="priority" class="run-cell-metric-header run-cell-queue-header" style="width: var(--col-w-priority)" tabindex="0" role="button" aria-sort="none"
+                title="The order torrents were added to this server: 1 is the first one you added, and the number never changes - not when a torrent finishes, not when you reprioritise it, not when you pick its files. Under it, while a row is still waiting, is its place in the queue as the server actually holds it (&quot;#2&quot; means one torrent is ahead of it), which is the number that moves. Use ▲ and ▼ at the end of a waiting row to change that; priority orders the torrents that are WAITING and never interrupts one that is already downloading. A dash means this row was added by an earlier run of the server, so this session never gave it a number - the Added column is what dates it."><span class="run-th-label">Queue</span><span class="col-resizer" aria-hidden="true"></span></th>
+            <th scope="col" class="run-actions-header" aria-hidden="true"></th>
+        </tr>
+      </thead>
+      <tbody id="run-list">
+      <!-- 1. RUNNING, and the only row here with a reading in every live cell.
+           entry.live carries peers, seeds, both rates and the swarm figure, so
+           every one of them is a measurement - which is what makes the four
+           rows under it legible as ABSENCE rather than as zero. The segmented
+           bar is TOR-123's, and renderRunProgress draws it only on a row that
+           is still cancellable: 7 of 20 frames is 7 segments at --fill 1.000
+           and 13 at 0.000. -->
+      <tr class="run-row" data-state="running" data-expanded="false">
+        <td class="run-cell-name"><button type="button" class="run-row-main" aria-expanded="false"><span class="run-toggle-icon" aria-hidden="true"></span><span class="run-name" title="Sintel.2010.1080p.BluRay.x264">Sintel.2010.1080p.BluRay.x264</span></button></td>
+        <td class="run-cell-when" title="Tue Sep 08 2026 21:41:03">Sep 8 21:41</td>
+        <td class="run-cell-status"><span class="run-badge" data-state="running">running</span><span class="run-meta" title="7/20 frames" data-stall="false">7/20 frames</span><span class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="20" aria-valuenow="7" aria-label="7 of 20 frames captured"><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 1.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span><span class="run-progress-seg" style="--fill: 0.000"></span></span></td>
+        <td class="run-cell-metric run-cell-peers" title="24 connected peer(s)" data-absent="false">24</td>
+        <td class="run-cell-metric run-cell-seeds" title="6 connected seed(s)" data-absent="false">6</td>
+        <td class="run-cell-metric run-cell-down" title="Download speed: 1.8 MB/s" data-absent="false">1.8 MB/s</td>
+        <td class="run-cell-metric run-cell-up" title="Upload speed: 60.0 KB/s" data-absent="false">60.0 KB/s</td>
+        <td class="run-cell-metric run-cell-availability" title="2.41 copies per piece, on average, across the swarm - not a percentage. 3 of 1284 pieces are held by no connected peer." data-absent="false"><span class="run-cell-availability-value">2.41×</span><span class="run-meta run-cell-availability-meta">3 missing</span></td>
+        <td class="run-cell-metric run-cell-queue" title="added 3rd to this server - a number that never changes. not waiting for a slot" data-absent="false"><span class="run-cell-queue-value">3</span><span class="run-meta run-cell-queue-meta"></span></td>
+        <td class="run-cell-actions"><button type="button" class="run-priority run-priority-up" hidden>&#9650;</button><button type="button" class="run-priority run-priority-down" hidden>&#9660;</button><button type="button" class="run-cancel" title="Cancel">&#10005;</button></td>
+      </tr>
+      <!-- THE SECOND <tr> OF THE PAIR. Every entry owns two adjacent rows, and
+           the row's `hidden` attribute is the whole of collapse - no rule in
+           detail.css sets `display` on .run-detail-row, so the UA's own
+           [hidden] wins uncontested. It draws nothing here, which is the
+           point: this card is the table, and what a row opens onto is
+           RunDetail's own card. The colSpan is read off the header count by
+           the element rather than written as a literal, and it is TEN: the nine
+           sortable columns plus the unlabelled actions one. -->
+      <tr class="run-detail-row" hidden><td class="run-detail-cell" colspan="10"></td></tr>
+      <!-- 2. QUEUED, waiting second, and its name is PROVISIONAL: it came from
+           the magnet's own dn= parameter, which anybody can put anything into,
+           so .run-name-provisional keeps it visibly distinct from a name the
+           torrent's own metadata confirmed (TOR-117). Every live figure is
+           absent because there is no client yet - not zero. -->
+      <tr class="run-row" data-state="queued" data-expanded="false">
+        <td class="run-cell-name"><button type="button" class="run-row-main" aria-expanded="false"><span class="run-toggle-icon" aria-hidden="true"></span><span class="run-name run-name-provisional" title="Big Buck Bunny 4K — from the magnet link, not yet confirmed by the torrent&#x27;s own metadata">Big Buck Bunny 4K</span></button></td>
+        <td class="run-cell-when" title="Tue Sep 08 2026 21:44:17">Sep 8 21:44</td>
+        <td class="run-cell-status"><span class="run-badge" data-state="queued">queued</span><span class="run-meta" data-stall="false"></span><span class="run-progress" hidden></span></td>
+        <td class="run-cell-metric run-cell-peers" title="no reading yet - this torrent has no client (queued, needs-action, or not yet started)" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-seeds" title="no reading yet - this torrent has no client (queued, needs-action, or not yet started)" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-down" title="no reading yet - this torrent has no client (queued, needs-action, or not yet started)" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-up" title="no reading yet - this torrent has no client (queued, needs-action, or not yet started)" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-availability" title="no reading yet - this torrent has no client (queued, needs-action, or not yet started)" data-absent="true"><span class="run-cell-availability-value">—</span><span class="run-meta run-cell-availability-meta"></span></td>
+        <td class="run-cell-metric run-cell-queue" title="added 5th to this server - a number that never changes. waiting at position 2 of the queue the server actually holds, at normal priority" data-absent="false"><span class="run-cell-queue-value">5</span><span class="run-meta run-cell-queue-meta">#2</span></td>
+        <!-- The two verbs a WAITING torrent has, in the column its verbs
+             already live in. Absent - not disabled - on every row the queue has
+             nothing to say about, and disabled only at the ends of the band, so
+             the pair never jumps sideways under the cursor. -->
+        <td class="run-cell-actions"><button type="button" class="run-priority run-priority-up" title="move up the queue (to high priority)" aria-label="Move this torrent up the queue">&#9650;</button><button type="button" class="run-priority run-priority-down" title="move down the queue (to low priority)" aria-label="Move this torrent down the queue">&#9660;</button><button type="button" class="run-cancel" title="Cancel">&#10005;</button></td>
+      </tr>
+      <tr class="run-detail-row" hidden><td class="run-detail-cell" colspan="10"></td></tr>
+      <!-- 3. FINISHED, AND PARTIAL. "partial" is not a state the server records:
+           it is done plus entry.partial, which GET /runs computes from the
+           counts - so badgeState() paints it its own colour rather than done's
+           green, which would say the opposite of the word inside it.
+           THIS ROW IS TOR-202. A run that has REACHED done has no client any
+           more, so every live cell is absent with "this run has finished" as
+           its reason rather than "not yet started", which would be backwards.
+           And no bar: a full bar on a done run tells nobody anything. -->
+      <tr class="run-row" data-state="partial" data-expanded="false">
+        <td class="run-cell-name"><button type="button" class="run-row-main" aria-expanded="false"><span class="run-toggle-icon" aria-hidden="true"></span><span class="run-name" title="Tears.of.Steel.2012.Season.Pack">Tears.of.Steel.2012.Season.Pack</span></button></td>
+        <td class="run-cell-when" title="Tue Sep 08 2026 19:02:55">Sep 8 19:02</td>
+        <td class="run-cell-status"><span class="run-badge" data-state="partial">partial</span><span class="run-meta" title="17/20 frames" data-stall="false">17/20 frames</span><span class="run-progress" hidden></span></td>
+        <td class="run-cell-metric run-cell-peers" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-seeds" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-down" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-up" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-availability" title="no reading - this run has finished, and no client is connected any more" data-absent="true"><span class="run-cell-availability-value">—</span><span class="run-meta run-cell-availability-meta"></span></td>
+        <td class="run-cell-metric run-cell-queue" title="added 1st to this server - a number that never changes. not waiting for a slot" data-absent="false"><span class="run-cell-queue-value">1</span><span class="run-meta run-cell-queue-meta"></span></td>
+        <!-- No Cancel: cancellable() is false for a finished run, and a control
+             that cannot do anything is worse than no control, because it
+             invites the click. -->
+        <td class="run-cell-actions"><button type="button" class="run-priority run-priority-up" hidden>&#9650;</button><button type="button" class="run-priority run-priority-down" hidden>&#9660;</button><button type="button" class="run-cancel" title="Cancel" hidden>&#10005;</button></td>
+      </tr>
+      <tr class="run-detail-row" hidden><td class="run-detail-cell" colspan="10"></td></tr>
+      <!-- 4. FAILED, and the error IS the row's second line: metaLabel() falls
+           through to entry.error when there is no stall, no metadata wait and
+           no progress reading. This is the row that gets Retry rather than a
+           top-up one level in - a run that produced nothing has nothing to
+           finish. -->
+      <tr class="run-row" data-state="failed" data-expanded="false">
+        <td class="run-cell-name"><button type="button" class="run-row-main" aria-expanded="false"><span class="run-toggle-icon" aria-hidden="true"></span><span class="run-name" title="Cosmos.Laundromat.2015.1080p">Cosmos.Laundromat.2015.1080p</span></button></td>
+        <td class="run-cell-when" title="Tue Sep 08 2026 18:30:11">Sep 8 18:30</td>
+        <td class="run-cell-status"><span class="run-badge" data-state="failed">failed</span><span class="run-meta" title="no peer offered the pieces for any capture point" data-stall="false">no peer offered the pieces for any capture point</span><span class="run-progress" hidden></span></td>
+        <td class="run-cell-metric run-cell-peers" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-seeds" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-down" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-up" title="no reading - this run has finished, and no client is connected any more" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-availability" title="no reading - this run has finished, and no client is connected any more" data-absent="true"><span class="run-cell-availability-value">—</span><span class="run-meta run-cell-availability-meta"></span></td>
+        <td class="run-cell-metric run-cell-queue" title="added 4th to this server - a number that never changes. not waiting for a slot" data-absent="false"><span class="run-cell-queue-value">4</span><span class="run-meta run-cell-queue-meta"></span></td>
+        <td class="run-cell-actions"><button type="button" class="run-priority run-priority-up" hidden>&#9650;</button><button type="button" class="run-priority run-priority-down" hidden>&#9660;</button><button type="button" class="run-cancel" title="Cancel" hidden>&#10005;</button></td>
+      </tr>
+      <tr class="run-detail-row" hidden><td class="run-detail-cell" colspan="10"></td></tr>
+      <!-- 5. READ OFF DISK, from a run of the server before this one. It is the
+           only row whose QUEUE cell is absent too: the arrival counter cannot
+           honestly outlive its process, so this session never gave this row a
+           number - and that absence means exactly that, never "not waiting".
+           Its second line is the disk row's own bare ratio,
+           complete/selected, which is the thing the badge cannot say. -->
+      <tr class="run-row" data-state="disk" data-expanded="false">
+        <td class="run-cell-name"><button type="button" class="run-row-main" aria-expanded="false"><span class="run-toggle-icon" aria-hidden="true"></span><span class="run-name" title="Elephants.Dream.2006.1080p">Elephants.Dream.2006.1080p</span></button></td>
+        <td class="run-cell-when" title="Sun Sep 06 2026 11:12:40">Sep 6 11:12</td>
+        <td class="run-cell-status"><span class="run-badge" data-state="disk">on disk</span><span class="run-meta" title="6 of 6 file(s) complete" data-stall="false">6/6</span><span class="run-progress" hidden></span></td>
+        <td class="run-cell-metric run-cell-peers" title="no reading - this row was read off disk, never a live client" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-seeds" title="no reading - this row was read off disk, never a live client" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-down" title="no reading - this row was read off disk, never a live client" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-up" title="no reading - this row was read off disk, never a live client" data-absent="true">—</td>
+        <td class="run-cell-metric run-cell-availability" title="no reading - this row was read off disk, never a live client" data-absent="true"><span class="run-cell-availability-value">—</span><span class="run-meta run-cell-availability-meta"></span></td>
+        <td class="run-cell-metric run-cell-queue" title="no arrival number: this row was read off disk, from a run of the server before this one" data-absent="true"><span class="run-cell-queue-value">—</span><span class="run-meta run-cell-queue-meta"></span></td>
+        <td class="run-cell-actions"><button type="button" class="run-priority run-priority-up" hidden>&#9650;</button><button type="button" class="run-priority run-priority-down" hidden>&#9660;</button><button type="button" class="run-cancel" title="Cancel" hidden>&#10005;</button></td>
+      </tr>
+      <tr class="run-detail-row" hidden><td class="run-detail-cell" colspan="10"></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <!-- Hidden by newRow() itself the moment there is a first row. -->
+  <p id="run-list-empty" class="run-list-empty" hidden>Nothing yet - paste a magnet link to start.</p>
+</section>
+</run-table>
+</div>
+
+<!-- No script. The sorting, the column drags, the accordion and the one-second
+     stall ticker belong to <run-table> in _ds_bundle.js and are exercised
+     where a design actually runs, not in a thumbnail. -->

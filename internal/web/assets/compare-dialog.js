@@ -546,4 +546,10 @@ class CompareDialog extends HTMLElement {
 // Native, no bundler.
 customElements.define("compare-dialog", CompareDialog);
 
+// Already the whole surface - the class plus setServices - and TOR-208 leaves
+// it alone rather than touching it for symmetry. setServices is the
+// irreducible residue on all five of these modules: app.js imports it by name
+// and it is point 7 of the element pattern, so it cannot be dropped to tidy a
+// consumer's index. See frame-panel.js's own export block for why an extra
+// name here is not free any more.
 export { CompareDialog, setServices };

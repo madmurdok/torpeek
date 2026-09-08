@@ -1267,14 +1267,13 @@ class FileDetail extends HTMLElement {
 // before it creates the first one.
 customElements.define("file-detail", FileDetail);
 
-export {
-  FileDetail,
-  BODY,
-  MAX_BLOCKS,
-  REACH_FLOOR,
-  SHIFT_REASON,
-  FAILURE_REASON,
-  cellTitle,
-  detailFrame,
-  setServices,
-};
+// THE SURFACE IS THE CLASS PLUS setServices (TOR-209's rule, applied by
+// TOR-208), and this module is where it saved the most: seven names went.
+// BODY, MAX_BLOCKS, REACH_FLOOR, SHIFT_REASON, FAILURE_REASON, cellTitle and
+// detailFrame were imported by NOBODY - checked across the whole repository -
+// and every Go test that names one of them (perfiledetail_test.go's BODY,
+// eventstate_test.go's detailFrame) lifts it out of this module's TEXT, which
+// needs no export. setServices stays because app.js imports it by name and it
+// is point 7 of the element pattern. See frame-panel.js's own export block for
+// the full reasoning, and for why an extra name here is not free any more.
+export { FileDetail, setServices };

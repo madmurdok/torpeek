@@ -1,14 +1,62 @@
 # torpeek ui
 
-torpeek's front end, as a design system. One component ships today and five
-follow it, in the shape this one established.
+torpeek's front end, as a design system. All six of its custom elements ship
+here, in the shape the frame panel established.
 
 ## Components
 
-- FramePanel - full-size frame viewer (`<frame-panel>`)
+Grouped by area, which is also how the stylesheets are split - though the two
+splits do not line up, and each component's own `.prompt.md` says where they
+part company.
 
-Five more follow the same shape: `<run-table>`, `<run-detail>`, `<file-list>`,
-`<file-detail>`, `<compare-dialog>`.
+**Table**
+
+- RunTable - every torrent, live or on disk, as nine columns that sort, resize
+  and open (`<run-table>`)
+- RunDetail - what an expanded row says about the RUN, and the price of
+  finishing it (`<run-detail>`)
+
+**Files**
+
+- FileList - every file the torrent holds, what a tick spends, and what an
+  un-tick would do (`<file-list>`)
+- FileDetail - one file's metadata, where its frames came from, and the frame
+  grid (`<file-detail>`)
+
+**Panels**
+
+- FramePanel - full-size frame viewer (`<frame-panel>`)
+- CompareDialog - two encodes of one film, on one rectangle, one keypress
+  apart (`<compare-dialog>`)
+
+### `setServices` is not a component
+
+Five of the six modules export a second name, `setServices`, and the checker
+indexes a module's named exports as components - so five entries in its list
+are that function rather than anything renderable. They are not a bug and they
+cannot be dropped: `app.js` imports each one BY NAME to inject the requests,
+the log and the page's own error line, and the injected-services setter is
+point 7 of the element pattern in `docs/front-end.md`. Removing one to tidy
+this index would break the page.
+
+Every other dead export WAS dropped (TOR-209's rule, applied across all six):
+twenty-odd entries for six components became eleven - the six classes, and
+five setters.
+
+### What a design is given, per component
+
+Two shapes, and which one applies is decided by where the element's markup
+lives rather than by preference:
+
+| | markup | children in JSX | what the card is |
+|---|---|---|---|
+| RunTable, CompareDialog, FramePanel | declarative in `index.html`, wrapped | **survive** - compose freely | the finished state, statically |
+| RunDetail, FileList, FileDetail | a template the element writes into itself | **destroyed** by its own `innerHTML` | the only sample there is |
+
+For all six, the card is the markup to copy. None of the six can be driven from
+props alone: five of them are built from a **run entry**, which is assembled
+out of `state.js`'s `newRunState`, `<run-table>`'s own row parts and `app.js`'s
+detail half, and nothing outside a running torpeek can mint one.
 
 ## What this is, and what it is not
 
@@ -40,14 +88,34 @@ working screen was built against `<frame-panel>`: the element, the markup and
 `panel.open()` composed without special handling, and mounting a custom element
 turned out to be a path the agent already had.
 
-That is why the other five follow rather than wait.
+That is why the other five follow rather than wait, and they now have.
 
 ## The stylesheets' order is load-bearing
 
-`styles.css` `@import`s three files in the order `index.html` links them, and
-at equal specificity the later FILE wins. torpeek has four rule pairs that
+`styles.css` `@import`s all eight files in the order `index.html` links them,
+and at equal specificity the later FILE wins. torpeek has four rule pairs that
 depend on it. Reordering those imports is a design change, not a formatting
 one.
+
+**And the split is by AREA, not by component.** The six elements do not map
+onto the eight stylesheets, in three places worth naming here because a shorter
+closure would silently break one of them:
+
+- **intake.css is not the intake's.** It carries `select, button`,
+  `input[type="number"]`, `button:hover:not(:disabled)`, `button:disabled` and
+  `select:focus-visible` as BARE ELEMENT rules, so every control in every one
+  of the six is drawn by it - the run detail's Cancel/Top up/Retry, the file
+  list's Select all and Clear frames, a file's Regenerate/Compare and its
+  frame-count field, and both of the compare dialog's pickers. It has to come
+  BEFORE the area files, which override it per control.
+- **framepanel.css is not only the panel's.** `.grid`, `.thumb*`, `.reach*`
+  and the `.avail-swarm` chip live there and are built by `<file-detail>`.
+- **detail.css holds `.run-table .run-detail-cell`** - a rule about a cell
+  `<run-table>` builds, whose selector *requires* the table's own class, which
+  is why `<run-detail>` cannot be drawn standalone and look right.
+
+So "one stylesheet per component" is not available today. The export ships the
+whole closure and each `.prompt.md` names what its component needs.
 
 ## The ground is dark, and there is no other
 
