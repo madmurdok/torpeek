@@ -418,4 +418,18 @@ class FramePanel extends HTMLElement {
 // before the page's own <frame-panel> is upgraded.
 customElements.define("frame-panel", FramePanel);
 
-export { FramePanel, PAN_STEP, ARROWS };
+// THE SURFACE IS THE CLASS, AND NOTHING ELSE (TOR-209). PAN_STEP and ARROWS
+// used to be exported beside it and were imported by NOBODY - checked across
+// the whole repository: they are read only at panBySteps and the keydown
+// handler above, and app.js takes this module with a bare
+// `import "./frame-panel.js"` for the side effect on the line before this
+// comment's own subject. So this narrows a DEAD export, which is a thing this
+// module wants on its own terms; it is not the front end being reshaped to
+// suit a consumer, and .design-sync/NOTES.md's rule against that still holds.
+//
+// It has a consequence for the design export worth knowing before adding a
+// name here: Claude Design's checker indexes a component module's named
+// exports as COMPONENTS, so every extra name in this block becomes an entry a
+// design agent is offered and can do nothing with. PAN_STEP and ARROWS were
+// two such entries on the smallest element in the project.
+export { FramePanel };
