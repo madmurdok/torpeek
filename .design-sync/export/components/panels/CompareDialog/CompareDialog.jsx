@@ -23,7 +23,18 @@
  * compare-dialog.js's setServices({url, log}) BEFORE open() is called -
  * open() is a fetch, and with no url() injected it throws.
  */
-import "./compare-dialog.js";
+// The module is imported from ../../../modules/ rather than from beside this
+// file, and that path is load-bearing (TOR-208). Claude Design's checker takes
+// every UPPERCASE-initial export of a module it finds under components/ as a
+// COMPONENT. state.js has to travel with every element - each one imports
+// ./state.js - and its five uppercase exports (ABSENT, FINAL and the three
+// PRIORITY_* levels) are constants, not components: PRIORITY_HIGH is the
+// number 1. Shipped inside the component folders they became five entries a
+// design agent is offered and can do nothing with. Nothing outside
+// components/ is scanned - the project's own templates/ carries .js files and
+// none of them is indexed - so one shared modules/ folder keeps the index
+// honest AND ships one copy of each module instead of state.js five times.
+import "../../../modules/compare-dialog.js";
 import { useEffect, useRef } from "react";
 
 export function CompareDialog({ open = false, infohash, index = 0, onClose }) {
