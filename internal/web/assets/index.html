@@ -7,7 +7,32 @@
 <!-- Every reference here is relative on purpose. The UI has to work under an
      arbitrary base path such as /torpeek behind a reverse proxy, and a single
      leading slash anywhere would break that (REQUIREMENTS.md section 3.3). -->
-<link rel="stylesheet" href="app.css">
+<!-- tokens.css first, then app.css's own former contents split by area
+     (TOR-190), each its own <link> rather than an @import - extending
+     TOR-189's decision rather than switching away from it partway through:
+     no build step ever inlines an @import away, so an @import chain would be
+     a serial fetch waterfall (the browser cannot discover the next
+     stylesheet until it has parsed the one before it), where a flat list of
+     <link>s here lets the browser fetch all of them in parallel and keeps
+     the load order - which IS load-bearing, see filelist.css's own header
+     comment on the one pair of rules that still depends on it - visible in
+     this file instead of hidden inside a CSS-level import.
+
+     base.css (page shell) comes first, ahead of every area file, for the
+     same reason tokens.css comes first of all: the typeface and the page's
+     bare element reset are read by everything after them. The six area
+     files that follow are ordered top-to-bottom the way they appear in the
+     page (intake, table, the table row's own detail, the file list nested
+     inside that, the frame panel nested inside THAT), then the compare
+     dialog, which stands apart from the table entirely. -->
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="intake.css">
+<link rel="stylesheet" href="table.css">
+<link rel="stylesheet" href="detail.css">
+<link rel="stylesheet" href="filelist.css">
+<link rel="stylesheet" href="framepanel.css">
+<link rel="stylesheet" href="compare.css">
 </head>
 <body>
 <div class="workspace">
@@ -55,6 +80,19 @@
          explain it, and the one genuinely empty state (no torrents at all)
          already has #run-list-empty. app.js builds both rows per entry, so
          the tbody below stays empty here. -->
+    <!-- TOR-194: the table's BEHAVIOUR lives in run-table.js as a custom
+         element, following the pattern frame-panel.js set out; its structure
+         stays here, wrapped and not re-indented, so the comment above stays
+         next to the markup it describes. The wrapper goes OUTSIDE the whole
+         section, not around the <table> alone, because #run-list-empty is one
+         of the element's own parts and it sits outside .run-table-wrap.
+         Light DOM for the reason frame-panel.js gives: table.css's rules
+         would not reach inside a shadow root, and a <table> with its own
+         stylesheet in a string is the last place this project wants one.
+         Three of the nine column headers are here and six are built by the
+         element (LIVE_COLUMNS) - see buildLiveColumnHeaders for why the six
+         are not written out below. -->
+    <run-table>
     <section id="runs" class="runs">
       <h2 class="runs-title">Torrents</h2>
       <div class="run-table-wrap">
@@ -72,6 +110,7 @@
       </div>
       <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
     </section>
+    </run-table>
   </div>
 </div>
 
@@ -91,6 +130,13 @@
      exactly the same place one keypress later and the eye compares against
      its own afterimage. Everything that DOES change on a flip - which arm is
      live - is either a colour or sits below the picture. -->
+<!-- TOR-193: the dialog's BEHAVIOUR lives in compare-dialog.js as a custom
+     element, following the frame panel's pattern; its structure stays here,
+     wrapped and not re-indented, so the comment above about what must not
+     move on a flip stays next to the markup it constrains. Light DOM for the
+     reason frame-panel.js sets out: compare.css's rules would not reach
+     inside a shadow root. -->
+<compare-dialog>
 <dialog id="compare" class="compare">
   <button id="compare-close" class="lightbox-close" type="button" aria-label="Close">&times;</button>
   <header class="compare-head">
@@ -124,6 +170,7 @@
   <p id="compare-note" class="compare-note"></p>
   <p class="compare-keys">← → position · space, ↑ ↓ or click flips · 1 2 pick a set · esc closes</p>
 </dialog>
+</compare-dialog>
 
 <!-- The frame, full size (TOR-172). The panel is HUD chrome in the reference
      sheet's language - hard corners, three L-brackets, one chamfered corner,
@@ -139,6 +186,16 @@
      decide the fit. The close button and the caption live INSIDE it on
      purpose - both sit over the footage, both carry their own ground for it
      (TOR-122), and both stay put while the picture pans beneath them. -->
+<!-- TOR-192: the panel's BEHAVIOUR lives in frame-panel.js as a custom
+     element; its structure stays here. The element finds its parts inside
+     itself, so this markup is what it operates on rather than a template
+     literal in the module - which is what keeps the comments below (the
+     chamfer, the scrims, the bracket placement) next to the elements they
+     explain. Light DOM on purpose: framepanel.css's rules would not reach
+     inside a shadow root, and the module's header says what that would have
+     cost. The children are not re-indented, so this wrapper reads as what it
+     is - a boundary, not a new level of structure. -->
+<frame-panel>
 <dialog id="lightbox" class="lightbox">
   <p class="lightbox-bar">
     <span class="lightbox-tab">
@@ -166,7 +223,22 @@
        available to solve it. -->
   <span class="lightbox-marks" aria-hidden="true"></span>
 </dialog>
+</frame-panel>
 
-<script src="app.js"></script>
+<!-- type="module" is not optional and not a style choice: since TOR-191 split
+     the page's script into app.js -> events.js -> state.js, app.js opens with
+     `import`, which is a syntax error in a classic script. A page served
+     without it does not partly work - it parses nothing at all.
+
+     It also means the two modules must be SERVED, not merely embedded: the
+     browser fetches them itself, by the relative paths in app.js's own import
+     statements, so they answer under the base path the way app.js does
+     (TestTheFrontendUsesNoAbsolutePaths keeps those paths relative, and
+     TestServesEmbeddedFrontend asks the server for all three by name).
+
+     No build step, which is the whole point of TOR-190/TOR-191 being possible
+     at all: modules are native, so nothing here is bundled, transpiled or
+     inlined away, and the file the browser runs is the file in the repo. -->
+<script type="module" src="app.js"></script>
 </body>
 </html>

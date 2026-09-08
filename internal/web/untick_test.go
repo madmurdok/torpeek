@@ -256,13 +256,41 @@ func TestRefuseUntickWalksWhatTheEngineCanActuallyDo(t *testing.T) {
 			want:  "plan it was handed",
 		},
 		{
-			// The trap that keeps this case out of scope: a request narrowed
-			// to nothing means all of them, so dropping the last file would
-			// WIDEN the run rather than stop it.
+			// ALLOWED SINCE TOR-197, and this case is why the verdict list
+			// changed rather than grew. TOR-184 refused it over a real trap:
+			// a request narrowed to nothing means ALL of them, so dropping
+			// the last file would widen the run instead of stopping it.
+			// UntickFile now answers that by putting the row back in
+			// RunNeedsAction, where an empty selection already means
+			// "nothing decided yet" - so the widening is impossible by
+			// construction and there is nothing left here to refuse.
 			name:  "a pass accepted and not started",
 			entry: &runEntry{id: "d", state: RunQueued, req: RunRequest{Files: []string{"1", "3"}}},
 			spec:  "1",
-			want:  "means every video file rather than none",
+			want:  "",
+		},
+		{
+			// The same gesture on the LAST file, which is the one the old
+			// refusal was really about. Still allowed here: refuseUntick
+			// answers whether the file can come out, and what emptying the
+			// request MEANS is UntickFile's to arrange - see
+			// TestNarrowingAQueuedPassToNothingParksItInsteadOfWideningIt.
+			name:  "the last file of a pass accepted and not started",
+			entry: &runEntry{id: "d2", state: RunQueued, req: RunRequest{Files: []string{"1"}}},
+			spec:  "1",
+			want:  "",
+		},
+		{
+			// And the guard that replaced the refusal: a non-final state
+			// that is not queueable either is a state this method has not
+			// been taught, and narrowing blind there would be worse than
+			// refusing. No such state exists today, which is the point of
+			// asserting it - it is the case a third one would land in.
+			name: "a non-final state that is neither queueable nor known",
+			entry: &runEntry{id: "d3", state: RunState("some-new-state"),
+				req: RunRequest{Files: []string{"1"}}},
+			spec: "1",
+			want: "neither waiting to start nor settled",
 		},
 		{
 			name:  "a row that has settled",
@@ -603,8 +631,12 @@ func tickedOf(srv *Server, id string) []int {
 // is lost - which is the fear the scope will produce and the fact that makes
 // it survivable.
 func TestTheRowSaysWhichActAnUnTickWillBeBeforeItIsPressed(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "updateFileCosts")
+	// RETARGETED ONTO file-list.js BY TOR-195: the four verdicts, their four
+	// sentences and the heading that says the stop's scope on screen are all
+	// the LIST's - the middle of the three nested detail elements - and each
+	// went there as a method.
+	js := fileListJS(t)
+	fn := jsMethod(t, js, "updateFileCosts")
 
 	// The stop, and every part of the claim. Each phrase is looked for whole,
 	// so it has to sit inside ONE JS string literal - which is why the
@@ -655,7 +687,7 @@ func TestTheRowSaysWhichActAnUnTickWillBeBeforeItIsPressed(t *testing.T) {
 	// titles above are not. A title is unreachable on a touch screen and to
 	// anybody who never hovers, so the scope of the stop is also stated once
 	// for the row in the list's own heading.
-	head := jsFunc(t, js, "fileListTitle")
+	head := jsMethod(t, js, "fileListTitle")
 	if !strings.Contains(head, "entry.fetching.size > 0") {
 		t.Fatal("the file list's heading no longer changes while the row is fetching, so " +
 			"the only warning about a run-stopping box is in a hover title")
@@ -687,9 +719,9 @@ func TestTheRowSaysWhichActAnUnTickWillBeBeforeItIsPressed(t *testing.T) {
 // be ticked again for free. A speed bump in front of a harmless act only
 // trains people to click through the one in front of the harmful one.
 func TestStoppingIsOneGestureAndSpendingIsTwo(t *testing.T) {
-	js := servedScript(t)
-	stop := jsFunc(t, js, "stopFetch")
-	drop := jsFunc(t, js, "dropFile")
+	js := fileListJS(t)
+	stop := jsMethod(t, js, "stopFetch")
+	drop := jsMethod(t, js, "dropFile")
 
 	// One press. Not an arming, not a confirm, and not a revealed button of
 	// its own - the last would be the clear's shape, which works there
@@ -709,7 +741,7 @@ func TestStoppingIsOneGestureAndSpendingIsTwo(t *testing.T) {
 	// And the arming it is deliberately unlike is still there, so the
 	// asymmetry above is a live comparison rather than a claim about code that
 	// has since gone.
-	if !strings.Contains(jsFunc(t, js, "syncSelectAll"), "entry.pickerAll.dataset.armed") {
+	if !strings.Contains(jsMethod(t, js, "syncSelectAll"), "this.pickerAll.dataset.armed") {
 		t.Error("Select all no longer arms. If that changed, the argument for this " +
 			"ticket's one-press stop has to be re-made rather than left standing on a " +
 			"comparison with something that is gone")
@@ -723,8 +755,7 @@ func TestStoppingIsOneGestureAndSpendingIsTwo(t *testing.T) {
 // stay, and run_state redraws the row moments later with the box ticked and a
 // Clear frames beside it.
 func TestTheStopPutsTheBoxBackBecauseACancelDoesNotUnAskForTheFile(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "stopFetch")
+	fn := jsMethod(t, fileListJS(t), "stopFetch")
 
 	if !strings.Contains(fn, "box.checked = true") {
 		t.Error("stopFetch leaves the box cleared, so a row whose run has just been " +
@@ -753,8 +784,7 @@ func TestTheStopPutsTheBoxBackBecauseACancelDoesNotUnAskForTheFile(t *testing.T)
 // itself (Server.pendingPass), so by the time the POST lands the file IS
 // being fetched and the server refuses.
 func TestTheDropIsRolledBackIfThePassTookTheFileFirst(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "dropFile")
+	fn := jsMethod(t, fileListJS(t), "dropFile")
 
 	if !strings.Contains(fn, `post("runs/untick", { id: entry.id, file: String(index) })`) {
 		t.Fatal("dropFile no longer asks the server to take the file out of the next pass")
@@ -783,17 +813,30 @@ func TestTheDropIsRolledBackIfThePassTookTheFileFirst(t *testing.T) {
 // set from what it already had would answer "stop the run" for a file an
 // earlier pass captured, and the person would lose the fetch that was going.
 func TestThePageReadsThePassInFlightFromTheServer(t *testing.T) {
-	js := servedScript(t)
-
-	if !strings.Contains(js, "entry.fetching = new Set(ev.fetching || [])") {
+	// Read out of the run_state handler itself since TOR-191, and out of the
+	// state module's own reset - and run for real, against a message carrying
+	// all three sets and then a reconnect, by
+	// TestThePassInFlightIsReadFromTheServerAndNotDerived and
+	// TestAReconnectLeavesNoStalePassBehind in eventstate_test.go. Those two
+	// are what can tell a WRONG answer from missing text; these two are what
+	// name the line that would have to change to produce one.
+	if !strings.Contains(jsFunc(t, eventsJS(t), "applyRunState"),
+		"entry.fetching = new Set(ev.fetching || [])") {
 		t.Fatal("the page no longer takes the pass in flight from run_state. Deriving it " +
 			"from picked minus deferred includes every file an earlier pass captured, and " +
 			"un-ticking one of those would stop a run fetching something else")
 	}
 	// Emptied with the rest of a run's content, so a reconnecting page cannot
 	// offer to stop a fetch from a history it is in the middle of re-reading.
-	if !strings.Contains(jsFunc(t, js, "resetRunContent"), "entry.fetching.clear()") {
-		t.Error("resetRunContent no longer clears entry.fetching - it is assigned from " +
+	//
+	// COMMENTS STRIPPED, which TOR-191's falsification run is the reason for:
+	// commenting the line out satisfied this check word for word, because a
+	// comment still contains the substring. The executable half of the same
+	// subject is TestResetRunStateEmptiesEverythingAReplayWillStateAgain,
+	// which calls the function instead of reading it.
+	if !strings.Contains(stripJSComments(jsFunc(t, stateJS(t), "resetRunState")),
+		"entry.fetching.clear()") {
+		t.Error("resetRunState no longer clears entry.fetching - it is assigned from " +
 			"every run_state, so this is what stops a stale one surviving a reconnect")
 	}
 }
@@ -809,11 +852,31 @@ func TestThePageReadsThePassInFlightFromTheServer(t *testing.T) {
 // TestACancelKeepsTheFramesAndTheClearThenTakesThem above. This only fixes
 // which door the page knocks on.
 func TestTheStopStillLetsTheEngineEndOnItsOwnTerms(t *testing.T) {
-	js := servedScript(t)
-
-	if !strings.Contains(jsFunc(t, js, "cancelRun"), `post("runs/cancel", { id })`) {
+	// cancelRun stays in app.js, deliberately, and TOR-195 is what makes that
+	// worth saying: THREE controls now reach it from three different modules -
+	// the row's own ✕ (run-table.js's service), the detail header's Cancel
+	// (run-detail.js's) and an un-tick mid-fetch (file-list.js's stopFetch) -
+	// so it is injected as one service rather than spelled three times, and
+	// there is still exactly one place a cancel is sent from.
+	if !strings.Contains(jsFunc(t, appJS(t), "cancelRun"), `post("runs/cancel", { id })`) {
 		t.Fatal("cancelRun no longer posts to /runs/cancel, which is the one route that " +
 			"stops a run by cancelling its context rather than by killing it")
+	}
+	for _, mod := range []struct{ name, src string }{
+		{"run-table.js", runTableJS(t)},
+		{"run-detail.js", runDetailJS(t)},
+		{"file-list.js", fileListJS(t)},
+	} {
+		if !strings.Contains(mod.src, `"cancelRun"`) {
+			t.Errorf("%s does not name cancelRun among the services it refuses to run "+
+				"without - a control that stops a torrent would call an injected function "+
+				"that was never injected", mod.name)
+		}
+		if strings.Contains(mod.src, `post("runs/cancel"`) {
+			t.Errorf("%s sends the cancel itself instead of going through the one injected "+
+				"service - three spellings of one destructive request is three places to "+
+				"get it wrong", mod.name)
+		}
 	}
 	// core.Event is what the run ends on either way; the flag the server reads
 	// to tell a stop from a completion is the one CancelRun sets, and pump
@@ -823,4 +886,170 @@ func TestTheStopStillLetsTheEngineEndOnItsOwnTerms(t *testing.T) {
 		t.Error("core.StopCancelled is no longer a StopReason; pump reads it to tell a " +
 			"stopped run from a finished one, which is what makes a cancelled row settle")
 	}
+}
+
+// TestNarrowingAQueuedPassToNothingParksItInsteadOfWideningIt is TOR-197 at
+// the one boundary the trap lives on, and it is written as two steps because
+// only the second one is dangerous.
+//
+// TOR-184 refused this gesture rather than get it subtly wrong, and its
+// reason was real: an empty RunRequest.Files means EVERY video file
+// (asksEveryVideo), so dropping the LAST box would not narrow the pass to
+// nothing - it would widen it from one file to every video the torrent
+// holds, silently, in the direction that spends the most traffic.
+//
+// The answer is not a rule about counting boxes. asksEveryVideo reads the
+// STATE as well as the length, and in RunNeedsAction an empty selection
+// already means the opposite - nothing decided yet - which is exactly what
+// no boxes ticked IS. So the row goes back to where it was before the first
+// box was pressed and the widening is impossible by construction.
+//
+// THE QUEUE SLOT IS THE HALF THAT COULD STILL WIDEN IT. dispatch() pops
+// s.waiting by position and never reads state, so a row left in the queue
+// would be started later with the empty request this narrowing created -
+// the same widening, one dispatch further along. That is what the runner
+// count at the end is for.
+func TestNarrowingAQueuedPassToNothingParksItInsteadOfWideningIt(t *testing.T) {
+	lister := newFakeLister()
+	lister.holds(manySource, 4)
+	lister.holds(otherManySource, 4)
+	runs := newFakeRuns()
+
+	cfg := DefaultConfig()
+	// One slot, so the second torrent's pass is accepted and NOT started -
+	// which is the only state this ticket is about.
+	cfg.MaxActiveTorrents = 1
+	srv, ts := newTestServerWithConfigAndLister(t, cfg, runs.runner, lister.list)
+
+	// BOTH TORRENTS ARE PARKED FIRST, and the order is forced rather than
+	// chosen: listThenRun does the metadata listing INSIDE the slot, so a
+	// second torrent posted while the first is fetching never reaches
+	// needs-action at all - it waits in the queue with nothing decided. A
+	// parked torrent does not hold the slot (TOR-67), which is what lets
+	// both of them park before either is decided.
+	holding := parkOne(t, srv, ts.URL)
+	parked := parkOneOf(t, srv, ts.URL, otherManySource)
+
+	// Now the slot's occupant, so nothing below can start.
+	if resp := decideRun(t, ts.URL, holding.id, []string{"0"}, 5); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("deciding the run that takes the slot: status %d, want 202", resp.StatusCode)
+	}
+	waitFor(t, func() bool { return runs.started(manySource) })
+
+	// And the one under test: decided, so it carries a real selection, and
+	// queued, so the engine has been handed nothing.
+	if resp := decideRun(t, ts.URL, parked.id, []string{"1", "3"}, 5); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("deciding the queued run: status %d, want 202", resp.StatusCode)
+	}
+	waitFor(t, func() bool { return runInfo(t, srv, parked.id).State == RunQueued })
+
+	// STEP ONE: two files to one. Not the dangerous case - the request is
+	// still non-empty afterwards, so nothing about asksEveryVideo changes.
+	if resp := untickFile(t, ts.URL, parked.id, "1"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("narrowing a queued pass from two files to one: status %d, want 200: %s",
+			resp.StatusCode, readAll(t, resp))
+	}
+	if got := requestedOf(srv, parked.id); len(got) != 1 || got[0] != "3" {
+		t.Fatalf("the queued pass asks for %v, want [3] - the rest of this test cannot tell "+
+			"a narrowing from a request that never changed", got)
+	}
+	if got := runInfo(t, srv, parked.id).State; got != RunQueued {
+		t.Errorf("the row is %s after narrowing to one file, want it still queued - it has a "+
+			"selection and is waiting for the slot, which is unchanged", got)
+	}
+
+	// STEP TWO: one file to none, which is what TOR-184 refused.
+	if resp := untickFile(t, ts.URL, parked.id, "3"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("narrowing a queued pass down to no files: status %d, want 200: %s",
+			resp.StatusCode, readAll(t, resp))
+	}
+
+	// THE RUN'S OWN RECORD, read back, which is what the criterion asks for:
+	// what it would actually be asked for, not what a page thinks it asked.
+	if got := requestedOf(srv, parked.id); len(got) != 0 {
+		t.Errorf("the row still asks for %v after the last box came out", got)
+	}
+	if got := runInfo(t, srv, parked.id).State; got != RunNeedsAction {
+		t.Errorf("the row is %s after its last file came out, want %s - an empty request "+
+			"means every video file in any other state, so parking it is what keeps the "+
+			"narrowing honest", got, RunNeedsAction)
+	}
+	if asksEverything(srv, parked.id) {
+		t.Error("the row reports asksEveryVideo after being narrowed to nothing - this is " +
+			"the widening TOR-184 refused the whole gesture to avoid: one file becomes " +
+			"every video the torrent holds")
+	}
+	if got := tickedOf(srv, parked.id); len(got) != 0 {
+		t.Errorf("the row reports ticked = %v, want none - every box a person cleared would "+
+			"otherwise snap back to checked", got)
+	}
+
+	// AND IT IS OUT OF THE QUEUE. Finishing the run that holds the slot is
+	// what makes dispatch look for the next waiter; if the parked row were
+	// still in s.waiting it would be started here, with the empty request -
+	// which is the widening again, one dispatch later.
+	runs.finish(t, manySource)
+	waitFor(t, func() bool { return runInfo(t, srv, holding.id).State == RunDone })
+	if runs.started(otherManySource) {
+		t.Error("the narrowed row started as soon as the slot freed - it was left in the " +
+			"queue, so dispatch handed the engine a request that means every video file")
+	}
+	if got := runs.count(); got != 1 {
+		t.Errorf("the runner was called %d times, want 1 - only the run that held the slot "+
+			"should ever have started", got)
+	}
+
+	// The person can still pick again, which is the whole point of parking
+	// rather than cancelling: nothing was spent and nothing was lost.
+	if resp := decideRun(t, ts.URL, parked.id, []string{"2"}, 5); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("deciding the parked row a second time: status %d, want 202", resp.StatusCode)
+	}
+	waitFor(t, func() bool { return runs.started(otherManySource) })
+	if got := strings.Join(runs.stream(t, otherManySource).req.Files, ","); got != "2" {
+		t.Errorf("the pass that finally started was handed %q, want \"2\" - the file the "+
+			"person chose after narrowing, and nothing else", got)
+	}
+}
+
+// requestedOf is what the row would actually be asked for - RunRequest.Files
+// itself, read back under the lock that writes it.
+//
+// Distinct from pendingOf and tickedOf on purpose, and TOR-197 is why the
+// distinction matters: pending is what waits BEHIND a pass, ticked is every
+// file the row has ever been asked for, and this is the pass the engine will
+// be handed. The trap this ticket answers lives in this field alone - empty
+// here means every video file, in every state but one.
+func requestedOf(srv *Server, id string) []string {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	entry := srv.runs[id]
+	if entry == nil {
+		return nil
+	}
+	return append([]string(nil), entry.req.Files...)
+}
+
+// asksEverything is the predicate the whole ticket turns on, read through the
+// server rather than recomputed in the test - a copy of the rule here would
+// agree with itself and not with the code.
+func asksEverything(srv *Server, id string) bool {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	entry := srv.runs[id]
+	if entry == nil {
+		return false
+	}
+	return entry.asksEveryVideo()
+}
+
+// parkOneOf is parkOne for a named source, so one test can park two torrents
+// and have the second one queue behind the first.
+func parkOneOf(t *testing.T, srv *Server, base, source string) startedRun {
+	t.Helper()
+
+	run := startRun(t, base, source)
+	waitFor(t, func() bool { return runInfo(t, srv, run.id).State == RunNeedsAction })
+	return run
 }

@@ -45,6 +45,36 @@ func servedScript(t *testing.T) string {
 	return string(b)
 }
 
+// jsLiteralAfter returns the body of the `{ ... }` object literal that opens
+// on the line `open`, searching from `after` - so a file holding two literals
+// of the same shape (state.js's newRunState and newFileState both open with
+// "  return {") can have either of them asked for by name.
+//
+// `close` is the exact text that ends it, and it is a parameter rather than a
+// constant because TOR-194 added a literal one level deeper: run-table.js's
+// newRow returns from inside a class method, so its fields sit at six spaces
+// and it closes at "\n    };" where every other literal here closes at
+// "\n  };". Passing the close in keeps this exact - the first close at the
+// literal's OWN indent - instead of loosening the anchor for all four callers.
+func jsLiteralAfter(t *testing.T, js, after, open, close string) string {
+	t.Helper()
+	at := strings.Index(js, after)
+	if at < 0 {
+		t.Fatalf("no %q to search from - this check is anchored on it", after)
+	}
+	rest := js[at:]
+	start := strings.Index(rest, open)
+	if start < 0 {
+		t.Fatalf("no %q literal after %q", open, after)
+	}
+	rest = rest[start+len(open):]
+	end := strings.Index(rest, close)
+	if end < 0 {
+		t.Fatalf("the %q literal after %q is never closed by %q", open, after, close)
+	}
+	return rest[:end]
+}
+
 // TestTheFileListIsTheRowsContentNotAState is the shape of the whole ticket.
 // Before it, one line in syncEntry read `state === "needs-action"` and that
 // alone decided whether the list was on screen - so a running, finished or
@@ -56,11 +86,15 @@ func servedScript(t *testing.T) string {
 // arrived genuinely have nothing to list, and that is the only reason the
 // section may be hidden.
 func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "syncFileList")
+	// RETARGETED ONTO file-list.js BY TOR-195: the list decides for itself
+	// whether it is on screen, which is the whole of what makes it the row's
+	// content rather than a state - and it is now the element that holds the
+	// section, so `this.pickerEl` rather than `entry.pickerEl`.
+	js := fileListJS(t)
+	fn := jsMethod(t, js, "syncFileList")
 
 	// The one statement that decides whether the section is on screen.
-	hidden := regexp.MustCompile(`entry\.pickerEl\.hidden = ([^;]+);`).FindStringSubmatch(fn)
+	hidden := regexp.MustCompile(`this\.pickerEl\.hidden = ([^;]+);`).FindStringSubmatch(fn)
 	if hidden == nil {
 		t.Fatal("syncFileList never sets entry.pickerEl.hidden - it is the only function " +
 			"that may put the file list on screen or take it off")
@@ -89,9 +123,9 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 	// longer read off the state here at all - it is the server's own verdict,
 	// carried on run_state (entry.tickable, runEntry.refuseTick). What is
 	// still parked-only is Select all, and it says so in its own function.
-	all := jsFunc(t, js, "syncSelectAll")
+	all := jsMethod(t, js, "syncSelectAll")
 	if !strings.Contains(all, `entry.state === "needs-action"`) ||
-		!strings.Contains(all, "entry.pickerAll.hidden") {
+		!strings.Contains(all, "this.pickerAll.hidden") {
 		t.Error("syncSelectAll does not gate Select all on the parked state - \"all of " +
 			"it\" answers a torrent whose whole list is undecided, and on a row already " +
 			"fetching it would undo, in one press, the choice not to take the rest")
@@ -103,7 +137,7 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 	}
 }
 
-// TestNoRunEntryFieldIsDeclaredTwice exists because this ticket walked into
+// TestNoRunEntryFieldIsDeclaredTwice exists because TOR-180 walked into
 // exactly that and got away with it for a while. The run entry is one large
 // object literal, and a duplicate key there is not an error in JavaScript -
 // the LAST one silently wins. TOR-180 added a `files` list beside the
@@ -115,45 +149,110 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 // makes it worth a standing check rather than a lesson: the entry gains
 // fields in most tickets that touch this file, and every one of them is a
 // chance to shadow a field declared two hundred lines away.
+//
+// SINCE TOR-191 THERE ARE SEVERAL LITERALS PER ENTRY AND THE SCAN COVERS
+// THEIR UNION, which is strictly more than it could see before. An entry is
+// the data half state.js owns (newRunState) spread into the DOM half app.js
+// adds (`const entry = {`), and they are ONE object - so a key declared in
+// the second still shadows the same key in the first, silently, exactly as
+// two keys in one literal always did. Scanning either one alone would have
+// made the split a way to reintroduce TOR-180's bug invisibly.
+//
+// TOR-194 MADE IT THREE, and it is the riskiest of the three additions so
+// far: run-table.js's newRow returns the row's own elements and app.js
+// spreads them into the same entry, so a field named there and a field named
+// in app.js's own literal are now written by two different people in two
+// different files, with the LAST one silently winning. That is TOR-180's bug
+// with a file boundary in the middle of it.
+//
+// AND TOR-195 SHRANK IT AGAIN, which is worth recording because it is the
+// opposite direction and the same reasoning. The run's detail became three
+// nested elements, each holding its own parts, so the entry lost twenty-two
+// DOM fields and gained one (`detail`, written as shorthand, which cannot
+// collide silently because shorthand names a variable that has to exist). The
+// two literals left with named keys are the ones in state.js and
+// run-table.js - two people, two files, and still every reason for this check
+// to exist.
+//
+// The file entry is scanned the same way and for the same reason, one level
+// in: newFileState plus the file's own element literal. It had no check at
+// all before TOR-183, and it grew three fields in it (media, heartbeat,
+// sheetURL) then and one more (`block`) with TOR-195.
 func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
-	js := servedScript(t)
+	page := servedScript(t)
+	derive := stateJS(t)
+	table := runTableJS(t)
+	detail := fileDetailJS(t)
 
-	start := strings.Index(js, "const entry = {")
-	if start < 0 {
-		t.Fatal("app.js no longer builds a `const entry = {` literal - this check is " +
-			"anchored on it")
-	}
-	end := strings.Index(js[start:], "\n  };")
-	if end < 0 {
-		t.Fatal("the run entry literal is never closed")
-	}
-	// Comments first: several of them name other fields in prose, including
-	// this very collision.
-	body := regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(js[start:start+end], "")
+	for _, subject := range []struct {
+		what   string
+		least  int
+		must   []string
+		halves map[string]string
+	}{
+		{
+			what:  "run entry",
+			least: 20,
+			// The two that actually collided, plus one row field, named so a
+			// later rename cannot quietly remove the thing this test is about.
+			// No detail field any more: since TOR-195 the detail's own
+			// elements are the element's, and the one field app.js's literal
+			// adds is shorthand (`detail,`), which the key scan below
+			// deliberately cannot see - and which cannot collide silently
+			// anyway.
+			must: []string{"files", "fileList", "rowQueueCell"},
+			halves: map[string]string{
+				"state.js's newRunState": jsLiteralAfter(t, derive, "function newRunState(id) {", "  return {", "\n  };"),
+				"run-table.js's newRow":  jsLiteralAfter(t, table, "  newRow() {", "    return {", "\n    };"),
+				"app.js's newRunEntry":   jsLiteralAfter(t, page, "function newRunEntry(id) {", "  const entry = {", "\n  };"),
+			},
+		},
+		{
+			what:  "file entry",
+			least: 10,
+			// The three TOR-191 added, which are the whole reason a file's
+			// metadata, progress line and contact sheet can be redrawn from
+			// state at all, plus the one TOR-195 added: the element that draws
+			// every one of them.
+			must: []string{"media", "heartbeat", "sheetURL", "block"},
+			halves: map[string]string{
+				"state.js's newFileState": jsLiteralAfter(t, derive, "function newFileState(index, entry) {", "  return {", "\n  };"),
+				"file-detail.js's mount":  jsLiteralAfter(t, detail, "  mount(entry, index, row) {", "    this.fentry = {", "\n    };"),
+			},
+		},
+	} {
+		// Comments first: several of them name other fields in prose,
+		// including this very collision.
+		comments := regexp.MustCompile(`(?m)//.*$`)
+		key := regexp.MustCompile(`(?m)(?:^|[{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:`)
 
-	// A key is a name that opens the literal, follows a comma, or opens a
-	// line - which is every shape this literal actually uses, shorthand
-	// (`id`, `detailEl`) aside, and shorthand cannot collide silently
-	// because it names a variable that has to exist.
-	seen := map[string]bool{}
-	for _, m := range regexp.MustCompile(`(?m)(?:^|[{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:`).FindAllStringSubmatch(body, -1) {
-		if seen[m[1]] {
-			t.Errorf("the run entry declares %q twice. JavaScript keeps the LAST one "+
-				"silently, so whichever reader wanted the first is now reading the "+
-				"other one's type", m[1])
+		seen := map[string]string{}
+		for where, body := range subject.halves {
+			body = comments.ReplaceAllString(body, "")
+			for _, m := range key.FindAllStringSubmatch(body, -1) {
+				// A key is a name that opens the literal, follows a comma, or
+				// opens a line - which is every shape these literals actually
+				// use, shorthand (`id`, `detailEl`) aside, and shorthand
+				// cannot collide silently because it names a variable that
+				// has to exist.
+				if prev, ok := seen[m[1]]; ok {
+					t.Errorf("the %s declares %q twice - in %s and in %s. JavaScript keeps the "+
+						"LAST one silently (and a spread loses to a literal key beside it), so "+
+						"whichever reader wanted the first is now reading the other one's type",
+						subject.what, m[1], prev, where)
+				}
+				seen[m[1]] = where
+			}
 		}
-		seen[m[1]] = true
-	}
-	if len(seen) < 20 {
-		t.Fatalf("only %d fields were found in the run entry; the scan is broken, not "+
-			"the literal", len(seen))
-	}
-	// The two that actually collided, named so a later rename cannot quietly
-	// remove the thing this test is about.
-	for _, want := range []string{"files", "fileList"} {
-		if !seen[want] {
-			t.Errorf("the run entry has no %q field - if it was renamed, rename it here "+
-				"too rather than leaving this check pointing at nothing", want)
+		if len(seen) < subject.least {
+			t.Fatalf("only %d fields were found across the %s's two literals; the scan is "+
+				"broken, not the literals", len(seen), subject.what)
+		}
+		for _, want := range subject.must {
+			if _, ok := seen[want]; !ok {
+				t.Errorf("the %s has no %q field - if it was renamed, rename it here too rather "+
+					"than leaving this check pointing at nothing", subject.what, want)
+			}
 		}
 	}
 }
@@ -165,16 +264,22 @@ func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
 // cache.Run.Files existed is exactly that message, and the video list is the
 // honest stand-in.
 func TestTheFileListRendersEveryFileAndFallsBackWhenItCannotKnow(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	fn := jsMethod(t, fileListJS(t), "renderFileList")
+	// SINCE TOR-191 the two halves of this are in two files, and each is
+	// where it belongs: reading the message is the event layer's
+	// (applyFileList), building the rows is the page's (renderFileList).
+	// Neither half alone is the guard - a fallback that reached the entry but
+	// no row that read it, or rows built off a list nothing filled, would
+	// each satisfy one of them.
+	apply := jsFunc(t, eventsJS(t), "applyFileList")
 
-	if !regexp.MustCompile(`entry\.fileList = ev\.files \|\| entry\.videos`).MatchString(fn) {
-		t.Error("renderFileList does not fall back from ev.files to the video list - an " +
+	if !regexp.MustCompile(`entry\.fileList = ev\.files \|\| entry\.videos`).MatchString(apply) {
+		t.Error("applyFileList does not fall back from ev.files to the video list - an " +
 			"absent \"files\" key means \"cannot say\", never \"holds nothing\", and no " +
 			"torrent holds no files")
 	}
-	if !strings.Contains(fn, "entry.fileListKnown = !!ev.files") {
-		t.Error("renderFileList does not record whether the whole list was actually " +
+	if !strings.Contains(apply, "entry.fileListKnown = !!ev.files") {
+		t.Error("applyFileList does not record whether the whole list was actually " +
 			"known - without it the title reports one list's length as the other's")
 	}
 	// The rows come from the whole list, and tickability from the video one.
@@ -199,8 +304,7 @@ func TestTheFileListRendersEveryFileAndFallsBackWhenItCannotKnow(t *testing.T) {
 // dash in the column the checkbox would have occupied, the same mark every
 // absent metric cell in the run table already uses.
 func TestAnUntickableFileIsNotToldByColourAlone(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	fn := jsMethod(t, fileListJS(t), "renderFileList")
 
 	if !regexp.MustCompile(`createElement\(video \? "label" : "span"\)`).MatchString(fn) {
 		t.Error("a non-video row is not built as a plain element - a <label> with no " +
@@ -289,22 +393,35 @@ func TestTheAmberFrameIsOnlyForARowThatIsBlocking(t *testing.T) {
 // and silently passed. It happens to declare no display; the point is that
 // nothing was checking.
 func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
-	js := servedScript(t)
+	// TWO MODULES SINCE TOR-194, read as one text on purpose: the trap this
+	// guard is about is a CLASS that declares display beating the UA's
+	// [hidden], and it does not care which file wrote `.hidden = true`. Four
+	// of the receivers below (rowCancel, rowRaise, rowLower, detailRowEl) are
+	// row elements and moved into the table element with them; the rest are
+	// the detail's and stayed. Reading only app.js would have quietly dropped
+	// those four out of the scan and left it passing.
+	// EVERY MODULE THAT DRAWS THE DETAIL, which since TOR-195 is five rather
+	// than two - and widening the scan to all of them is the point: an element
+	// hidden in a module nobody scanned is exactly this trap, unguarded.
+	js := strings.Join([]string{servedScript(t), runTableJS(t), runDetailJS(t),
+		fileListJS(t), fileDetailJS(t)}, "\n")
 	css := stylesheet(t)
 
-	// The detail's own elements app.js takes off screen, as the property
-	// assignments themselves - so an element that stops being hidden drops
-	// out of this list rather than failing it. THREE receivers, because the
-	// page hides elements through three bags of them: a run's own entry, a
-	// file's fentry, and - since TOR-183 - a file's row in the picker list,
-	// which is an entry.pickerRows value and is called `row` at every point
-	// of use. Widening this rather than adding rows to the alias table below
-	// is what keeps the scan the DEFAULT: a `row.x.hidden` the alias table
-	// did not know about would have been invisible here, which is exactly the
-	// failure mode TOR-182 found on .run-progress.
-	hidden := regexp.MustCompile(`(?:entry|fentry|row)\.([A-Za-z]+)\.hidden = `).FindAllStringSubmatch(js, -1)
+	// The detail's own elements the front end takes off screen, as the
+	// property assignments themselves - so an element that stops being hidden
+	// drops out of this list rather than failing it. FOUR receivers, because
+	// the detail hides elements through four bags of them: a run's own entry,
+	// a file's fentry, a file's row in the picker list (an entry the list
+	// calls `row` at every point of use, since TOR-183), and - since TOR-195 -
+	// the three elements' own `this`, which is where the detail's parts, the
+	// list's parts and a file's parts now live. Widening this rather than
+	// adding rows to the alias table below is what keeps the scan the DEFAULT:
+	// a `row.x.hidden` the alias table did not know about would have been
+	// invisible here, which is exactly the failure mode TOR-182 found on
+	// .run-progress.
+	hidden := regexp.MustCompile(`(?:entry|fentry|row|this)\.([A-Za-z]+)\.hidden = `).FindAllStringSubmatch(js, -1)
 	if len(hidden) == 0 {
-		t.Fatal("app.js hides nothing in a run's detail - this guard is anchored on it")
+		t.Fatal("the front end hides nothing in a run's detail - this guard is anchored on it")
 	}
 
 	// The element behind each name, since the JS reads a property and the CSS
@@ -313,10 +430,15 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	// element whose class carries no rule at all in app.css, which is the
 	// one honest way to be exempt: nothing can outrank the UA's [hidden].
 	selector := map[string]string{
-		"pickerEl":       ".picker",
-		"pickerAll":      ".picker-all",
-		"pickerArmed":    ".picker-armed",
-		"detailRowEl":    ".run-detail-row",
+		"pickerEl":    ".picker",
+		"pickerAll":   ".picker-all",
+		"pickerArmed": ".picker-armed",
+		"detailRowEl": ".run-detail-row",
+		// The table's own empty-state paragraph, which came into this scan
+		// with TOR-195 only because the receiver widened to `this` - it was
+		// always hidden the same way, through a part the element found inside
+		// itself, and nothing was looking at it.
+		"emptyNote":      "#run-list-empty",
 		"detailError":    ".run-detail-error",
 		"torrentSummary": ".torrent-summary",
 		"torrentActions": ".torrent-actions",
@@ -354,7 +476,7 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 
 		sel, ok := selector[name]
 		if !ok {
-			t.Errorf("app.js hides %s and this test does not know which class that "+
+			t.Errorf("the front end hides %s and this test does not know which class that "+
 				"is - add it to the table rather than leaving the display/[hidden] trap "+
 				"unguarded for it", name)
 			continue
@@ -380,7 +502,7 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	// matching nothing after a rename.
 	for _, want := range []string{"links", "torrentActions", "body"} {
 		if !seen[want] {
-			t.Errorf("app.js no longer hides %q. If it was renamed, rename it in the "+
+			t.Errorf("the front end no longer hides %q. If it was renamed, rename it in the "+
 				"table above too - this guard was widened to cover exactly this element, "+
 				"and it caught a live instance of the trap on it", want)
 		}
@@ -405,11 +527,28 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	// Kept as a small table of its own rather than folded above, because the
 	// two halves are found differently and a reader has to know which is
 	// which.
-	for fn, sel := range map[string]string{
-		"renderRunProgress": ".run-progress",
-		"renderReach":       ".reach",
+	//
+	// ONE ROW LEFT SINCE TOR-195, and that is a real improvement rather than a
+	// deletion: renderReach and renderAvail each opened with `const el =
+	// fentry.reach` / `fentry.availSwarm` and then hid `el`, which is exactly
+	// what the receiver-based scan above cannot see. Both are methods of the
+	// file's own element now and write `this.reach.hidden` directly, so the
+	// DEFAULT scan covers them - which is where this trap wants to be
+	// covered. What is left is the row's own progress bar, whose alias is
+	// still an alias.
+	for _, alias := range []struct {
+		fn, sel string
+		method  bool
+	}{
+		{"renderRunProgress", ".run-progress", true},
 	} {
-		body := jsFunc(t, js, fn)
+		fn, sel := alias.fn, alias.sel
+		var body string
+		if alias.method {
+			body = jsMethod(t, runTableJS(t), fn)
+		} else {
+			body = jsFunc(t, servedScript(t), fn)
+		}
 		if !strings.Contains(body, "el.hidden") {
 			t.Errorf("%s no longer hides anything through a local alias. If the alias is "+
 				"gone the scan above covers it and this row should go; if the function "+

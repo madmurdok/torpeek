@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -439,14 +440,48 @@ func TestUploadWhileARunIsGoingIsQueued(t *testing.T) {
 
 // TestServesEmbeddedFrontend is the acceptance criterion in miniature: the
 // binary has to be able to show a UI with nothing beside it on disk.
+//
+// One entry per stylesheet, not just one for "the CSS": TOR-189 split :root
+// into tokens.css and TOR-190 split the rest of what used to be app.css into
+// one file per area (see index.html's own <link> list), and //go:embed
+// assets covering the whole directory is exactly the kind of thing that can
+// look right in dev and 404 a new file in the shipped build if nothing here
+// actually asks the server for it. Each marker is a rule this test already
+// knew to expect from the old single-file app.css, now checked against
+// whichever split file actually declares it.
 func TestServesEmbeddedFrontend(t *testing.T) {
 	fake := &fakeRun{}
 	ts := testServer(t, fake.runner)
 
+	// One needle per served asset, and since TOR-191 that is more than one
+	// script: a module that is not served is a page that does not parse, and
+	// each needle is distinctive to the module it is in (the socket is
+	// events.js's, the run store is state.js's, the element lookups are
+	// app.js's, and the custom-element registration is run-table.js's).
 	for _, tc := range []struct{ path, contains string }{
 		{"/", "<title>torpeek</title>"},
-		{"/app.js", "WebSocket"},
-		{"/app.css", ".grid"},
+		{"/app.js", "document.getElementById"},
+		{"/state.js", "state.runs"},
+		{"/events.js", "new WebSocket("},
+		{"/run-table.js", `customElements.define("run-table"`},
+		// TOR-195's three, each needled on its own registration: a module that
+		// is not served is a page that does not parse, and these three are
+		// reached only through another module's import (see
+		// TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed), so a
+		// missing one costs the whole detail tree rather than one element.
+		{"/run-detail.js", `customElements.define("run-detail"`},
+		{"/file-list.js", `customElements.define("file-list"`},
+		{"/file-detail.js", `customElements.define("file-detail"`},
+		{"/frame-panel.js", `customElements.define("frame-panel"`},
+		{"/compare-dialog.js", `customElements.define("compare-dialog"`},
+		{"/tokens.css", ":root"},
+		{"/base.css", "@font-face"},
+		{"/intake.css", ".dropzone"},
+		{"/table.css", ".run-table"},
+		{"/detail.css", ".run-detail"},
+		{"/filelist.css", ".picker"},
+		{"/framepanel.css", ".grid"},
+		{"/compare.css", ".compare-stage"},
 	} {
 		resp, err := http.Get(ts.URL + tc.path)
 		if err != nil {
@@ -784,7 +819,12 @@ func TestWorksUnderABasePath(t *testing.T) {
 		t.Errorf("GET /torpeek redirects to %q, want /torpeek/", location)
 	}
 
-	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/app.css"} {
+	// One representative stylesheet, not all nine (TOR-189/TOR-190 split
+	// :root and the rest of what used to be app.css across several files):
+	// this test is about the base-path rewrite applying to every static
+	// asset alike, and TestServesEmbeddedFrontend is where every split file
+	// is checked by name.
+	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/tokens.css"} {
 		resp, err := http.Get(ts.URL + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
@@ -811,7 +851,34 @@ func TestWorksUnderABasePath(t *testing.T) {
 // a single leading slash in the markup would survive every test above, because
 // they all ask for the right URL themselves.
 func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
-	for _, name := range []string{"assets/index.html", "assets/app.js"} {
+	// state.js and events.js are in this list from the moment they exist
+	// (TOR-191): "/events" and "/runs" are precisely the strings the event
+	// layer deals in, so it is the likeliest of the three to grow a leading
+	// slash - and every one of them is served under the base path the same
+	// way app.js is.
+	//
+	// run-table.js joins them with TOR-194, for a narrower reason: it holds
+	// no URL at all today, and that is exactly the state worth keeping - the
+	// table draws from an entry and asks the page for anything that needs
+	// fetching, so the first absolute path to appear here would be the first
+	// sign that stopped being true. frame-panel.js and compare-dialog.js
+	// were missing from BOTH lists until TOR-194's report pointed it out:
+	// TOR-192 and TOR-193 added the modules without adding them here, so two
+	// served scripts went unswept for a font CDN and unwalked for their own
+	// import specifiers. Adding a module to the page and not to these lists
+	// is the easy half of the mistake to make, which is why each list now
+	// says out loud that it is the set of SERVED scripts.
+	//
+	// TOR-195's three join for the sharpest reason of any of them: two of
+	// them BUILD PATHS. file-list.js's clear and file-detail.js's per-frame
+	// delete and its loadFileDetail each assemble a path from segments
+	// precisely so no leading slash can appear - which is the rule this test
+	// enforces, so they are the modules it most needs to read.
+	names := []string{"assets/index.html"}
+	for _, mod := range servedModules(t) {
+		names = append(names, "assets/"+mod)
+	}
+	for _, name := range names {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -880,7 +947,12 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 
 	// The shell itself is not gated (authGuard's doc comment says why), so
 	// it loads with no token at all.
-	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/app.css"} {
+	// One representative stylesheet, not all nine (TOR-189/TOR-190 split
+	// :root and the rest of what used to be app.css across several files):
+	// this test is about the base-path rewrite applying to every static
+	// asset alike, and TestServesEmbeddedFrontend is where every split file
+	// is checked by name.
+	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/tokens.css"} {
 		resp, err := http.Get(root + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
@@ -1747,5 +1819,238 @@ func TestDefaultsReportsTheServersFrameCount(t *testing.T) {
 	}
 	if count, ok := decodeBody(t, resp)["count"].(float64); !ok || int(count) != 6 {
 		t.Errorf("count = %v, want 6", decodeBody(t, resp)["count"])
+	}
+}
+
+// TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed guards the one line
+// that decides whether the page runs at all.
+//
+// Since TOR-191 split the script into app.js -> events.js -> state.js, app.js
+// opens with `import`, which is a syntax error in a classic script. So
+// `type="module"` is not a style choice: without it the page does not partly
+// work, it parses nothing, and no other Go test here would notice - they all
+// read the assets as text or ask the server for them by name, and both keep
+// answering exactly as before while the browser runs none of it.
+//
+// The second half is the part a by-name check cannot cover.
+// TestServesEmbeddedFrontend asks for /state.js and /events.js because this
+// test's author knew to name them; that guarantees those two are served, not
+// that they are the two app.js actually asks for. Rename a module and update
+// the import, and the by-name list keeps passing while the browser 404s a
+// specifier nobody checked. So the IMPORTS are read out of the shipped script
+// and each one is required to resolve to an embedded asset - the page's own
+// text is the source of truth, the same way index.html is for the stylesheet
+// order (TestTheConcatenationOrderIsThePagesOwn).
+func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+
+	if !strings.Contains(string(html), `<script type="module" src="app.js">`) {
+		t.Error(`index.html does not load app.js with type="module". app.js begins with ` +
+			`import statements, which are a syntax error in a classic script, so the ` +
+			`page would execute nothing at all - not a degraded page, a blank one`)
+	}
+	if strings.Contains(string(html), `<script src="app.js">`) {
+		t.Error(`index.html still has a classic <script src="app.js">. Two tags would run ` +
+			`the module twice or the classic one would throw on its first import; either ` +
+			`way the surviving tag is not the one that was reasoned about`)
+	}
+
+	// Only the page's own script is followed. A module's transitive imports
+	// are covered because each imported file is itself checked below when it
+	// appears in this same walk.
+	assets := map[string]bool{}
+	entries, err := embedded.ReadDir("assets")
+	if err != nil {
+		t.Fatalf("listing the embedded assets: %v", err)
+	}
+	for _, e := range entries {
+		assets[e.Name()] = true
+	}
+
+	// Matches the specifier of a static import or re-export, which is the only
+	// kind the browser resolves at load: `import x from "./y.js"`,
+	// `import "./y.js"`, `export ... from "./y.js"`. A dynamic import()
+	// built from a variable is deliberately not matched - it cannot be
+	// resolved statically, and this project has none.
+	//
+	// A MULTI-LINE IMPORT LIST COUNTS, which it did not until TOR-194's
+	// falsification run found this: the pattern used to be `[^'"\n]*?`, which
+	// cannot cross a newline, so every
+	//
+	//	import {
+	//	  ...names...
+	//	} from "./state.js";
+	//
+	// was invisible to this walk - and that is the shape of the biggest import
+	// on the page. app.js was only ever checked here through its three
+	// SINGLE-LINE imports (events.js, frame-panel.js, compare-dialog.js);
+	// pointing its state.js import at a file that does not exist left this
+	// test green, which is precisely what it exists to prevent. Newlines are
+	// now allowed inside the clause and quotes still are not, so the match
+	// still cannot run past the end of one import statement.
+	spec := regexp.MustCompile(`(?m)^\s*(?:import|export)\b[^'"]*?from\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]`)
+
+	seen := map[string]int{}
+	// EVERY SERVED SCRIPT, which is the list this walk has twice failed to
+	// be: run-table.js joined it with TOR-194, and frame-panel.js and
+	// compare-dialog.js only when TOR-194's report noticed TOR-192 and
+	// TOR-193 had added modules to the page without adding them here. A
+	// module absent from this list is a module whose import specifiers
+	// nothing resolves.
+	//
+	// TOR-195's three are the first that are reached ONLY through another
+	// module's import: index.html names app.js, app.js imports run-detail.js,
+	// which imports file-list.js, which imports file-detail.js. So a broken
+	// specifier three hops in would 404 the whole graph, and nothing but this
+	// walk would say which link broke.
+	for _, name := range servedModules(t) {
+		src, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Errorf("reading the embedded %s: %v - index.html or another module names it, "+
+				"so it has to be in the binary", name, err)
+			continue
+		}
+		for _, m := range spec.FindAllStringSubmatch(string(src), -1) {
+			target := m[1]
+			if target == "" {
+				target = m[2]
+			}
+			seen[name]++
+			// A bare or absolute specifier would not survive the base path,
+			// which TestTheFrontendUsesNoAbsolutePaths covers for `src="/`;
+			// an import specifier is a different syntax and needs saying here.
+			if !strings.HasPrefix(target, "./") {
+				t.Errorf("%s imports %q, which is not a relative specifier - the page is served "+
+					"under a configurable base path, so only './x.js' resolves", name, target)
+				continue
+			}
+			if base := strings.TrimPrefix(target, "./"); !assets[base] {
+				t.Errorf("%s imports %q, and no such file is embedded under assets/ - the browser "+
+					"fetches this path itself, so it 404s and the whole module graph fails to "+
+					"load, whatever the by-name checks in this file say", name, target)
+			}
+		}
+	}
+
+	// A regex that stopped matching would make every check above vacuous, and
+	// the split's whole premise is that there ARE imports to follow.
+	//
+	// CHECKED PER MODULE, not as one total, and that is the lesson rather
+	// than a refinement. "None at all" was never how this went vacuous: the
+	// multi-line `import {\n...\n} from` shape was invisible to the pattern
+	// while app.js's three SINGLE-line imports kept the total comfortably
+	// non-zero, so a total - even an exact one - cannot tell "every module
+	// was read" from "one module was read three times". A per-module floor
+	// can, and unlike an exact total it does not fail because somebody added
+	// a legitimate import.
+	//
+	// state.js and frame-panel.js are the leaves: they import nothing, by
+	// design, and demanding a specifier from them would be demanding a
+	// dependency they are better without.
+	// The two lists below stay hand-written, because which modules are LEAVES
+	// is a real decision rather than a fact to derive - a leaf imports nothing
+	// on purpose, and deriving that from the source would make the test agree
+	// with whatever the source says instead of with what was decided.
+	//
+	// What IS derived is that they cover everything. Without this, deleting a
+	// name from `importers` made the test pass MORE easily - the weakness
+	// TOR-195's report named - and a new module belonged to neither list and
+	// was simply never checked.
+	importers := []string{"app.js", "events.js", "run-table.js", "compare-dialog.js",
+		"run-detail.js", "file-list.js", "file-detail.js"}
+	leaves := []string{"state.js", "frame-panel.js"}
+	classified := map[string]bool{}
+	for _, n := range append(append([]string{}, importers...), leaves...) {
+		classified[n] = true
+	}
+	for _, name := range servedModules(t) {
+		if !classified[name] {
+			t.Errorf("%s is served but is in neither the importers nor the leaves list below, "+
+				"so nothing here checks it. Add it to whichever it is - and if it was removed "+
+				"from one of those lists to quieten a failure, that is the thing this check "+
+				"exists to catch: a shorter list is a weaker test, not a passing one", name)
+		}
+	}
+
+	for _, name := range importers {
+		if seen[name] == 0 {
+			t.Errorf("no import specifier was found in %s, which does import - so this walk did "+
+				"not read it and every check above verified nothing for it. Either the module "+
+				"split was undone, or the pattern no longer matches the syntax the file uses "+
+				"(a multi-line `import {\n...\n} from` is the shape it has already missed once)",
+				name)
+		}
+	}
+	for _, name := range leaves {
+		if seen[name] != 0 {
+			t.Errorf("%s has grown %d import(s). That is not wrong in itself, but it is one of "+
+				"the two leaves of the graph - nothing under it to fetch - so the fact is worth "+
+				"stating deliberately rather than discovering", name, seen[name])
+		}
+	}
+}
+
+// servedModules is every .js the binary serves, read off the embedded FS
+// rather than typed out.
+//
+// IT EXISTS BECAUSE A HAND-MAINTAINED LIST WENT WRONG THREE TIMES in one
+// batch, each time silently and each time the same way: TOR-192 and TOR-193
+// added frame-panel.js and compare-dialog.js to the page and to neither of
+// web_test.go's lists; TOR-194 added run-table.js to one of them; TOR-195
+// added its three and left a comment saying the other three were still
+// missing from font_test.go's sweep. Every one of those was a "one-line add"
+// that nobody did, and in the meantime the sweeps quietly covered less than
+// they claimed.
+//
+// A derived list also closes a weakness a hand-written one cannot: DELETING a
+// name makes a hand-written list pass more easily, so the check gets weaker in
+// exactly the direction nobody notices. There is no list here to delete from.
+func servedModules(t *testing.T) []string {
+	t.Helper()
+	entries, err := embedded.ReadDir("assets")
+	if err != nil {
+		t.Fatalf("listing the embedded assets: %v", err)
+	}
+	var out []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".js") {
+			out = append(out, e.Name())
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no .js is embedded under assets/ at all - either the front end went away " +
+			"or this helper stopped seeing it, and every sweep built on it is now vacuous")
+	}
+	return out
+}
+
+// TestEveryServedModuleIsAskedForByName is the other half of
+// TestServesEmbeddedFrontend, whose table cannot be derived: each entry pairs a
+// path with a needle distinctive to THAT module, and only a person can choose
+// the needle. So the table stays hand-written and this test makes forgetting an
+// entry impossible - a new module fails here until somebody names it.
+func TestEveryServedModuleIsAskedForByName(t *testing.T) {
+	body, err := os.ReadFile("web_test.go")
+	if err != nil {
+		t.Fatalf("reading this test file: %v", err)
+	}
+	// The table lives in this file, so this reads its own source. Crude, and
+	// the honest alternative - exporting the table - would let a module be
+	// dropped from it without anything noticing, which is the failure being
+	// closed here.
+	src := string(body)
+	table := src[strings.Index(src, "func TestServesEmbeddedFrontend"):]
+	table = table[:strings.Index(table, "\n}\n")]
+
+	for _, name := range servedModules(t) {
+		if !strings.Contains(table, `{"/`+name+`"`) {
+			t.Errorf("TestServesEmbeddedFrontend never asks the server for /%s. A module the "+
+				"binary serves and no test requests is a module that can 404 in the shipped "+
+				"build while every other check passes - //go:embed assets covers the whole "+
+				"directory, so it looks right in dev", name)
+		}
 	}
 }

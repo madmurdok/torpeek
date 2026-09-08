@@ -42,6 +42,26 @@ ffmpeg:
 archives: cross
 	./scripts/package.sh
 
+# vet + tests (the suite drives real torrents through a local seeder, so it
+# is slow).
+#
+# TOR-148's decision, recorded here because it changes what a green `check`
+# actually proves: internal/web/columns_test.go's
+# TestCompareEntriesAndSortValueExecuteForReal shells out to node to run
+# app.js's own compareEntries/sortValue against real inputs, rather than only
+# matching their text - a text guard alone cannot tell a deletion from a
+# rewrite that keeps every guarded substring and gets the answer wrong (see
+# that test's own doc for the exact rewrite that does it). That test FAILS,
+# it does not skip, when node is not on PATH. This repository's `go test
+# ./...` is never run by CI (only .github/workflows/archives.yml is, and it
+# never runs the general suite) - `check` is entirely a human-or-agent-run
+# gate - so a skip here would let it go green on a machine that never
+# actually ran the one test able to catch a wrong answer, with nothing
+# printed to say so. Install Node.js (any recent LTS) to run this target in
+# full; nothing about it touches CGO_ENABLED or what scripts/package.sh
+# ships - node is a dev-time precondition for one test, the same way a GPL
+# ffmpeg already is for internal/frames' extraction tests (which DO skip
+# without it - TOR-148 chose not to repeat that precedent here).
 .PHONY: check
 check:
 	go vet ./...

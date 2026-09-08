@@ -615,10 +615,13 @@ func TestClearFileRefusesWhatNamesNoFile(t *testing.T) {
 // ticket insists on: the page has to know a file HAS FRAMES, not merely that
 // somebody ticked it.
 func TestUnTickingAFinishedFileOffersToClearItsFrames(t *testing.T) {
-	js := servedScript(t)
+	// RETARGETED ONTO file-list.js BY TOR-195, unchanged in subject: the row,
+	// its clear and every verdict an un-tick can carry are the LIST's, so all
+	// three of the functions below went there as methods.
+	js := fileListJS(t)
 
 	// The button is built into the file's own row, at its end.
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, js, "renderFileList")
 	if !strings.Contains(render, `clear.className = "picker-clear"`) {
 		t.Fatal("renderFileList builds no .picker-clear on a file's row - the ticket puts " +
 			"the button at the end of the row it is about")
@@ -633,7 +636,7 @@ func TestUnTickingAFinishedFileOffersToClearItsFrames(t *testing.T) {
 
 	// The un-tick is what reveals it, and it is page-local: nothing is asked
 	// of the server and nothing is spent.
-	tick := jsFunc(t, js, "tickFile")
+	tick := jsMethod(t, js, "tickFile")
 	if !strings.Contains(tick, "entry.unticked.add(index)") {
 		t.Fatal("un-ticking a finished file records nothing, so there is nothing for the " +
 			"row to draw the offer from")
@@ -651,7 +654,7 @@ func TestUnTickingAFinishedFileOffersToClearItsFrames(t *testing.T) {
 
 	// And it goes when the file is clean. Both halves of the lifecycle live
 	// in updateFileCosts, the one place that re-states every row.
-	costs := jsFunc(t, js, "updateFileCosts")
+	costs := jsMethod(t, js, "updateFileCosts")
 	if !strings.Contains(costs, "row.clear.hidden = !offering") {
 		t.Fatal("the button's visibility is not decided from the offer, so nothing takes " +
 			"it away when there is nothing left to clear")
@@ -673,9 +676,10 @@ func TestUnTickingAFinishedFileOffersToClearItsFrames(t *testing.T) {
 // so the two cannot disagree - "Clear 12 frames" next to "8 frames" would be
 // two answers to one question and only one of them could be right.
 func TestTheClearSaysHowManyFramesItWillDelete(t *testing.T) {
-	js := servedScript(t)
-
-	costs := jsFunc(t, js, "updateFileCosts")
+	// The button is the LIST's and the summary beside it is the FILE's own
+	// detail (TOR-195), which is exactly why "one count, shared" is worth
+	// asserting across the two modules rather than within one.
+	costs := jsMethod(t, fileListJS(t), "updateFileCosts")
 	if !strings.Contains(costs, `row.clear.textContent = "Clear " + (frames === 1 ? "1 frame" : frames + " frames")`) {
 		t.Error("the button does not name the number of frames it would delete")
 	}
@@ -684,16 +688,20 @@ func TestTheClearSaysHowManyFramesItWillDelete(t *testing.T) {
 	}
 
 	// One count, shared, rather than two spellings of it.
-	summary := jsFunc(t, js, "updateFileSummary")
+	summary := jsMethod(t, fileDetailJS(t), "updateFileSummary")
 	if !strings.Contains(summary, "capturedCells(fentry)") {
 		t.Error("the row's summary no longer counts through capturedCells, so the button " +
 			"beside it and the figure beside that are two independent counts of one thing")
 	}
-	on := jsFunc(t, js, "framesOnDisk")
+	// framesOnDisk and capturedCells are derivations over a file's own state,
+	// so they are state.js's since TOR-191 - the count the button quotes is
+	// not a fact about the DOM.
+	derive := stateJS(t)
+	on := jsFunc(t, derive, "framesOnDisk")
 	if !strings.Contains(on, "capturedCells(fentry)") {
 		t.Error("framesOnDisk does not go through capturedCells either")
 	}
-	cells := jsFunc(t, js, "capturedCells")
+	cells := jsFunc(t, derive, "capturedCells")
 	if !strings.Contains(cells, "gridCells(fentry).filter((cell) => cell.url).length") {
 		t.Error("capturedCells no longer counts cells that have a picture - counting the " +
 			"map's size instead would report a holed run of five frames as twelve, since " +
@@ -722,8 +730,7 @@ func TestTheClearSaysHowManyFramesItWillDelete(t *testing.T) {
 // nothing deferred, so this is a statement about the reading order, not a
 // clash), and that the one remaining refusal still puts the box back.
 func TestUnTickingAFinishedFileStillOffersTheClearRatherThanStoppingAnything(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "tickFile")
+	fn := jsMethod(t, fileListJS(t), "tickFile")
 
 	if !strings.Contains(fn, "box.checked = true;") {
 		t.Fatal("an un-tick that is not an offer no longer puts the box back, so a box " +
@@ -734,8 +741,8 @@ func TestUnTickingAFinishedFileStillOffersTheClearRatherThanStoppingAnything(t *
 			"frames button can never appear")
 	}
 	// Every branch, in the order the function reads them.
-	drop := strings.Index(fn, "dropFile(entry, index)")
-	stop := strings.Index(fn, "stopFetch(entry, index, box)")
+	drop := strings.Index(fn, "this.dropFile(index)")
+	stop := strings.Index(fn, "this.stopFetch(index, box)")
 	offer := strings.Index(fn, "entry.unticked.add(index)")
 	refusal := strings.Index(fn, "nothing is fetching this file")
 	if drop < 0 || stop < 0 || offer < 0 || refusal < 0 {
@@ -758,10 +765,9 @@ func TestUnTickingAFinishedFileStillOffersTheClearRatherThanStoppingAnything(t *
 // disclosure went in first; the fix was naming the control explicitly, and
 // that fix is what makes adding another button to this row safe at all.
 func TestTheRowStillNamesItsOwnCheckbox(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	fn := jsMethod(t, fileListJS(t), "renderFileList")
 
-	if !strings.Contains(fn, "box.id = \"file-tick-\"") || !strings.Contains(fn, "row.htmlFor = box.id") {
+	if !strings.Contains(fn, `box.id = nextDetailId("file-tick-")`) || !strings.Contains(fn, "row.htmlFor = box.id") {
 		t.Fatal("the row no longer names its checkbox by id. With two buttons in the row " +
 			"the label would fall to whichever is first in the DOM, and clicking the " +
 			"file's NAME would press a button instead of ticking it")
@@ -780,11 +786,11 @@ func TestTheRowStillNamesItsOwnCheckbox(t *testing.T) {
 // be: a page-global error line saying some frames could not be removed does
 // not say WHICH file's, and a season pack has twenty-five rows.
 func TestAClearThatOnlyPartlyHappenedIsReportedBesideTheFile(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
 	css := stylesheet(t)
 
-	fn := jsFunc(t, js, "clearFrames")
-	if !strings.Contains(fn, "if (answer.warning) setFileNote(entry, index, answer.warning)") {
+	fn := jsMethod(t, js, "clearFrames")
+	if !strings.Contains(fn, "if (answer.warning) this.setFileNote(index, answer.warning)") {
 		t.Fatal("a warning from the server is not put beside the file it is about")
 	}
 	if strings.Contains(fn, "showError(answer.warning)") {
@@ -793,8 +799,16 @@ func TestAClearThatOnlyPartlyHappenedIsReportedBesideTheFile(t *testing.T) {
 			"person comes to think two things went wrong")
 	}
 	// The grid is replaced from what the server read back, never edited here.
-	if !strings.Contains(fn, "fentry.frames = new Map()") ||
-		!strings.Contains(fn, "for (const f of (detail && detail.frames) || [])") {
+	// SINCE TOR-195 THAT HAPPENS ONE LEVEL IN: the list hands the answer to
+	// the file's own detail (afterClear), which owns the grid - so this reads
+	// both halves, because the hand-off alone with nothing replacing anything,
+	// or a replacement nothing calls, each satisfies only one of them.
+	if !strings.Contains(fn, "if (fentry) fentry.block.afterClear(answer.file)") {
+		t.Error("the clear does not hand the server's answer to the file's own detail, " +
+			"which is the only thing that may replace that file's grid")
+	}
+	if after := jsMethod(t, fileDetailJS(t), "afterClear"); !strings.Contains(after, "fentry.frames = new Map()") ||
+		!strings.Contains(after, "for (const f of (cleared && cleared.frames) || [])") {
 		t.Error("the grid is not replaced from the server's own re-read of disk - a page " +
 			"that removed its own tiles and hoped the two agreed is how a frame comes to " +
 			"be on screen that is not on disk")
@@ -807,13 +821,13 @@ func TestAClearThatOnlyPartlyHappenedIsReportedBesideTheFile(t *testing.T) {
 	}
 	// A failure that changed nothing is reported in the same place, not in
 	// two places for one button.
-	if !regexp.MustCompile(`(?s)catch \(err\) \{[^}]*setFileNote\(entry, index, String\(err`).MatchString(fn) {
+	if !regexp.MustCompile(`(?s)catch \(err\) \{[^}]*this\.setFileNote\(index, String\(err`).MatchString(fn) {
 		t.Error("a failed clear does not report beside the file")
 	}
 
 	// The note is a sibling of the row rather than inside it: the row is a
 	// <label>, and a whole sentence in it would join the checkbox's name.
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, js, "renderFileList")
 	if !strings.Contains(render, `note.className = "picker-note"`) || !strings.Contains(render, "item.append(note)") {
 		t.Error("the note is not built as a sibling of the row inside the list item")
 	}
@@ -885,26 +899,44 @@ func TestTheDestructiveButtonDoesNotWearTheAccentUnderThePointer(t *testing.T) {
 // recorded for this set", which after a clear is a sentence about a set that
 // no longer exists. So the strip goes off screen rather than being redrawn.
 func TestAClearedFileTakesItsReachStripWithIt(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "clearFrames")
+	// RETARGETED ONTO file-detail.js BY TOR-195: the frames, the strip that
+	// described them and the artefact link are one FILE's, so the block that
+	// replaces all three after a clear is that element's own afterClear. The
+	// list still owns the request and the button - see
+	// TestAClearThatOnlyPartlyHappenedIsReportedBesideTheFile for the hand-off.
+	js := fileDetailJS(t)
+	fn := jsMethod(t, js, "afterClear")
 
-	if !regexp.MustCompile(`(?s)if \(capturedCells\(fentry\) === 0\) \{\s*fentry\.reach\.hidden = true;`).MatchString(fn) {
+	if !regexp.MustCompile(`(?s)if \(capturedCells\(fentry\) === 0\) \{\s*this\.reach\.hidden = true;`).MatchString(fn) {
 		t.Error("a file with no frames left keeps its reach strip, which describes where " +
 			"frames that are gone came from")
 	}
-	if !strings.Contains(fn, "renderReach(fentry, (detail && detail.sets) || [])") {
+	if !strings.Contains(fn, "this.renderReach((cleared && cleared.sets) || [])") {
 		t.Error("a file that still has frames does not redraw its reach strip from the " +
 			"sets that are left, so the strip would go on describing a set that was cleared")
 	}
 	// AND THE CONTACT SHEET LINK, which the browser found and no text check
-	// here did: onFileDone puts it on screen from the file's own file_done and
-	// nothing else ever removes it, so after a clear it offered a picture that
-	// had just been deleted - a link whose only possible answer is a 404.
-	if !strings.Contains(fn, "fentry.links.hidden = true") ||
-		!strings.Contains(fn, "fentry.links.replaceChildren()") {
+	// here did: the file's own file_done put it on screen and nothing else
+	// ever removed it, so after a clear it offered a picture that had just
+	// been deleted - a link whose only possible answer is a 404.
+	//
+	// SINCE TOR-191 IT GOES THROUGH THE FIELD, not the element: the link is
+	// drawn from fentry.sheetURL, so emptying that and redrawing is the same
+	// act as file_done putting it there rather than a second, opposite piece
+	// of DOM handling to keep in step with the first. Both halves are
+	// checked, because the field alone with no redraw would leave the link on
+	// screen and the redraw alone with no field change would put it back.
+	if !strings.Contains(fn, `fentry.sheetURL = "";`) ||
+		!strings.Contains(fn, "this.renderFileLinks()") {
 		t.Error("a cleared file keeps its contact-sheet link, which now points at a file " +
-			"the clear removed - both hidden AND emptied, so nothing later unhides a " +
-			"link to something that is gone")
+			"the clear removed - the field has to be emptied AND the link redrawn from it")
+	}
+	links := jsMethod(t, js, "renderFileLinks")
+	if !strings.Contains(links, "this.links.hidden = links.length === 0") ||
+		!strings.Contains(links, "this.links.replaceChildren(") {
+		t.Error("renderFileLinks does not take the link off screen when there is no sheet " +
+			"to link - both hidden AND emptied, so nothing later unhides a link to " +
+			"something that is gone")
 	}
 	if !strings.Contains(fn, "fentry.plan = []") {
 		t.Error("the plan survives a clear, so the grid would keep laying itself out from " +
@@ -918,8 +950,7 @@ func TestAClearedFileTakesItsReachStripWithIt(t *testing.T) {
 // alternative - sending the params of whichever frame happened to be first -
 // would clear one set and leave the button standing.
 func TestTheClearIsAddressedAtTheFileRatherThanOneOfItsSets(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "clearFrames")
+	fn := jsMethod(t, fileListJS(t), "clearFrames")
 
 	if !strings.Contains(fn, `const path = ["runs", entry.infohash, "files", index, "frames"].join("/")`) {
 		t.Fatal("the clear no longer addresses the file's frames as a whole")
@@ -932,7 +963,7 @@ func TestTheClearIsAddressedAtTheFileRatherThanOneOfItsSets(t *testing.T) {
 	// And the per-frame delete still DOES name one, which is what makes the
 	// difference above a decision rather than an omission: a cross on a
 	// thumbnail is about one frame of one set, and it has the set to name.
-	if !strings.Contains(jsFunc(t, js, "deleteFrame"), `target.searchParams.set("params", frame.params)`) {
+	if !strings.Contains(jsMethod(t, fileDetailJS(t), "deleteFrame"), `target.searchParams.set("params", frame.params)`) {
 		t.Error("the per-frame delete no longer names its result set; if that changed, the " +
 			"reasoning about why a whole-file clear does not name one has to be re-made")
 	}
@@ -943,24 +974,47 @@ func TestTheClearIsAddressedAtTheFileRatherThanOneOfItsSets(t *testing.T) {
 // run_state message, so an un-tick recorded there would be undone by the next
 // one to arrive - which for a settled row can be a queue change nobody caused.
 func TestTheClearGoesThroughTheRowsOwnState(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
+	events := eventsJS(t)
+	derive := stateJS(t)
 
-	if !strings.Contains(js, "entry.picked = new Set(ev.ticked || [])") {
-		t.Fatal("run_state no longer assigns entry.picked; if that changed, the reasoning " +
-			"below about why the un-tick needs its own set has to be re-made")
+	if !strings.Contains(events, "entry.picked = new Set(ev.ticked || [])") {
+		t.Fatal("events.js's run_state handler no longer assigns entry.picked; if that " +
+			"changed, the reasoning below about why the un-tick needs its own set has to " +
+			"be re-made")
 	}
 	if regexp.MustCompile(`entry\.picked\.delete\(index\)[^\n]*\n[^\n]*unticked`).MatchString(js) {
 		t.Error("an un-tick removes the file from entry.picked - the server's own answer, " +
 			"which the next run_state would put straight back")
 	}
-	if !strings.Contains(jsFunc(t, js, "resetRunContent"), "entry.unticked.clear()") {
-		t.Error("resetRunContent does not clear the offers, so a reconnecting page would " +
+	// AND run_state MUST NOT TOUCH entry.unticked AT ALL, which is the other
+	// half and the one the split made worth stating: the handler is now a
+	// function of its own, so "it does not write this field" is a thing that
+	// can be read off one place. TestRunStateAssignsTheTicksAndNeverTouchesThe
+	// LocalUnTick (eventstate_test.go) runs the same claim for real.
+	// Comments stripped: applyRunState's own doc names this field precisely to
+	// say it does not touch it, so a substring check over the prose would
+	// answer the opposite of the question.
+	if strings.Contains(stripJSComments(jsFunc(t, events, "applyRunState")), "entry.unticked") {
+		t.Error("events.js's run_state handler writes entry.unticked - it is the one piece " +
+			"of tick state the server does not own, and anything this message did to it " +
+			"would undo a local un-tick on the very next message")
+	}
+	// Comments stripped, as everywhere a check like this reads a function body.
+	if !strings.Contains(stripJSComments(jsFunc(t, derive, "resetRunState")),
+		"entry.unticked.clear()") {
+		t.Error("resetRunState does not clear the offers, so a reconnecting page would " +
 			"keep offering to clear a file it has yet to be told anything about")
 	}
 
 	// One declaration of the field, which is what TestNoRunEntryFieldIsDeclaredTwice
 	// guards generally and what a bug found by a mutation run cost once already.
-	if n := strings.Count(js, "unticked: new Set()"); n != 1 {
-		t.Errorf("runEntry declares unticked %d times, want exactly 1", n)
+	// It is state.js's half of the entry now.
+	if n := strings.Count(derive, "unticked: new Set()"); n != 1 {
+		t.Errorf("state.js's newRunState declares unticked %d times, want exactly 1", n)
+	}
+	if strings.Contains(js, "unticked: new Set()") {
+		t.Error("app.js declares unticked as well - two halves of one object, so the " +
+			"second silently wins and a local un-tick is lost on the first render")
 	}
 }

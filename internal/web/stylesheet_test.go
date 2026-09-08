@@ -80,7 +80,7 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 			}
 		case '*':
 			if i+1 < len(css) && css[i+1] == '/' {
-				t.Fatalf("app.css:%d: stray */ with no /* open to close - a "+
+				t.Fatalf("the stylesheet:%d: stray */ with no /* open to close - a "+
 					"comment terminator with nothing before it to terminate", line)
 			}
 		case '{':
@@ -88,7 +88,7 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 			openBraceLines = append(openBraceLines, line)
 		case '}':
 			if depth == 0 {
-				t.Fatalf("app.css:%d: unmatched } - a closing brace with no "+
+				t.Fatalf("the stylesheet:%d: unmatched } - a closing brace with no "+
 					"{ open to close it", line)
 			}
 			depth--
@@ -97,11 +97,11 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 	}
 
 	if inComment {
-		t.Fatalf("app.css:%d: /* opened here is never closed - everything "+
+		t.Fatalf("the stylesheet:%d: /* opened here is never closed - everything "+
 			"after it, to the end of the file, is silently commented out", commentOpenedAt)
 	}
 	if depth != 0 {
-		t.Fatalf("app.css:%d: { opened here is never closed (%d brace(s) "+
+		t.Fatalf("the stylesheet:%d: { opened here is never closed (%d brace(s) "+
 			"still open at end of file)", openBraceLines[0], depth)
 	}
 }
@@ -421,6 +421,49 @@ func jsListener(t *testing.T, js, prefix string) string {
 		t.Fatalf("app.js's %q listener is never closed", prefix)
 	}
 	return js[i : i+end]
+}
+
+// framePanelJS returns the embedded frame-panel.js source. TOR-192 moved the
+// panel's behaviour out of app.js into its own custom element, so the guards
+// below read that module - and read it from the embedded FS, because that is
+// the copy that ships.
+func framePanelJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/frame-panel.js")
+	if err != nil {
+		t.Fatalf("reading the embedded frame-panel.js: %v", err)
+	}
+	return string(b)
+}
+
+// jsMethod is jsFunc for a CLASS METHOD, which is what the panel's functions
+// became when it turned into an element: `layout() {` rather than
+// `function layoutLightbox() {`, closing at two spaces of indent instead of
+// column zero. Same convention as jsFunc and block(), one level in - nothing
+// inside a method body is indented at exactly two spaces.
+//
+// It exists rather than a looser regex because the alternative was keeping the
+// panel's functions module-level so jsFunc would still match them, which would
+// have shaped the element around its test instead of the other way round.
+func jsMethod(t *testing.T, js, name string) string {
+	t.Helper()
+	// Both spellings, because a method that awaits carries `async` in front of
+	// its name and the first version of this helper matched only the bare one
+	// - so it reported "no open() method" for a module whose open() is right
+	// there, one keyword away. A helper that cannot find what it is pointed at
+	// fails the test for the wrong reason, which is worse than not finding it.
+	i := strings.Index(js, "\n  "+name+"(")
+	if i < 0 {
+		i = strings.Index(js, "\n  async "+name+"(")
+	}
+	if i < 0 {
+		t.Fatalf("no %s() method in the module under test", name)
+	}
+	end := strings.Index(js[i+1:], "\n  }\n")
+	if end < 0 {
+		t.Fatalf("%s() is never closed", name)
+	}
+	return js[i : i+1+end]
 }
 
 // rgbaOverWhite composites an rgba() token over pure white and returns the
@@ -768,40 +811,48 @@ func TestLightboxPanelClipsItsOwnOverflow(t *testing.T) {
 	}
 }
 
-// TestLightboxScalingAndPanAreWiredInTheServedScript reads app.js as served
-// text - there is no JS runner here (columns_test.go's note explains the
-// precedent) - so what it guards is that each of the four rules still has
-// code answering for it, and that the two things easiest to lose in an edit
-// are still there: the clamp's far bound, and the arrow keys' preventDefault.
+// TestLightboxScalingAndPanAreWiredInTheServedScript reads frame-panel.js as
+// served text - TOR-192 moved the panel's behaviour into its own custom
+// element, so this is where the four rules now live - and what it guards is
+// that each rule still has code answering for it, plus the two things easiest
+// to lose in an edit: the clamp's far bound, and the arrow keys'
+// preventDefault.
 //
 // It cannot tell whether the clamp is CORRECT. Only a browser can, by panning
-// to each edge and looking for a gutter.
+// to each edge and looking for a gutter, which is what TOR-172's and TOR-192's
+// own reports record.
 func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
-	js := appJS(t)
+	js := framePanelJS(t)
 	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
 	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
 
+	// Comments are stripped above for a reason worth stating: the module's
+	// header explains rule 4 by NAMING `window.innerWidth` as the thing not to
+	// write, and mentions Escape while explaining why Escape is absent from the
+	// arrow table. Both would satisfy a substring check that ran over the raw
+	// text, so both checks below would pass on prose alone.
+
 	// RULES 1 AND 2: one expression, and the 1 is the whole of "never
 	// upscale". Without it a 320-wide frame is blown up to fill the panel.
-	layout := jsFunc(t, live, "layoutLightbox")
-	if !strings.Contains(layout, "Math.min(1, avail.w / lb.natW, avail.h / lb.natH)") {
-		t.Error("layoutLightbox no longer caps the fit factor at 1 alongside the two axis " +
+	layout := jsMethod(t, live, "layout")
+	if !strings.Contains(layout, "Math.min(1, avail.w / this.natW, avail.h / this.natH)") {
+		t.Error("layout() no longer caps the fit factor at 1 alongside the two axis " +
 			"ratios - the cap is rule 1 (a picture that fits is drawn at 100%, and a small " +
 			"frame is never upscaled) and the ratios are rule 2")
 	}
-	if !strings.Contains(layout, "clampPan();") {
-		t.Error("layoutLightbox does not re-clamp the pan - a window resize changes the " +
+	if !strings.Contains(layout, "this.clampPan();") {
+		t.Error("layout() does not re-clamp the pan - a window resize changes the " +
 			"window's size, and an offset that was legal at the old size shows a gutter at " +
 			"the new one")
 	}
 
 	// RULE 4's second half. Both bounds, on both axes, or an edge leaks.
-	clamp := jsFunc(t, live, "clampPan")
+	clamp := jsMethod(t, live, "clampPan")
 	for _, want := range []string{
-		"Math.min(0, lb.boxW - lb.drawW)",
-		"Math.min(0, lb.boxH - lb.drawH)",
-		"lb.x = Math.min(0, Math.max(minX, lb.x));",
-		"lb.y = Math.min(0, Math.max(minY, lb.y));",
+		"Math.min(0, this.boxW - this.drawW)",
+		"Math.min(0, this.boxH - this.drawH)",
+		"this.x = Math.min(0, Math.max(minX, this.x));",
+		"this.y = Math.min(0, Math.max(minY, this.y));",
 	} {
 		if !strings.Contains(clamp, want) {
 			t.Errorf("clampPan does not contain %q - the pan offset has to be held to "+
@@ -812,67 +863,128 @@ func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
 	}
 
 	// Nothing may move the picture without coming through the clamp.
-	for _, fn := range []string{"panFromPointer", "panBySteps", "toggleLightboxZoom"} {
-		body := jsFunc(t, live, fn)
-		if !strings.Contains(body, "clampPan()") && !strings.Contains(body, "layoutLightbox()") {
+	for _, fn := range []string{"panFromPointer", "panBySteps", "toggleZoom"} {
+		body := jsMethod(t, live, fn)
+		if !strings.Contains(body, "this.clampPan()") && !strings.Contains(body, "this.layout()") {
 			t.Errorf("%s writes the pan without going through clampPan() - rule 4 has one "+
 				"enforcement point on purpose", fn)
 		}
 	}
 
 	// RULE 3, both halves: the mouse's position maps to the offset, and the
-	// arrow keys step it.
-	if !strings.Contains(live, `el.lightboxView.addEventListener("pointermove", panFromPointer)`) {
-		t.Error(`app.js does not map pointermove to the pan - "moving the mouse" pans the ` +
-			"picture, with no button held, which is what the rules asked for")
+	// arrow keys step it. The listeners are registered in connectedCallback
+	// against instance-bound handlers, which is what lets
+	// disconnectedCallback take them off again - so the assertion names the
+	// bound field rather than the method, because that is what is actually
+	// handed to addEventListener.
+	wiring := jsMethod(t, live, "connectedCallback")
+	if !strings.Contains(wiring, `this.view.addEventListener("pointermove", this.onPointerMove)`) {
+		t.Error(`connectedCallback does not map pointermove to the pan - "moving the mouse" ` +
+			"pans the picture, with no button held, which is what the rules asked for")
 	}
-	if !strings.Contains(live, `el.lightboxImg.addEventListener("click", toggleLightboxZoom)`) {
-		t.Error("app.js does not zoom on a click on the picture - and it has to be the " +
-			"picture, not the panel: the close button and the caption sit over it, and a " +
-			"handler on the panel would turn a click aimed at either into a zoom")
+	if !strings.Contains(wiring, `this.img.addEventListener("click", this.onImgClick)`) {
+		t.Error("connectedCallback does not zoom on a click on the picture - and it has to " +
+			"be the picture, not the panel: the close button and the caption sit over it, " +
+			"and a handler on the panel would turn a click aimed at either into a zoom")
 	}
-	keys := jsListener(t, live, `el.lightbox.addEventListener("keydown"`)
-	if !strings.Contains(keys, "LIGHTBOX_ARROWS[event.key]") {
-		t.Error("the lightbox's keydown handler no longer reads LIGHTBOX_ARROWS - the arrow " +
+	// Every listener added must be removed, or a resize handler holding a
+	// reference to a detached element keeps it alive and keeps measuring it.
+	// window is the one that genuinely leaks; the rest are checked as a pair
+	// so the two lists cannot drift.
+	teardown := jsMethod(t, live, "disconnectedCallback")
+	if !strings.Contains(teardown, `window.removeEventListener("resize", this.onResize)`) {
+		t.Error("disconnectedCallback does not take the resize listener off window - it is " +
+			"the one listener that outlives the element's own DOM, so it is the one that " +
+			"keeps a detached panel alive and being measured")
+	}
+	for _, h := range []string{
+		"onImgLoad", "onClose", "onImgClick", "onPointerMove",
+		"onViewKeydown", "onCloseClick", "onBackdropClick", "onDialogKeydown", "onResize",
+	} {
+		if !strings.Contains(wiring, "this."+h) {
+			t.Errorf("connectedCallback never uses this.%s - a bound handler nothing "+
+				"registers is either dead weight or a listener that silently stopped "+
+				"being attached", h)
+		}
+		if !strings.Contains(teardown, "this."+h) {
+			t.Errorf("disconnectedCallback never removes this.%s - it was added in "+
+				"connectedCallback, so an element moved in the DOM would accumulate a "+
+				"second copy of this listener", h)
+		}
+	}
+
+	keys := jsMethod(t, live, "dialogKeydown")
+	if !strings.Contains(keys, "ARROWS[event.key]") {
+		t.Error("the panel's keydown handler no longer reads ARROWS - the arrow " +
 			"keys are how this pans without a mouse")
 	}
 	if !strings.Contains(keys, "event.preventDefault();") {
-		t.Error("the lightbox's keydown handler does not preventDefault - a modal <dialog> " +
+		t.Error("the panel's keydown handler does not preventDefault - a modal <dialog> " +
 			"does NOT stop the document behind it from scrolling, so an arrow key it " +
 			"declines scrolls the page under the backdrop")
 	}
 	if strings.Contains(keys, "Escape") {
-		t.Error("the lightbox's keydown handler mentions Escape - the dialog closes itself " +
+		t.Error("the panel's keydown handler mentions Escape - the dialog closes itself " +
 			"on Escape for free, and a handler that touches it is how that gets lost")
 	}
-	if !strings.Contains(live, `el.lightboxZoom.textContent`) {
-		t.Error("app.js never writes el.lightboxZoom.textContent - the readout is where the " +
-			"zoom state is said in words, next to the cursor that says it in shape")
+	if !strings.Contains(live, "this.zoomReadout.textContent") {
+		t.Error("frame-panel.js never writes this.zoomReadout.textContent - the readout is " +
+			"where the zoom state is said in words, next to the cursor that says it in shape")
 	}
 	if !strings.Contains(live, "dataset.zoom") {
-		t.Error("app.js never sets the panel's dataset.zoom - every chrome rule that changes " +
-			"with the zoom is keyed on that attribute")
+		t.Error("frame-panel.js never sets the panel's dataset.zoom - every chrome rule " +
+			"that changes with the zoom is keyed on that attribute")
 	}
 
-	// The panel's arithmetic has ONE home, and it is app.css: availableBox
-	// asks the browser what the stylesheet's own maximum came to rather than
-	// keeping a second copy of the numbers here.
-	avail := jsFunc(t, live, "availableBox")
+	// open() is the element's whole API, and the one thing app.js is allowed
+	// to call. A panel that never showModal()s is a panel that cannot appear.
+	open := jsMethod(t, live, "open")
+	for _, want := range []string{"this.dialog.showModal();", "this.layout();"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("open() does not contain %q - it is the only entry point the page has "+
+				"into this panel, and layout() after showModal is what covers a picture "+
+				"already decoded in the cache, which is the usual case here", want)
+		}
+	}
+
+	// The panel's arithmetic has ONE home, and it is framepanel.css:
+	// availableBox asks the browser what the stylesheet's own maximum came to
+	// rather than keeping a second copy of the numbers here.
+	avail := jsMethod(t, live, "availableBox")
 	if !strings.Contains(avail, "getBoundingClientRect()") {
 		t.Error("availableBox no longer measures the element - it exists so the panel's " +
-			"padding and strips are stated once, in app.css, instead of twice")
+			"padding and strips are stated once, in framepanel.css, instead of twice")
 	}
 	if strings.Contains(live, "innerWidth") || strings.Contains(live, "innerHeight") {
-		t.Error("app.js computes the viewport itself - that is the copy of app.css's " +
-			"arithmetic availableBox exists to avoid, and the two drift apart silently")
+		t.Error("frame-panel.js computes the viewport itself - that is the copy of " +
+			"framepanel.css's arithmetic availableBox exists to avoid, and the two drift " +
+			"apart silently")
+	}
+
+	// The element has to be REGISTERED, natively and with no bundler, or the
+	// <frame-panel> in the page is an unknown tag and every method above is
+	// unreachable code.
+	if !strings.Contains(live, `customElements.define("frame-panel", FramePanel)`) {
+		t.Error("frame-panel.js never calls customElements.define(\"frame-panel\", ...) - " +
+			"without it the tag in index.html is inert, connectedCallback never runs, and " +
+			"clicking a frame throws on a null panel")
 	}
 }
 
-// TestLightboxMarkupHoldsTheWindowAndItsChrome guards the shape app.css and
-// app.js both assume: the clipped window exists, the picture and both
-// controls laid over it are INSIDE it (so the controls stay put while the
+// TestLightboxMarkupHoldsTheWindowAndItsChrome guards the shape framepanel.css
+// and frame-panel.js both assume: the clipped window exists, the picture and
+// both controls laid over it are INSIDE it (so the controls stay put while the
 // picture pans beneath them, and the clip catches everything), and the label
 // tab with its zoom readout is above it in the panel's own strip.
+//
+// Since TOR-192 it also guards the WRAPPER, which is the most breakable thing
+// on this page and the least visible. frame-panel.js finds every part above
+// with this.querySelector, so the markup has to be INSIDE the <frame-panel>
+// element - and app.js reaches the panel as document.querySelector(
+// "frame-panel"). Delete the wrapper and the tag is gone, the element never
+// upgrades, connectedCallback never runs, el.framePanel is null, and the first
+// click on a frame throws. Every other test in this file would stay green,
+// because the dialog and all its ids would still be exactly where they were.
 func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 	html, err := embedded.ReadFile("assets/index.html")
 	if err != nil {
@@ -889,8 +1001,27 @@ func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 		`class="lightbox-keys"`,
 	} {
 		if !strings.Contains(page, needle) {
-			t.Errorf("index.html has no %s - app.css styles it and app.js reaches for it", needle)
+			t.Errorf("index.html has no %s - framepanel.css styles it and frame-panel.js "+
+				"reaches for it", needle)
 		}
+	}
+
+	// THE WRAPPER, AND THE DIALOG BEING INSIDE IT. Both, because either alone
+	// passes while the panel is dead: a <frame-panel> with the dialog outside
+	// it upgrades fine and then throws in connectedCallback with "no dialog
+	// inside the element", and a dialog with no wrapper leaves app.js holding
+	// null.
+	wrap := strings.Index(page, "<frame-panel>")
+	wrapEnd := strings.Index(page, "</frame-panel>")
+	if wrap < 0 || wrapEnd < 0 {
+		t.Fatalf("index.html has no <frame-panel> element (open=%d close=%d) - the panel's "+
+			"behaviour is a custom element now, so without the tag nothing registers it "+
+			"against any markup and clicking a frame throws on a null panel", wrap, wrapEnd)
+	}
+	if dialog := strings.Index(page, `<dialog id="lightbox"`); dialog < wrap || dialog > wrapEnd {
+		t.Errorf("the lightbox <dialog> is at %d, outside <frame-panel> (%d..%d) - "+
+			"frame-panel.js finds every part with this.querySelector, so markup outside "+
+			"the element is markup it cannot see", dialog, wrap, wrapEnd)
 	}
 
 	view := strings.Index(page, `id="lightbox-view"`)
@@ -932,13 +1063,18 @@ func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 // runner here, so it cannot build the template and inspect the DOM, only
 // confirm the markup and its order are what TOR-169 asked for.
 func TestSaveTorrentSitsInTheHeaderBesideCancel(t *testing.T) {
-	js := appJS(t)
+	// RETARGETED ONTO run-detail.js BY TOR-195: the header is what the row
+	// says about the RUN, so its template went with it. The template is still
+	// a string rather than markup in index.html for the reason that module's
+	// header sets out - there is one detail per torrent - so this check reads
+	// exactly the same way it did.
+	js := runDetailJS(t)
 	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
 	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
 
 	header := strings.Index(live, `'<header class="run-detail-header">'`)
 	if header < 0 {
-		t.Fatal("app.js has no .run-detail-header template to check")
+		t.Fatal("run-detail.js has no .run-detail-header template to check")
 	}
 	headerEnd := strings.Index(live[header:], `"</header>"`)
 	if headerEnd < 0 {
@@ -971,7 +1107,7 @@ func TestSaveTorrentSitsInTheHeaderBesideCancel(t *testing.T) {
 
 	actionsBlockStart := strings.Index(live, `'<p class="torrent-actions" hidden>'`)
 	if actionsBlockStart < 0 {
-		t.Fatal("app.js has no .torrent-actions template to check")
+		t.Fatal("run-detail.js has no .torrent-actions template to check")
 	}
 	actionsBlockEnd := strings.Index(live[actionsBlockStart:], `'</p>'`)
 	if actionsBlockEnd < 0 {
@@ -1023,5 +1159,386 @@ func TestSaveAndCancelStayPinnedRegardlessOfEachOther(t *testing.T) {
 	if regexp.MustCompile(`(?s)\.run-detail-cancel\[data-idle\]\s*\{[^}]*display:\s*none`).MatchString(live) {
 		t.Error(".run-detail-cancel[data-idle] sets display: none - that removes Cancel from the " +
 			"flow, which is exactly what reserving its box with visibility was meant to avoid")
+	}
+}
+
+// TestTheConcatenationOrderIsThePagesOwn is what the split made necessary,
+// and it defends a claim that was until now only WRITTEN DOWN.
+//
+// While there was one app.css, "later in the file wins" was a fact about the
+// file, and tick_test.go's byte-offset assertion could read it directly. The
+// split (TOR-189 for :root, TOR-190 for the rest) moved the cascade's second
+// axis out of the stylesheet and into index.html: the order of its <link>
+// elements now decides which of two equal-specificity rules in DIFFERENT
+// files wins, and stylesheet() reproduces that order from a hand-written
+// list, stylesheetFiles, so the tests can keep reading one text.
+//
+// stylesheetFiles' own comment asserts it is "in the exact order index.html
+// links them", and nothing checked that. A list that silently disagrees with
+// the page is the worst of the available failures: every CSS test keeps
+// passing, tick_test.go's byte-offset comparison still returns two numbers
+// and still compares them - against a concatenation the browser never builds.
+// That is the same defect one level up as the one tick_test.go's cursor block
+// was rewritten to remove: an assertion whose message promises a guarantee it
+// does not provide.
+//
+// So the page is the source of truth and the list is checked against it,
+// rather than the two being maintained in parallel and hoped to agree.
+func TestTheConcatenationOrderIsThePagesOwn(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+
+	// Matched in document order, which is the only order that matters here -
+	// FindAllStringSubmatch returns matches left to right, so the resulting
+	// slice IS the cascade order the browser applies.
+	re := regexp.MustCompile(`<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"`)
+	var linked []string
+	for _, m := range re.FindAllStringSubmatch(string(html), -1) {
+		linked = append(linked, m[1])
+	}
+
+	if len(linked) == 0 {
+		t.Fatal("index.html links no stylesheet at all - either the page stopped " +
+			"styling itself or this test's regex stopped matching the markup; " +
+			"both are failures, and a silent pass here would hide either")
+	}
+
+	if len(linked) != len(stylesheetFiles) {
+		t.Fatalf("index.html links %d stylesheets %v, stylesheetFiles has %d %v; "+
+			"every CSS test reads the concatenation of the latter, so a file the "+
+			"page loads and this list omits is a file no test looks at",
+			len(linked), linked, len(stylesheetFiles), stylesheetFiles)
+	}
+
+	for i, href := range linked {
+		if href != stylesheetFiles[i] {
+			t.Errorf("index.html loads %q at position %d, stylesheetFiles has %q there; "+
+				"at equal specificity the later file wins, so a list in a different "+
+				"order than the page builds a cascade the browser never applies - and "+
+				"tick_test.go's byte-offset assertion would then compare offsets "+
+				"inside a fiction and pass\nlinked: %v\nlist:   %v",
+				href, i, stylesheetFiles[i], linked, stylesheetFiles)
+		}
+	}
+}
+
+// positionDecidedPairs are the rule pairs whose winner is decided by POSITION
+// rather than specificity. Each follows the same shape: a GROUPED rule sets a
+// value for several controls at once, and a later STANDALONE rule overrides it
+// for one of them. Both selectors weigh the same, so only order separates them.
+//
+// TOR-190's commit message names all four and states that each pair stayed
+// inside one file, in its original relative order, so no cross-file load order
+// can un-decide it. That statement was true when written and nothing held it
+// true afterwards: only the cursor pair had a test (tick_test.go's byte-offset
+// assertion), and that one reads stylesheet()'s concatenation, which cannot
+// tell "both rules are in filelist.css" from "they are in two files that
+// happen to be concatenated in this order".
+//
+// EACH ANCHOR IS THE RULE'S OWN TEXT, and uniqueness is asserted below rather
+// than assumed. The first version of this test anchored on the bare selectors
+// `.run-cancel` and `.run-priority`, which was inert: `.run-priority` occurs
+// seven times in table.css (:hover, :disabled, :focus-visible), so moving the
+// standalone rule to another file left the substring behind and the guard
+// passed. A guard that cannot fail is worse than none, so the anchors are the
+// full declarations and a match count that is not exactly one fails the test.
+var positionDecidedPairs = []struct {
+	what     string
+	grouped  string
+	override string
+	breakage string
+}{
+	{
+		what:     "the file picker's cursor",
+		grouped:  `.picker-item[data-tick="asked"] .picker-file,`,
+		override: `.picker-item[data-detail="true"] > .picker-file { cursor: pointer; }`,
+		breakage: "an asked row would look inert while still opening its detail (TOR-181/TOR-182)",
+	},
+	{
+		what:     "the queue arrows' opacity",
+		grouped:  ".run-cancel,\n.run-priority {",
+		override: ".run-priority { font-size: .7rem; padding: .3rem .15rem; opacity: .45; }",
+		breakage: "the arrows would take Cancel's weight, and a control that reads as " +
+			"equally weighty as the destructive one beside it is one people hesitate over",
+	},
+	{
+		what:     "the comparison dialog's step font",
+		grouped:  ".compare-step, .compare-flip {",
+		override: ".compare-step { font-family: var(--mono); }",
+		breakage: "the step label would lose its mono figures",
+	},
+	{
+		what:     "the comparison dialog's key hints",
+		grouped:  ".compare-note, .compare-keys {",
+		override: ".compare-keys { font-family: var(--mono); font-size: .72rem; }",
+		breakage: "the key hints would render in the note's font and size",
+	},
+}
+
+// TestEveryPositionDecidedPairStaysInOneFile asserts what the split's safety
+// rests on. It is deliberately a statement about FILES, not about
+// stylesheet()'s concatenated text: within one file the relative order is a
+// fact about that file and survives any reordering of index.html, which is
+// precisely the property that makes a pair safe. A pair spread across two
+// files is not necessarily wrong today - that depends on the link order - but
+// it has stopped being decided by anything local, and that is the regression.
+func TestEveryPositionDecidedPairStaysInOneFile(t *testing.T) {
+	texts := map[string]string{}
+	for _, name := range stylesheetFiles {
+		b, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Fatalf("reading the embedded %s: %v", name, err)
+		}
+		texts[name] = string(b)
+	}
+
+	// holder returns the one stylesheet containing sel, failing if the count
+	// across every served file is anything but exactly one - zero means the
+	// rule was renamed or deleted and this guard has quietly stopped guarding;
+	// more than one means the anchor is too loose to locate anything.
+	holder := func(t *testing.T, what, sel string) string {
+		t.Helper()
+		var in []string
+		total := 0
+		for _, name := range stylesheetFiles {
+			if n := strings.Count(texts[name], sel); n > 0 {
+				in = append(in, name)
+				total += n
+			}
+		}
+		if total != 1 {
+			t.Errorf("%s: %q matches %d times across %v, want exactly 1 - an anchor that "+
+				"matches nothing guards nothing, and one that matches twice cannot say "+
+				"where the rule is", what, sel, total, in)
+			return ""
+		}
+		return in[0]
+	}
+
+	for _, p := range positionDecidedPairs {
+		groupedIn := holder(t, p.what, p.grouped)
+		overrideIn := holder(t, p.what, p.override)
+		if groupedIn == "" || overrideIn == "" {
+			continue
+		}
+
+		if groupedIn != overrideIn {
+			t.Errorf("%s: the grouped rule is in %s and its override in %s, so which one wins "+
+				"is decided by index.html's link order instead of by one file's own "+
+				"contents; %s", p.what, groupedIn, overrideIn, p.breakage)
+			continue
+		}
+
+		css := texts[groupedIn]
+		g, o := strings.Index(css, p.grouped), strings.Index(css, p.override)
+		if o < g {
+			t.Errorf("%s: in %s the override is at byte %d, BEFORE the grouped rule at %d; "+
+				"at equal specificity the later rule wins, so the override no longer "+
+				"overrides anything and %s", p.what, groupedIn, o, g, p.breakage)
+		}
+	}
+}
+
+// compareDialogJS returns the embedded compare-dialog.js source. TOR-193 moved
+// the flipbook's behaviour out of app.js into its own custom element.
+func compareDialogJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/compare-dialog.js")
+	if err != nil {
+		t.Fatalf("reading the embedded compare-dialog.js: %v", err)
+	}
+	return string(b)
+}
+
+// TestTheFlipbookIsWiredInTheServedScript is a guard that did not exist before
+// TOR-193, and its absence is the finding worth recording: moving 337 lines -
+// the whole of TOR-109's design, its no-partner note included - out of app.js
+// into a new module broke not one test. compare_test.go is 541 lines of
+// SERVER tests covering the pairing; the front end that draws it had nothing.
+//
+// So a silent loss was available on every item the ticket listed as
+// must-survive, and this is what closes that. It cannot tell whether the
+// picture actually holds still on a flip - only a browser can, by measuring
+// the same rectangle twice, which TOR-193's report records - but it can catch
+// each mechanism being deleted, renamed or regated.
+func TestTheFlipbookIsWiredInTheServedScript(t *testing.T) {
+	js := compareDialogJS(t)
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
+	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
+
+	// THE FLIP IS A VISIBILITY TOGGLE, not a fetch. Both arms get a src for
+	// every position whichever is live, and a src is re-assigned only when it
+	// actually changes - that pair of facts is what makes flipping back and
+	// forth free, and either one alone does not.
+	shot := jsMethod(t, live, "setShot")
+	if !strings.Contains(shot, `if (img.getAttribute("src") !== href) img.src = href;`) {
+		t.Error("setShot assigns src unconditionally - flipping back and forth would " +
+			"re-decode the picture each time, and the whole design rests on the flip " +
+			"being a toggle over pixels the browser already has")
+	}
+	position := jsMethod(t, live, "renderPosition")
+	for _, want := range []string{
+		"this.setShot(this.shotA, position.a,",
+		"this.setShot(this.shotB, position.b,",
+	} {
+		if !strings.Contains(position, want) {
+			t.Errorf("renderPosition does not contain %q - BOTH arms must be given their "+
+				"picture at every position, whichever is live, or the flip becomes a fetch", want)
+		}
+	}
+
+	// THE SHAPE COMES FROM THE ARMS' RESOLUTION, once per comparison and never
+	// per position: a stage that re-shaped itself as pictures arrived would
+	// move the picture, which is the one thing this must not do.
+	render := jsMethod(t, live, "renderComparison")
+	if !strings.Contains(render, "--compare-aspect") {
+		t.Error("renderComparison no longer sets --compare-aspect - the stage's shape would " +
+			"then come from whichever image happened to arrive first")
+	}
+	if strings.Contains(position, "--compare-aspect") {
+		t.Error("renderPosition sets --compare-aspect - the shape belongs to the COMPARISON, " +
+			"not to a position; setting it per position re-shapes the stage as the " +
+			"flipbook is walked and slides the picture")
+	}
+	aspect := jsMethod(t, live, "aspectOf")
+	if !strings.Contains(aspect, "String(arm.width / arm.height)") {
+		t.Error("aspectOf no longer returns a bare number - compare.css multiplies this " +
+			"inside a calc() to bound the stage's height without breaking its shape, and " +
+			"only a number can be multiplied")
+	}
+
+	// THE NO-PARTNER NOTE, which the ticket named as the thing easiest to lose
+	// in a move. Both arms, and the count for each, or a person who counted
+	// twenty frames in the grid is left wondering where they went.
+	// Each arm is asserted as its WHOLE clause, gate and text together, not as
+	// the field name: `data.b.unpaired` occurs twice in its own line (once as
+	// the gate, once in the sentence), so a check for the bare name stays
+	// green while the gate is disabled - which is what a falsification run
+	// showed, on the arm this guard exists for. A guard weaker than its own
+	// error message is the defect it was written to catch, one level up.
+	note := jsMethod(t, live, "comparisonNote")
+	for _, want := range []string{
+		`if (data.a.unpaired) orphans.push(data.a.unpaired + " of set 1's " + data.a.points);`,
+		`if (data.b.unpaired) orphans.push(data.b.unpaired + " of set 2's " + data.b.points);`,
+		"capture points have no partner in the other set",
+	} {
+		if !strings.Contains(note, want) {
+			t.Errorf("comparisonNote does not contain %q - the pairing's leftovers have to be "+
+				"said out loud, per arm and with its count, rather than silently dropped", want)
+		}
+	}
+	if !strings.Contains(note, `data.basis === "time"`) {
+		t.Error("comparisonNote no longer says when the pairing fell back to timecode - a " +
+			"comparison paired by absolute time rather than by fraction of duration is a " +
+			"weaker claim, and the page has to admit which one it is making")
+	}
+
+	// STEPPING WRAPS. The flipbook is short and a person walking it with one
+	// finger should not have to turn round.
+	step := jsMethod(t, live, "step")
+	if !strings.Contains(step, "% positions.length") {
+		t.Error("step no longer wraps - the modulo is what lets one finger walk the whole " +
+			"flipbook in either direction")
+	}
+
+	// THE KEYS. 1 and 2 pick an arm outright, the arrows step, and the pickers
+	// keep their own arrows - a select is being used to choose a set, not to
+	// steer the flipbook.
+	keys := jsMethod(t, live, "dialogKeydown")
+	for _, want := range []string{
+		`case "1": this.showArm("a");`,
+		`case "2": this.showArm("b");`,
+		`case "ArrowLeft": this.step(-1);`,
+		`case "ArrowRight": this.step(1);`,
+		"this.flip();",
+	} {
+		if !strings.Contains(keys, want) {
+			t.Errorf("the flipbook's keydown handler does not contain %q", want)
+		}
+	}
+	if !strings.Contains(keys, `tag === "select"`) {
+		t.Error("the keydown handler no longer exempts a focused select - arrow keys belong " +
+			"to the picker while someone is choosing a set with it")
+	}
+	if !strings.Contains(keys, `tag === "button" && event.key === " "`) {
+		t.Error("the keydown handler no longer exempts space on a focused button - space is " +
+			"that button's own activation, so intercepting it flips twice for one press")
+	}
+	if strings.Contains(keys, "Escape") {
+		t.Error("the keydown handler mentions Escape - the dialog closes itself on Escape " +
+			"for free, and a handler that touches it is how that gets lost")
+	}
+
+	// ONE MODAL AT A TIME, which TOR-193 established is not automatic: the
+	// platform allows two, and this page could reach it because open() awaits
+	// a fetch before showModal().
+	open := jsMethod(t, live, "open")
+	if !strings.Contains(open, `document.querySelectorAll("dialog[open]")`) {
+		t.Error("open() no longer closes any other open dialog - two modal dialogs can be " +
+			"open at once (measured, on a bare pair), and this page can reach that state " +
+			"because open() awaits a fetch before showModal()")
+	}
+	if !strings.Contains(open, "this.dialog.showModal();") {
+		t.Error("open() never calls showModal - it is the only entry point the page has " +
+			"into the flipbook")
+	}
+
+	// THE SERVICES, injected because they cannot move: url() carries the base
+	// path and the token, log() writes to the page's activity log.
+	if !strings.Contains(live, "function setServices(services)") {
+		t.Error("compare-dialog.js exports no setServices - url() and log() belong to the " +
+			"page's bootstrap, and an element that reached for them directly could not be " +
+			"loaded without it")
+	}
+	if !strings.Contains(live, `throw new Error("compare-dialog: setServices needs a "`) {
+		t.Error("setServices accepts a missing service silently - the failure it forecloses " +
+			"is a request built without the base path, which breaks only behind a reverse " +
+			"proxy and only in production")
+	}
+	if !strings.Contains(live, `customElements.define("compare-dialog", CompareDialog)`) {
+		t.Error("compare-dialog.js never registers the element - the tag in index.html " +
+			"would be inert and pressing Compare would throw on a null dialog")
+	}
+}
+
+// TestTheFlipbookMarkupIsInsideItsElement is the companion to
+// TestLightboxMarkupHoldsTheWindowAndItsChrome, and exists for the same
+// reason: compare-dialog.js finds every part with this.querySelector, so
+// markup outside the element is markup it cannot see, and app.js reaches the
+// element as document.querySelector("compare-dialog").
+func TestTheFlipbookMarkupIsInsideItsElement(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+	page := string(html)
+
+	wrap := strings.Index(page, "<compare-dialog>")
+	wrapEnd := strings.Index(page, "</compare-dialog>")
+	if wrap < 0 || wrapEnd < 0 {
+		t.Fatalf("index.html has no <compare-dialog> element (open=%d close=%d)", wrap, wrapEnd)
+	}
+
+	// Every selector the element queries, checked against the markup rather
+	// than assumed: this list is the element's constructor read out loud, and
+	// a class where the markup carries only an id resolves to null.
+	for _, sel := range []string{
+		`class="compare"`, `class="compare-stage"`, `id="compare-a"`, `id="compare-b"`,
+		`id="compare-shot-a"`, `id="compare-shot-b"`, `class="compare-gap-code"`,
+		`id="compare-prev"`, `id="compare-next"`, `class="compare-flip"`,
+		`id="compare-close"`, `class="compare-place"`, `class="compare-times"`,
+		`class="compare-note"`,
+	} {
+		at := strings.Index(page, sel)
+		if at < 0 {
+			t.Errorf("index.html has no %s - compare-dialog.js queries for it and would get null", sel)
+			continue
+		}
+		if at < wrap || at > wrapEnd {
+			t.Errorf("%s is at %d, outside <compare-dialog> (%d..%d) - the element only "+
+				"searches inside itself", sel, at, wrap, wrapEnd)
+		}
 	}
 }

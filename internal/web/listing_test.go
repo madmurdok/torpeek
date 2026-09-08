@@ -1901,26 +1901,31 @@ func TestATopUpKeepsTheRowsArrivalOrdinal(t *testing.T) {
 // that reads as a perfectly plausible different one. "#12" cannot run out
 // of room.
 //
-// Read as served text, the way every front-end guard in this package works
-// (see columns_test.go's own opening note on why there is no JS runner).
+// Read as served text, the way most front-end guards in this package work
+// (see columns_test.go's own opening note). What each cell SAYS is a
+// derivation over an entry, so it is state.js's since TOR-191; which element
+// it is written into, and which one is dimmed, is run-table.js's since
+// TOR-194.
 func TestTheQueueCellShowsTheOrdinalAndMarksThePosition(t *testing.T) {
-	js := appJS(t)
+	derive := stateJS(t)
 
 	// The figure is the ordinal - the fact every row has.
-	if !strings.Contains(js, "function queueCellText(entry) {\n  const arrival = arrivalOrdinal(entry);") {
-		t.Error("app.js's queueCellText() does not read arrivalOrdinal() - if the cell's figure is the queue " +
+	if !strings.Contains(derive, "function queueCellText(entry) {\n  const arrival = arrivalOrdinal(entry);") {
+		t.Error("state.js's queueCellText() does not read arrivalOrdinal() - if the cell's figure is the queue " +
 			"position again, the column is empty for every row that is not waiting, which is the whole complaint")
 	}
 	// And the position is the second line, marked so two stacked numbers
 	// cannot be read as the same kind of thing.
-	if !strings.Contains(js, `if (position !== null) return "#" + position;`) {
-		t.Error(`app.js's queueCellMetaText() does not render the waiting position as "#" + position - a ` +
+	if !strings.Contains(derive, `if (position !== null) return "#" + position;`) {
+		t.Error(`state.js's queueCellMetaText() does not render the waiting position as "#" + position - a ` +
 			`spelled-out label does not fit the cell and gets ellipsised mid-number`)
 	}
 	// The dimmed state has to follow the figure too, or almost every row in
-	// the table renders as absent while showing a number.
-	if !strings.Contains(js, `entry.rowQueueCell.dataset.absent = String(arrivalOrdinal(entry) === null);`) {
-		t.Error("app.js dims the queue cell by something other than its own figure - a row with an ordinal " +
-			"would render as absent, or one without would not")
+	// the table renders as absent while showing a number. In run-table.js
+	// since TOR-194: which element a cell's text is written into, and which
+	// one is dimmed, is the ROW's business and moved with it.
+	if !strings.Contains(runTableJS(t), `entry.rowQueueCell.dataset.absent = String(arrivalOrdinal(entry) === null);`) {
+		t.Error("run-table.js dims the queue cell by something other than its own figure - a row with an " +
+			"ordinal would render as absent, or one without would not")
 	}
 }

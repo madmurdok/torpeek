@@ -24,14 +24,18 @@ import (
 // above the function, which in this file is where most of the reasoning
 // actually lives - jsFunc deliberately starts at the `function` keyword, so a
 // check for a ticket reference run through it would report every doc comment
-// in app.js as missing.
+// as missing.
+//
+// Like jsFunc it reads whichever of the three shipped modules it is handed
+// (TOR-191), which is what lets the table below say where each piece of
+// reasoning now lives rather than assuming all of it is in app.js.
 func jsFuncWithDoc(t *testing.T, js, name string) string {
 	t.Helper()
 
 	body := jsFunc(t, js, name)
 	head := strings.Index(js, body)
 	if head < 0 {
-		t.Fatalf("jsFunc's answer for %s is not in app.js", name)
+		t.Fatalf("jsFunc's answer for %s is not in the module handed to it", name)
 	}
 
 	lines := strings.Split(js[:head], "\n")
@@ -44,70 +48,122 @@ func jsFuncWithDoc(t *testing.T, js, name string) string {
 	return strings.Join(lines[first:], "\n") + body
 }
 
+// jsMethodWithDoc is jsFuncWithDoc for a CLASS METHOD, which is what most of
+// this file's subjects became when TOR-195 turned the three depths of a row's
+// detail into three custom elements. Same shape, one level of indentation in:
+// jsMethod finds the body, and the doc comment above it is walked back the
+// same way - except that a method's doc sits at two spaces rather than at
+// column zero, so the prefix test has to allow the indent.
+//
+// It exists for the reason jsMethod does: the alternative was keeping these
+// functions module-level so jsFuncWithDoc would still match them, which would
+// have shaped the elements around their tests instead of the other way round.
+func jsMethodWithDoc(t *testing.T, js, name string) string {
+	t.Helper()
+
+	body := jsMethod(t, js, name)
+	head := strings.Index(js, body)
+	if head < 0 {
+		t.Fatalf("jsMethod's answer for %s is not in the module handed to it", name)
+	}
+
+	lines := strings.Split(js[:head], "\n")
+	first := len(lines) - 1
+	for first > 0 && strings.HasPrefix(strings.TrimSpace(lines[first-1]), "//") {
+		first--
+	}
+	return strings.Join(lines[first:], "\n") + body
+}
+
 // TestAVideoFileOpensItsOwnDetailOneLevelIn is the move itself: the slot the
 // detail is built into belongs to the file's own row in the list, and the
 // container that used to hold the file cards below the list is gone rather
 // than left empty beside it.
 func TestAVideoFileOpensItsOwnDetailOneLevelIn(t *testing.T) {
-	js := servedScript(t)
+	// RETARGETED BY TOR-195, and this test straddles the boundary it drew:
+	// the ROW and the slot on it are file-list.js's, and what fills the slot
+	// is file-detail.js's - so each half below says which module it expects
+	// its own subject in. That is the point rather than an inconvenience: the
+	// seam is what this test is about.
+	js := fileListJS(t)
 	css := stylesheet(t)
 
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, js, "renderFileList")
 
 	// The slot, built with the row rather than by whatever fills it later:
 	// the disclosure has to be able to name the region it opens from the
 	// start (aria-controls), and a region minted later is one the control
 	// pointed at nothing for.
-	if !strings.Contains(render, `detail.className = "file-detail"`) {
-		t.Fatal("renderFileList builds no .file-detail slot on a file's row - the whole " +
+	// SINCE TOR-195 THE SLOT IS AN ELEMENT'S, and the row creates that element
+	// eagerly for exactly the reason the slot used to be built here: the
+	// disclosure has to be able to name the region it opens from the start
+	// (aria-controls), and a region minted later is one the control pointed at
+	// nothing for. So the row asks the element for the id it minted, and the
+	// element owns the slot's class and its `hidden`.
+	if !strings.Contains(render, `document.createElement("file-detail")`) {
+		t.Fatal("renderFileList creates no <file-detail> on a file's row - the whole " +
 			"of this ticket is that a file's detail hangs off its own row in the list")
 	}
-	if !strings.Contains(render, "detail.hidden = true") {
-		t.Error("the detail slot is not built closed - every file after the first starts " +
-			"collapsed, and a slot that begins open would show the first file's detail " +
-			"under every row for the frame before setFileExpanded runs")
-	}
-	if !strings.Contains(render, "open.setAttribute(\"aria-controls\", detail.id)") {
+	if !strings.Contains(render, `open.setAttribute("aria-controls", block.regionId)`) {
 		t.Error("the row's disclosure does not name the region it opens - a control that " +
-			"opens something has to say what, and the id is why the slot is built here")
+			"opens something has to say what, and the id is why the element is created here")
+	}
+	slot := jsMethod(t, fileDetailJS(t), "build")
+	if !strings.Contains(slot, `'<div class="file-detail" hidden></div>'`) {
+		t.Fatal("file-detail.js's build does not put a closed .file-detail slot inside " +
+			"itself - every file after the first starts collapsed, and a slot that begins " +
+			"open would show the first file's detail under every row for the frame before " +
+			"setFileExpanded runs")
+	}
+	if !strings.Contains(slot, `nextDetailId("file-detail-")`) {
+		t.Error("the slot's id no longer comes from the one counter all three detail " +
+			"levels share (state.js's nextDetailId) - three counters each guarantee " +
+			"uniqueness only within their own prefix")
 	}
 
 	// SIBLING, NOT DESCENDANT. This is the same structural decision the run
 	// row makes by putting its detail in a second <tr>: everything in a
 	// detail - a thumbnail, Regenerate, the per-frame delete - is outside the
 	// row that toggles it, so using the detail cannot close it.
-	if !strings.Contains(render, "item.append(detail)") {
-		t.Error("the detail slot is not appended to the row's own <li> - it has to be a " +
+	if !strings.Contains(render, "item.append(block)") {
+		t.Error("the detail is not appended to the row's own <li> - it has to be a " +
 			"sibling of the clickable row and a child of the item that holds both")
 	}
-	if regexp.MustCompile(`row\.append\([^)]*\bdetail\b`).MatchString(render) {
+	if regexp.MustCompile(`row\.append\([^)]*\bblock\b`).MatchString(render) {
 		t.Error("the detail slot is appended INSIDE the clickable row. Every click in it " +
 			"would then bubble to the row's own toggle and collapse the thing being " +
 			"used - the failure newRunEntry's second <tr> exists to avoid, one level down")
 	}
 
-	// And fileBlock builds into that slot, not into a container of its own.
-	block := jsFunc(t, js, "fileBlock")
-	if !strings.Contains(block, "const listRow = entry.pickerRows.get(index)") {
-		t.Fatal("fileBlock does not look up the file's row - the row is where its detail " +
-			"goes now, so the row is what it needs before it can build anything")
+	// And the mount goes through the row, not into a container of its own. The
+	// lookup is the LIST's since TOR-195 (it owns the row map) and the filling
+	// is the element's, so both halves are read.
+	mount := jsMethod(t, js, "mountFileDetail")
+	if !strings.Contains(mount, "const row = this.rows.get(index)") {
+		t.Fatal("mountFileDetail does not look up the file's row - the row is where its " +
+			"detail goes now, so the row is what it needs before anything can be built")
 	}
-	if !strings.Contains(block, "const body = listRow.detail") {
-		t.Error("fileBlock does not build into the row's own detail slot")
+	if !strings.Contains(mount, "row.block.mount(entry, index, row)") {
+		t.Error("the list does not mount the file's detail into the element on that row")
 	}
-	if !strings.Contains(block, "if (!listRow) {") || !strings.Contains(block, "return null") {
-		t.Error("fileBlock does not cope with a file the list has no row for. It cannot " +
-			"happen for any sequence the server publishes (MetadataReady precedes the " +
-			"first FileStarted on both paths), but this page must not throw on an " +
+	if !strings.Contains(mount, "if (!row) {") || !strings.Contains(mount, "return null") {
+		t.Error("mountFileDetail does not cope with a file the list has no row for. It " +
+			"cannot happen for any sequence the server publishes (MetadataReady precedes " +
+			"the first FileStarted on both paths), but this page must not throw on an " +
 			"invariant that lives in another package")
+	}
+	if fill := jsMethod(t, fileDetailJS(t), "mount"); !strings.Contains(fill, "this.body.innerHTML = BODY;") {
+		t.Error("file-detail.js's mount does not fill the slot it built - the row would " +
+			"open onto an empty panel")
 	}
 
 	// The old home, gone from both files rather than left as an empty
 	// section that a later ticket would wonder about.
-	live := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(js, "")
+	live := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(
+		js+"\n"+fileDetailJS(t)+"\n"+appJS(t)+"\n"+runDetailJS(t), "")
 	for _, gone := range []string{`class="files"`, "filesEl", "file-toggle", "file-body"} {
 		if strings.Contains(live, gone) {
-			t.Errorf("app.js still builds or reads %q - the file cards moved into the "+
+			t.Errorf("the served front end still builds or reads %q - the file cards moved into the "+
 				"list's own rows, and the container that held them has nothing left to "+
 				"hold", gone)
 		}
@@ -146,10 +202,10 @@ func TestAVideoFileOpensItsOwnDetailOneLevelIn(t *testing.T) {
 // the box by TARGET would fire twice per click on the file's name and toggle
 // the detail straight back closed.
 func TestTheRowOwnsTheToggleAndTheTickStillOwnsTheBox(t *testing.T) {
-	js := servedScript(t)
-	render := jsFunc(t, js, "renderFileList")
+	js := fileListJS(t)
+	render := jsMethod(t, js, "renderFileList")
 
-	listener := regexp.MustCompile(`(?s)row\.addEventListener\("click", \(event\) => \{(.*?)\n      \}\);`).
+	listener := regexp.MustCompile(`(?s)row\.addEventListener\("click", \(event\) => \{(.*?)\n        \}\);`).
 		FindStringSubmatch(render)
 	if listener == nil {
 		t.Fatal("renderFileList registers no click listener on the file's row - the " +
@@ -162,7 +218,7 @@ func TestTheRowOwnsTheToggleAndTheTickStillOwnsTheBox(t *testing.T) {
 			"control, which bubbles to this same handler - so a click on the name "+
 			"toggles the detail open and then closed again", listener[1])
 	}
-	if !strings.Contains(listener[1], "toggleFileDetail(entry, file.index)") {
+	if !strings.Contains(listener[1], "this.toggleFileDetail(file.index)") {
 		t.Errorf("the row's click handler is %q, and does not go through "+
 			"toggleFileDetail - which is where reading the other result sets off disk "+
 			"on first open lives", listener[1])
@@ -170,7 +226,7 @@ func TestTheRowOwnsTheToggleAndTheTickStillOwnsTheBox(t *testing.T) {
 
 	// The box keeps the meaning TOR-181 gave it, and nothing about the row
 	// becoming a disclosure may take that away.
-	if !regexp.MustCompile(`box\.addEventListener\("change", \(\) => tickFile\(`).MatchString(render) {
+	if !regexp.MustCompile(`box\.addEventListener\("change", \(\) => this\.tickFile\(`).MatchString(render) {
 		t.Error("a checkbox's change no longer calls tickFile - the tick IS the decision " +
 			"since TOR-181, and the row growing a second meaning must not cost the first")
 	}
@@ -190,7 +246,7 @@ func TestTheRowOwnsTheToggleAndTheTickStillOwnsTheBox(t *testing.T) {
 			"sitting ahead of the checkbox - so clicking the name toggles the detail " +
 			"twice and never ticks the file")
 	}
-	if !regexp.MustCompile(`box\.id = "file-tick-" \+ \(\+\+detailSeq\)`).MatchString(render) {
+	if !regexp.MustCompile(`box\.id = nextDetailId\("file-tick-"\)`).MatchString(render) {
 		t.Error("the checkbox has no id for the label to name, or one that is not unique " +
 			"per row - two rows sharing an id means one label pointing at the other " +
 			"row's box")
@@ -198,13 +254,21 @@ func TestTheRowOwnsTheToggleAndTheTickStillOwnsTheBox(t *testing.T) {
 
 	// A file that has said nothing has nothing to open, so the row does
 	// nothing rather than showing an empty panel.
-	toggle := jsFunc(t, js, "toggleFileDetail")
+	// SPLIT IN TWO BY TOR-195, along the boundary it drew: which row was
+	// clicked and whether it has a detail at all is the LIST's, and what
+	// opening MEANS is the detail's own. Both halves are read, because either
+	// alone is satisfiable while the other does nothing.
+	toggle := jsMethod(t, js, "toggleFileDetail")
 	if !strings.Contains(toggle, "if (!fentry) return") {
 		t.Error("toggleFileDetail opens a detail for a file with no block yet - until a " +
 			"tick starts a file there is no metadata, no plan and no frames, and an " +
 			"empty panel says the file has nothing rather than that nothing has run")
 	}
-	if !strings.Contains(toggle, "loadFileDetail(entry, fentry, index)") {
+	if !strings.Contains(toggle, "fentry.block.toggle()") {
+		t.Error("the row's click does not reach the file's own detail, which is the only " +
+			"thing that may decide what opening it means")
+	}
+	if open := jsMethod(t, fileDetailJS(t), "toggle"); !strings.Contains(open, "this.loadFileDetail()") {
 		t.Error("opening a file no longer reads its other result sets off disk - that is " +
 			"the only way a regeneration's frames can be reached at all (loadFileDetail)")
 	}
@@ -220,14 +284,12 @@ func TestTheRowOwnsTheToggleAndTheTickStillOwnsTheBox(t *testing.T) {
 // be rebuilt, a collapsed file loses nothing by closing, because its detail
 // keeps being updated whether or not it is on screen.
 func TestOnlyOneFileDetailIsOpenAtOnce(t *testing.T) {
-	js := servedScript(t)
-
-	fn := jsFunc(t, js, "setFileExpanded")
+	fn := jsMethod(t, fileDetailJS(t), "setFileExpanded")
 	if !strings.Contains(fn, "fentry.entry.fileEntries.values()") {
 		t.Fatal("setFileExpanded does not look at this torrent's other files - a " +
 			"single-open accordion is exactly the sibling it has to close")
 	}
-	if !regexp.MustCompile(`if \(other !== fentry && other\.expanded\) setFileExpanded\(other, false\)`).
+	if !regexp.MustCompile(`if \(other !== fentry && other\.expanded\) other\.block\.setFileExpanded\(false\)`).
 		MatchString(fn) {
 		t.Error("setFileExpanded does not collapse the file that was open - without it " +
 			"this level is multi-open, and a season pack inside two expanded torrents " +
@@ -242,7 +304,11 @@ func TestOnlyOneFileDetailIsOpenAtOnce(t *testing.T) {
 	// AND THE LEVEL ABOVE IS UNTOUCHED. The bound belongs on the inner level
 	// precisely so the outer one keeps what it is for: two torrents side by
 	// side, one of them mid-run.
-	run := jsFunc(t, js, "setRunExpanded")
+	//
+	// setRunExpanded is a method of the table element since TOR-194 - the
+	// accordion's mechanism is three attributes on row elements, so it moved
+	// with the rows. What it must not read did not change with the move.
+	run := jsMethod(t, runTableJS(t), "setRunExpanded")
 	for _, forbidden := range []string{"state.runs", "fileEntries", "setFileExpanded"} {
 		if strings.Contains(run, forbidden) {
 			t.Errorf("setRunExpanded now reads %q. It must not: several torrents may be "+
@@ -262,7 +328,8 @@ func TestOnlyOneFileDetailIsOpenAtOnce(t *testing.T) {
 func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 	js := servedScript(t)
 
-	run := jsFunc(t, js, "setRunExpanded")
+	// The table element's, since TOR-194 (see the sibling test above).
+	run := jsMethod(t, runTableJS(t), "setRunExpanded")
 	if !strings.Contains(run, "entry.detailRowEl.hidden = !expanded") {
 		t.Fatal("setRunExpanded no longer collapses by hiding the detail's own row - " +
 			"this test is anchored on that being the only thing it does to the content")
@@ -319,8 +386,15 @@ func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 // detaches every frame grid, every open disclosure and every element
 // fileBlock is holding a reference to - on a row whose frames are on screen.
 func TestASecondFileListMessageDoesNotWipeTheDetailsInsideIt(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	// SINCE TOR-191 THE DECISION IS THE EVENT LAYER'S, and that is the whole
+	// improvement: renderFileList used to compute the signature and return
+	// early, so "did it redraw" was a fact about a function's control flow.
+	// Now events.js either asks the page for a rebuild or does not, which is
+	// a fact something can COUNT - and
+	// TestASecondIdenticalFileListRebuildsNothing (eventstate_test.go) counts
+	// it, against four real messages, which is the only way to tell a
+	// suppressed rebuild from a suppressed everything.
+	fn := jsFunc(t, eventsJS(t), "applyFileList")
 
 	// The signature is the list ITSELF, not a counter or a length: two
 	// different lists of the same length must not compare equal.
@@ -344,45 +418,60 @@ func TestASecondFileListMessageDoesNotWipeTheDetailsInsideIt(t *testing.T) {
 			"same paths mean a different list in those two cases", sig[1])
 	}
 
-	if !regexp.MustCompile(`if \(sig !== "" && sig === entry\.fileListSig\) \{`).MatchString(fn) {
-		t.Error("renderFileList does not skip the rebuild for a list it has already " +
+	if !regexp.MustCompile(`if \(sig !== "" && sig === entry\.fileListSig\) return;`).MatchString(fn) {
+		t.Error("applyFileList does not skip the rebuild for a list it has already " +
 			"drawn. The empty-signature half matters too: an empty list must not match " +
 			"the next empty one and suppress the first real draw")
 	}
-	// It still restates everything a repeat message can legitimately have
-	// changed - the boxes, the prices, the frame, the title.
-	if !regexp.MustCompile(`(?s)sig === entry\.fileListSig\) \{.*?syncFileList\(entry\);\s*\n\s*return;`).MatchString(fn) {
-		t.Error("the early return does not re-sync the list's state - the shape is " +
-			"unchanged, but the ticks, the prices and the parked frame all still have " +
-			"to follow the message that arrived")
+	// The repeat message must not go silent: everything about a row that is
+	// not its SHAPE - the boxes, the prices, the frame, the title - still has
+	// to follow it. That is the syncEntry both callers end on, so it is read
+	// out of them rather than out of the early return.
+	for _, caller := range []string{"applyMetadataReady", "applyNeedsAction"} {
+		body := jsFunc(t, eventsJS(t), caller)
+		if !strings.Contains(body, "applyFileList(entry, ev);") {
+			t.Errorf("%s does not go through applyFileList - the signature would not be "+
+				"consulted at all for the message it carries", caller)
+		}
+		if !strings.Contains(body, "view.syncEntry(entry);") {
+			t.Errorf("%s does not re-sync the row - the list's shape is unchanged on a "+
+				"repeat, but the ticks, the prices and the parked frame all still have "+
+				"to follow the message that arrived", caller)
+		}
 	}
 
 	// AND WHEN IT DOES REBUILD, the blocks go with the rows that held them.
 	// Every fentry points at elements inside a row a rebuild detaches, so a
 	// map left standing would have fileBlock hand back a block whose DOM is
 	// off the page - and that file's detail would never appear again, in
-	// silence, for the rest of the row's life.
-	if !regexp.MustCompile(`(?s)entry\.pickerRows = new Map\(\);.*?entry\.fileEntries\.clear\(\)`).MatchString(fn) {
-		t.Error("renderFileList rebuilds the rows without clearing the file entries - " +
-			"they are references into the rows it just detached, and fileBlock returns " +
-			"them again rather than rebuilding")
+	// silence, for the rest of the row's life. The order is load-bearing and
+	// now spans two files: the file entries are the only handle on those
+	// blocks, so they go BEFORE the page is asked to detach the rows.
+	if !regexp.MustCompile(`(?s)entry\.fileEntries\.clear\(\);\s*\n\s*entry\.autoExpanded = false;\s*\n\s*view\.rebuildFileList\(entry\);`).MatchString(fn) {
+		t.Errorf("applyFileList does not clear the file entries and re-arm the auto-expand "+
+			"immediately before asking for the rebuild - they are references into the rows "+
+			"that rebuild detaches, and the latch is what makes only the FIRST file open "+
+			"itself: %q", fn)
 	}
-	if !regexp.MustCompile(`(?s)entry\.fileEntries\.clear\(\);\s*\n\s*entry\.autoExpanded = false`).MatchString(fn) {
-		t.Error("a rebuilt list does not re-arm the auto-expand - the latch is what makes " +
-			"only the FIRST file open itself, and a list rebuilt with it still set would " +
-			"come back with every file closed")
+	// The page's own half: a fresh map, since every bundle in the old one
+	// points into a row that is about to go.
+	if !strings.Contains(jsMethod(t, fileListJS(t), "renderFileList"), "this.rows = new Map();") {
+		t.Error("renderFileList reuses the row map across a rebuild - its bundles are " +
+			"references into the rows it is replacing")
 	}
 
 	// A genuine fresh start still rebuilds, which is what keeps this from
 	// being a way to lose the list entirely.
-	reset := jsFunc(t, js, "resetRunContent")
+	// Comments stripped: both lines below are named in resetRunState's own
+	// prose as well as executed by it, and a comment satisfies strings.Contains.
+	reset := stripJSComments(jsFunc(t, stateJS(t), "resetRunState"))
 	if !strings.Contains(reset, `entry.fileListSig = ""`) {
-		t.Error("resetRunContent does not clear the signature. Left behind, it tells the " +
+		t.Error("resetRunState does not clear the signature. Left behind, it tells the " +
 			"replayed metadata_ready that follows a reset \"you already drew this\", and " +
 			"the row comes back from a reconnect with an empty list")
 	}
 	if !strings.Contains(reset, "entry.fileEntries.clear()") {
-		t.Error("resetRunContent no longer clears the file entries - they are the only " +
+		t.Error("resetRunState no longer clears the file entries - they are the only " +
 			"handle on blocks that are about to be detached with the rows holding them")
 	}
 }
@@ -393,8 +482,12 @@ func TestASecondFileListMessageDoesNotWipeTheDetailsInsideIt(t *testing.T) {
 // the ticket whose comment travelled with it - a move that strips those
 // loses the knowledge, not just the prose.
 func TestTheMovedBlocksKeepTheReasonsAttachedToThem(t *testing.T) {
-	js := servedScript(t)
-	block := jsFunc(t, js, "fileBlock")
+	// SINCE TOR-195 the elements are a template constant of file-detail.js
+	// rather than an innerHTML inside a function, so the "still built" scan
+	// reads the module - which covers BODY and anything a method builds with
+	// createElement, and is therefore no narrower than reading one function.
+	js := fileDetailJS(t)
+	block := js
 
 	// Every element that travelled, still built.
 	for _, element := range []string{
@@ -410,7 +503,7 @@ func TestTheMovedBlocksKeepTheReasonsAttachedToThem(t *testing.T) {
 		`class="file-progress"`, `class="file-links"`, `class="grid"`,
 	} {
 		if !strings.Contains(block, element) {
-			t.Errorf("fileBlock no longer builds %s - it was in the flat detail, so "+
+			t.Errorf("file-detail.js no longer builds %s - it was in the flat detail, so "+
 				"losing it in the move is a silent loss of something that worked", element)
 		}
 	}
@@ -419,33 +512,71 @@ func TestTheMovedBlocksKeepTheReasonsAttachedToThem(t *testing.T) {
 	// beside the element (fileBlock's own template) or on the function that
 	// fills it, and this checks whichever of the two it is rather than
 	// requiring it to be moved to where a test would find it more easily.
-	for _, want := range []struct{ where, ticket, what string }{
-		{"fileBlock", "TOR-153", "the swarm chip beside the reach strip, and why it " +
-			"stays a separate shape rather than a fill on the strip's own axis"},
-		{"fileBlock", "TOR-109", "why Compare sits beside Regenerate"},
-		{"fileBlock", "TOR-110", "the plan-shaped grid, laid out at final size before " +
-			"any piece is fetched, and the reserved cell that is the reason for it"},
-		{"fileBlock", "TOR-71", "the metadata accordion, one level inside a file's own"},
-		{"setMetaExpanded", "TOR-71", "the single function that may open or close a " +
-			"file's metadata"},
-		{"onFileDone", "TOR-171", "why the manifest link is not offered beside the " +
-			"contact sheet"},
-		{"applyFrameProgress", "TOR-167", "which of two signals the row's bar reads from"},
-		{"renderReach", "TOR-179", "where the strip's data comes from, now that it is " +
-			"the frames' own byte ranges rather than the last run's claim log"},
-		{"frameState", "TOR-118", "a point that produced nothing, given a cell of its " +
-			"own rather than left looking like one still on its way"},
+	//
+	// SINCE TOR-191 "the place it actually sits" includes WHICH MODULE, and
+	// that is the point rather than an inconvenience: this table is the
+	// clearest statement in the suite of where each of these decisions ended
+	// up, and a piece of reasoning that arrived in the wrong module is a
+	// piece of reasoning nobody editing that code will read.
+	modules := map[string]string{
+		"state.js":       stateJS(t),
+		"events.js":      eventsJS(t),
+		"file-detail.js": js,
+	}
+	// method says whether the named subject is a class method (jsMethodWithDoc)
+	// or still a top-level function (jsFuncWithDoc) - which since TOR-195 is
+	// itself part of "the place it actually sits".
+	for _, want := range []struct {
+		module, where, ticket, what string
+		method                      bool
+	}{
+		{"file-detail.js", "renderReach", "TOR-153", "the swarm chip beside the reach strip, and why it " +
+			"stays a separate shape rather than a fill on the strip's own axis", true},
+		// Compare's own reason sits beside the button in the BODY template
+		// rather than on a method, which is what the "either beside the
+		// element or on the function that fills it" rule below allows for.
+		{"file-detail.js", "", "TOR-109", "why Compare sits beside Regenerate", false},
+		// The plan itself is what a file KNOWS, so it moved to state.js's own
+		// file-entry shape - and the reserved cell's reasoning went with the
+		// field rather than staying beside the elements it explains.
+		{"state.js", "newFileState", "TOR-110", "the plan-shaped grid, laid out at final size " +
+			"before any piece is fetched, and the reserved cell that is the reason for it", false},
+		{"file-detail.js", "mount", "TOR-71", "the metadata accordion, one level inside a file's own", true},
+		{"file-detail.js", "setMetaExpanded", "TOR-71", "the single function that may open or close a " +
+			"file's metadata", true},
+		// onFileDone split in two: what a finished file KNOWS (events.js) and
+		// the link drawn from it (file-detail.js's renderFileLinks). TOR-171
+		// is about what is drawn, so it travelled with the drawing.
+		{"file-detail.js", "renderFileLinks", "TOR-171", "why the manifest link is not offered beside " +
+			"the contact sheet", true},
+		{"events.js", "applyFrameProgress", "TOR-167", "which of two signals the row's bar " +
+			"reads from", false},
+		{"file-detail.js", "renderReach", "TOR-179", "where the strip's data comes from, now that it is " +
+			"the frames' own byte ranges rather than the last run's claim log", true},
+		{"state.js", "frameState", "TOR-118", "a point that produced nothing, given a cell of its " +
+			"own rather than left looking like one still on its way", false},
 	} {
-		if !strings.Contains(jsFuncWithDoc(t, js, want.where), want.ticket) {
-			t.Errorf("%s no longer names %s, which is where %s was decided - a move that "+
+		var where string
+		switch {
+		case want.where == "":
+			// Beside the element, in the module's own template.
+			where = modules[want.module]
+		case want.method:
+			where = jsMethodWithDoc(t, modules[want.module], want.where)
+		default:
+			where = jsFuncWithDoc(t, modules[want.module], want.where)
+		}
+		if !strings.Contains(where, want.ticket) {
+			t.Errorf("%s's %s no longer names %s, which is where %s was decided - a move that "+
 				"keeps the element and drops the reasoning loses the knowledge, not just "+
-				"the prose", want.where, want.ticket, want.what)
+				"the prose", want.module, want.where, want.ticket, want.what)
 		}
 	}
 
 	// The grid's four cell states, still four: the two the disk shape can
-	// report and the two only a plan-shaped grid has.
-	cells := jsFunc(t, js, "gridCells")
+	// report and the two only a plan-shaped grid has. gridCells is a
+	// derivation over a file's own frames and plan, so it is state.js's.
+	cells := jsFunc(t, stateJS(t), "gridCells")
 	for _, state := range []string{`"exact"`, `"shifted"`, `"failed"`, `"pending"`} {
 		if !strings.Contains(cells, state) {
 			t.Errorf("gridCells no longer produces the %s cell state - TOR-110's answer "+
@@ -457,15 +588,38 @@ func TestTheMovedBlocksKeepTheReasonsAttachedToThem(t *testing.T) {
 	// And the top-up offer, which is the one block on the ticket's list that
 	// is about the RUN rather than about a file: it stays above the list,
 	// where it was, and the move must not have swept it in.
-	if !strings.Contains(js, `'<section class="run-again" hidden>'`) {
-		t.Error("the run detail's template no longer builds .run-again - the top-up " +
-			"offer (TOR-152) is a property of the run, not of any one file, and it " +
-			"belongs above the list rather than inside a file's own detail")
+	//
+	// SINCE TOR-195 THAT IS STRUCTURAL RATHER THAN A MATTER OF ORDER, which is
+	// what TOR-195's own acceptance asks to be checkable rather than
+	// eyeballed: the offer is built by run-detail.js and the files are in a
+	// nested <file-list> the run detail appends AFTER it, so "outside every
+	// file detail" is a fact about which module builds what.
+	if !strings.Contains(runDetailJS(t), `'<section class="run-again" hidden>'`) {
+		t.Error("run-detail.js no longer builds .run-again - the top-up offer (TOR-152) " +
+			"is a property of the run, not of any one file, and it belongs above the " +
+			"list rather than inside a file's own detail")
 	}
-	if strings.Contains(block, "run-again") {
-		t.Error("fileBlock builds the top-up offer into a file's detail. It is one " +
-			"offer per run and would be repeated per file, and the figure it states " +
-			"is the run's own")
+	// COMMENTS STRIPPED, which is this suite's own standing lesson (see
+	// runtable_test.go's liveJS): file-list.js's framesLabel names
+	// .run-again-cost in prose, precisely to say that the byte figure belongs
+	// to the run rather than to a file - and a raw-text check would read that
+	// explanation as the violation it is explaining.
+	for _, mod := range []struct{ name, src string }{
+		{"file-list.js", liveJS(t, fileListJS(t))},
+		{"file-detail.js", liveJS(t, js)},
+	} {
+		if strings.Contains(mod.src, "run-again") {
+			t.Errorf("%s builds or reads the top-up offer. It is one offer per run and "+
+				"would be repeated per file, and the figure it states is the run's own",
+				mod.name)
+		}
+	}
+	// And the nesting itself: the list is appended to the run's detail, after
+	// the offer, which is the second of the ticket's three boundaries.
+	if build := jsMethod(t, runDetailJS(t), "build"); !strings.Contains(build, `document.createElement("file-list")`) ||
+		!strings.Contains(build, "this.detailEl.append(this.files)") {
+		t.Error("run-detail.js does not create and append the file list itself - if the " +
+			"list were built anywhere else, nothing would keep the top-up offer above it")
 	}
 }
 
@@ -482,10 +636,9 @@ func TestTheMovedBlocksKeepTheReasonsAttachedToThem(t *testing.T) {
 // down twenty-five rows, so a column that empties the row you are looking at
 // is one that has to be re-found every time.
 func TestTheRowsSummaryStaysOnScreenWhileTheFileIsOpen(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "setFileExpanded")
+	fn := jsMethod(t, fileDetailJS(t), "setFileExpanded")
 
-	if regexp.MustCompile(`fentry\.summary\.hidden\s*=`).MatchString(fn) {
+	if regexp.MustCompile(`this\.summary\.hidden\s*=`).MatchString(fn) {
 		t.Error("setFileExpanded hides the row's summary again. It is a column of the " +
 			"file list now, and the specs panel that used to repeat it is collapsed by " +
 			"default (TOR-71) - so hiding it shows nothing in its place")
@@ -493,12 +646,12 @@ func TestTheRowsSummaryStaysOnScreenWhileTheFileIsOpen(t *testing.T) {
 
 	// It is on the row itself, and it is still kept current by the one
 	// function that ever wrote it.
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, fileListJS(t), "renderFileList")
 	if !strings.Contains(render, `summary.className = "picker-summary"`) {
 		t.Fatal("renderFileList builds no .picker-summary on a file's row - the file " +
 			"card's own title line is gone, so this row is where it goes")
 	}
-	if !strings.Contains(jsFunc(t, js, "updateFileSummary"), "fentry.summary.textContent") {
+	if !strings.Contains(jsMethod(t, fileDetailJS(t), "updateFileSummary"), "this.summary.textContent") {
 		t.Error("updateFileSummary no longer writes the summary - the figures have to " +
 			"follow file_started and every frame_ready, open or closed")
 	}
@@ -527,10 +680,10 @@ func TestTheRowsSummaryStaysOnScreenWhileTheFileIsOpen(t *testing.T) {
 // visibility changes, the same way .picker-mark reserves the checkbox column
 // and .run-detail-cancel[data-idle] reserves Cancel's.
 func TestTheDisclosureIsReservedOnEveryRowAndDrawnWhereThereIsSomethingToOpen(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
 	css := stylesheet(t)
 
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, js, "renderFileList")
 	if !regexp.MustCompile(`createElement\(video \? "button" : "span"\)`).MatchString(render) {
 		t.Error("the disclosure is built as the same element on every row - a <button> " +
 			"belongs only where there can ever be something to open, and a file no " +
@@ -560,15 +713,18 @@ func TestTheDisclosureIsReservedOnEveryRowAndDrawnWhereThereIsSomethingToOpen(t 
 			"one signal that there is something behind it", shown)
 	}
 
-	// One writer of that attribute, and it is the moment the detail exists.
-	block := jsFunc(t, js, "fileBlock")
-	if !strings.Contains(block, `listRow.item.dataset.detail = "true"`) {
-		t.Error("fileBlock does not mark the row as having a detail, so the triangle " +
-			"never appears on a row that does")
+	// One writer of that attribute, and it is the moment the detail exists -
+	// which since TOR-195 is the file's own element filling its slot, one of
+	// the four row elements it is handed at mount.
+	block := jsMethod(t, fileDetailJS(t), "mount")
+	if !strings.Contains(block, `this.item.dataset.detail = "true"`) {
+		t.Error("file-detail.js's mount does not mark the row as having a detail, so the " +
+			"triangle never appears on a row that does")
 	}
-	writers := regexp.MustCompile(`dataset\.detail\s*=`).FindAllString(js, -1)
+	writers := regexp.MustCompile(`dataset\.detail\s*=`).FindAllString(
+		js+"\n"+fileDetailJS(t)+"\n"+appJS(t)+"\n"+runDetailJS(t), -1)
 	if len(writers) != 1 {
-		t.Errorf("app.js writes dataset.detail in %d places, want 1. It says \"there is "+
+		t.Errorf("the front end writes dataset.detail in %d places, want 1. It says \"there is "+
 			"something behind this triangle\", and a second writer is how that comes to "+
 			"be claimed for a row with an empty slot", len(writers))
 	}

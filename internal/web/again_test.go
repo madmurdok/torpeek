@@ -697,11 +697,11 @@ func TestRetryOfAnUnknownRunIsNotFound(t *testing.T) {
 // lever. What it CANNOT prove is that any of it renders; that is the browser
 // pass.
 func TestTheServedPageOffersToppingUpAndRetrying(t *testing.T) {
-	js, err := embedded.ReadFile("assets/app.js")
-	if err != nil {
-		t.Fatalf("reading the embedded page: %v", err)
-	}
-	page := string(js)
+	// RETARGETED ONTO run-detail.js BY TOR-195, not rewritten: the top-up
+	// offer is what a row says about the RUN, so it went to the outermost of
+	// the three nested detail elements with every sentence below intact. The
+	// subject did not change, only the file it lives in.
+	page := runDetailJS(t)
 
 	for _, want := range []string{
 		`post("runs/topup"`,
@@ -753,7 +753,14 @@ func TestTheServedPageOffersToppingUpAndRetrying(t *testing.T) {
 // both halves: the sentence is gone from the served script, and the figure
 // it used to carry still is a live spec, not a lost one.
 func TestTheDetailDropsTheRedundantLineButKeepsTheFileCount(t *testing.T) {
-	js := appJS(t)
+	// BOTH HALVES MOVED, AND TO DIFFERENT MODULES (TOR-195), which is exactly
+	// why this reads the two of them concatenated rather than one: the
+	// sentence that must be gone and the top-up's own completeness gate are
+	// run-detail.js's, and "Torrent files" - M's new home since TOR-178 - is
+	// a spec inside a FILE's Metadata disclosure, so it is file-detail.js's.
+	// Concatenating is what keeps the test's own subject ("the sentence went
+	// and the figure did not") one question rather than two.
+	js := runDetailJS(t) + "\n" + fileDetailJS(t)
 
 	// The exact sentence metadata_ready used to draw on .torrent-summary. If
 	// this comes back, either directly or via a differently-worded

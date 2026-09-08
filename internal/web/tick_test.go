@@ -715,15 +715,21 @@ func indices(t *testing.T, raw any) []int {
 // into the program - so it is asserted present in the same test that asserts
 // the other gone.
 func TestTheButtonUnderTheFileListIsGone(t *testing.T) {
-	js := servedScript(t)
+	// RETARGETED ONTO file-list.js BY TOR-195 for the positive half, and
+	// WIDENED for the negative one: "the control is not in the script that
+	// ships" now means not in ANY of the modules that ship, which is a
+	// stronger claim than the single-file version could make.
+	js := fileListJS(t)
+	sweep := strings.Join([]string{appJS(t), stateJS(t), eventsJS(t), runTableJS(t),
+		runDetailJS(t), js, fileDetailJS(t)}, "\n")
 	css := stylesheet(t)
 
 	// Comments name the removed things in prose, on purpose - a reader has to
 	// be able to find out where the button went.
-	live := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(js, "")
+	live := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(sweep, "")
 	for _, gone := range []string{"picker-go", "picker-foot", "picker-none", "pickerGo", "pickerFoot", "pickerNone"} {
 		if strings.Contains(live, gone) {
-			t.Errorf("app.js still builds or reads %q - ticking a file starts it, so a "+
+			t.Errorf("the served front end still builds or reads %q - ticking a file starts it, so a "+
 				"button under the list is a second click for something already done", gone)
 		}
 	}
@@ -735,8 +741,8 @@ func TestTheButtonUnderTheFileListIsGone(t *testing.T) {
 	}
 
 	// The tick is what starts it now: the checkbox's own listener.
-	fn := jsFunc(t, js, "renderFileList")
-	if !regexp.MustCompile(`box\.addEventListener\("change", \(\) => tickFile\(`).MatchString(fn) {
+	fn := jsMethod(t, js, "renderFileList")
+	if !regexp.MustCompile(`box\.addEventListener\("change", \(\) => this\.tickFile\(`).MatchString(fn) {
 		t.Error("a checkbox's change no longer calls tickFile - the tick IS the decision " +
 			"since TOR-181, and nothing else on the row starts a capture")
 	}
@@ -762,11 +768,11 @@ func TestTheButtonUnderTheFileListIsGone(t *testing.T) {
 // number, and the row is where that multiplication is agreed to one file at
 // a time.
 func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
 	css := stylesheet(t)
 
 	// The span is built into the row, not into a foot below the list.
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, js, "renderFileList")
 	if !strings.Contains(render, `cost.className = "picker-cost"`) {
 		t.Fatal("renderFileList builds no .picker-cost on a file's row - the figure moved " +
 			"there when the button under the list went")
@@ -784,11 +790,17 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 	}
 
 	// The figure itself, and the one number it may quote.
-	costs := jsFunc(t, js, "updateFileCosts")
+	costs := jsMethod(t, js, "updateFileCosts")
 	if !strings.Contains(costs, "row.cost.textContent = framesLabel(n)") {
 		t.Error("updateFileCosts does not write the frame count onto the row")
 	}
-	if !strings.Contains(costs, "const n = passCount(entry)") {
+	// passCount takes its fallback as an argument since TOR-191: "the server's
+	// own -n" is whatever the intake box displays, which is a DOM fact, so the
+	// page reads it (countValue) and the decision stays in state.js.
+	// countValue itself is app.js's - reading the intake box is the page's job -
+	// so since TOR-195 the list is HANDED it as the `count` service and calls
+	// that. The decision is unchanged and still state.js's passCount.
+	if !strings.Contains(costs, "const n = passCount(entry, count())") {
 		t.Error("updateFileCosts does not read passCount - a row with a pass already " +
 			"forming must quote the count that pass is LOCKED to, not whatever the intake " +
 			"box now shows, or the price changes under a person after they read it")
@@ -801,9 +813,20 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 
 	// It follows the intake box live, because a person may well retype the
 	// count while reading the list.
-	listener := jsListener(t, js, `el.count.addEventListener("input"`)
-	if !strings.Contains(listener, "updateFileCosts(entry)") {
-		t.Error("retyping the intake count no longer restates the rows' prices")
+	// The listener is app.js's (it is the intake's own box) and the gate moved
+	// INTO the list with TOR-195, so both halves are read: a listener that
+	// asked nothing, or a reprice that repriced nothing, each satisfies only
+	// one of them.
+	listener := jsListener(t, appJS(t), `el.count.addEventListener("input"`)
+	if !strings.Contains(listener, "entry.detail.files.reprice()") {
+		t.Error("retyping the intake count no longer asks each torrent's file list to " +
+			"restate its prices")
+	}
+	if reprice := jsMethod(t, js, "reprice"); !strings.Contains(reprice, "if (this.pickerEl.hidden) return;") ||
+		!strings.Contains(reprice, "this.updateFileCosts();") {
+		t.Error("file-list.js's reprice does not gate on the list being on screen and then " +
+			"restate every figure - the gate is what keeps a page of fifty closed rows from " +
+			"redrawing on every keystroke")
 	}
 
 	// THE ACCENT IS NOT WHAT SAYS IT. The accent means "this is live, or this
@@ -832,10 +855,10 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 // than in a dialog, so the figure is in the page's own type and can be seen
 // in a screenshot of what the page actually said.
 func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
 	css := stylesheet(t)
 
-	arm := jsFunc(t, js, "armSelectAll")
+	arm := jsMethod(t, js, "armSelectAll")
 	if !strings.Contains(arm, "if (entry.armed) {") || !strings.Contains(arm, "entry.armed = true") {
 		t.Fatal("armSelectAll does not arm and then act on a second press - one press that " +
 			"starts every file is the silent one-click bill this ticket refuses to leave")
@@ -846,7 +869,7 @@ func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
 			"spend on a file somebody else's tick already started")
 	}
 
-	sync := jsFunc(t, js, "syncSelectAll")
+	sync := jsMethod(t, js, "syncSelectAll")
 	// The total, in the label and in the sentence beside it. Both, because a
 	// label that changed is a hint and this needs an instruction.
 	if !strings.Contains(sync, `"Start all " + remaining.length + " — " + total + " frames"`) {
@@ -863,18 +886,18 @@ func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
 		t.Error("an armed control with no way out is one somebody comes back to and " +
 			"presses without re-reading")
 	}
-	if !strings.Contains(js, `entry.pickerAll.addEventListener("blur", () => disarmSelectAll(entry))`) {
+	if !strings.Contains(js, `this.pickerAll.addEventListener("blur", () => this.disarmSelectAll())`) {
 		t.Error("Select all stays armed when focus leaves it")
 	}
 	// A tick disarms it too: somebody who ticks one file has answered the
 	// question by doing something else.
-	if !strings.Contains(jsFunc(t, js, "tickFile"), "disarmSelectAll(entry)") {
+	if !strings.Contains(jsMethod(t, js, "tickFile"), "this.disarmSelectAll()") {
 		t.Error("ticking a single file leaves Select all armed - which would put a " +
 			"whole-torrent bill under the next stray press")
 	}
 
 	// Three carriers for the armed state and only one of them is colour.
-	if !strings.Contains(sync, `entry.pickerAll.dataset.armed = "true"`) {
+	if !strings.Contains(sync, `this.pickerAll.dataset.armed = "true"`) {
 		t.Error("nothing marks the armed button for the stylesheet")
 	}
 	rule := cssRule(t, css, `.picker-all[data-armed="true"] {`)
@@ -896,35 +919,35 @@ func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
 // A box left ticked after one would say a file is being captured when
 // nothing is.
 func TestATickThatIsRefusedLeavesNoBoxClaimingAFetch(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "startFiles")
+	fn := jsMethod(t, fileListJS(t), "startFiles")
 
 	if !strings.Contains(fn, `await post("runs/decide"`) {
 		t.Fatal("startFiles does not post the tick")
 	}
-	if !strings.Contains(fn, "count: passCount(entry)") {
+	if !strings.Contains(fn, "count: passCount(entry, count())") {
 		t.Error("startFiles sends a count it did not display - the promise a price makes " +
 			"is that pressing the thing beside it costs THAT")
 	}
 	if !regexp.MustCompile(`(?s)catch \(err\) \{.*entry\.picked\.delete\(index\).*entry\.deferred\.delete\(index\)`).MatchString(fn) {
 		t.Error("a refused tick is not rolled back out of picked and deferred")
 	}
-	if !regexp.MustCompile(`(?s)catch \(err\) \{.*updateFileCosts\(entry\)`).MatchString(fn) {
+	if !regexp.MustCompile(`(?s)catch \(err\) \{.*this\.updateFileCosts\(\)`).MatchString(fn) {
 		t.Error("a refused tick does not redraw the rows, so the box stays ticked beside a " +
 			"file nothing is fetching")
 	}
 
-	// And the boxes are the server's answer, not the page's intention. Read
-	// off the whole script rather than out of apply(): these two assignments
-	// are unique in it, and the run_state handler is a block inside a
-	// function rather than a function of its own, so jsFunc has nothing to
-	// bound.
-	if !strings.Contains(js, "entry.picked = new Set(ev.ticked || [])") {
+	// And the boxes are the server's answer, not the page's intention. Since
+	// TOR-191 the run_state handler IS a function of its own (events.js's
+	// applyRunState), so these two are read out of it rather than off the
+	// whole script - which is what the note here used to have to apologise
+	// for.
+	apply := jsFunc(t, eventsJS(t), "applyRunState")
+	if !strings.Contains(apply, "entry.picked = new Set(ev.ticked || [])") {
 		t.Error("run_state's \"ticked\" is not written into entry.picked - a tick that was " +
 			"refused, or a second tab ticking the same torrent, would leave the boxes " +
 			"disagreeing with what is actually being fetched")
 	}
-	if !strings.Contains(js, "entry.tickable = !!ev.tickable") {
+	if !strings.Contains(apply, "entry.tickable = !!ev.tickable") {
 		t.Error("the page does not read the server's own tickable verdict")
 	}
 }
@@ -934,10 +957,9 @@ func TestATickThatIsRefusedLeavesNoBoxClaimingAFetch(t *testing.T) {
 // control that cannot be used must say so without relying on colour, and
 // must not light up under the pointer as though it could.
 func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
-	js := servedScript(t)
 	css := stylesheet(t)
 
-	fn := jsFunc(t, js, "updateFileCosts")
+	fn := jsMethod(t, fileListJS(t), "updateFileCosts")
 	// TOR-183 gave the asked-for arm ONE live case; TOR-184 gave it three, so
 	// the arm is now gated on a NAMED VERDICT rather than on any one of them.
 	// What has not changed is the rule the assertion is really about, and it
@@ -950,16 +972,17 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 			"then refuses is a control that lies, and a live box on a file nothing is " +
 			"fetching offers a stop with nothing to stop")
 	}
-	// The verdict itself, and every one of the four answers, because dropping
-	// one of them silently is how this control would come to mean the wrong
-	// thing in one state - which is TOR-184's whole subject.
+	// The verdict itself, and every one of the FIVE answers since TOR-197 -
+	// dropping one of them silently is how this control would come to mean
+	// the wrong thing in one state, which is TOR-184's whole subject.
 	if !strings.Contains(fn, `const untick = !asked ? ""`) ||
 		!strings.Contains(fn, `entry.deferred.has(index) ? "drop"`) ||
+		!strings.Contains(fn, `entry.narrowable.has(index) ? "narrow"`) ||
 		!strings.Contains(fn, `entry.fetching.has(index) ? "stop"`) ||
 		!strings.Contains(fn, `clearable ? "clear"`) {
-		t.Error("the row no longer decides which of drop/stop/clear an un-tick would be, " +
-			"so the box, the sentence on the row and tickFile's routing have nothing to " +
-			"agree on (TOR-184)")
+		t.Error("the row no longer decides which of drop/narrow/stop/clear an un-tick " +
+			"would be, so the box, the sentence on the row and tickFile's routing have " +
+			"nothing to agree on (TOR-184, TOR-197)")
 	}
 	if !strings.Contains(fn, "const clearable = asked && FINAL.has(entry.state) && framesOnDisk(entry, index) > 0") {
 		t.Error("the clear is not gated on all three of asked, settled and having frames " +
@@ -974,16 +997,26 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 	// by the order it is written in, and reading the strings alone would pass
 	// on a chain that answers "stop" for a deferred file.
 	dropAt := strings.Index(fn, `entry.deferred.has(index) ? "drop"`)
+	narrowAt := strings.Index(fn, `entry.narrowable.has(index) ? "narrow"`)
 	stopAt := strings.Index(fn, `entry.fetching.has(index) ? "stop"`)
 	clearAt := strings.Index(fn, `clearable ? "clear"`)
-	if dropAt < 0 || stopAt < 0 || clearAt < 0 {
-		t.Fatalf("cannot locate the three verdicts: drop at %d, stop at %d, clear at %d",
-			dropAt, stopAt, clearAt)
+	if dropAt < 0 || narrowAt < 0 || stopAt < 0 || clearAt < 0 {
+		t.Fatalf("cannot locate the four verdicts: drop at %d, narrow at %d, stop at %d, "+
+			"clear at %d", dropAt, narrowAt, stopAt, clearAt)
 	}
-	if !(dropAt < stopAt && stopAt < clearAt) {
-		t.Errorf("the verdicts are written drop@%d stop@%d clear@%d; a later arm of a "+
-			"ternary chain is only reached when the earlier ones are false, so this order "+
-			"is what decides which act a box performs", dropAt, stopAt, clearAt)
+	// TOR-197's arm sits between drop and stop, and the placement is the same
+	// argument as the rest of the order rather than a preference: it is the
+	// other case where nothing has been asked of the swarm, so it must be
+	// decided before the arm whose scope is a whole torrent. The two cannot
+	// both be true - "deferred" only ever holds files on a RUNNING row and
+	// "narrowable" only on a queueable one - but a chain of ternaries is
+	// decided by what is written first, and asserting the order is how a
+	// future edit that reverses them is caught rather than reasoned about.
+	if !(dropAt < narrowAt && narrowAt < stopAt && stopAt < clearAt) {
+		t.Errorf("the verdicts are written drop@%d narrow@%d stop@%d clear@%d; a later arm "+
+			"of a ternary chain is only reached when the earlier ones are false, so this "+
+			"order is what decides which act a box performs",
+			dropAt, narrowAt, stopAt, clearAt)
 	}
 	if !strings.Contains(fn, "row.row.title = entry.tickRefusal") {
 		t.Error("a disabled box carries no reason - the server sends its own sentence " +
@@ -1064,24 +1097,30 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 // The cumulative answer is the server's, and it has one for exactly this
 // reason (runEntry.asked). The page only has to add.
 func TestASecondPassDoesNotClearTheTicksTheFirstOneTook(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	// The message's own "selected" is read where every message is read since
+	// TOR-191: events.js's applyFileList, off both metadata_ready and
+	// needs_action. TestTheTicksOfAnEarlierPassAreNotClearedByTheNextFileList
+	// (eventstate_test.go) runs the same subject against two real messages.
+	fn := jsFunc(t, eventsJS(t), "applyFileList")
 
 	if regexp.MustCompile(`entry\.picked\s*=\s*new Set\(ev\.selected`).MatchString(fn) {
-		t.Error("renderFileList assigns entry.picked from ev.selected. That is the pass " +
+		t.Error("applyFileList assigns entry.picked from ev.selected. That is the pass " +
 			"in flight, not everything this row has asked for, so a second pass's " +
 			"metadata_ready unticks whatever the first pass captured")
 	}
 	if !strings.Contains(fn, "for (const index of ev.selected || []) entry.picked.add(index)") {
-		t.Error("renderFileList does not ADD ev.selected to what this row has asked for - " +
+		t.Error("applyFileList does not ADD ev.selected to what this row has asked for - " +
 			"and it must not assign it either (see above), so there is nothing left that " +
 			"would keep a first pass's ticks on screen")
 	}
 
 	// The one thing that still empties the set, so a union cannot accumulate
 	// across a reconnect: the reset that opens a run's history.
-	if !strings.Contains(jsFunc(t, js, "resetRunContent"), "entry.picked.clear()") {
-		t.Error("resetRunContent no longer clears entry.picked - with renderFileList only " +
+	// Comments stripped: a commented-out line still contains the substring
+	// (see untick_test.go's own note on what the falsification run found).
+	if !strings.Contains(stripJSComments(jsFunc(t, stateJS(t), "resetRunState")),
+		"entry.picked.clear()") {
+		t.Error("resetRunState no longer clears entry.picked - with applyFileList only " +
 			"adding, this is the only thing that can ever empty it, and without it a " +
 			"reconnecting page would keep ticks the server has moved past")
 	}
@@ -1092,8 +1131,7 @@ func TestASecondPassDoesNotClearTheTicksTheFirstOneTook(t *testing.T) {
 // would be a column of the same three words. What a reader genuinely cannot
 // see is the tick that did NOT join the pass in flight.
 func TestTheDeferredTickIsTheOnlyThingARowSaysInWords(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "updateFileCosts")
+	fn := jsMethod(t, fileListJS(t), "updateFileCosts")
 
 	if !strings.Contains(fn, `row.state.textContent = deferred ? "in the next pass" : ""`) {
 		t.Error("a row does not say - and only - that a tick is waiting for the next pass")
