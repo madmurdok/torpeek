@@ -467,6 +467,50 @@ func (s *Server) handleDecideRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": info.ID, "state": string(info.State)})
 }
 
+// untickRequest is one box moved the other way: this run, this one file.
+//
+// ONE file where decideRequest carries a set, and the asymmetry is the two
+// acts' own rather than an inconsistency. A tick can arrive from Select all,
+// which is every video file in one press; an un-tick is always a single box,
+// because TOR-181 removed Select none for saying it could stop things it
+// could not, and nothing on the page sends more than one.
+//
+// The file is a string rather than an int for the reason RunRequest.Files is
+// a []string: a file spec is what swarm.Select understands, and an index is
+// one shape of it. Server.UntickFile only ever accepts an index (holdsFile
+// refuses everything else), so this cannot smuggle a pattern in - it simply
+// does not invent a second vocabulary for a field that already has one.
+type untickRequest struct {
+	ID   string `json:"id"`
+	File string `json:"file"`
+}
+
+// handleUntickFile takes one file back out of what a row will fetch
+// (TOR-184), which is only ever the file no pass has been handed yet. See
+// Server.UntickFile for why the file the engine is already fetching is
+// /runs/cancel's job instead, and refuseUntick for the sentence this answers
+// with when somebody asks anyway.
+//
+// 200 rather than the 202 the decide route answers with, and the difference
+// is real: a tick accepts something that will happen later, while by the time
+// this returns the file is already out of the entry's list under the lock
+// this call took. handleSetPriority answers the same way for the same reason.
+func (s *Server) handleUntickFile(w http.ResponseWriter, r *http.Request) {
+	var req untickRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "read the request: "+err.Error())
+		return
+	}
+
+	info, err := s.UntickFile(req.ID, req.File)
+	if err != nil {
+		writeError(w, decideStatus(err), err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"id": info.ID, "state": string(info.State)})
+}
+
 // priorityRequest is a reorder: this run, at this level.
 //
 // Priority is an ABSOLUTE level, never a step, and the field is a plain int
@@ -520,6 +564,14 @@ func (s *Server) handleSetPriority(w http.ResponseWriter, r *http.Request) {
 // that is not waiting for a slot - which for a reorder is the preemption
 // refusal, and a 409 is the right shape for it (the request was understood,
 // the run is simply not in a state this can act on).
+//
+// And handleUntickFile since TOR-184, which is the same four once more: an id
+// this server does not hold, a file this torrent does not have, a closed
+// server, and - the 409 - a file no un-tick can reach because the engine is
+// already fetching it (refuseUntick). The last one is worth naming: the
+// request was understood perfectly and the row is simply past the point where
+// one file of it can be stopped, which is what a conflict means everywhere
+// else on this list.
 func decideStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrNoSuchRun):

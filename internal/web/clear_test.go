@@ -708,31 +708,45 @@ func TestTheClearSaysHowManyFramesItWillDelete(t *testing.T) {
 	}
 }
 
-// TestUnTickingAFileThatIsStillFetchingIsStillRefused holds TOR-184's
-// boundary from this side. On a finished file the gesture offers a clear; on
-// one still going it would mean STOP, which this page cannot do, and one
-// control that quietly meant both would be wrong in the destructive
-// direction.
-func TestUnTickingAFileThatIsStillFetchingIsStillRefused(t *testing.T) {
+// TestUnTickingAFinishedFileStillOffersTheClearRatherThanStoppingAnything is
+// this ticket's half of a control TOR-184 gave two more meanings, and it is
+// kept as an ORDER assertion because that is where the two could come to
+// disagree.
+//
+// It was written as "un-ticking anything unfinished is refused", which was
+// the honest answer while nothing could stop a fetch. TOR-184 made two of
+// those cases act - a file waiting for the next pass is dropped, a file being
+// fetched stops the run - so the refusal is no longer what an un-tick falls
+// through to for them. What must still be true is that the clear is reached
+// only when neither stop applies (a settled row has nothing fetching and
+// nothing deferred, so this is a statement about the reading order, not a
+// clash), and that the one remaining refusal still puts the box back.
+func TestUnTickingAFinishedFileStillOffersTheClearRatherThanStoppingAnything(t *testing.T) {
 	js := servedScript(t)
 	fn := jsFunc(t, js, "tickFile")
 
 	if !strings.Contains(fn, "box.checked = true;") {
 		t.Fatal("an un-tick that is not an offer no longer puts the box back, so a box " +
-			"would sit cleared beside a file that is still being fetched")
+			"would sit cleared beside a file this row is still holding")
 	}
-	if !strings.Contains(fn, "un-ticking cannot stop a capture that has already started") {
-		t.Error("the refusal's own sentence is gone; TOR-184 is what replaces it with a " +
-			"cancel, and until then this is the honest answer")
+	if !strings.Contains(fn, "entry.unticked.add(index)") {
+		t.Fatal("un-ticking a finished file no longer records the offer, so the Clear " +
+			"frames button can never appear")
 	}
-	// The order is the load-bearing part: the offer is tested first and
-	// returns, so the refusal is what everything else falls through to.
+	// Every branch, in the order the function reads them.
+	drop := strings.Index(fn, "dropFile(entry, index)")
+	stop := strings.Index(fn, "stopFetch(entry, index, box)")
 	offer := strings.Index(fn, "entry.unticked.add(index)")
-	refusal := strings.Index(fn, "un-ticking cannot stop a capture")
-	if offer < 0 || refusal < 0 || offer > refusal {
-		t.Errorf("the offer is at %d and the refusal at %d; the refusal must be what an "+
-			"un-tick falls through to, not something the offer has to be squeezed past",
-			offer, refusal)
+	refusal := strings.Index(fn, "nothing is fetching this file")
+	if drop < 0 || stop < 0 || offer < 0 || refusal < 0 {
+		t.Fatalf("cannot locate all four un-tick branches: drop at %d, stop at %d, offer "+
+			"at %d, refusal at %d", drop, stop, offer, refusal)
+	}
+	if !(drop < stop && stop < offer && offer < refusal) {
+		t.Errorf("the branches read drop@%d stop@%d offer@%d refusal@%d. The two stops "+
+			"must come first - they are the cases where something is actually happening to "+
+			"the file - and the refusal must stay what an un-tick falls through to, not "+
+			"something the offer has to be squeezed past", drop, stop, offer, refusal)
 	}
 }
 
