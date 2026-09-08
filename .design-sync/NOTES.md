@@ -84,3 +84,90 @@ which `tokens.css` is already shaped for.
 - The markup that goes with an element lives in `index.html`, wrapped, not in a
   template literal (TOR-192's pattern). An export that needs standalone markup
   has to lift it from there rather than invent it.
+
+---
+
+# What the probe answered (TOR-204)
+
+**Yes.** A design agent can render and compose torpeek's web component from
+this layout. Its own words, after building a working screen against it:
+`<frame-panel>` plus the markup plus `panel.open()` composed fine, and mounting
+a custom element is a path it already has. The `.jsx`-versus-web-component
+question the batch was cut to answer is settled, and the other five elements
+follow the same shape.
+
+It took three round trips to learn three things about the format, none of which
+should have to be learned again.
+
+## 1. `_ds_bundle.js` is the platform's OUTPUT, not an input
+
+Do not hand-write it. The app compiles it from the `.jsx` sources - the
+generated header names them in `sourceHashes` - and it overwrites anything
+uploaded under that name. The first attempt shipped a hand-built bundle
+containing torpeek's own `frame-panel.js` verbatim; the platform replaced it
+with a twelve-line stub carrying `components: []`, because the JSX had not
+compiled.
+
+So **the element's own module travels beside the `.jsx` and is imported by
+it**, and that import is the whole mechanism:
+
+    import "./frame-panel.js";
+
+Importing for the side effect is enough - the file ends in
+`customElements.define("frame-panel", FramePanel)`.
+
+The namespace is generated too (`TorpeekUi_2928d4`), so writing to
+`window.<SomeName>` is guesswork. Nothing needs to.
+
+## 2. HTML comments are a syntax error in JSX
+
+Markup lifted from `index.html` needs `class` → `className` **and** every
+`<!-- … -->` turned into `{/* … */}`. Doing the first and not the second is
+what compiled the first upload to zero components, and the failure is silent
+from the uploader's side: the manifest simply says `components: []`.
+
+## 3. A preview card does not run scripts
+
+The card's HTML is rendered without JavaScript. The first card loaded the
+bundle and called `panel.open()`, which worked in a plain browser and rendered
+**nothing** here - a `<dialog>` without `open` is `display: none` in every UA
+stylesheet, so all that showed was the body painted `#03070B`.
+
+A card is a PICTURE of the component. It has to carry the finished state
+statically: `open` on the dialog, the `src`, and the values `layout()` would
+have written (`--lb-view-w/h` on the view, inline width/height on the image,
+`data-zoom`, the readout's text).
+
+## What the platform got right without help
+
+Worth knowing so it is not re-solved: **forty tokens** were extracted with
+their kinds and their defining file, including the four `.lightbox`-scoped
+locals; **nine font faces** with their unicode ranges and files; all four
+stylesheets recognised; and the card indexed from its `@dsCard` first line.
+
+Two remaining checker complaints are TOR-206's, and one is a false positive -
+the `.lightbox`-scoped variables are local layout vars, not a theme.
+
+## Where the export's sources live, and what is derived
+
+`.design-sync/export/` holds only what is **hand-authored** and would
+otherwise be lost with a scratch directory:
+
+    export/styles.css                         the @import entry, in index.html's order
+    export/README.md                          the project's own README
+    export/components/panels/FramePanel/*     .jsx, .d.ts, .prompt.md, .html
+
+Everything else the upload needs is a **copy of `internal/web/assets/`** -
+`frame-panel.js`, `tokens.css`, `base.css`, `framepanel.css`, `fonts/` - and is
+deliberately NOT stored here. The upload derives them at sync time, so there is
+no second version to drift. That is the same reason the bundle is not stored:
+it is generated.
+
+Keeping the bridge beside the element it bridges is the point. A change to
+`frame-panel.js`'s API that the `.jsx` or the `.d.ts` does not follow shows up
+as a diff in one commit rather than as a broken design weeks later.
+
+One thing to know before editing the card: it embeds its sample frame as a
+`data:` URI, which is why that one file is ~23 KB. A card must render without
+scripts and without a network, so an embedded image is the only kind it can be
+sure of.

@@ -1,0 +1,16 @@
+/* torpeek ui - the entry stylesheet.
+ *
+ * Rendered designs receive ONLY this file's transitive @import closure, so
+ * everything a component needs has to be reachable from here.
+ *
+ * The order is not arbitrary and it is not this file's invention: it is the
+ * order index.html links these files in, and at equal specificity the later
+ * FILE wins. torpeek has four rule pairs that depend on it (each kept inside
+ * one file so no link order can un-decide them), and
+ * TestTheConcatenationOrderIsThePagesOwn in the repo holds the test helper's
+ * idea of that order to what index.html actually says. Reordering these
+ * @imports is a design change, not a formatting one.
+ */
+@import url("tokens.css");   /* the design system: palette, type scale, spacing */
+@import url("base.css");     /* @font-face for both faces, and the page ground */
+@import url("framepanel.css");
