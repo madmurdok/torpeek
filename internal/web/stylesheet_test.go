@@ -872,18 +872,19 @@ func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
 	}
 
 	// RULE 3, both halves: the mouse's position maps to the offset, and the
-	// arrow keys step it. The listeners are registered in connectedCallback
-	// against instance-bound handlers, which is what lets
-	// disconnectedCallback take them off again - so the assertion names the
-	// bound field rather than the method, because that is what is actually
-	// handed to addEventListener.
-	wiring := jsMethod(t, live, "connectedCallback")
+	// arrow keys step it. The listeners are registered in wire() (TOR-205
+	// moved this out of connectedCallback, which now only calls it - see
+	// framepaneldom_test.go for that move itself) against instance-bound
+	// handlers, which is what lets disconnectedCallback take them off again -
+	// so the assertion names the bound field rather than the method, because
+	// that is what is actually handed to addEventListener.
+	wiring := jsMethod(t, live, "wire")
 	if !strings.Contains(wiring, `this.view.addEventListener("pointermove", this.onPointerMove)`) {
-		t.Error(`connectedCallback does not map pointermove to the pan - "moving the mouse" ` +
+		t.Error(`wire() does not map pointermove to the pan - "moving the mouse" ` +
 			"pans the picture, with no button held, which is what the rules asked for")
 	}
 	if !strings.Contains(wiring, `this.img.addEventListener("click", this.onImgClick)`) {
-		t.Error("connectedCallback does not zoom on a click on the picture - and it has to " +
+		t.Error("wire() does not zoom on a click on the picture - and it has to " +
 			"be the picture, not the panel: the close button and the caption sit over it, " +
 			"and a handler on the panel would turn a click aimed at either into a zoom")
 	}
@@ -902,13 +903,13 @@ func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
 		"onViewKeydown", "onCloseClick", "onBackdropClick", "onDialogKeydown", "onResize",
 	} {
 		if !strings.Contains(wiring, "this."+h) {
-			t.Errorf("connectedCallback never uses this.%s - a bound handler nothing "+
+			t.Errorf("wire() never uses this.%s - a bound handler nothing "+
 				"registers is either dead weight or a listener that silently stopped "+
 				"being attached", h)
 		}
 		if !strings.Contains(teardown, "this."+h) {
 			t.Errorf("disconnectedCallback never removes this.%s - it was added in "+
-				"connectedCallback, so an element moved in the DOM would accumulate a "+
+				"wire(), so an element moved in the DOM would accumulate a "+
 				"second copy of this listener", h)
 		}
 	}
@@ -1008,8 +1009,12 @@ func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 
 	// THE WRAPPER, AND THE DIALOG BEING INSIDE IT. Both, because either alone
 	// passes while the panel is dead: a <frame-panel> with the dialog outside
-	// it upgrades fine and then throws in connectedCallback with "no dialog
-	// inside the element", and a dialog with no wrapper leaves app.js holding
+	// it upgrades fine, and since TOR-205 that no longer throws on the spot -
+	// wire() bails quietly and waits, because a part missing there COULD be a
+	// subtree still arriving. This one never will (the dialog is not coming),
+	// so it fails loudly SETTLE_TIMEOUT_MS later with "no dialog inside the
+	// element" instead - still loud, just not synchronous. And a dialog with
+	// no wrapper leaves app.js holding
 	// null.
 	wrap := strings.Index(page, "<frame-panel>")
 	wrapEnd := strings.Index(page, "</frame-panel>")

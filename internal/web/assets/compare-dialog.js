@@ -34,6 +34,11 @@
 
 import { basename, shortId, timecode } from "./state.js";
 
+// "NOT YET" IS NOT "NEVER" (TOR-205). frame-panel.js's own block carries the
+// full reasoning for the mechanism below (wire/awaitParts/partsNeverArrived)
+// and for this deadline's value, not repeated here.
+const SETTLE_TIMEOUT_MS = 10000;
+
 // The two services the page injects. Undefined until setServices runs, which
 // is checked there rather than here.
 let url = null;
@@ -111,9 +116,28 @@ class CompareDialog extends HTMLElement {
       if (event.target === this.dialog) this.dialog.close();
     };
     this.onKeydown = (event) => this.dialogKeydown(event);
+
+    // wired, partsObserver and partsDeadline are wire()'s own bookkeeping
+    // (TOR-205) - see frame-panel.js for the full reasoning, and its wire()
+    // for the shape this one repeats.
+    this.wired = false;
+    this.partsObserver = null;
+    this.partsDeadline = null;
   }
 
   connectedCallback() {
+    this.wire();
+  }
+
+  // wire finds this element's parts and, if every one exists, wires it -
+  // what connectedCallback used to do inline, until a part missing meant a
+  // quiet bail into awaitParts() instead of a throw (TOR-205; frame-panel.js
+  // carries the reasoning). Idempotent: awaitParts()'s observer calls this
+  // again on every mutation until it succeeds, and it must do nothing after
+  // that.
+  wire() {
+    if (this.wired) return;
+
     this.dialog = this.querySelector(".compare");
     this.stage = this.querySelector(".compare-stage");
     this.pickerA = this.querySelector("#compare-a");
@@ -129,17 +153,20 @@ class CompareDialog extends HTMLElement {
     this.times = this.querySelector(".compare-times");
     this.note = this.querySelector(".compare-note");
 
-    // A missing part is a wiring error, not a state to degrade into: failing
-    // here names the part that is absent instead of throwing "cannot read
-    // property of null" from whichever handler happens to fire first.
-    for (const [name, node] of Object.entries({
+    const missing = Object.entries({
       dialog: this.dialog, stage: this.stage, pickerA: this.pickerA, pickerB: this.pickerB,
       shotA: this.shotA, shotB: this.shotB, gapCode: this.gapCode, prevButton: this.prevButton,
       nextButton: this.nextButton, flipButton: this.flipButton, closeButton: this.closeButton,
       place: this.place, times: this.times, note: this.note,
-    })) {
-      if (!node) throw new Error("compare-dialog: no " + name + " inside the element");
+    }).filter(([, node]) => !node).map(([name]) => name);
+
+    if (missing.length) {
+      this.awaitParts(missing);
+      return;
     }
+
+    this.stopAwaitingParts();
+    this.wired = true;
 
     this.pickerA.addEventListener("change", this.onPickA);
     this.pickerB.addEventListener("change", this.onPickB);
@@ -152,7 +179,59 @@ class CompareDialog extends HTMLElement {
     this.dialog.addEventListener("keydown", this.onKeydown);
   }
 
+  // awaitParts/stopAwaitingParts/partsNeverArrived: the same three as
+  // frame-panel.js's, for the same reason - see its own copy for the
+  // reasoning behind each.
+  awaitParts(missing) {
+    if (this.partsObserver) return;
+    console.error("compare-dialog: waiting for " + missing.join(", ") +
+      " to appear inside the element - connected before its subtree finished arriving");
+    this.partsObserver = new MutationObserver(() => this.wire());
+    this.partsObserver.observe(this, { childList: true, subtree: true });
+    this.partsDeadline = setTimeout(() => this.partsNeverArrived(), SETTLE_TIMEOUT_MS);
+  }
+
+  stopAwaitingParts() {
+    if (this.partsObserver) {
+      this.partsObserver.disconnect();
+      this.partsObserver = null;
+    }
+    if (this.partsDeadline != null) {
+      clearTimeout(this.partsDeadline);
+      this.partsDeadline = null;
+    }
+  }
+
+  partsNeverArrived() {
+    this.partsDeadline = null;
+    this.wire();
+    if (this.wired) return;
+
+    const missing = Object.entries({
+      dialog: this.querySelector(".compare"),
+      stage: this.querySelector(".compare-stage"),
+      pickerA: this.querySelector("#compare-a"),
+      pickerB: this.querySelector("#compare-b"),
+      shotA: this.querySelector("#compare-shot-a"),
+      shotB: this.querySelector("#compare-shot-b"),
+      gapCode: this.querySelector(".compare-gap-code"),
+      prevButton: this.querySelector("#compare-prev"),
+      nextButton: this.querySelector("#compare-next"),
+      flipButton: this.querySelector(".compare-flip"),
+      closeButton: this.querySelector("#compare-close"),
+      place: this.querySelector(".compare-place"),
+      times: this.querySelector(".compare-times"),
+      note: this.querySelector(".compare-note"),
+    }).filter(([, node]) => !node).map(([name]) => name);
+    this.stopAwaitingParts();
+    const message = "compare-dialog: no " + missing.join(", ") + " inside the element, " +
+      (SETTLE_TIMEOUT_MS / 1000) + "s after connecting - giving up rather than waiting forever";
+    console.error(message);
+    throw new Error(message);
+  }
+
   disconnectedCallback() {
+    this.stopAwaitingParts();
     if (!this.dialog) return;
     this.pickerA.removeEventListener("change", this.onPickA);
     this.pickerB.removeEventListener("change", this.onPickB);
