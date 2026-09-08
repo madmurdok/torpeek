@@ -344,6 +344,11 @@ function reopenRun(entry) {
       // expansion is a flag on the entry, and claimReopenedRun keeps the
       // entry, so swapping its key cannot lose it.
       claimReopenedRun(entry, info.id);
+      // The redraw is the caller's since TOR-203: claimReopenedRun cannot see
+      // syncEntry, and calling it from there threw on every id swap - quietly,
+      // because the re-key had already happened, so the success path was never
+      // reached and a reopen that worked arrived as a failure.
+      syncEntry(entry);
     })
     .catch((err) => {
       entry.reopening = false;

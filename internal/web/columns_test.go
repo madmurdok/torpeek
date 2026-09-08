@@ -1317,3 +1317,61 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 //     `<script type="module" src="app.js"></script>` there. The line was
 //     applied for this pass only, and reverted afterwards with a
 //     byte-for-byte comparison against a pre-pass snapshot.
+
+// ---------------------------------------------------------------------------
+// TOR-203's browser pass: THE ID SWAP, BY CLICK, five times.
+//
+// This is the gap TOR-191's pass named and could not close. That pass triggered
+// the reopen with POST /runs/reopen instead of a click, so resolveIncomingRun
+// found no entry expecting the new id and ensureRun opened a SECOND row beside
+// the disk one - correct for how it was driven, and the exact reason it never
+// executed claimReopenedRun's swap branch. The swap is where the defect lived,
+// so it survived that pass untouched.
+//
+// Driven this time by clicking the disk row, which is what raises `reopening`.
+// torpeek was served headless on 8837 with -dht=false over an out dir holding
+// the browser fixture's result sets. A reopen replays off disk (Server.ReopenRun
+// goes through s.replayer), so no swarm and no seeder are involved in it.
+//
+// FIVE DISK ROWS REOPENED BY CLICK, and every one arrived as `done`:
+// data-state went disk -> replaying -> done, the detail rendered inside the
+// row with its frame grid, the row took a queue ordinal, and ONE row existed
+// per reopen - the new id folded into the row that asked for it rather than
+// spawning a duplicate. On the broken module each of these was `failed` with
+// "syncEntry is not defined" as its reason, because the ReferenceError in the
+// swap branch sent app.js's own handler into its catch.
+//
+// THE TOP-UP, on a finished run: the log recorded "topping up: 6 point(s), up
+// to 150.0 MB more traffic", the row went done -> running and redrew AT ONCE -
+// which is the redraw this ticket moved out to the caller - and NO error line
+// appeared, neither the row's own nor the page's, read at 2.5s and again at 9s.
+// That page-level line is precisely where the old failure printed itself.
+//
+// Two failures on the way there were the FIXTURE's, not the page's, and are
+// recorded because each names a real constraint on this kind of check:
+//   - `unknown profile "fastest", want "min-time" or "min-traffic"`. A plan
+//     written by hand carried the label off the page's dropdown instead of the
+//     internal profile name. The intake's "fastest" is not a stored value.
+//   - `privacy_unresolvable: magnet has no trackers and DHT is disabled`. With
+//     -dht=false the privacy routing refuses a trackerless magnet, which is why
+//     the TOR-194 recipe's magnets carry a dead loopback tracker. Adding one to
+//     the fixture's source is what let the topped-up run reach `running`.
+// Both arrived AFTER the POST had succeeded, as named server errors on the run,
+// and neither is a ReferenceError - which is what made them separable from the
+// thing under test rather than fatal to the pass.
+//
+// A top-up whose set has no recorded plan offers nothing at all: topUpFor
+// refuses with "this run was recorded before torpeek kept the capture plan",
+// and the Top up control stays hidden. The stock fixture is such a set, so the
+// half-captured set above (plan.count 12 against 6 frames on disk) had to be
+// built before this half of the criterion could be exercised at all.
+//
+// NOT COVERED, deliberately: the swap branch reached from topUpRun rather than
+// from the reopen. It needs a row that is still `entry.disk` when Top up is
+// pressed, since that is what makes the page send no id and the server mint a
+// new one - and clicking a disk row reopens it, so the detail is never open
+// with the flag still up. Every other caller re-arms with the id it already
+// has (Server.again), which is claimReopenedRun's second branch and never held
+// the missing name. The swap itself is covered by execution instead:
+// TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing
+// (eventstate_test.go) runs it through apply() and fails on the broken module.
