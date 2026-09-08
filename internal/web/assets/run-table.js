@@ -1003,7 +1003,22 @@ class RunTable extends HTMLElement {
         this.applyColumnWidth(key, width);
       });
 
-      function endColumnDrag(event) {
+      // AN ARROW FUNCTION, AND THAT IS THE WHOLE OF IT. Written as
+      // `function endColumnDrag(...)` this is registered as a listener on the
+      // handle, so `this` inside it is the <span> - and
+      // `this.saveColumnWidths(...)` throws
+      // `TypeError: this.saveColumnWidths is not a function` on every drag
+      // that ends. The lines above it still run, so the drag LOOKS finished:
+      // the class comes off and the column keeps its new width on screen.
+      // What silently does not happen is the save - so no width ever reaches
+      // localStorage and TOR-157's whole point, drag-a-border-and-remember-it,
+      // is gone - and syncRunDetailWidth, so TOR-174's recheck after a drag is
+      // gone with it.
+      //
+      // No text guard could see this: the call reads exactly as it should. It
+      // took a real drag in a browser and the console, which is why TOR-194's
+      // acceptance criterion asked for one.
+      const endColumnDrag = (event) => {
         if (!drag) return;
         drag = null;
         event.stopPropagation();
@@ -1019,7 +1034,7 @@ class RunTable extends HTMLElement {
         // which changes the TABLE's width rather than the pane's, still gets a
         // recheck here.
         this.syncRunDetailWidth();
-      }
+      };
       handle.addEventListener("pointerup", endColumnDrag);
       handle.addEventListener("pointercancel", endColumnDrag);
       // lostpointercapture fires whenever the capture set in pointerdown ends
