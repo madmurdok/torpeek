@@ -1,0 +1,467 @@
+/* THE TORRENT TABLE (TOR-190).
+   Split out of app.css: the sortable table itself (TOR-62), its sticky
+   header and draggable columns (TOR-157), the nine live columns (TOR-139),
+   and each row's own status badge and actions.
+
+   .run-progress lands here, not in framepanel.css, even though its own
+   banner comment below ("in the panel row") reads like it could belong to
+   a file's frame panel: app.js builds it inside the run TABLE row's status
+   cell (buildLiveColumnHeaders), not inside a file's own detail - it is
+   the row's segmented progress bar, one level above any file. This is
+   exactly the kind of banner TOR-190 asked to be checked against the JS
+   that actually builds the markup rather than assumed from its prose. */
+
+/* TOR-137: the torrent table's new home, between the pinned intake above and
+   the detail pane below. */
+.runs { margin: 0 0 1.5rem; }
+.runs-title {
+  font-size: .72rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  margin: 0 0 .5rem;
+}
+
+/* The torrent list: a sortable table (TOR-62) rather than a stack of cards,
+   so a library of any size costs one line per torrent instead of three. The
+   wrap is what scrolls - the table itself just grows - and the header row
+   stays put (position: sticky) so the sort controls are never scrolled away.
+
+   TOR-137 first bounded this to 22rem so it would scroll inside a fixed box.
+   That is removed deliberately, and TOR-138 is why: the table now grows rows
+   that expand into the whole detail panel, and a panel of frames inside a
+   352-pixel scroll window is not what an accordion is for. So the table grows
+   and the PAGE scrolls, with the intake pinned above it. Do not put a bounded
+   scroll box back here - an expanded row needs the page's own height.
+
+   overflow-x stays. It is the horizontal escape hatch for a narrow viewport,
+   and it is also the reason the detail's own content must keep its
+   min-content width small - though TOR-157's table-layout: fixed changed
+   WHY: a colspanned cell is excluded from the fixed algorithm's column-width
+   pass entirely, so a wide detail can no longer widen the table or resize
+   any other row's columns the way it could under automatic layout (the
+   RUN_TABLE_COLUMNS colspan just gets whatever the nine columns currently
+   sum to, draggable borders included). What is still true, and still the
+   reason for it: that cell's fixed width can be narrower than its content
+   wants, and without a min-content kept small, the content would overflow
+   its own box rather than wrap - visible spillage instead of a reflow.
+   Everything inside .run-detail either wraps, ellipsises or has a min-width
+   of a pixel per block, so the measured min-content of a detail row stays
+   under whatever the columns currently sum to. */
+.run-table-wrap { overflow-x: auto; }
+/* TOR-158: was opacity: .6 on the inherited full-strength --ink, dimming a
+   sentence a person needs to read (it is the only thing on the page telling
+   them nothing is loaded yet) rather than the muted --ink-2 it is meant to
+   read as. An explicit token instead of an opacity guess: legible at a
+   known, measured strength. */
+.run-list-empty { font-size: .82rem; color: var(--ink-2); margin: 0; }
+
+/* table-layout: fixed (TOR-157) is what makes a column's width absolute
+   rather than a hint the browser can override from content: with the
+   default automatic layout a column cannot shrink below its own content's
+   width (a magnet's whole name, unbreakable), which is exactly what
+   dragging a border narrower has to be able to do. Fixed layout reads every
+   column's width off its <th> alone (app.js sets each one from the
+   --col-w-* tokens above) and holds every row to it regardless of what a
+   cell contains - the same guarantee .run-name's own overflow: hidden;
+   text-overflow: ellipsis (below) then turns into "…" instead of a shoved
+   layout. width: 100% still matters under fixed layout: the used width is
+   the GREATER of it and the columns' own summed widths, so it fills the
+   pane by default and, the moment a drag makes that sum wider than 100%, it
+   simply loses the comparison and the table grows past the pane instead -
+   which is what pushes .run-table-wrap's own overflow-x: auto rather than
+   the page. */
+.run-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .82rem; }
+.run-table th, .run-table td { padding: .4rem .3rem; text-align: left; vertical-align: middle; }
+
+.run-table thead th {
+  position: sticky;
+  /* Sticky within the wrap, which since TOR-137's cap was removed has no
+     height to scroll inside - so today the header travels with the page and
+     tucks under the pinned intake rather than coming to rest below it.
+     Measured rather than guessed, twice now: the intake was 130px tall when
+     TOR-139 first measured it; TOR-168 moved the page's title and its live
+     status indicator into the intake, ahead of the input row, and the
+     re-measured height at a 1440px window is 173px. Neither number changes
+     top: 0 here, which never depended on the exact height - it just accepts
+     that the header comes to rest hidden behind the intake rather than
+     computing an offset in rem, which would be wrong again the moment the
+     hint line wraps (or, now, the moment the title/status row wraps).
+
+     Left as it is on purpose, and TOR-139's own decision, now that it has
+     six more columns to make room for, is to leave it exactly here rather
+     than change how the header comes to rest: .run-table-wrap's own
+     overflow-x: auto is already the answer to a table wider than the pane
+     (see that rule's own comment), and the six new cells are the narrowest
+     things in the row (.run-cell-metric) rather than additional prose, so
+     the table only actually needs that escape hatch at widths this pane was
+     already tight at before that ticket. TOR-168 later widened the pane by
+     removing the left panel: measured at a 1440px window, the nine columns
+     (1079px) now fit inside the pane (1168px) with no overflow at all - see
+     TOR-168's own ticket for the before/after numbers, and TOR-164 (not
+     TOR-166, which TOR-168's own text names by mistake - TOR-166 is the
+     unrelated top-up pricing ticket) for whatever of the overflow this
+     leaves at a narrower window. */
+  top: 0;
+  z-index: 2;
+  background: var(--s1);
+  font-family: var(--mono);
+  font-size: .66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  color: var(--ink-2);
+  white-space: nowrap;
+  /* TOR-157: a dragged column can go as narrow as COLUMN_MIN_WIDTH (app.js),
+     narrower than a label like "Availability" - clipped rather than left to
+     overflow into the next header, the same reason .run-name gets an
+     ellipsis instead of a shoved layout. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+}
+/* Fixed (TOR-157): the actions column carries no data-sort and its border
+   never drags, so unlike every other header it keeps a plain, un-tokened
+   width here instead of a --col-w-* var - table-layout: fixed still needs
+   it stated on the header cell itself, since a <td>'s own width (see
+   .run-cell-actions) is no longer read for column sizing. */
+.run-table thead th.run-actions-header { cursor: default; width: 3.8rem; }
+.run-table thead th:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.run-table thead th[aria-sort]::after { display: inline-block; width: .9em; text-align: center; }
+.run-table thead th[aria-sort="ascending"]::after { content: "▲"; }
+.run-table thead th[aria-sort="descending"]::after { content: "▼"; }
+
+/* TOR-157: the drag handle sitting inside every sortable header (app.js
+   appends one .col-resizer span per <th data-sort>, after buildLiveColumnHeaders
+   has built all nine). position: sticky on .run-table thead th above already
+   gives each header its own containing block, so this needs nothing extra to
+   anchor to its header rather than the table. Transparent at rest,
+   --accent-dim on hover/focus/drag - deliberately narrow, since a column
+   border sits inside a clickable sort control and must not read as large a
+   target as that. */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.col-resizer:hover, .col-resizer.dragging { background: var(--accent-dim); }
+
+.run-row { border-bottom: 1px solid var(--rule); }
+.run-row:hover { background: var(--hover); }
+/* An open row wears the accent, which is the design system's own rule for it
+   (see :root): "this is live or this is where you are". With the accordion
+   several rows can be where you are at once, and the marking says so for each
+   of them. The inset rail continues down the detail cell below (see
+   .run-detail-cell), so an open torrent and its detail read as one block
+   rather than as a row and a loose panel under it.
+
+   The bottom rule goes transparent rather than away: a line between the
+   torrent and its own detail would cut that block in half at exactly the
+   place it must not be. Transparent rather than `border-bottom: none`, so the
+   row keeps the same height open as closed and opening one does not nudge
+   every row below it by a pixel. */
+.run-row[data-expanded="true"] {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+  border-bottom-color: transparent;
+}
+
+/* A name is cut off, not shredded. Before TOR-157 this cell needed its own
+   `max-width: 0` / `width: 100%` trick to shrink below its content at all -
+   an automatic-layout table cell is sized by its content otherwise, and a
+   long name would push the other columns out rather than truncate. Now that
+   .run-table is table-layout: fixed, the column's width comes solely from
+   its <th> (--col-w-name, draggable) and every cell in it is held there
+   regardless of content, so the trick is gone; .run-name's own
+   overflow: hidden; text-overflow: ellipsis (below) is what still turns an
+   over-long name into "…" rather than nothing at all. min-width: 0 stays -
+   without it a flex child's default min-width: auto would keep .run-row-main
+   from shrinking past its own content, defeating the ellipsis one level in. */
+.run-cell-name { min-width: 0; }
+.run-row-main {
+  display: flex;
+  align-items: baseline;
+  gap: .3rem;
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* The disclosure triangle, deliberately the same object as .picker-open one
+   level down (TOR-182 moved that mark onto the file's own row in the list,
+   from the .file-toggle-icon that used to sit on each file card's title
+   line): opening a torrent and opening one of its files are the same gesture,
+   so they should not be two different marks. A fixed width, so the name
+   starts at the same x whichever way the triangle points. */
+.run-toggle-icon {
+  flex: 0 0 auto;
+  width: .7em;
+  opacity: .6;
+}
+.run-toggle-icon::before { content: "▸"; }
+.run-row-main[aria-expanded="true"] .run-toggle-icon::before { content: "▾"; }
+
+.run-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-meta { display: block; font-family: var(--mono); font-size: .64rem; letter-spacing: -.01em; color: var(--ink-2); overflow-wrap: anywhere; white-space: normal; margin-top: .1rem; }
+
+/* TOR-141: a run that is going nowhere reads differently from one that is
+   merely slow - that distinction is the ticket's own acceptance criterion,
+   and colour is what makes it legible at a glance rather than only on
+   careful reading. --warn is the same amber "queued"/"needs-action"/
+   "partial" already wear (see .run-badge below) for the same reason: this
+   is a row that wants attention, not a row that is broken (--bad) or a row
+   quietly working (the plain --ink-2 every other .run-meta line uses). */
+.run-meta[data-stall="true"] { color: var(--warn); font-weight: 600; }
+
+/* TOR-117: a name read off a magnet's own dn= is not confirmed - anyone can
+   put anything after it - so it must never look like one. Italic plus the
+   same muted ink .run-meta already uses is the smallest difference that
+   still reads as "not settled yet"; the title attribute (app.js) carries the
+   rest of the explanation. Shared by .run-name and .run-detail-title, the
+   only two places a name is shown. */
+.run-name-provisional { font-style: italic; color: var(--ink-2); }
+
+.run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.run-cell-status { white-space: nowrap; }
+/* Deliberately NOT nowrap-with-a-max-width, which is what this was first and
+   why TOR-121 exists: before TOR-157 an unshrinkable cell here would have
+   taken its width from .run-cell-name's own `max-width: 0` trick, which gave
+   the somewhere it stole from a name. TOR-157's table-layout: fixed removed
+   that trick - no column can grow for content any more - so today an
+   unshrinkable, over-long line here would simply overflow its own fixed
+   column instead. The label is short (metaLabel in app.js), so there is
+   nothing to constrain there; an error message is the one long thing that
+   still lands here, and it is allowed to wrap rather than risk that. */
+.run-cell-status .run-meta { max-width: 11rem; }
+
+/* THE SIX LIVE COLUMNS (TOR-139): peers, seeds, both rates, availability and
+   queue position. One shape for all of them - narrow, monospace,
+   tabular-nums, right-aligned - because they are figures meant to be
+   compared straight down a column, the exact reasoning the --mono token's
+   own comment gives for every other number in this file. Right-aligned is
+   new among this table's own cells (name/when/status all read left to
+   right); a column of right-aligned digits lines up on the ones place, which
+   is the one thing that makes a column of numbers scannable at a glance -
+   left-aligned, "8" and "142" line up on nothing.
+
+   The `.run-table td` in the selector is not decoration: `.run-table th,
+   .run-table td` above already sets text-align left at two classes' worth of
+   specificity, and a bare `.run-cell-metric` rule (one class) would lose to
+   it silently, leaving every figure here flush left with nothing to say why.
+
+   No `width` here since TOR-157: table-layout: fixed reads a column's width
+   off its <th> alone (see --col-w-peers etc. and .run-table's own comment),
+   so a td's own width is never consulted for layout - the figure just sits
+   wherever its column ends up. */
+.run-table td.run-cell-metric {
+  white-space: nowrap;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+/* ABSENT IS NOT ZERO (app.js's ABSENT constant, and this ticket's own
+   opening argument). The placeholder em dash reads a step dimmer than the
+   figures themselves - down at --ink-2 now (TOR-158): the base rule above
+   used to be --ink-2 and this override --ink-3, which put the dimmer of the
+   two below AA on every surface it rendered on. Lifting --ink-3 to AA would
+   have landed it within a contrast step of --ink-2 - indistinguishable, not
+   fixed - so instead the base figure moved up to full --ink and the absent
+   state kept --ink-2, the same two tokens, swapped, both already clearing
+   AA everywhere. The em dash's own shape still carries the rest of the
+   signal: it cannot be mistaken for a digit regardless of colour. */
+.run-table td.run-cell-metric[data-absent="true"] { color: var(--ink-2); }
+
+/* Two lines, the same shape .run-cell-status gives a badge and its .run-meta
+   underneath: the copies-per-piece figure on top, and how many pieces no
+   connected peer holds at all directly under it - both from the one swarm
+   reading (listing.go's Availability), never shown split across two rows'
+   worth of a person's attention. */
+.run-cell-availability-value { display: block; }
+/* nowrap + ellipsis rather than letting this wrap: measured in a real
+   browser, "N of M unavailable" wrapped to three lines at this column's
+   width and made the row taller than every other one - the row height this
+   ticket's own six columns must not disturb was worth more than a few
+   digits, and the full sentence is one hover away (availabilityCellTitle). */
+.run-cell-availability-meta {
+  display: block;
+  margin-top: .05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Two lines, the same shape .run-cell-availability uses: the position the
+   server actually holds this row at on top, and the priority level under it
+   (TOR-140) - the level only when it is not the default, so a queue nobody
+   has reordered shows a plain column of positions and one that has been
+   reordered says so on exactly the rows that moved. The controls that change
+   it are NOT here: this stays a figure column (see .run-cell-metric's own
+   rule), and the ▲/▼ pair lives in .run-cell-actions with the row's other
+   verbs. Wider than the 2.6rem TOR-139 gave it because "normal" is not shown
+   but "high" and "low" are, and a wrapped level would make the row taller
+   than every other one - the same measurement .run-cell-availability-meta
+   records. */
+.run-cell-queue-value { display: block; }
+.run-cell-queue-meta {
+  display: block;
+  margin-top: .05rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Header cells for the same six columns. Left-aligned like every other
+   header in this table (unlike their own data cells) - .run-table thead th's
+   own rule already sizes and cases the label, so nothing here needs to
+   repeat it, and (TOR-157) nothing here sets a width either any more: each
+   header's width comes from app.js's own inline `style.width =
+   "var(--col-w-KEY)"`, set once per <th data-sort> so table-layout: fixed
+   has something authoritative to read column by column instead of one class
+   shared by four differently-resizable headers (.run-cell-metric-header
+   used to be exactly that: peers, seeds, download_bps and upload_bps all
+   wore it, which would have made all four resize together). The unit line
+   (.run-th-unit) still gives the availability header its own second line so
+   its figure's unit is legible without a tooltip nobody opens, per that
+   ticket's acceptance criterion. */
+.run-th-label { display: block; }
+.run-th-unit {
+  display: block;
+  font-size: .55rem;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink-2);
+  margin-top: .05rem;
+}
+
+/* Wider than the 1.6rem one ✕ needed: since TOR-140 a waiting row also
+   carries the two buttons that move it up and down the queue, and they
+   belong here rather than in the Queue cell because this is the column the
+   row's VERBS live in - the figure columns stay figures. No `width` here
+   since TOR-157 (see .run-table thead th.run-actions-header, which is where
+   this column's fixed 3.8rem now actually lives under table-layout: fixed). */
+.run-cell-actions { text-align: right; white-space: nowrap; }
+.run-cancel,
+.run-priority {
+  border: none;
+  background: none;
+  opacity: .55;
+  cursor: pointer;
+  font-size: .9rem;
+  line-height: 1;
+  padding: .3rem .4rem;
+  border-radius: .3rem;
+}
+.run-cancel:hover,
+.run-priority:hover { opacity: 1; background: var(--hover); }
+/* The queue arrows are a step smaller and a step quieter than Cancel. Cancel
+   destroys a run and this only reorders one, and a control that reads as
+   equally weighty as the destructive one next to it is a control people
+   hesitate over. */
+.run-priority { font-size: .7rem; padding: .3rem .15rem; opacity: .45; }
+/* Disabled at the ends of the band (app.js's syncEntry) - shown, not hidden,
+   so the pair does not jump sideways under the cursor as a torrent reaches
+   the top of the queue. It has to READ as unavailable, hence the dimming and
+   the cursor, or a person clicks it and concludes the feature is broken. */
+.run-priority:disabled { opacity: .15; cursor: default; }
+.run-priority:disabled:hover { opacity: .15; background: none; }
+.run-cancel:focus-visible,
+.run-priority:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.run-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: .64rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  padding: .12rem .45rem;
+  border-radius: 0;
+  background: var(--s3);
+  color: var(--ink-2);
+}
+.run-badge[data-state="running"] { background: var(--accent-dim); color: var(--accent); }
+.run-badge[data-state="replaying"] { background: var(--accent-dim); color: var(--accent); }
+.run-badge[data-state="queued"] { background: var(--warn-dim); color: var(--warn); }
+.run-badge[data-state="done"] { background: var(--ok-dim); color: var(--ok); }
+.run-badge[data-state="failed"] { background: var(--bad-dim); color: var(--bad); }
+/* Partial is a finished run that did not finish everything it was asked for,
+   so it borrows the amber the queue and the need for a decision already use
+   rather than done's green (TOR-72). */
+.run-badge[data-state="partial"] { background: var(--warn-dim); color: var(--warn); }
+.run-badge[data-state="needs-action"] { background: var(--warn-dim); color: var(--warn); font-weight: 600; }
+.run-badge[data-state="cancelled"] { background: var(--s3); color: var(--ink-2); }
+.run-badge[data-state="disk"] { background: var(--s3); color: var(--ink-2); }
+
+/* PROGRESS AS A GRAPHIC (TOR-123), in the panel row and nowhere else - in the
+   detail pane the frame grid already is this picture.
+
+   Segments with gaps, not a smooth fill: torpeek captures discrete frames, and
+   a continuous bar is a shape borrowed from software that moves bytes. It sits
+   under the line reading "4/20 frames", which is what makes a bar that has not
+   moved for twenty seconds legible as a slow frame rather than as a bar
+   measuring the wrong thing.
+
+   Deliberately thin and deliberately accent-coloured: it is the one thing in
+   the panel that moves, and it must read as the tool working rather than as a
+   state needing attention - which is why it is not --warn and not --ok. */
+.run-progress {
+  display: flex;
+  gap: 1px;
+  height: .28rem;
+  margin-top: .25rem;
+  border-radius: .1rem;
+  overflow: hidden;
+}
+/* THE SIXTH INSTANCE OF THE [hidden] TRAP, and the one that hid the longest,
+   found by TOR-182 while widening the guard that names it (see
+   TestEverythingHiddenFromJSCanActuallyBeHidden). `display: flex` above beats
+   the UA's own `[hidden] { display: none }` at equal specificity, so
+   renderRunProgress's `el.hidden = true` - the line that is supposed to take
+   this bar off a finished, failed or disk row - never did.
+
+   NOTHING WAS VISIBLE, which is exactly why it lasted this long: the bar is
+   .28rem tall, has no ground of its own, and its segments are emptied in the
+   same breath, so all it left behind was its own .25rem of margin. What it
+   also left behind was the accessibility tree: renderRunProgress sets
+   role="progressbar" and the aria-value* attributes when it shows the bar and
+   removes none of them when it hides it, on the reasonable assumption that
+   `hidden` takes the element out of the tree altogether. With `hidden`
+   working again it does, so this one line fixes both halves and no JS
+   changes. */
+.run-progress[hidden] { display: none; }
+.run-progress-seg {
+  flex: 1 1 0;
+  min-width: 1px;
+  /* to right rather than to top: a segment standing for several frames fills
+     along the direction the bar reads in, so a part-done segment looks like
+     progress through it and not like a shorter block. */
+  background: linear-gradient(to right,
+    var(--accent) calc(var(--fill, 0) * 100%),
+    var(--s3) 0);
+}

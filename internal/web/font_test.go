@@ -156,7 +156,7 @@ func TestTheStylesheetAsksForExactlyTheEmbeddedFonts(t *testing.T) {
 	for _, m := range regexp.MustCompile(`url\("fonts/([^"]+)"\)`).FindAllStringSubmatch(css, -1) {
 		asked[m[1]] = true
 		if _, err := embedded.ReadFile("assets/fonts/" + m[1]); err != nil {
-			t.Errorf("app.css asks for fonts/%s, which is not embedded", m[1])
+			t.Errorf("the stylesheet asks for fonts/%s, which is not embedded", m[1])
 		}
 	}
 	for _, s := range stanzas {
@@ -172,21 +172,30 @@ func TestTheStylesheetAsksForExactlyTheEmbeddedFonts(t *testing.T) {
 // and differently per machine.
 func TestNoFontIsFetchedFromTheNetwork(t *testing.T) {
 	// Comments are stripped first: what matters is what the browser acts on,
-	// and app.css names the CDN in prose precisely to say it is not used.
+	// and the stylesheets name the CDN in prose precisely to say it is not
+	// used.
 	comment := regexp.MustCompile(`(?s)/\*.*?\*/`)
-	// tokens.css (TOR-189) is in this list too: it is now a served stylesheet
-	// of its own, and the design system living there is exactly the kind of
-	// file a stray @import from a font CDN could slip into unnoticed. state.js
-	// and events.js (TOR-191) join it for the same reason - every served asset
-	// belongs in this sweep, not only the ones that existed when it was
-	// written.
-	for _, name := range []string{
-		"assets/app.css", "assets/tokens.css", "assets/index.html",
-		"assets/app.js", "assets/state.js", "assets/events.js",
-	} {
+	// Every served asset, not just whichever one file happened to hold :root
+	// or the typeface. Two lists feed it: the stylesheets come from
+	// stylesheetFiles (theme_test.go - tokens.css from TOR-189 plus the area
+	// files TOR-190 split the rest of app.css into), and the scripts are
+	// app.js plus the two modules TOR-191 separated out of it. A stray
+	// @import from a font CDN could slip into any of them unnoticed, and the
+	// sweep is only worth having if it covers what is actually served rather
+	// than what existed when it was written.
+	//
+	// ReadFile erroring here is a real failure rather than a silent skip: a
+	// missing split file or a renamed module is exactly the kind of thing
+	// this loop exists to catch, not to excuse. It used to `continue`, which
+	// meant a typo in a name quietly checked nothing.
+	names := []string{"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js"}
+	for _, css := range stylesheetFiles {
+		names = append(names, "assets/"+css)
+	}
+	for _, name := range names {
 		b, err := embedded.ReadFile(name)
 		if err != nil {
-			continue // app.css is the one that must exist; the others are belt and braces
+			t.Fatalf("reading the embedded %s: %v", name, err)
 		}
 		live := comment.ReplaceAllString(string(b), "")
 		for _, bad := range []string{"fonts.googleapis.com", "fonts.gstatic.com", "use.typekit", "@import url(http"} {
@@ -245,7 +254,7 @@ func TestNoFaceIsPresentedUnderAReservedFontName(t *testing.T) {
 	for _, token := range []string{"--sans", "--mono"} {
 		m := regexp.MustCompile(token + `:\s*([^;]+);`).FindStringSubmatch(css)
 		if m == nil {
-			t.Fatalf("app.css declares no %s", token)
+			t.Fatalf("the stylesheet declares no %s", token)
 		}
 		if strings.Contains(strings.ToLower(m[1]), "plex") {
 			t.Errorf("%s names a Plex family: %s", token, strings.TrimSpace(m[1]))
@@ -278,7 +287,7 @@ func TestEveryWeightTheCSSAsksForIsCovered(t *testing.T) {
 		covered[fam[1]] = append(covered[fam[1]], lo, hi)
 	}
 	if len(covered) == 0 {
-		t.Fatal("app.css declares no @font-face at all")
+		t.Fatal("the stylesheet declares no @font-face at all")
 	}
 
 	// Which family each token resolves to, taking the first name in the stack.
@@ -318,7 +327,7 @@ func TestEveryWeightTheCSSAsksForIsCovered(t *testing.T) {
 		asks = append(asks, ask{sel, w, fam})
 	}
 	if len(asks) == 0 {
-		t.Fatal("no rule in app.css asks for a weight; the scan is broken, not the CSS")
+		t.Fatal("no rule in the stylesheet asks for a weight; the scan is broken, not the CSS")
 	}
 
 	for _, a := range asks {
@@ -355,7 +364,7 @@ func TestTheFallbackStackSurvivesAStrippedBuild(t *testing.T) {
 	for token, generic := range map[string]string{"--sans": "sans-serif", "--mono": "monospace"} {
 		m := regexp.MustCompile(token + `:\s*([^;]+);`).FindStringSubmatch(css)
 		if m == nil {
-			t.Fatalf("app.css declares no %s", token)
+			t.Fatalf("the stylesheet declares no %s", token)
 		}
 		stack := strings.TrimSpace(m[1])
 		if !strings.HasSuffix(stack, generic) {

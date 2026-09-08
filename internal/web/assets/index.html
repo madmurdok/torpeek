@@ -7,14 +7,32 @@
 <!-- Every reference here is relative on purpose. The UI has to work under an
      arbitrary base path such as /torpeek behind a reverse proxy, and a single
      leading slash anywhere would break that (REQUIREMENTS.md section 3.3). -->
-<!-- tokens.css ahead of app.css, and a <link> rather than an @import inside
-     app.css (TOR-189): app.css's component rules read var(--bg) etc. with no
-     fallback, so this order is load-bearing, and stating the dependency here
-     as two ordered <link>s - instead of hiding it in a CSS-level import - is
-     what lets a consumer take just the design system by linking tokens.css
-     alone. See tokens.css's own header comment for the full reasoning. -->
+<!-- tokens.css first, then app.css's own former contents split by area
+     (TOR-190), each its own <link> rather than an @import - extending
+     TOR-189's decision rather than switching away from it partway through:
+     no build step ever inlines an @import away, so an @import chain would be
+     a serial fetch waterfall (the browser cannot discover the next
+     stylesheet until it has parsed the one before it), where a flat list of
+     <link>s here lets the browser fetch all of them in parallel and keeps
+     the load order - which IS load-bearing, see filelist.css's own header
+     comment on the one pair of rules that still depends on it - visible in
+     this file instead of hidden inside a CSS-level import.
+
+     base.css (page shell) comes first, ahead of every area file, for the
+     same reason tokens.css comes first of all: the typeface and the page's
+     bare element reset are read by everything after them. The six area
+     files that follow are ordered top-to-bottom the way they appear in the
+     page (intake, table, the table row's own detail, the file list nested
+     inside that, the frame panel nested inside THAT), then the compare
+     dialog, which stands apart from the table entirely. -->
 <link rel="stylesheet" href="tokens.css">
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="base.css">
+<link rel="stylesheet" href="intake.css">
+<link rel="stylesheet" href="table.css">
+<link rel="stylesheet" href="detail.css">
+<link rel="stylesheet" href="filelist.css">
+<link rel="stylesheet" href="framepanel.css">
+<link rel="stylesheet" href="compare.css">
 </head>
 <body>
 <div class="workspace">
@@ -174,6 +192,20 @@
   <span class="lightbox-marks" aria-hidden="true"></span>
 </dialog>
 
-<script src="app.js"></script>
+<!-- type="module" is not optional and not a style choice: since TOR-191 split
+     the page's script into app.js -> events.js -> state.js, app.js opens with
+     `import`, which is a syntax error in a classic script. A page served
+     without it does not partly work - it parses nothing at all.
+
+     It also means the two modules must be SERVED, not merely embedded: the
+     browser fetches them itself, by the relative paths in app.js's own import
+     statements, so they answer under the base path the way app.js does
+     (TestTheFrontendUsesNoAbsolutePaths keeps those paths relative, and
+     TestServesEmbeddedFrontend asks the server for all three by name).
+
+     No build step, which is the whole point of TOR-190/TOR-191 being possible
+     at all: modules are native, so nothing here is bundled, transpiled or
+     inlined away, and the file the browser runs is the file in the repo. -->
+<script type="module" src="app.js"></script>
 </body>
 </html>

@@ -1,0 +1,183 @@
+/* THE INTAKE (TOR-190).
+   Split out of app.css: the pinned upload bar - magnet field, mode select,
+   Take frames, the drop target - and everything in it, plus .status, the
+   live connection indicator that sits beside the title in .intake-head.
+   .status moved here from its old spot next to h1-h3 in the source file;
+   it is intake-only markup (index.html's #status lives inside
+   .intake-head) and had no reason to sit with the page's bare element
+   resets once those and it no longer had to share one file. */
+
+/* Intake: magnet field, mode select and Take frames on one line - a magnet
+   is pasted, never read, so the field does not need to be wide - plus the
+   drop target for a .torrent file.
+
+   PINNED TO THE VIEWPORT, not merely placed above the table (TOR-137). Source
+   order alone was not enough and the difference is measurable: the document
+   is what scrolls here, so with a torrent open and its grid below, scrolling
+   carried the intake's top from 20px to -543px and off the screen entirely.
+   "зафиксировано всегда сверху" means a person can paste a magnet without first
+   scrolling back up past a screenful of frames.
+
+   It needs its own opaque ground: a sticky element with a transparent
+   background lets whatever scrolls beneath show through it, which on a grid
+   of thumbnails is unreadable. The padding compensates for .main's own top
+   padding, which the element now slides over. */
+.intake {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin: 0 0 1.5rem;
+  padding: 1.25rem 0 .8rem;
+  margin-top: -1.25rem;
+  background: var(--bg);
+}
+
+/* The title and the live connection indicator, TOR-168's addition to this
+   section - the left panel's only two occupants before that ticket removed
+   the panel. .panel-header supplied their side-by-side layout there; it is
+   gone with the panel, so this is that arrangement's new home. Baseline
+   alignment is what keeps a short mono status word sitting on the same line
+   as the much larger h1 rather than at its top. */
+.intake-head {
+  display: flex;
+  align-items: baseline;
+  gap: .75rem;
+  flex-wrap: wrap;
+  margin: 0 0 .75rem;
+}
+
+.status { font-family: var(--mono); font-size: .74rem; color: var(--ink-2); letter-spacing: .04em; }
+.status[data-state="live"] { color: var(--accent); opacity: 1; }
+.status[data-state="lost"] { color: var(--warn); opacity: 1; }
+
+form { display: flex; align-items: center; gap: .6rem; flex-wrap: nowrap; }
+
+@media (max-width: 52rem) {
+  form { flex-wrap: wrap; }
+}
+
+/* TOR-173: was `border: 1px dashed var(--rule)`, at 1.36 against --s1 -
+   effectively no edge (see --edge's own comment: 3.0 is the floor for a UI
+   part to be distinguishable at all), while TOR-159 lit every control this
+   frame encloses. Two decisions, not one colour swap:
+
+   THE DASH DROPPED. A dashed rectangle is the conventional "drop it here"
+   cue, but the drop handler is on `document` with a page-wide #drop-overlay
+   (see below) and .hint says so - dropping works anywhere on the page, so a
+   dashed box around just this row promised a narrower target than the truth.
+   Solid, hard-cornered brackets read as this row's own frame rather than as
+   a target, which is what the truth actually is.
+
+   HARD CORNERS, REUSING .run-detail::before's TECHNIQUE (border-radius: .5rem
+   was rounded; the reference sheet's vocabulary is not). Two short strokes
+   per corner rather than a closed rectangle - the same "space instead of
+   borders" HUD idiom .run-detail::before's own comment records, applied to a
+   one-line row instead of a whole panel. Deliberately NO filter: var(--stroke-
+   glow) here, unlike .run-detail::before - that glow is accent-tinted, and
+   --accent is reserved for "this is live or this is where you are" (:root);
+   a permanently accented intake would be exactly the furniture-spending that
+   rule exists to prevent. Focus already owns the accent, on #source itself.
+
+   --edge, the same token every control inside this row already rests on:
+   4.09 against --bg (this row's own background, painted by .intake) and 3.83
+   against --s1 - both clear the 3.0 floor with room, and sharing the token
+   makes the frame read as part of the same family as what it encloses rather
+   than a leftover in the old, quieter --rule. */
+.dropzone {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  flex-wrap: wrap;
+  padding: .45rem .75rem;
+}
+.dropzone::before, .dropzone::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+}
+.dropzone::before {
+  top: 0; left: 0;
+  border-top: 1px solid var(--edge);
+  border-left: 1px solid var(--edge);
+}
+.dropzone::after {
+  bottom: 0; right: 0;
+  border-bottom: 1px solid var(--edge);
+  border-right: 1px solid var(--edge);
+}
+
+#source {
+  flex: 1 1 14rem;
+  min-width: 8rem;
+  padding: .45rem .6rem;
+  font-family: var(--mono);
+  font-size: .82rem;
+  border: 1px solid var(--edge);
+  border-radius: 0;
+  background: var(--s1);
+  color: var(--ink);
+}
+#source::placeholder { color: var(--ink-2); }
+/* Focus is where the accent belongs (see --accent's own comment in :root):
+   the resting edge is --edge, deliberately not the accent, so focus has to
+   say so itself rather than borrowing whatever the border already wears -
+   otherwise a focused field and an idle one would look the same. Shared by
+   the whole intake row, so tabbing through it reads as one consistent
+   control set rather than the magnet field getting special treatment. */
+#source:focus-visible,
+input[type="number"]:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+
+.browse { font-size: .85rem; opacity: .8; cursor: pointer; white-space: nowrap; }
+.browse .link { text-decoration: underline; }
+
+.controls { flex: 0 0 auto; display: flex; gap: .5rem; flex-wrap: nowrap; }
+/* input is deliberately absent from the rule below: #source has its own,
+   and a number field wants the same border and radius as a select without
+   the select's width. 4.5rem holds four digits and keeps the intake one
+   line. */
+input[type="number"] {
+  width: 4.5rem;
+  padding: .45rem .6rem;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--edge);
+  border-radius: 0;
+  background: var(--s1);
+  color: var(--ink);
+}
+
+select, button {
+  padding: .45rem .7rem;
+  font: inherit;
+  border-radius: 0;
+  background: var(--s2);
+  color: var(--ink);
+  border: 1px solid var(--edge);
+}
+/* Take frames is the one filled control on the page: it is the thing that
+   spends traffic, and it should look like it. */
+button[type="submit"] {
+  font-family: var(--mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: var(--glow);
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .5; }
+
+.hint { font-size: .78rem; color: var(--ink-2); margin: .6rem 0 0; }
+.error { color: var(--bad); }
