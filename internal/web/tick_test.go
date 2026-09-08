@@ -938,22 +938,52 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 	css := stylesheet(t)
 
 	fn := jsFunc(t, js, "updateFileCosts")
-	// TOR-183 gave the asked-for arm ONE live case and left the other arm
-	// alone, so this is asserted as the two arms rather than as the single
-	// expression TOR-181 wrote. A box that is not asked for is still live
-	// only where the server says a tick would be accepted; a box that IS
-	// asked for is live only where un-ticking it means "offer to clear the
-	// frames" (clearable), which is the whole of that ticket's gate.
-	if !strings.Contains(fn, "row.box.disabled = asked ? !clearable : !entry.tickable") {
-		t.Fatal("a box is not disabled for a file already asked for that cannot be cleared, " +
-			"or on a row the server would refuse a tick on - a live box the server then " +
-			"refuses is a control that lies, and a live box on a file mid-fetch offers a " +
-			"cancel this page cannot perform (TOR-184)")
+	// TOR-183 gave the asked-for arm ONE live case; TOR-184 gave it three, so
+	// the arm is now gated on a NAMED VERDICT rather than on any one of them.
+	// What has not changed is the rule the assertion is really about, and it
+	// is the reason this test exists: a box is live only where the gesture can
+	// actually be carried out. A box that is not asked for is still live only
+	// where the server says a tick would be accepted.
+	if !strings.Contains(fn, `row.box.disabled = asked ? untick === "" : !entry.tickable`) {
+		t.Fatal("a box is not disabled for a file already asked for that un-ticking cannot " +
+			"reach, or on a row the server would refuse a tick on - a live box the server " +
+			"then refuses is a control that lies, and a live box on a file nothing is " +
+			"fetching offers a stop with nothing to stop")
+	}
+	// The verdict itself, and every one of the four answers, because dropping
+	// one of them silently is how this control would come to mean the wrong
+	// thing in one state - which is TOR-184's whole subject.
+	if !strings.Contains(fn, `const untick = !asked ? ""`) ||
+		!strings.Contains(fn, `entry.deferred.has(index) ? "drop"`) ||
+		!strings.Contains(fn, `entry.fetching.has(index) ? "stop"`) ||
+		!strings.Contains(fn, `clearable ? "clear"`) {
+		t.Error("the row no longer decides which of drop/stop/clear an un-tick would be, " +
+			"so the box, the sentence on the row and tickFile's routing have nothing to " +
+			"agree on (TOR-184)")
 	}
 	if !strings.Contains(fn, "const clearable = asked && FINAL.has(entry.state) && framesOnDisk(entry, index) > 0") {
-		t.Error("the one live asked-for box is not gated on all three of asked, settled and " +
-			"having frames on disk - dropping the settled test offers a destructive button " +
-			"on a file mid-capture, and dropping the frame test offers to clear nothing")
+		t.Error("the clear is not gated on all three of asked, settled and having frames " +
+			"on disk - dropping the settled test offers a destructive button on a file " +
+			"mid-capture, and dropping the frame test offers to clear nothing")
+	}
+	// AND THE ORDER OF THE THREE, which is not decoration: a file being
+	// fetched must be told from one that is only waiting for the next pass
+	// BEFORE either is acted on, because those two answers differ in scope -
+	// one stops a torrent, the other stops a file. Asserted by position for
+	// the reason the cursor cascade below is: a chain of ternaries is decided
+	// by the order it is written in, and reading the strings alone would pass
+	// on a chain that answers "stop" for a deferred file.
+	dropAt := strings.Index(fn, `entry.deferred.has(index) ? "drop"`)
+	stopAt := strings.Index(fn, `entry.fetching.has(index) ? "stop"`)
+	clearAt := strings.Index(fn, `clearable ? "clear"`)
+	if dropAt < 0 || stopAt < 0 || clearAt < 0 {
+		t.Fatalf("cannot locate the three verdicts: drop at %d, stop at %d, clear at %d",
+			dropAt, stopAt, clearAt)
+	}
+	if !(dropAt < stopAt && stopAt < clearAt) {
+		t.Errorf("the verdicts are written drop@%d stop@%d clear@%d; a later arm of a "+
+			"ternary chain is only reached when the earlier ones are false, so this order "+
+			"is what decides which act a box performs", dropAt, stopAt, clearAt)
 	}
 	if !strings.Contains(fn, "row.row.title = entry.tickRefusal") {
 		t.Error("a disabled box carries no reason - the server sends its own sentence " +

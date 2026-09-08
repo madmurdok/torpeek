@@ -1365,6 +1365,21 @@ function newRunEntry(id) {
     // the row - "in this run" against "in the next pass" - and a reader has
     // to be able to tell which of their ticks is already spending.
     deferred: new Set(),
+    // fetching is the part of picked the ENGINE IS HOLDING RIGHT NOW: the
+    // files of the pass in flight, from run_state's own "fetching"
+    // (runEntry.fetchingLocked). Only ever non-empty while the row is
+    // running.
+    //
+    // NOT "picked minus deferred", which is what it looks like and is wrong
+    // in exactly one direction: picked is cumulative, so that difference also
+    // holds every file an EARLIER pass on this row already captured, and
+    // those are files nothing is fetching. The two need opposite answers from
+    // TOR-184 - un-ticking a file being fetched stops this torrent's fetch,
+    // and un-ticking one a previous pass finished must not, because the run
+    // it would stop is fetching something else. So the server sends the set
+    // rather than leaving the page to reconstruct it and be wrong on the row
+    // with two passes behind it.
+    fetching: new Set(),
     // unticked is what somebody has UN-TICKED on this row to be offered the
     // clear (TOR-183), by torrent index. It is the only piece of tick state
     // on this page the server does not own, and that is the whole design:
@@ -1588,6 +1603,12 @@ function resetRunContent(entry) {
   entry.fileListKnown = false;
   entry.picked.clear();
   entry.deferred.clear();
+  // And what the engine was holding (TOR-184), for the same reason as the two
+  // above and one of its own: a stale "fetching" would make an un-tick offer
+  // to stop a run whose history this page is in the middle of re-reading, and
+  // stopping is the one act here that reaches the server without being asked
+  // twice.
+  entry.fetching.clear();
   // And the offers on it (TOR-183). The rows those buttons sat on are about
   // to be detached, and the frames they offered to clear are re-read from
   // disk by the history that follows - so an offer kept here would be an
@@ -2640,7 +2661,28 @@ function fileListTitle(entry, parked) {
   // there is nothing to pick and then confirm, and a sentence that says
   // otherwise would have people ticking a box and hunting for the button
   // that used to follow it.
-  const suffix = parked ? " — tick a file to start it" : "";
+  //
+  // AND WHAT AN UN-TICK MEANS WHILE THE ROW IS FETCHING (TOR-184), which is
+  // said HERE rather than on each file for two reasons. It is a fact about
+  // the row's state, not about any one file - the scope of the stop is the
+  // run - and a season pack fetching twenty files would otherwise carry
+  // twenty copies of one sentence down the list, which is the same column of
+  // repeated words updateFileCosts refuses to draw beside every ticked box.
+  //
+  // ON SCREEN, not in a title, and that is the requirement rather than a
+  // preference: TOR-184's acceptance is that the two gestures are
+  // distinguishable BEFORE they are made, and a hover title is not readable
+  // on a touch screen or by somebody who never hovers. The per-file title
+  // still says it precisely for the box under the pointer; this is what a
+  // person reads without doing anything at all.
+  //
+  // Mutually exclusive with the parked sentence by construction: a parked row
+  // has fetched nothing, and a fetching one is long past being parked.
+  const suffix = parked
+    ? " — tick a file to start it"
+    : entry.fetching.size > 0
+      ? " — un-ticking a file it is fetching stops this torrent's fetch; frames already taken stay"
+      : "";
   if (!entry.fileListKnown) {
     return entry.videos.length + " video file(s)" + suffix;
   }
@@ -2717,15 +2759,47 @@ function updateFileCosts(entry) {
     // and its box goes straight back to checked.
     const offering = clearable && entry.unticked.has(index);
 
-    // ASKED FOR IS DISABLED, WITH ONE LIVE CASE. Un-ticking cannot un-start
-    // a fetch, so a box that could be cleared would claim to stop something
-    // it has no way of stopping - the reason Select none is gone, and still
-    // the rule for every file this row is or may yet be fetching. TOR-184
-    // is the ticket that makes un-ticking a file mid-fetch mean "cancel
-    // this". The exception is the one TOR-184's own description hands here:
-    // a FINISHED file with frames on disk, where un-ticking means "offer to
-    // clear them" - so that box has to be clickable, and only that one.
-    row.box.disabled = asked ? !clearable : !entry.tickable;
+    // WHAT UN-TICKING THIS BOX WOULD DO, AS ONE OF FOUR ANSWERS (TOR-184),
+    // decided here once and read by everything below - the box's own live or
+    // dead state, the sentence on the row, and tickFile's routing, which
+    // re-asks these same three questions rather than trusting the DOM.
+    //
+    // The order is the priority and the three cases are mutually exclusive by
+    // construction, so it states the reading rather than resolving a clash: a
+    // file waiting for the next pass is never in the pass in flight
+    // (Server.UntickFile's own disjointness note), and neither can be true on
+    // a row that has settled, which is all "clear" is ever offered on.
+    //
+    //   "drop"  - ticked while this row was already fetching, so nothing has
+    //             been asked of the swarm for it yet. Taking it out stops
+    //             that one file and nothing else, spends nothing, deletes
+    //             nothing. The one honestly per-file stop there is.
+    //   "stop"  - the engine is fetching it now, and core.Engine has no
+    //             per-file stop to offer: one context for the whole run, one
+    //             budget sized before it started. So this stops THE RUN, and
+    //             the row says so before it is pressed (below, and once for
+    //             the row in fileListTitle).
+    //   "clear" - TOR-183's: a finished file with frames on disk, where the
+    //             un-tick only puts the Clear frames button on the row and
+    //             changes nothing by itself.
+    //   ""      - nothing this can reach. A file an earlier pass captured
+    //             while this row runs on is the case that matters: nothing is
+    //             fetching it, so stopping the run would stop the wrong
+    //             thing, and it is not settled, so there is nothing to clear
+    //             yet either.
+    const untick = !asked ? ""
+      : entry.deferred.has(index) ? "drop"
+      : entry.fetching.has(index) ? "stop"
+      : clearable ? "clear"
+      : "";
+
+    // ASKED FOR IS DISABLED UNLESS AN UN-TICK MEANS SOMETHING, which since
+    // TOR-184 is three cases rather than TOR-183's one. What has not changed
+    // is the rule underneath: a box is live only where the gesture can
+    // actually be carried out, because a box that moves and then does nothing
+    // is the control that lied - and that is still the whole reason Select
+    // none is gone.
+    row.box.disabled = asked ? untick === "" : !entry.tickable;
     row.box.checked = asked && !offering;
 
     // The button goes when there is nothing to clear, which is the other
@@ -2754,19 +2828,54 @@ function updateFileCosts(entry) {
       // reader cannot see is the one case where a tick did NOT join the run
       // in flight, so that is the only case with words on it.
       row.state.textContent = deferred ? "in the next pass" : "";
-      // WHICH ACT THE BOX IS ABOUT TO DO, BEFORE IT IS DONE, which is a
-      // requirement rather than a courtesy: from TOR-183 an asked-for box is
-      // live in exactly one state and inert in every other, and nothing else
-      // on the row distinguishes the two. The clear's own sentence lives on
-      // the button; this is what the BOX promises, and it promises that
-      // un-ticking spends nothing and deletes nothing by itself.
-      if (deferred) {
+      // WHICH ACT THE BOX IS ABOUT TO DO, BEFORE IT IS DONE, and since
+      // TOR-184 this is an acceptance criterion rather than a courtesy: an
+      // asked-for box now performs one of THREE acts, or none, and it is the
+      // same box in all four states - so nothing but the row can say which.
+      //
+      // One sentence per verdict, in the verdict's own order. The clear's
+      // reads "changes nothing by itself", because that un-tick only reveals
+      // a button; the stop's has to read the opposite, because that one acts
+      // on the press - and the difference between those two sentences is the
+      // whole of this ticket's legibility requirement. The heading above the
+      // list says the stop's scope once more, on screen, for a reader who
+      // never hovers anything (fileListTitle).
+      if (untick === "drop") {
         row.row.title = "ticked while this torrent was already fetching - the engine works " +
           "from a plan it was handed, so this file starts the moment that pass ends, on " +
-          "this same row";
-      } else if (clearable) {
+          "this same row. Un-tick to drop it before it starts: nothing has been asked of " +
+          "the swarm for it, so that stops this file alone and costs nothing";
+      } else if (untick === "stop") {
+        // THE ONE DESTRUCTIVE-BY-SCOPE PRESS ON THIS ROW, and the whole of
+        // TOR-184's legibility requirement is that this sentence exists
+        // before it rather than after. It says three things a person cannot
+        // see: that the box acts at once (unlike the clear's, which only
+        // reveals a button), that it reaches the WHOLE run and not just this
+        // file, and that nothing on disk is lost - which is what makes the
+        // scope survivable and is exactly what a reader will fear.
+        //
+        // The count is read from the same set the verdict came from, so it
+        // cannot claim a scope the gesture does not have, and a one-file pass
+        // says nothing about siblings rather than "and 0 others".
+        row.row.title = "this file is being fetched now — un-ticking it STOPS THIS TORRENT'S FETCH" +
+          (entry.fetching.size > 1
+            ? ", all " + entry.fetching.size + " files of this pass with it"
+            : "") +
+          ". The engine works from the plan it was handed," +
+          " so one file of it cannot be stopped on its own." +
+          " Nothing is deleted: the frames already written stay on disk," +
+          " and a later run reuses them";
+      } else if (untick === "clear") {
         row.row.title = "this row captured this file - un-tick it to be offered a clear, " +
           "which deletes its frames from disk; un-ticking by itself changes nothing";
+      } else if (cancellable(entry.state)) {
+        // The row is still live and this file is in none of the three: an
+        // earlier pass on this row captured it and the pass in flight is
+        // fetching something else. Said in full because it is the case whose
+        // dead box looks arbitrary beside the live ones above it.
+        row.row.title = "this row has asked for this file and nothing is fetching it now - " +
+          "an earlier pass took it, so stopping this run would stop the wrong file, and " +
+          "its frames can be cleared once the row has finished";
       } else {
         row.row.title = "this row has asked for this file - whatever it has taken is in " +
           "the file's own block below";
@@ -2890,28 +2999,39 @@ function syncSelectAll(entry) {
   entry.pickerAll.title = entry.pickerArmed.textContent;
 }
 
-// tickFile is what a checkbox means, and since TOR-183 that depends on which
-// way it was just moved and on what the file has.
+// tickFile is what a checkbox means, and since TOR-184 that is FOUR different
+// acts depending on what the file is doing - which is the whole difficulty of
+// this control and the reason each of them is named in one place.
 //
 // The box's own state is already changed by the time this runs (it is a
 // change listener). A TICK captures the file, optimistically - startFiles
-// rolls the box back if the server refuses. An UN-TICK is one of two entirely
-// different acts, and telling them apart is the whole of this function's new
-// half:
+// rolls the box back if the server refuses. An UN-TICK is one of these, in
+// this order, and it re-asks updateFileCosts' own three questions rather than
+// trusting the box being clickable: a run_state, a pass ending or a delete
+// may have landed between the render and the click.
 //
-//   - On a FINISHED file with frames on disk, it offers to clear them. It
-//     asks nothing of the server, spends nothing and deletes nothing: the run
-//     still asked for this file and cache.Run.Selected still says so, so
-//     there is no server state for an un-tick to change. It puts the button
-//     on the row, and ticking the box again takes it away. Nothing about this
-//     is irreversible until that button is pressed.
-//   - On anything else - a file being fetched now, one waiting for the next
-//     pass, one whose row is still going - it is refused with the sentence it
-//     has carried since TOR-181, because a fetch cannot be un-started from
-//     here. Making that gesture mean "stop this file" is TOR-184, which is
-//     also where the two are made legible to a person before they act; until
-//     then updateFileCosts leaves every one of those boxes an honest
-//     `disabled` control and this is the guard for a stale DOM.
+//   - WAITING FOR THE NEXT PASS: dropped, at the server (dropFile). Nothing
+//     has been asked of the swarm for it, so this stops that one file and
+//     nothing else. The only per-file stop that honestly exists.
+//   - BEING FETCHED NOW: stops the run (stopFetch). core.Engine has no
+//     per-file stop - one context for the whole run, one budget sized from
+//     the file list before the clock started - so this is the only stop
+//     there is, and the row has said so before the press.
+//   - A FINISHED file with frames on disk: it offers to clear them (TOR-183).
+//     It asks nothing of the server, spends nothing and deletes nothing: the
+//     run still asked for this file and cache.Run.Selected still says so. It
+//     puts the button on the row, and ticking the box again takes it away.
+//     Nothing about this is irreversible until that button is pressed.
+//   - ANYTHING ELSE: refused, with the box put back. Since TOR-184 that is
+//     one case rather than the old three - a file an earlier pass captured
+//     while this row runs on - and updateFileCosts leaves its box an honest
+//     `disabled` control, so this is the guard for a stale DOM rather than a
+//     path a person can normally take.
+//
+// THE FIRST TWO ARE ONE GESTURE WITH TWO SCOPES, which is what makes this
+// control dangerous and what the row's own sentences exist to answer: one
+// stops a file, the other stops a torrent, and only the row can say which
+// before it happens (updateFileCosts' titles, fileListTitle's suffix).
 function tickFile(entry, index, box) {
   // Somebody who ticks a single file has answered Select all's question by
   // doing something else; leaving it armed behind them would put a
@@ -2919,6 +3039,19 @@ function tickFile(entry, index, box) {
   disarmSelectAll(entry);
 
   if (!box.checked) {
+    // TOR-184's two stops, in updateFileCosts' own order and read from the
+    // same sets, so the box that was drawn live is the box that acts. Both
+    // are guarded on the file being one this row asked for at all: a box
+    // moved on a row whose run_state has since re-armed it must not send a
+    // stop for a file the server no longer holds.
+    if (entry.picked.has(index) && entry.deferred.has(index)) {
+      dropFile(entry, index);
+      return;
+    }
+    if (entry.picked.has(index) && entry.fetching.has(index)) {
+      stopFetch(entry, index, box);
+      return;
+    }
     // The same three conditions updateFileCosts drew the live box from, read
     // again here rather than trusted: a run_state or a delete may have landed
     // between the render and the click, and the box being clickable is not by
@@ -2934,9 +3067,16 @@ function tickFile(entry, index, box) {
         "and nothing has been deleted");
       return;
     }
+    // THE ONE CASE LEFT, and it is narrow now: a file an earlier pass on this
+    // row already captured, while the pass in flight is fetching something
+    // else. There is nothing to stop - nothing is fetching this file - and
+    // nothing to clear yet, because the row has not settled and TOR-183's
+    // offer is deliberately gated on that. The sentence says both, because
+    // "cannot" with no reason is a refusal a person cannot act on.
     box.checked = true;
-    showError("un-ticking cannot stop a capture that has already started — " +
-      "use Cancel on the torrent's own row to stop this run");
+    showError("nothing is fetching this file — an earlier pass on this row took it, so " +
+      "there is nothing here to stop. Its frames can be cleared once the row has " +
+      "finished, or use Cancel on the row to stop the pass that is going now");
     return;
   }
 
@@ -2997,6 +3137,84 @@ function setFileNote(entry, index, text) {
   if (!row) return;
   row.note.textContent = text;
   row.note.hidden = !text;
+}
+
+// dropFile takes one file back out of what this row will fetch, before
+// anything has been asked of the swarm for it (TOR-184).
+//
+// THE PER-FILE STOP, and the only one that exists. It reaches exactly the
+// file a tick could not put in the plan the engine was already working from,
+// which the server holds on the entry for the next pass (runEntry.pending):
+// no traffic has been spent on it, no budget was sized for it, and dropping
+// it stops that file and touches nothing else on the row.
+//
+// NO CONFIRMATION, and this is the easy half of that argument: the act spends
+// nothing, deletes nothing and can be undone by ticking the box again at no
+// cost. See stopFetch for the harder half, where the scope is the whole run
+// and the answer is still no.
+async function dropFile(entry, index) {
+  showError("");
+
+  // Optimistic, for the same frame startFiles guesses through and rolled back
+  // the same way: the boxes are the only feedback there is between the click
+  // and the socket. run_state overwrites both sets moments later.
+  entry.picked.delete(index);
+  entry.deferred.delete(index);
+  updateFileCosts(entry);
+
+  try {
+    await post("runs/untick", { id: entry.id, file: String(index) });
+    logFor(entry, "file " + index + " dropped before it started - it was waiting for the " +
+      "next pass, so nothing was fetched for it and nothing was deleted");
+  } catch (err) {
+    // A refusal is a real answer: the pass in flight may have ended in the
+    // meantime and taken this file into itself (Server.pendingPass), and it
+    // is being fetched by the time the POST lands. Put back, so the box does
+    // not say a file is not wanted while the engine is holding it.
+    entry.picked.add(index);
+    entry.deferred.add(index);
+    updateFileCosts(entry);
+    showError(String(err.message || err));
+    logFor(entry, "could not drop file " + index + ": " + (err.message || err));
+  }
+}
+
+// stopFetch is what un-ticking a file the engine is already fetching means:
+// STOP THE RUN THAT FILE BELONGS TO (TOR-184).
+//
+// It is the whole of this ticket's decision, and it is a decision about the
+// ENGINE rather than about the page. core.Engine.Run hands back an event
+// channel and nothing else; its only handle is the context it was started
+// with, every file's goroutine is given that same context, and the run's
+// traffic budget is sized once from the file list before the clock starts. So
+// there is no per-file stop to call here - the choice was between saying the
+// gesture stops the run and building per-file cancellation into the engine,
+// and this release says the first and says it out loud.
+//
+// NO CONFIRMATION, and it is the deliberate opposite of Select all one
+// section up. That button ARMS on its first press and states what it is about
+// to spend, because it SPENDS - and this page keeps its one confirmation
+// gesture for spending. A stop spends nothing and destroys nothing: the
+// traffic already sent is not recoverable whatever anybody clicks next, and
+// the frames already written stay on disk (section 2.10, and the Clear button
+// that appears on this very row afterwards is the proof of it). A speed bump
+// in front of a harmless act only trains people to click through the one in
+// front of the harmful one.
+//
+// WHAT CARRIES THE WEIGHT INSTEAD is that the row said so first: the box's
+// own title states the scope and that nothing is deleted, and the list's
+// heading says it once for the row without needing to be hovered
+// (updateFileCosts, fileListTitle).
+function stopFetch(entry, index, box) {
+  // The box goes straight back, and that is the truth rather than a
+  // rollback: a cancel does not un-ask for the file. The run asked for it,
+  // whatever frames it took stay on disk, and run_state redraws this row
+  // moments later with the box ticked and a Clear frames beside it - so a box
+  // left cleared would be the one thing on screen claiming otherwise.
+  box.checked = true;
+  logFor(entry, "un-ticked file " + index + " while it was being fetched - stopping this " +
+    "run; the frames already written stay on disk and a later run reuses them");
+  cancelRun(entry.id);
 }
 
 // clearFrames deletes everything one file has on disk - its frames, its
@@ -4968,6 +5186,12 @@ function apply(ev) {
     // fact.
     entry.picked = new Set(ev.ticked || []);
     entry.deferred = new Set(ev.deferred || []);
+    // TOR-184, and the direction an absent key falls is the safe one here
+    // too: the server sends this only while the row is running, so an empty
+    // set means "the engine is holding nothing", which draws no offer to stop
+    // anything. Guessing the other way would put a run-stopping gesture on a
+    // row that has already finished.
+    entry.fetching = new Set(ev.fetching || []);
     // false when the key is missing, which cannot happen for a run this
     // server holds (it is sent on every run_state, true or false) and is the
     // safe direction if it ever does: a live checkbox the server would

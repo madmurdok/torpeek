@@ -639,6 +639,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /runs/retry", s.authGuard(s.handleRetryRun))
 	mux.HandleFunc("POST /runs/cancel", s.authGuard(s.handleCancelRun))
 	mux.HandleFunc("POST /runs/decide", s.authGuard(s.handleDecideRun))
+	// The tick's inverse, and NOT a cancel by another name (TOR-184): it
+	// reaches exactly the file no pass has been handed yet. Un-ticking one the
+	// engine is already fetching is /runs/cancel, because that is the only
+	// stop core.Engine has - see Server.UntickFile.
+	mux.HandleFunc("POST /runs/untick", s.authGuard(s.handleUntickFile))
 	mux.HandleFunc("POST /runs/priority", s.authGuard(s.handleSetPriority))
 	// The whole file, and one of its frames. Two patterns rather than one
 	// with an argument that means "all of them" - see handleClearFile.
@@ -1935,6 +1940,173 @@ func (e *runEntry) refuseTick() string {
 	}
 }
 
+// UntickFile takes one file back out of what this row will fetch (TOR-184).
+//
+// IT IS THE TICK'S INVERSE AND NOT A CANCEL, and the whole of this ticket is
+// that those are two different acts on one control. It reaches exactly the
+// file DecideRun could not put in the plan - one ticked while a pass was
+// already in flight, waiting on the entry for the next one (runEntry.pending)
+// - and taking it out of that list is exact: nothing was asked of the swarm
+// for it, no budget was sized for it, no goroutine is holding it. So it stops
+// that one file and touches nothing else, spends nothing, and deletes nothing.
+//
+// WHAT IT REFUSES IS THE FILE THE ENGINE IS ALREADY FETCHING, and that is a
+// limit of the engine rather than a choice made here. core.Engine.Run hands
+// back an event channel and nothing else: its only handle is the context it
+// was started with, every file's goroutine is given that SAME context
+// (core.Engine.run passes one runCtx to every processFile), the run's traffic
+// budget is sized once from len(selected) before the clock starts, and
+// core.haltReason answers one question for the whole run. There is no per-file
+// stop to reach for. So the honest answer there is the run-scoped one -
+// CancelRun - and refuseUntick says so in the sentence a page can show,
+// rather than accepting the call and stopping more than was asked.
+//
+// NO CONFIRMATION, HERE OR ON THE PAGE, and the asymmetry with Select all's
+// armed second press is deliberate rather than an oversight. Select all
+// SPENDS - twenty files of traffic on one click - and this page reserves its
+// one confirmation gesture for spending. Stopping spends nothing and destroys
+// nothing: traffic already sent is not recoverable whatever happens next, the
+// frames already written stay on disk (CancelRun's own promise, section 2.10),
+// and a file dropped here can be ticked again at no cost. A speed bump in
+// front of a harmless, reversible act only teaches people to click through
+// the one in front of the harmful one.
+//
+// ONE FILE rather than a set, unlike DecideRun beside it: a tick can arrive
+// from Select all, which is twenty files in one press, while an un-tick is
+// always one box - TOR-181 removed Select none precisely because a control
+// that takes twenty things back cannot say which twenty.
+func (s *Server) UntickFile(id, spec string) (RunInfo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return RunInfo{}, ErrNoSuchRun
+	}
+	spec = strings.TrimSpace(spec)
+
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return RunInfo{}, errClosed
+	}
+
+	entry := s.runs[id]
+	if entry == nil {
+		s.mu.Unlock()
+		return RunInfo{}, ErrNoSuchRun
+	}
+	// The same check a tick goes through, for the same reason: a page left
+	// open across two torrents would name an index this one does not hold,
+	// and that is a fact about the request rather than about the row's state
+	// - so it is answered as a 400 before refuseUntick is consulted at all.
+	if !entry.holdsFile(spec) {
+		s.mu.Unlock()
+		return RunInfo{}, fmt.Errorf("%w: %q is not a video file of this torrent", errBadRequest, spec)
+	}
+	if refusal := entry.refuseUntick(spec); refusal != "" {
+		info := s.infoLocked(entry)
+		s.mu.Unlock()
+		return info, errors.New(refusal)
+	}
+
+	// BOTH LISTS, and the second is what makes the gesture visible at all.
+	//
+	// pending is where the file actually waits, so dropping it there is what
+	// stops it. asked is every file this row has EVER been asked to capture
+	// and never shrinks on its own (runEntry.asked), and tickedLocked unions
+	// the two - so leaving it there would report the file as still ticked, the
+	// box would snap straight back to checked, and the un-tick would read as a
+	// control that does nothing.
+	//
+	// Safe because pending and req.Files are disjoint by construction:
+	// DecideRun's running window adds only withoutFiles(chosen, req.Files),
+	// and pendingPass nils pending before its files become the next pass's
+	// req.Files. So the only reason this spec is in asked is the very tick
+	// that put it in pending, and taking it out of both undoes exactly that
+	// tick - never a tick an earlier pass already captured, whose file is in
+	// req.Files or in asked alone and is refused above.
+	//
+	// New slices, never an edit in place, the rule withFiles exists for: the
+	// engine may be holding req.Files by reference and these slices share
+	// this file's own allocation discipline.
+	drop := []string{spec}
+	entry.pending = withoutFiles(entry.pending, drop)
+	entry.asked = withoutFiles(entry.asked, drop)
+
+	rec := s.runStateRecordLocked(entry, false)
+	info := s.infoLocked(entry)
+	s.mu.Unlock()
+
+	// No dispatch call, unlike DecideRun's: nothing new can start because of
+	// this, and the pass in flight is exactly as it was. The only thing that
+	// changed is what the NEXT pass will ask for, which pendingPass reads at
+	// the end of the current stream.
+	s.hub.publish(entry.id, rec)
+	return info, nil
+}
+
+// refuseUntick reports why this file cannot be taken back out of what the row
+// will fetch, as the sentence to answer with - empty when it can.
+//
+// refuseTick's shape, one act over, and for the identical reason: the PAGE has
+// to ask the same question before it draws a live checkbox, so the rule lives
+// here once instead of being copied into app.js where the two would come to
+// disagree. It differs in taking a FILE, because the answer differs file by
+// file on one row - the pass in flight and the tick waiting behind it sit in
+// the same list on screen - which is why the page is told the two sets
+// (run_state's "deferred" and "fetching") rather than one verdict per row.
+//
+// The caller must hold s.mu: every field it reads is written under it.
+func (e *runEntry) refuseUntick(spec string) string {
+	// The one case that says yes, and it is asked first: a file waiting for
+	// the next pass is not being fetched by anything, whatever the row's own
+	// state says about the pass that IS in flight.
+	if containsFile(e.pending, spec) {
+		return ""
+	}
+
+	// The file the engine holds. asksEveryVideo is folded in because an empty
+	// RunRequest.Files means every video file rather than none, so on a
+	// running row it is the widest possible pass rather than an idle one.
+	if e.state == RunRunning && (e.asksEveryVideo() || containsFile(e.req.Files, spec)) {
+		return "file " + spec + " is in the pass run " + e.id + " is fetching now, and the " +
+			"engine works from the plan it was handed - one file of it cannot be stopped on " +
+			"its own. Cancelling the run is what stops it, and the frames it has already " +
+			"written stay on disk for a later run to reuse"
+	}
+
+	// A replay is read back off disk and fetches nothing, so there is nothing
+	// here to stop - refuseTick's own words for the same state, and asked
+	// before the queued case below because a replay's request does carry
+	// files and the sentence there would call them "the pass it will start
+	// with", which a replay never has.
+	if e.state == RunReplaying {
+		return "run " + e.id + " is being read back from disk rather than fetched, so " +
+			"there is no fetch for this to stop"
+	}
+
+	// A pass accepted and not started. Narrowing it is the one thing that
+	// cannot be done in place, and the trap is the reason rather than an
+	// excuse: a request narrowed to NO files means every video file the
+	// torrent holds (asksEveryVideo), so dropping the last of them would
+	// widen this run from one file to twenty instead of stopping it. Refused
+	// as a whole rather than only on the last one, so the answer does not
+	// depend on how many boxes somebody has already pressed.
+	if !e.state.final() && containsFile(e.req.Files, spec) {
+		return "run " + e.id + " is " + string(e.state) + " with file " + spec + " in the " +
+			"pass it will start with, and a pass narrowed to nothing means every video " +
+			"file rather than none - so this cannot take one file back out of it. Cancel " +
+			"the run and ask for the files you want"
+	}
+
+	if e.state.final() {
+		return "run " + e.id + " is " + string(e.state) + ", so there is nothing left for " +
+			"it to fetch and nothing for this to stop - what file " + spec + " has on disk " +
+			"goes with a clear (Clear frames on its row), not with an un-tick"
+	}
+
+	return "run " + e.id + " is not waiting to fetch file " + spec + " - only a file ticked " +
+		"while a pass was already in flight can be taken back out before it starts"
+}
+
 // withFiles returns have plus every spec of want it does not already carry,
 // in that order, ALWAYS AS A NEW SLICE.
 //
@@ -2772,6 +2944,25 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 	if deferred := fileIndices(entry.pending); len(deferred) > 0 {
 		m["deferred"] = deferred
 	}
+	// TOR-184: WHICH OF THEM THE ENGINE IS ACTUALLY HOLDING, which is the one
+	// fact that decides what un-ticking a box means - and the page cannot
+	// derive it from the two lists above.
+	//
+	// "ticked" is cumulative and "deferred" is what waits for the next pass,
+	// so ticked minus deferred is the pass in flight PLUS every file an
+	// earlier pass already captured (runEntry.asked keeps those). Those two
+	// need opposite answers: un-ticking a file being fetched stops the run,
+	// and un-ticking one a previous pass finished must not, because the run it
+	// would stop is fetching something else entirely. Sent as its own set so
+	// the page never has to guess which of the two a row's file is.
+	//
+	// Present only while the row is running, the same absent-is-not-empty line
+	// the queue's own fields draw: a queued pass has been accepted and not
+	// started, a parked one is undecided, a finished one is over, and in none
+	// of those is anything being fetched at all.
+	if fetching := entry.fetchingLocked(); len(fetching) > 0 {
+		m["fetching"] = fetching
+	}
 	// The frames-per-file this row's request carries, so the page can price
 	// the files it has NOT ticked at what they would actually get rather
 	// than at whatever the intake box now shows - DecideRun locks the figure
@@ -2814,6 +3005,37 @@ func (e *runEntry) tickedLocked() []int {
 	all = append(all, e.req.Files...)
 	all = append(all, e.pending...)
 	return fileIndices(all)
+}
+
+// fetchingLocked is every torrent index the pass THIS ROW IS RUNNING was
+// handed: the files core.Engine is working from at this moment, and nothing
+// else (TOR-184).
+//
+// NOT tickedLocked minus pending, which is the shape it looks like and would
+// be wrong in one direction: that includes every file an earlier pass on this
+// row already captured (runEntry.asked never shrinks), and those are files
+// nothing is fetching. Reading req.Files is the honest answer, because that
+// is literally the slice handed to the runner.
+//
+// Empty for every state but running, and that is the point rather than a
+// shortcut: a queued row's req.Files is a plan nobody has started, so a page
+// told those were "being fetched" would offer to stop a fetch that has not
+// begun.
+//
+// The caller must hold s.mu.
+func (e *runEntry) fetchingLocked() []int {
+	if e.state != RunRunning {
+		return nil
+	}
+	// The widest pass rather than an empty one: an empty RunRequest.Files
+	// means every video file the torrent holds, which is exactly what the
+	// engine was handed and therefore exactly what it is fetching.
+	if e.asksEveryVideo() {
+		out := append([]int(nil), e.videos...)
+		sort.Ints(out)
+		return out
+	}
+	return fileIndices(e.req.Files)
 }
 
 // asksEveryVideo reports whether this row's request narrows to no files and
