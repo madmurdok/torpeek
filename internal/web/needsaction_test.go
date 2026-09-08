@@ -18,7 +18,11 @@ import (
 // does not.
 const (
 	manySource = "magnet:?xt=urn:btih:many"
-	oneSource  = "magnet:?xt=urn:btih:one"
+	// A SECOND multi-video torrent, so one test can park two and have the
+	// second queue behind the first (TOR-197 needs a pass that is accepted
+	// and not started, which one torrent alone cannot produce).
+	otherManySource = "magnet:?xt=urn:btih:othermany"
+	oneSource       = "magnet:?xt=urn:btih:one"
 )
 
 // fakeLister stands in for a metadata pass: it answers what a torrent holds

@@ -837,8 +837,19 @@ class FileList extends HTMLElement {
       //             fetching it, so stopping the run would stop the wrong
       //             thing, and it is not settled, so there is nothing to clear
       //             yet either.
+      //   "narrow" - TOR-197's: the pass has been chosen and the engine has
+      //             not been handed it, so the file simply comes out. If it
+      //             is the LAST one the row goes back to needs-action, which
+      //             is what an empty selection already means there - so the
+      //             gesture never depends on how many boxes are left, and
+      //             there is no last-box case a person cannot predict.
+      //             Placed after "drop" and before "stop" because it is the
+      //             other case where nothing has been asked of the swarm
+      //             yet; the two are mutually exclusive anyway, since
+      //             "deferred" only ever holds files on a RUNNING row.
       const untick = !asked ? ""
         : entry.deferred.has(index) ? "drop"
+        : entry.narrowable.has(index) ? "narrow"
         : entry.fetching.has(index) ? "stop"
         : clearable ? "clear"
         : "";
@@ -915,6 +926,23 @@ class FileList extends HTMLElement {
             " so one file of it cannot be stopped on its own." +
             " Nothing is deleted: the frames already written stay on disk," +
             " and a later run reuses them";
+        } else if (untick === "narrow") {
+          // TOR-197's, and the sentence has to say which of two things the
+          // press will be, because the person cannot see the difference: with
+          // another box still ticked it takes this file out and the torrent
+          // goes on waiting; with this one the last, the row goes back to
+          // asking which files to take. Both are said, in that order, so the
+          // one that happens is the one that was read.
+          //
+          // The count comes from the same set the verdict did, so it cannot
+          // claim a scope the gesture does not have.
+          row.row.title = entry.narrowable.size > 1
+            ? "this torrent is waiting to start and has not been handed to the engine yet - " +
+              "un-tick to take this file out of the pass it will start with. The other " +
+              (entry.narrowable.size - 1) + " stay, and nothing has been fetched or deleted"
+            : "this is the only file this torrent is waiting to take - un-ticking it puts " +
+              "the row back to asking which files you want, which is where it was before " +
+              "any box was pressed. Nothing has been fetched, so nothing is lost";
         } else if (untick === "clear") {
           row.row.title = "this row captured this file - un-tick it to be offered a clear, " +
             "which deletes its frames from disk; un-ticking by itself changes nothing";
@@ -1101,6 +1129,10 @@ class FileList extends HTMLElement {
         this.dropFile(index);
         return;
       }
+      if (entry.picked.has(index) && entry.narrowable.has(index)) {
+        this.narrowPass(index);
+        return;
+      }
       if (entry.picked.has(index) && entry.fetching.has(index)) {
         this.stopFetch(index, box);
         return;
@@ -1197,6 +1229,57 @@ class FileList extends HTMLElement {
       this.updateFileCosts();
       showError(String(err.message || err));
       log(entry, "could not drop file " + index + ": " + (err.message || err));
+    }
+  }
+
+  // narrowPass takes one file out of a pass this torrent is WAITING to start
+  // (TOR-197), which TOR-184 had to refuse over a trap rather than an
+  // objection.
+  //
+  // THE TRAP, AND WHY THIS IS SAFE NOW: an empty RunRequest.Files means every
+  // video file the torrent holds, so taking the LAST file out of a queued
+  // pass would have widened the run from one file to twenty rather than
+  // emptying it. The server answers that by putting the row back in
+  // needs-action, where an empty selection already means the opposite -
+  // nothing decided yet - so there is no last-box case, and nothing here has
+  // to count boxes to know which of the two happened.
+  //
+  // Same route as dropFile, and deliberately not the same method: the act is
+  // different enough to need its own sentence in the log. dropFile takes a
+  // file out from BEHIND a pass that is running; this takes one out of a pass
+  // that has not started, and on the last file the row changes state.
+  //
+  // NO CONFIRMATION, on the same argument dropFile makes and more strongly:
+  // this row has been handed to nothing, so the act spends nothing, deletes
+  // nothing, and ticking the box again puts it straight back.
+  async narrowPass(index) {
+    const entry = this.entry;
+    showError("");
+
+    const last = entry.narrowable.size <= 1;
+    // Optimistic, the same frame dropFile guesses through and rolled back the
+    // same way - run_state overwrites all three sets moments later.
+    entry.picked.delete(index);
+    entry.narrowable.delete(index);
+    this.updateFileCosts();
+
+    try {
+      await post("runs/untick", { id: entry.id, file: String(index) });
+      log(entry, last
+        ? "file " + index + " was the last this torrent was waiting to take, so the row is " +
+          "back to asking which files you want - nothing was fetched and nothing deleted"
+        : "file " + index + " taken out of the pass this torrent will start with - it had " +
+          "not been handed to the engine, so nothing was fetched for it");
+    } catch (err) {
+      // A refusal is a real answer here too: the slot may have freed and the
+      // pass started between the click and the POST, at which point the file
+      // is being fetched and the server says so.
+      entry.picked.add(index);
+      entry.narrowable.add(index);
+      this.updateFileCosts();
+      showError(String(err.message || err));
+      log(entry, "could not take file " + index + " out of the waiting pass: " +
+        (err.message || err));
     }
   }
 
