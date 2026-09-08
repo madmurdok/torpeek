@@ -1508,3 +1508,128 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 // different from how it started. The server (pid captured from the
 // foreground process, not a `go run` wrapper) was killed and
 // `lsof -nP -iTCP:8973 -sTCP:LISTEN` confirmed the port free afterward.
+
+// TOR-207's browser pass: the six checks 1.4.0's release notes named as
+// outstanding, closed against a real torpeek server on 127.0.0.1:8827
+// (-headless -dht=false -max-active-torrents 1), real loopback-seeded
+// torrents (scratchpad/seed.go, the TestZZHarness194 harness's replacement -
+// that harness lived in a worktree removed after TOR-194 and was never
+// tracked in this repository), and Chrome DevTools Protocol driving the
+// shipped page. Machine load at the start of the pass was `uptime`'s
+// `4.58 22.72 21.58` on 8 cores (the 1-minute figure - the one that matters
+// for what the tooling is about to do - was calm; the 15-minute figure was
+// inherited from earlier sibling agents' work and fell across the session).
+// One CDP `Runtime.evaluate` call timed out at 45s against load ~8.9; a
+// retry immediately after succeeded, matching TOR-194's own note that this
+// is a load artifact and not a driving-agent one.
+//
+// CHECK 1 - A LIVE ROW'S FIGURES AT FULL STRENGTH, the positive case TOR-194
+// left unverified. It could not be reached by polling an ordinary loopback
+// run: a 200KB-2MB clip transfers over loopback in well under a second, far
+// faster than any HTTP round trip this session could poll with, so peers and
+// download_bps read back 0 for a run's entire observable "running" window in
+// every unthrottled attempt - the download is over before the first poll
+// after it starts, and the remaining ~15-30s of "running" is ffmpeg frame
+// extraction with the swarm already idle. seed.go gained a `-rate-bps` flag
+// (an anacrolix `cfg.UploadRateLimiter`, capping the SEED side's upload) to
+// hold a transfer open long enough to read: at -rate-bps 40000 over a
+// 1.98MB clip, GET /runs returned
+// `"live":{"peers":1,"seeds":1,"download_bps":39323.92,"upload_bps":0,...}`,
+// and the page's own DOM showed PEERS 1, SEEDS 1, DOWN ramping 19.2 KB/s ->
+// 37.2 KB/s -> 41.6 KB/s as the poll caught it, UP 0 B/s, AVAIL 1.00x/0
+// missing - every one of `run-cell-peers/-seeds/-down/-up/-availability` on
+// that row read `data-absent="false"`, including the genuinely-zero UP cell,
+// which is the case criterion 1 is actually about: a real zero is not the
+// same reading as an absent dash, and hasLive() does not conflate them.
+//
+// CHECK 2 - ABSENT SINKING TO THE END OF A SORT, ON A TABLE HOLDING BOTH. The
+// attempt TOR-194 counted was rejected for running on one row, which cannot
+// show an order. This one ran on 13: 1 running row with real Peers (the
+// check 1 row above) and 12 absent rows (1 queued, 11 done/on-disk). Peers
+// was clicked to ascending, then to descending; in BOTH directions the one
+// real row (`absent="false"`, text "1") sat at index 0 and all 12 absent
+// rows (`absent="true"`, text "-") filled 1-12 - proving the rule is
+// "absent always sinks to the end" rather than "small values sort first",
+// which a single real row sorting trivially first could not have shown
+// either way.
+//
+// CHECK 3 - TWO ROWS OPEN AT ONCE, AND A FILE'S DETAIL SURVIVING A COLLAPSE
+// AND RE-OPEN. tor207-filler2 (running) and tor207-multi (queued) were
+// expanded together and both stayed rendered open at once - ordinary
+// <run-detail> accordion behaviour, but never asserted in a browser before
+// now. Separately, on a finished row with real frames on disk
+// (tor207-clip-k), its lone file's own picker-open sub-detail was opened
+// (`.picker-item.dataset.expanded` read "true", a `.file-detail` node
+// present), the WHOLE TORRENT ROW was collapsed
+// (`.run-row-main`'s `aria-expanded` false), then re-expanded
+// (`aria-expanded` true again) - and the file's own `dataset.expanded` read
+// "true" throughout, with `.file-detail` still present after the reopen:
+// the file-level state survived the row-level collapse rather than
+// resetting.
+//
+// CHECK 4 - COLUMN WIDTHS PERSISTING ACROSS A RELOAD, AND A CORRUPT
+// localStorage VALUE FALLING BACK TO DEFAULTS. The Name column's resize
+// handle was dragged with real `PointerEvent`s (pointerdown/pointermove
+// with `buttons: 1`/pointerup on the `.col-resizer`, the same events
+// wireColumnResizers listens for and the reason a plain synthetic
+// MouseEvent drag did nothing first) from the default 20rem to 456.734375px.
+// `localStorage["torpeek.columnWidths"]` read back
+// `{"name":456.734375}` and a full page reload (fresh navigation, not a
+// soft refresh) still computed `--col-w-name: 456.734375px` - the width
+// survived the reload, matching what a screenshot showed as a visibly wider
+// Name column. Then `localStorage.setItem("torpeek.columnWidths",
+// "{not valid json!!!")` and another reload: the page rendered normally
+// (18 rows, table intact), `--col-w-name` read back the plain default
+// "20rem", and `read_console_messages` found no errors or exceptions across
+// that load - loadColumnWidths' try/catch does exactly what its own comment
+// says, falling back to "as if nothing was ever stored" rather than
+// breaking.
+//
+// CHECK 5 - THE STALL TICKER COUNTING UP, THEN GOING QUIET ONCE THE ELEMENT
+// IS REMOVED. A torrent was posted whose seed's own peer address was
+// deliberately left out of -peer, so it could never connect: GET /runs
+// showed `"stall":{"code":"no_peers","since_ms":5000}` and climbing, and the
+// row's `.run-meta` text read "no peers connected for 15s", then "...25s",
+// then "...50s" as real time passed - the 1s ticker (run-table.js's single
+// `stallTimer`) counting up for real. To check it goes quiet: the live
+// `<run-table>` element's own `.stallTimer` read back `1` (an active
+// interval id), `window.clearInterval` was wrapped to record its argument,
+// and `el.remove()` was called directly. Immediately after: `el.stallTimer`
+// had been reset to `null` and the wrapped `clearInterval` had been called
+// with exactly `[1]` - disconnectedCallback's `clearInterval(this.stallTimer)`
+// ran for real, on the real interval id, the moment the element left the
+// document, rather than leaving a dangling 1s timer touching removed nodes.
+//
+// CHECK 6 - TOR-197'S FIVE-VERDICT CHAIN AND ITS TWO SENTENCES, ON A REAL
+// QUEUED TORRENT - the one check TOR-197 itself only ever text-checked.
+// Getting a queued row that still has an on-screen file picker took an
+// ordering discovery worth recording: a QUEUED entry carries no metadata at
+// all (files:0, no file list, just a "QUEUED" badge and Cancel - confirmed
+// against file-list.js's own syncFileList comment, "a queued one, whose
+// metadata has not been fetched"), so a multi-file torrent must be POSTed
+// FIRST, while the one active slot is still free, to reach `needs-action`
+// ("CHOOSE FILES", files known, picker rendered) - then a SECOND, throttled
+// torrent posted after it takes the slot instead, since a needs-action row
+// consumes no slot of its own. That left a genuine two-video-file torrent
+// (tor207-multi: a-clip.mkv, b-clip.mkv) sitting at `state: "queued"`,
+// `"QUEUED"` badge, queue position #1, with a real running row ahead of it.
+// Both boxes were ticked (asking for both files while still queued), and
+// the resulting `<label class="picker-file">` title on EACH file read
+// exactly: "this torrent is waiting to start and has not been handed to
+// the engine yet - un-tick to take this file out of the pass it will start
+// with. The other 1 stay, and nothing has been fetched or deleted" - the
+// untick==="narrow", `entry.narrowable.size > 1` branch of
+// updateFileCosts, word for word, including the two-sentence shape
+// (what pressing it does, then what happens if it is the one taken) the
+// ticket's own comment calls out as the whole of its legibility
+// requirement. Before ticking, both boxes showed the `!asked -> ""` case
+// (unchecked, a plain frame-count estimate, no verdict title) - so this one
+// pass crossed both ends of the chain's first two links on a torrent that
+// was never anything but genuinely queued.
+//
+// No defect was found: all six checks show the shipped code doing exactly
+// what its own comments say it does. The one thing worth flagging for
+// whoever next drives torpeek's web UI from a script rather than the page:
+// `DELETE /runs/{id}` is not a route (405) - cancelling a run is
+// `POST /runs/cancel` with a `{"id": "..."}` JSON body
+// (Server.handleCancelRun), reached from the row's own X button.
