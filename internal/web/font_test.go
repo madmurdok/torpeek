@@ -174,7 +174,10 @@ func TestNoFontIsFetchedFromTheNetwork(t *testing.T) {
 	// Comments are stripped first: what matters is what the browser acts on,
 	// and app.css names the CDN in prose precisely to say it is not used.
 	comment := regexp.MustCompile(`(?s)/\*.*?\*/`)
-	for _, name := range []string{"assets/app.css", "assets/index.html", "assets/app.js"} {
+	// tokens.css (TOR-189) is in this list too: it is now a served stylesheet
+	// of its own, and the design system living there is exactly the kind of
+	// file a stray @import from a font CDN could slip into unnoticed.
+	for _, name := range []string{"assets/app.css", "assets/tokens.css", "assets/index.html", "assets/app.js"} {
 		b, err := embedded.ReadFile(name)
 		if err != nil {
 			continue // app.css is the one that must exist; the others are belt and braces

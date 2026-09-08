@@ -32,7 +32,7 @@ func block(t *testing.T, css, sel string) map[string]string {
 	t.Helper()
 	i := strings.Index(css, sel)
 	if i < 0 {
-		t.Fatalf("app.css has no %q rule", sel)
+		t.Fatalf("the served stylesheet (tokens.css + app.css) has no %q rule", sel)
 	}
 	end := strings.Index(css[i:], "\n}\n")
 	if end < 0 {
@@ -48,13 +48,25 @@ func block(t *testing.T, css, sel string) map[string]string {
 	return out
 }
 
+// stylesheet returns the page's whole served stylesheet - not just app.css.
+// TOR-189 split the :root token rule out into tokens.css, loaded by its own
+// <link> ahead of app.css (see index.html), so a test that used to find
+// everything in one embedded file now has to read two and concatenate them
+// in the order the browser sees them, or every check below that looks for
+// ":root {" or a token declaration would silently stop finding it - passing
+// not because the page is right but because the test stopped looking where
+// the tokens now live.
 func stylesheet(t *testing.T) string {
 	t.Helper()
-	b, err := embedded.ReadFile("assets/app.css")
+	tokens, err := embedded.ReadFile("assets/tokens.css")
+	if err != nil {
+		t.Fatalf("reading the embedded token stylesheet: %v", err)
+	}
+	app, err := embedded.ReadFile("assets/app.css")
 	if err != nil {
 		t.Fatalf("reading the embedded stylesheet: %v", err)
 	}
-	return string(b)
+	return string(tokens) + "\n" + string(app)
 }
 
 // TestThePageCommitsToOneTheme is the first half: the stylesheet must not vary
