@@ -1334,6 +1334,28 @@ function resetRunState(entry) {
 // even writes its response - see resolveIncomingRun), and either one can
 // arrive first. Whichever gets here first does the swap; the other finds
 // entry.id already equal to newId and does nothing.
+//
+// IT DOES NOT REDRAW, AND THAT IS THE CALLER'S JOB (TOR-203). It used to end
+// the swap branch with syncEntry(entry) - a function this module cannot see.
+// state.js imports nothing and syncEntry lives in app.js, so the call was a
+// ReferenceError on every id swap, and a quiet one: the re-key above happens
+// BEFORE it, so the swap survived and the caller's catch ran instead of its
+// success path. A successful reopen was reported as FAILED with
+// "syncEntry is not defined" as its error (TOR-55), and a top-up or retry
+// cleared entry.claiming - defeating the very race guard this comment is
+// about (TOR-152).
+//
+// The cause was not a typo but a contract violation, which is why the fix is
+// here rather than an import: this file owns what a run and a file KNOW and
+// touches no DOM, and that property is exactly what lets it be executed for
+// real in node (eventstate_test.go). A redraw sitting in it is the one shape
+// it may not have - and its having no imports is precisely why nothing caught
+// the name at load time.
+//
+// So every caller redraws after calling this, in BOTH branches: the flags come
+// down either way, so the row has changed either way. resolveIncomingRun's own
+// call below is the exception that needs nothing added - events.js's handler
+// ends on view.syncEntry for every message it processes.
 function claimReopenedRun(entry, newId) {
   if (entry.id !== newId) {
     state.runs.delete(entry.id);
@@ -1342,7 +1364,6 @@ function claimReopenedRun(entry, newId) {
     entry.reopening = false;
     entry.claiming = false;
     state.runs.set(entry.id, entry);
-    syncEntry(entry);
     return;
   }
   // The id it already had. A top-up or retry the server RE-ARMED answers

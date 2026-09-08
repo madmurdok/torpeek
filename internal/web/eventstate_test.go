@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,10 @@ type jsRunSnapshot struct {
 	Stall         string `json:"stall"`
 	Peers         int    `json:"peers"`
 	HasLive       bool   `json:"hasLive"`
+	// The page's own flags for a row expecting an id it does not hold yet: a
+	// disk row being replayed (TOR-55) and a run the server re-armed (TOR-152).
+	Reopening bool `json:"reopening"`
+	Claiming  bool `json:"claiming"`
 	// The two halves of TOR-180's collision, reported as what they ARE rather
 	// than as what they hold: `files` has to stay a NUMBER (GET /runs' own
 	// per-row count) and `fileList` an array, whatever a message carrying both
@@ -192,6 +197,10 @@ function snapshot() {
       complete: e.complete, selected: e.selected, partial: e.partial,
       framesDone: e.framesDone, framesTotal: e.framesTotal,
       priority: e.priority, queuePosition: e.queuePosition, arrival: e.arrival,
+        // Neither flag is ever on the wire; both are the page's own record of a
+        // row waiting for an id, and both must come DOWN on the id swap
+        // (TOR-203), so a test cannot check the swap without seeing them.
+        reopening: !!e.reopening, claiming: !!e.claiming,
       picked: sorted(e.picked), deferred: sorted(e.deferred),
       fetching: sorted(e.fetching), unticked: sorted(e.unticked),
       tickable: e.tickable, passCount: e.passCount,
@@ -229,6 +238,16 @@ for (const step of input.steps) {
   // un-ticking a finished file, which tickFile records here and nothing on
   // the wire ever carries.
   if (step.untick) S.state.runs.get(step.untick.run).unticked.add(step.untick.file);
+  // The other thing the wire never carries: a row WAITING for an id it does
+  // not have yet - a disk row being replayed (reopening, TOR-55) or a run the
+  // server re-armed (claiming, TOR-152). The page raises the flag itself when
+  // it posts, and the id arrives in a later run_state, so this step is the
+  // only way to script resolveIncomingRun's id-swap branch (TOR-203).
+  if (step.reopen) {
+    const waiting = S.state.runs.get(step.reopen.run);
+    if (step.reopen.claiming) waiting.claiming = true;
+    else waiting.reopening = true;
+  }
 }
 process.stdout.write(JSON.stringify({ runs: snapshot(), calls, logs, suspect }));
 `
@@ -282,6 +301,17 @@ func runApply(t *testing.T, steps []map[string]any) jsApplyResult {
 			"--- stdout ---\n%s\n--- stderr ---\n%s", err, stdout.String(), stderr.String())
 	}
 	return out
+}
+
+// runIDs names the keys the store ended up with, sorted, so a failure about a
+// row that is missing or duplicated prints where the rows actually went.
+func (r jsApplyResult) runIDs() []string {
+	ids := make([]string, 0, len(r.Runs))
+	for id := range r.Runs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func event(fields map[string]any) map[string]any { return map[string]any{"event": fields} }
@@ -1314,6 +1344,76 @@ process.stdout.write(JSON.stringify(out));
 		if !strings.Contains(js, hook+":") && !strings.Contains(js, "\n  "+hook+",") {
 			t.Errorf("app.js's setView call does not supply the %q hook", hook)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TRAP 5 (TOR-203): the id swap must not throw, and only RUNNING it can say so.
+//
+// claimReopenedRun used to end its swap branch with syncEntry(entry) - a name
+// state.js cannot see, since this module imports nothing and syncEntry lives in
+// app.js. Every id swap therefore raised a ReferenceError, and a quiet one: the
+// re-key happens BEFORE that call, so the swap itself survived and only the
+// caller's success path was lost. A reopen that had actually worked arrived on
+// the page as FAILED, reason "syncEntry is not defined".
+//
+// Every test in this file passed on that code, and no text guard could have
+// failed: the call reads exactly as a correct redraw does, and the sole thing
+// wrong with it is a name absent from one module's scope. Whether a name
+// resolves is a property of running the module, so this test runs it - through
+// apply(), by the one path that reaches the swap from a wire message
+// (resolveIncomingRun), which is also the path a real socket takes whenever the
+// reopen's own POST loses the race it is documented to race.
+//
+// It fails on the broken module by runApply's own node-error fatal, which
+// carries the ReferenceError in stderr. Verified by re-adding the call.
+func TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing(t *testing.T) {
+	const (
+		diskID = "disk-7c1f"
+		runID  = "run-91b2"
+		hash   = "0123456789abcdef0123456789abcdef01234567"
+	)
+
+	res := runApply(t, []map[string]any{
+		// The disk row, under the synthetic key the listing minted for it.
+		runStateFor(diskID, "done", map[string]any{"infohash": hash, "name": "Some.Pack"}),
+		// A local un-tick, which nothing on the wire carries and no fresh entry
+		// could be born holding. It is this test's proof of IDENTITY: if the
+		// set survives under the new key, the same object was re-keyed rather
+		// than a second row spawned for the same torrent.
+		{"untick": map[string]any{"run": diskID, "file": 2}},
+		// Somebody reopens it. The page raises the flag and posts; the server
+		// replays the whole run - publishing this very message - before it
+		// writes the POST's response, so this message can arrive first.
+		{"reopen": map[string]any{"run": diskID}},
+		{"mark": "the swap"},
+		runStateFor(runID, "running", map[string]any{"infohash": hash}),
+	})
+
+	if _, stale := res.Runs[diskID]; stale {
+		t.Errorf("the synthetic key %q is still in the store after the swap - the row was not re-keyed", diskID)
+	}
+	entry, ok := res.Runs[runID]
+	if !ok {
+		t.Fatalf("no row under the real id %q after the swap; the store holds %v", runID, res.runIDs())
+	}
+	if len(res.Runs) != 1 {
+		t.Errorf("one torrent, %d rows: the reopen spawned a duplicate instead of folding into the row that asked for it", len(res.Runs))
+	}
+
+	// Identity, then the flags. The name and the un-tick both predate the swap.
+	if entry.Name != "Some.Pack" {
+		t.Errorf("the row under the real id has name %q, not the disk row's - this is a fresh entry, not the re-keyed one", entry.Name)
+	}
+	if got := entry.Unticked; len(got) != 1 || got[0] != 2 {
+		t.Errorf("the local un-tick did not survive the swap: %v - only a re-key of the same object keeps it", got)
+	}
+	if entry.Reopening || entry.Claiming {
+		t.Errorf("reopening=%v claiming=%v after the swap: the flags must come down, or this row goes on claiming every other run's id that shares its infohash",
+			entry.Reopening, entry.Claiming)
+	}
+	if entry.Disk {
+		t.Error("the row is still marked disk after a run_state claimed it")
 	}
 }
 

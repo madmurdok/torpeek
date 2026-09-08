@@ -635,6 +635,10 @@ class RunDetail extends HTMLElement {
       log(entry, "topping up: " + (entry.topup && entry.topup.remaining) + " point(s), up to " +
           bytesLabel((entry.topup && entry.topup.offer_bytes) || 0) + " more traffic");
       claimReopenedRun(entry, info.id);
+      // TOR-203: the redraw belongs to the caller, and this one used to be done
+      // for it by a call state.js could not make. Without it a re-armed run
+      // keeps its old row until the socket's next message.
+      redraw(entry);
     } catch (err) {
       entry.claiming = false;
       showError(String(err.message || err));
@@ -661,6 +665,10 @@ class RunDetail extends HTMLElement {
       const info = await post("runs/retry", { id: entry.id });
       log(entry, "retrying");
       claimReopenedRun(entry, info.id);
+      // TOR-203: the redraw belongs to the caller, and this one used to be done
+      // for it by a call state.js could not make. Without it a re-armed run
+      // keeps its old row until the socket's next message.
+      redraw(entry);
     } catch (err) {
       entry.claiming = false;
       showError(String(err.message || err));
