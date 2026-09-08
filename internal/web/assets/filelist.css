@@ -19,6 +19,31 @@
    assertion finds its rules by searching the served text for their literal
    substrings, and this comment would otherwise be the first, wrong match. */
 
+/* TOR-195 wrapped this whole area in TWO custom elements whose behaviour
+   lives in file-list.js and file-detail.js: <file-list> around the .picker
+   section below, and one <file-detail> per video row around that row's own
+   .file-detail slot. An unknown element is display: inline by default, which
+   would put a block-level <section> inside an inline box - so these two lines
+   are what keep the wrappers invisible to layout, exactly as table.css's
+   `run-table { display: block; }` does one level up (see that rule's own
+   comment for why display: contents was not used). Nothing else: no padding,
+   no border and no margin, so .picker's own margin-top and .file-detail's own
+   margins collapse through them as they did before the wrappers existed.
+
+   THE [hidden] COMPANIONS ARE THE POINT OF THE SECOND HALF, and they are here
+   for the trap this file has now paid for six times. Collapse in both places
+   is the `hidden` attribute on the element INSIDE the wrapper - .picker for
+   the list, .file-detail for a file's slot - and the wrapper itself is never
+   hidden, so these two rules are redundant TODAY. They are kept because a
+   type selector declaring display is the loudest possible version of that
+   trap: it would beat the UA's own `[hidden] { display: none }`, so the first
+   ticket to simplify by moving `hidden` onto the wrapper would get a list
+   that cannot be hidden and a file detail that cannot close. */
+file-list { display: block; }
+file-list[hidden] { display: none; }
+file-detail { display: block; }
+file-detail[hidden] { display: none; }
+
 /* WHAT THE TORRENT HOLDS (TOR-180). Since that ticket this is a row's
    ordinary content in every state that knows a file list, not only the
    screen a multi-file torrent parks on (TOR-67) - so the frame cannot be

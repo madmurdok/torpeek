@@ -115,6 +115,34 @@ function basename(path) {
   return parts[parts.length - 1] || path || "";
 }
 
+// ---------------------------------------------------------------------------
+// THE ONE COUNTER THE THREE DETAIL MODULES SHARE (TOR-195).
+//
+// detailSeq gives each detail container and each checkbox a unique id, which
+// the control that opens or labels it needs: a disclosure has to name the
+// region it opens (aria-controls) and a <label> has to name its control
+// (htmlFor), and there are as many regions as there are torrents, as many
+// again as there are video files inside them, and one id per tick box on top.
+//
+// ONE COUNTER, THREE PREFIXES, and it is here rather than in any one of the
+// three modules because all three mint ids and what it has to guarantee is
+// uniqueness ACROSS THE DOCUMENT - which three counters would each only
+// guarantee within their own prefix. That is the same reasoning app.js's own
+// detailSeq carried before this ticket split the detail into three files; the
+// only thing that changed is that the counter now has three callers instead
+// of two, so it can no longer live in any of them.
+//
+// It is not a derivation, which is the one thing every other function in this
+// file is. It is here on the strength of the two rules this file actually
+// keeps: it touches no DOM, makes no request and knows no message shape, and
+// it is the only place all three detail modules can reach without importing
+// one another.
+let detailSeq = 0;
+
+function nextDetailId(prefix) {
+  return prefix + ++detailSeq;
+}
+
 // stallDuration is "how long" for a stall reading - the load-bearing part of
 // TOR-141's own acceptance criterion. Distinct from seconds() above: that one
 // prints a single measurement to a tenth of a second ("21.3s"), useful for a
@@ -1357,6 +1385,7 @@ export {
   bytesLabel,
   timecode,
   basename,
+  nextDetailId,
   waitingForMetadata,
   cancellable,
   badgeState,

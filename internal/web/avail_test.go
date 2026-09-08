@@ -90,9 +90,13 @@ func TestTheSwarmReadingIsAChipAndNeverAFillOnTheStrip(t *testing.T) {
 // row has to stay visible for the chip even while the strip itself is
 // hatched.
 func TestARunWithNoClaimsRecordedRendersAsNeitherFullNorEmpty(t *testing.T) {
-	js := appJS(t)
+	// RETARGETED ONTO file-detail.js BY TOR-195: the reach strip is one
+	// FILE's, so it went with the rest of that file's detail into the
+	// innermost of the three nested elements - as a method, which is why the
+	// anchor below is `renderReach(sets) {` rather than a `function`.
+	js := fileDetailJS(t)
 
-	if !strings.Contains(js, "function renderReach(") {
+	if !strings.Contains(js, "renderReach(sets) {") {
 		t.Fatal("renderReach is gone")
 	}
 	// The known/unknown toggle has to come from the measured data (whether
@@ -118,11 +122,12 @@ func TestARunWithNoClaimsRecordedRendersAsNeitherFullNorEmpty(t *testing.T) {
 func TestTheStripReusesTheColumnsOwnAvailabilitySentence(t *testing.T) {
 	// SINCE TOR-191 both functions are state.js's - a swarm reading and the
 	// sentence about it are derivations over an entry - and the strip's chip
-	// is app.js's renderAvail. So "reused rather than re-phrased" is now
+	// is file-detail.js's renderAvail (TOR-195). So "reused rather than
+	// re-phrased" is now
 	// checkable directly, by reading the one function that draws the chip,
 	// instead of by counting mentions in one file and hoping two of them were
 	// the definition and a call.
-	chip := jsFunc(t, appJS(t), "renderAvail")
+	chip := jsMethod(t, fileDetailJS(t), "renderAvail")
 	for _, fn := range []string{"availabilityReading(entry)", "availabilityCellTitle(entry)"} {
 		if !strings.Contains(chip, fn) {
 			t.Errorf("renderAvail does not call %s: the strip has stopped reusing the "+
@@ -139,8 +144,8 @@ func TestTheStripReusesTheColumnsOwnAvailabilitySentence(t *testing.T) {
 		t.Errorf("state.js states %q %d times, want exactly 1 - two copies of one sentence "+
 			"is two chances to change only one of them", sentence, n)
 	}
-	if strings.Contains(appJS(t), sentence) {
-		t.Error("app.js phrases the availability sentence itself as well - the column and " +
-			"the chip six inches below it would be able to word the same fact differently")
+	if strings.Contains(fileDetailJS(t), sentence) {
+		t.Error("file-detail.js phrases the availability sentence itself as well - the column " +
+			"and the chip six inches below it would be able to word the same fact differently")
 	}
 }

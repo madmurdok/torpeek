@@ -715,15 +715,21 @@ func indices(t *testing.T, raw any) []int {
 // into the program - so it is asserted present in the same test that asserts
 // the other gone.
 func TestTheButtonUnderTheFileListIsGone(t *testing.T) {
-	js := servedScript(t)
+	// RETARGETED ONTO file-list.js BY TOR-195 for the positive half, and
+	// WIDENED for the negative one: "the control is not in the script that
+	// ships" now means not in ANY of the modules that ship, which is a
+	// stronger claim than the single-file version could make.
+	js := fileListJS(t)
+	sweep := strings.Join([]string{appJS(t), stateJS(t), eventsJS(t), runTableJS(t),
+		runDetailJS(t), js, fileDetailJS(t)}, "\n")
 	css := stylesheet(t)
 
 	// Comments name the removed things in prose, on purpose - a reader has to
 	// be able to find out where the button went.
-	live := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(js, "")
+	live := regexp.MustCompile(`(?m)^\s*//.*$`).ReplaceAllString(sweep, "")
 	for _, gone := range []string{"picker-go", "picker-foot", "picker-none", "pickerGo", "pickerFoot", "pickerNone"} {
 		if strings.Contains(live, gone) {
-			t.Errorf("app.js still builds or reads %q - ticking a file starts it, so a "+
+			t.Errorf("the served front end still builds or reads %q - ticking a file starts it, so a "+
 				"button under the list is a second click for something already done", gone)
 		}
 	}
@@ -735,8 +741,8 @@ func TestTheButtonUnderTheFileListIsGone(t *testing.T) {
 	}
 
 	// The tick is what starts it now: the checkbox's own listener.
-	fn := jsFunc(t, js, "renderFileList")
-	if !regexp.MustCompile(`box\.addEventListener\("change", \(\) => tickFile\(`).MatchString(fn) {
+	fn := jsMethod(t, js, "renderFileList")
+	if !regexp.MustCompile(`box\.addEventListener\("change", \(\) => this\.tickFile\(`).MatchString(fn) {
 		t.Error("a checkbox's change no longer calls tickFile - the tick IS the decision " +
 			"since TOR-181, and nothing else on the row starts a capture")
 	}
@@ -762,11 +768,11 @@ func TestTheButtonUnderTheFileListIsGone(t *testing.T) {
 // number, and the row is where that multiplication is agreed to one file at
 // a time.
 func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
 	css := stylesheet(t)
 
 	// The span is built into the row, not into a foot below the list.
-	render := jsFunc(t, js, "renderFileList")
+	render := jsMethod(t, js, "renderFileList")
 	if !strings.Contains(render, `cost.className = "picker-cost"`) {
 		t.Fatal("renderFileList builds no .picker-cost on a file's row - the figure moved " +
 			"there when the button under the list went")
@@ -784,14 +790,17 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 	}
 
 	// The figure itself, and the one number it may quote.
-	costs := jsFunc(t, js, "updateFileCosts")
+	costs := jsMethod(t, js, "updateFileCosts")
 	if !strings.Contains(costs, "row.cost.textContent = framesLabel(n)") {
 		t.Error("updateFileCosts does not write the frame count onto the row")
 	}
 	// passCount takes its fallback as an argument since TOR-191: "the server's
 	// own -n" is whatever the intake box displays, which is a DOM fact, so the
 	// page reads it (countValue) and the decision stays in state.js.
-	if !strings.Contains(costs, "const n = passCount(entry, countValue())") {
+	// countValue itself is app.js's - reading the intake box is the page's job -
+	// so since TOR-195 the list is HANDED it as the `count` service and calls
+	// that. The decision is unchanged and still state.js's passCount.
+	if !strings.Contains(costs, "const n = passCount(entry, count())") {
 		t.Error("updateFileCosts does not read passCount - a row with a pass already " +
 			"forming must quote the count that pass is LOCKED to, not whatever the intake " +
 			"box now shows, or the price changes under a person after they read it")
@@ -804,9 +813,20 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 
 	// It follows the intake box live, because a person may well retype the
 	// count while reading the list.
-	listener := jsListener(t, js, `el.count.addEventListener("input"`)
-	if !strings.Contains(listener, "updateFileCosts(entry)") {
-		t.Error("retyping the intake count no longer restates the rows' prices")
+	// The listener is app.js's (it is the intake's own box) and the gate moved
+	// INTO the list with TOR-195, so both halves are read: a listener that
+	// asked nothing, or a reprice that repriced nothing, each satisfies only
+	// one of them.
+	listener := jsListener(t, appJS(t), `el.count.addEventListener("input"`)
+	if !strings.Contains(listener, "entry.detail.files.reprice()") {
+		t.Error("retyping the intake count no longer asks each torrent's file list to " +
+			"restate its prices")
+	}
+	if reprice := jsMethod(t, js, "reprice"); !strings.Contains(reprice, "if (this.pickerEl.hidden) return;") ||
+		!strings.Contains(reprice, "this.updateFileCosts();") {
+		t.Error("file-list.js's reprice does not gate on the list being on screen and then " +
+			"restate every figure - the gate is what keeps a page of fifty closed rows from " +
+			"redrawing on every keystroke")
 	}
 
 	// THE ACCENT IS NOT WHAT SAYS IT. The accent means "this is live, or this
@@ -835,10 +855,10 @@ func TestEveryTickableRowSaysWhatItWillSpendBeforeItIsTicked(t *testing.T) {
 // than in a dialog, so the figure is in the page's own type and can be seen
 // in a screenshot of what the page actually said.
 func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
-	js := servedScript(t)
+	js := fileListJS(t)
 	css := stylesheet(t)
 
-	arm := jsFunc(t, js, "armSelectAll")
+	arm := jsMethod(t, js, "armSelectAll")
 	if !strings.Contains(arm, "if (entry.armed) {") || !strings.Contains(arm, "entry.armed = true") {
 		t.Fatal("armSelectAll does not arm and then act on a second press - one press that " +
 			"starts every file is the silent one-click bill this ticket refuses to leave")
@@ -849,7 +869,7 @@ func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
 			"spend on a file somebody else's tick already started")
 	}
 
-	sync := jsFunc(t, js, "syncSelectAll")
+	sync := jsMethod(t, js, "syncSelectAll")
 	// The total, in the label and in the sentence beside it. Both, because a
 	// label that changed is a hint and this needs an instruction.
 	if !strings.Contains(sync, `"Start all " + remaining.length + " — " + total + " frames"`) {
@@ -866,18 +886,18 @@ func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
 		t.Error("an armed control with no way out is one somebody comes back to and " +
 			"presses without re-reading")
 	}
-	if !strings.Contains(js, `entry.pickerAll.addEventListener("blur", () => disarmSelectAll(entry))`) {
+	if !strings.Contains(js, `this.pickerAll.addEventListener("blur", () => this.disarmSelectAll())`) {
 		t.Error("Select all stays armed when focus leaves it")
 	}
 	// A tick disarms it too: somebody who ticks one file has answered the
 	// question by doing something else.
-	if !strings.Contains(jsFunc(t, js, "tickFile"), "disarmSelectAll(entry)") {
+	if !strings.Contains(jsMethod(t, js, "tickFile"), "this.disarmSelectAll()") {
 		t.Error("ticking a single file leaves Select all armed - which would put a " +
 			"whole-torrent bill under the next stray press")
 	}
 
 	// Three carriers for the armed state and only one of them is colour.
-	if !strings.Contains(sync, `entry.pickerAll.dataset.armed = "true"`) {
+	if !strings.Contains(sync, `this.pickerAll.dataset.armed = "true"`) {
 		t.Error("nothing marks the armed button for the stylesheet")
 	}
 	rule := cssRule(t, css, `.picker-all[data-armed="true"] {`)
@@ -899,20 +919,19 @@ func TestSelectAllStatesItsTotalAndAsksBeforeSpending(t *testing.T) {
 // A box left ticked after one would say a file is being captured when
 // nothing is.
 func TestATickThatIsRefusedLeavesNoBoxClaimingAFetch(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "startFiles")
+	fn := jsMethod(t, fileListJS(t), "startFiles")
 
 	if !strings.Contains(fn, `await post("runs/decide"`) {
 		t.Fatal("startFiles does not post the tick")
 	}
-	if !strings.Contains(fn, "count: passCount(entry, countValue())") {
+	if !strings.Contains(fn, "count: passCount(entry, count())") {
 		t.Error("startFiles sends a count it did not display - the promise a price makes " +
 			"is that pressing the thing beside it costs THAT")
 	}
 	if !regexp.MustCompile(`(?s)catch \(err\) \{.*entry\.picked\.delete\(index\).*entry\.deferred\.delete\(index\)`).MatchString(fn) {
 		t.Error("a refused tick is not rolled back out of picked and deferred")
 	}
-	if !regexp.MustCompile(`(?s)catch \(err\) \{.*updateFileCosts\(entry\)`).MatchString(fn) {
+	if !regexp.MustCompile(`(?s)catch \(err\) \{.*this\.updateFileCosts\(\)`).MatchString(fn) {
 		t.Error("a refused tick does not redraw the rows, so the box stays ticked beside a " +
 			"file nothing is fetching")
 	}
@@ -938,10 +957,9 @@ func TestATickThatIsRefusedLeavesNoBoxClaimingAFetch(t *testing.T) {
 // control that cannot be used must say so without relying on colour, and
 // must not light up under the pointer as though it could.
 func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
-	js := servedScript(t)
 	css := stylesheet(t)
 
-	fn := jsFunc(t, js, "updateFileCosts")
+	fn := jsMethod(t, fileListJS(t), "updateFileCosts")
 	// TOR-183 gave the asked-for arm ONE live case; TOR-184 gave it three, so
 	// the arm is now gated on a NAMED VERDICT rather than on any one of them.
 	// What has not changed is the rule the assertion is really about, and it
@@ -1102,8 +1120,7 @@ func TestASecondPassDoesNotClearTheTicksTheFirstOneTook(t *testing.T) {
 // would be a column of the same three words. What a reader genuinely cannot
 // see is the tick that did NOT join the pass in flight.
 func TestTheDeferredTickIsTheOnlyThingARowSaysInWords(t *testing.T) {
-	js := servedScript(t)
-	fn := jsFunc(t, js, "updateFileCosts")
+	fn := jsMethod(t, fileListJS(t), "updateFileCosts")
 
 	if !strings.Contains(fn, `row.state.textContent = deferred ? "in the next pass" : ""`) {
 		t.Error("a row does not say - and only - that a tick is waiting for the next pass")
