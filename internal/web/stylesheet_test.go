@@ -423,6 +423,42 @@ func jsListener(t *testing.T, js, prefix string) string {
 	return js[i : i+end]
 }
 
+// framePanelJS returns the embedded frame-panel.js source. TOR-192 moved the
+// panel's behaviour out of app.js into its own custom element, so the guards
+// below read that module - and read it from the embedded FS, because that is
+// the copy that ships.
+func framePanelJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/frame-panel.js")
+	if err != nil {
+		t.Fatalf("reading the embedded frame-panel.js: %v", err)
+	}
+	return string(b)
+}
+
+// jsMethod is jsFunc for a CLASS METHOD, which is what the panel's functions
+// became when it turned into an element: `layout() {` rather than
+// `function layoutLightbox() {`, closing at two spaces of indent instead of
+// column zero. Same convention as jsFunc and block(), one level in - nothing
+// inside a method body is indented at exactly two spaces.
+//
+// It exists rather than a looser regex because the alternative was keeping the
+// panel's functions module-level so jsFunc would still match them, which would
+// have shaped the element around its test instead of the other way round.
+func jsMethod(t *testing.T, js, name string) string {
+	t.Helper()
+	head := "\n  " + name + "("
+	i := strings.Index(js, head)
+	if i < 0 {
+		t.Fatalf("frame-panel.js has no %s() method", name)
+	}
+	end := strings.Index(js[i+1:], "\n  }\n")
+	if end < 0 {
+		t.Fatalf("frame-panel.js's %s() is never closed", name)
+	}
+	return js[i : i+1+end]
+}
+
 // rgbaOverWhite composites an rgba() token over pure white and returns the
 // result as a hex literal contrastRatio can score. White is the worst ground
 // a video frame can hand a control: TOR-122's near-invisible close button was
@@ -768,40 +804,48 @@ func TestLightboxPanelClipsItsOwnOverflow(t *testing.T) {
 	}
 }
 
-// TestLightboxScalingAndPanAreWiredInTheServedScript reads app.js as served
-// text - there is no JS runner here (columns_test.go's note explains the
-// precedent) - so what it guards is that each of the four rules still has
-// code answering for it, and that the two things easiest to lose in an edit
-// are still there: the clamp's far bound, and the arrow keys' preventDefault.
+// TestLightboxScalingAndPanAreWiredInTheServedScript reads frame-panel.js as
+// served text - TOR-192 moved the panel's behaviour into its own custom
+// element, so this is where the four rules now live - and what it guards is
+// that each rule still has code answering for it, plus the two things easiest
+// to lose in an edit: the clamp's far bound, and the arrow keys'
+// preventDefault.
 //
 // It cannot tell whether the clamp is CORRECT. Only a browser can, by panning
-// to each edge and looking for a gutter.
+// to each edge and looking for a gutter, which is what TOR-172's and TOR-192's
+// own reports record.
 func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
-	js := appJS(t)
+	js := framePanelJS(t)
 	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(js, "")
 	live = regexp.MustCompile(`(?m)//[^\n]*`).ReplaceAllString(live, "")
 
+	// Comments are stripped above for a reason worth stating: the module's
+	// header explains rule 4 by NAMING `window.innerWidth` as the thing not to
+	// write, and mentions Escape while explaining why Escape is absent from the
+	// arrow table. Both would satisfy a substring check that ran over the raw
+	// text, so both checks below would pass on prose alone.
+
 	// RULES 1 AND 2: one expression, and the 1 is the whole of "never
 	// upscale". Without it a 320-wide frame is blown up to fill the panel.
-	layout := jsFunc(t, live, "layoutLightbox")
-	if !strings.Contains(layout, "Math.min(1, avail.w / lb.natW, avail.h / lb.natH)") {
-		t.Error("layoutLightbox no longer caps the fit factor at 1 alongside the two axis " +
+	layout := jsMethod(t, live, "layout")
+	if !strings.Contains(layout, "Math.min(1, avail.w / this.natW, avail.h / this.natH)") {
+		t.Error("layout() no longer caps the fit factor at 1 alongside the two axis " +
 			"ratios - the cap is rule 1 (a picture that fits is drawn at 100%, and a small " +
 			"frame is never upscaled) and the ratios are rule 2")
 	}
-	if !strings.Contains(layout, "clampPan();") {
-		t.Error("layoutLightbox does not re-clamp the pan - a window resize changes the " +
+	if !strings.Contains(layout, "this.clampPan();") {
+		t.Error("layout() does not re-clamp the pan - a window resize changes the " +
 			"window's size, and an offset that was legal at the old size shows a gutter at " +
 			"the new one")
 	}
 
 	// RULE 4's second half. Both bounds, on both axes, or an edge leaks.
-	clamp := jsFunc(t, live, "clampPan")
+	clamp := jsMethod(t, live, "clampPan")
 	for _, want := range []string{
-		"Math.min(0, lb.boxW - lb.drawW)",
-		"Math.min(0, lb.boxH - lb.drawH)",
-		"lb.x = Math.min(0, Math.max(minX, lb.x));",
-		"lb.y = Math.min(0, Math.max(minY, lb.y));",
+		"Math.min(0, this.boxW - this.drawW)",
+		"Math.min(0, this.boxH - this.drawH)",
+		"this.x = Math.min(0, Math.max(minX, this.x));",
+		"this.y = Math.min(0, Math.max(minY, this.y));",
 	} {
 		if !strings.Contains(clamp, want) {
 			t.Errorf("clampPan does not contain %q - the pan offset has to be held to "+
@@ -812,67 +856,128 @@ func TestLightboxScalingAndPanAreWiredInTheServedScript(t *testing.T) {
 	}
 
 	// Nothing may move the picture without coming through the clamp.
-	for _, fn := range []string{"panFromPointer", "panBySteps", "toggleLightboxZoom"} {
-		body := jsFunc(t, live, fn)
-		if !strings.Contains(body, "clampPan()") && !strings.Contains(body, "layoutLightbox()") {
+	for _, fn := range []string{"panFromPointer", "panBySteps", "toggleZoom"} {
+		body := jsMethod(t, live, fn)
+		if !strings.Contains(body, "this.clampPan()") && !strings.Contains(body, "this.layout()") {
 			t.Errorf("%s writes the pan without going through clampPan() - rule 4 has one "+
 				"enforcement point on purpose", fn)
 		}
 	}
 
 	// RULE 3, both halves: the mouse's position maps to the offset, and the
-	// arrow keys step it.
-	if !strings.Contains(live, `el.lightboxView.addEventListener("pointermove", panFromPointer)`) {
-		t.Error(`app.js does not map pointermove to the pan - "moving the mouse" pans the ` +
-			"picture, with no button held, which is what the rules asked for")
+	// arrow keys step it. The listeners are registered in connectedCallback
+	// against instance-bound handlers, which is what lets
+	// disconnectedCallback take them off again - so the assertion names the
+	// bound field rather than the method, because that is what is actually
+	// handed to addEventListener.
+	wiring := jsMethod(t, live, "connectedCallback")
+	if !strings.Contains(wiring, `this.view.addEventListener("pointermove", this.onPointerMove)`) {
+		t.Error(`connectedCallback does not map pointermove to the pan - "moving the mouse" ` +
+			"pans the picture, with no button held, which is what the rules asked for")
 	}
-	if !strings.Contains(live, `el.lightboxImg.addEventListener("click", toggleLightboxZoom)`) {
-		t.Error("app.js does not zoom on a click on the picture - and it has to be the " +
-			"picture, not the panel: the close button and the caption sit over it, and a " +
-			"handler on the panel would turn a click aimed at either into a zoom")
+	if !strings.Contains(wiring, `this.img.addEventListener("click", this.onImgClick)`) {
+		t.Error("connectedCallback does not zoom on a click on the picture - and it has to " +
+			"be the picture, not the panel: the close button and the caption sit over it, " +
+			"and a handler on the panel would turn a click aimed at either into a zoom")
 	}
-	keys := jsListener(t, live, `el.lightbox.addEventListener("keydown"`)
-	if !strings.Contains(keys, "LIGHTBOX_ARROWS[event.key]") {
-		t.Error("the lightbox's keydown handler no longer reads LIGHTBOX_ARROWS - the arrow " +
+	// Every listener added must be removed, or a resize handler holding a
+	// reference to a detached element keeps it alive and keeps measuring it.
+	// window is the one that genuinely leaks; the rest are checked as a pair
+	// so the two lists cannot drift.
+	teardown := jsMethod(t, live, "disconnectedCallback")
+	if !strings.Contains(teardown, `window.removeEventListener("resize", this.onResize)`) {
+		t.Error("disconnectedCallback does not take the resize listener off window - it is " +
+			"the one listener that outlives the element's own DOM, so it is the one that " +
+			"keeps a detached panel alive and being measured")
+	}
+	for _, h := range []string{
+		"onImgLoad", "onClose", "onImgClick", "onPointerMove",
+		"onViewKeydown", "onCloseClick", "onBackdropClick", "onDialogKeydown", "onResize",
+	} {
+		if !strings.Contains(wiring, "this."+h) {
+			t.Errorf("connectedCallback never uses this.%s - a bound handler nothing "+
+				"registers is either dead weight or a listener that silently stopped "+
+				"being attached", h)
+		}
+		if !strings.Contains(teardown, "this."+h) {
+			t.Errorf("disconnectedCallback never removes this.%s - it was added in "+
+				"connectedCallback, so an element moved in the DOM would accumulate a "+
+				"second copy of this listener", h)
+		}
+	}
+
+	keys := jsMethod(t, live, "dialogKeydown")
+	if !strings.Contains(keys, "ARROWS[event.key]") {
+		t.Error("the panel's keydown handler no longer reads ARROWS - the arrow " +
 			"keys are how this pans without a mouse")
 	}
 	if !strings.Contains(keys, "event.preventDefault();") {
-		t.Error("the lightbox's keydown handler does not preventDefault - a modal <dialog> " +
+		t.Error("the panel's keydown handler does not preventDefault - a modal <dialog> " +
 			"does NOT stop the document behind it from scrolling, so an arrow key it " +
 			"declines scrolls the page under the backdrop")
 	}
 	if strings.Contains(keys, "Escape") {
-		t.Error("the lightbox's keydown handler mentions Escape - the dialog closes itself " +
+		t.Error("the panel's keydown handler mentions Escape - the dialog closes itself " +
 			"on Escape for free, and a handler that touches it is how that gets lost")
 	}
-	if !strings.Contains(live, `el.lightboxZoom.textContent`) {
-		t.Error("app.js never writes el.lightboxZoom.textContent - the readout is where the " +
-			"zoom state is said in words, next to the cursor that says it in shape")
+	if !strings.Contains(live, "this.zoomReadout.textContent") {
+		t.Error("frame-panel.js never writes this.zoomReadout.textContent - the readout is " +
+			"where the zoom state is said in words, next to the cursor that says it in shape")
 	}
 	if !strings.Contains(live, "dataset.zoom") {
-		t.Error("app.js never sets the panel's dataset.zoom - every chrome rule that changes " +
-			"with the zoom is keyed on that attribute")
+		t.Error("frame-panel.js never sets the panel's dataset.zoom - every chrome rule " +
+			"that changes with the zoom is keyed on that attribute")
 	}
 
-	// The panel's arithmetic has ONE home, and it is app.css: availableBox
-	// asks the browser what the stylesheet's own maximum came to rather than
-	// keeping a second copy of the numbers here.
-	avail := jsFunc(t, live, "availableBox")
+	// open() is the element's whole API, and the one thing app.js is allowed
+	// to call. A panel that never showModal()s is a panel that cannot appear.
+	open := jsMethod(t, live, "open")
+	for _, want := range []string{"this.dialog.showModal();", "this.layout();"} {
+		if !strings.Contains(open, want) {
+			t.Errorf("open() does not contain %q - it is the only entry point the page has "+
+				"into this panel, and layout() after showModal is what covers a picture "+
+				"already decoded in the cache, which is the usual case here", want)
+		}
+	}
+
+	// The panel's arithmetic has ONE home, and it is framepanel.css:
+	// availableBox asks the browser what the stylesheet's own maximum came to
+	// rather than keeping a second copy of the numbers here.
+	avail := jsMethod(t, live, "availableBox")
 	if !strings.Contains(avail, "getBoundingClientRect()") {
 		t.Error("availableBox no longer measures the element - it exists so the panel's " +
-			"padding and strips are stated once, in app.css, instead of twice")
+			"padding and strips are stated once, in framepanel.css, instead of twice")
 	}
 	if strings.Contains(live, "innerWidth") || strings.Contains(live, "innerHeight") {
-		t.Error("app.js computes the viewport itself - that is the copy of app.css's " +
-			"arithmetic availableBox exists to avoid, and the two drift apart silently")
+		t.Error("frame-panel.js computes the viewport itself - that is the copy of " +
+			"framepanel.css's arithmetic availableBox exists to avoid, and the two drift " +
+			"apart silently")
+	}
+
+	// The element has to be REGISTERED, natively and with no bundler, or the
+	// <frame-panel> in the page is an unknown tag and every method above is
+	// unreachable code.
+	if !strings.Contains(live, `customElements.define("frame-panel", FramePanel)`) {
+		t.Error("frame-panel.js never calls customElements.define(\"frame-panel\", ...) - " +
+			"without it the tag in index.html is inert, connectedCallback never runs, and " +
+			"clicking a frame throws on a null panel")
 	}
 }
 
-// TestLightboxMarkupHoldsTheWindowAndItsChrome guards the shape app.css and
-// app.js both assume: the clipped window exists, the picture and both
-// controls laid over it are INSIDE it (so the controls stay put while the
+// TestLightboxMarkupHoldsTheWindowAndItsChrome guards the shape framepanel.css
+// and frame-panel.js both assume: the clipped window exists, the picture and
+// both controls laid over it are INSIDE it (so the controls stay put while the
 // picture pans beneath them, and the clip catches everything), and the label
 // tab with its zoom readout is above it in the panel's own strip.
+//
+// Since TOR-192 it also guards the WRAPPER, which is the most breakable thing
+// on this page and the least visible. frame-panel.js finds every part above
+// with this.querySelector, so the markup has to be INSIDE the <frame-panel>
+// element - and app.js reaches the panel as document.querySelector(
+// "frame-panel"). Delete the wrapper and the tag is gone, the element never
+// upgrades, connectedCallback never runs, el.framePanel is null, and the first
+// click on a frame throws. Every other test in this file would stay green,
+// because the dialog and all its ids would still be exactly where they were.
 func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 	html, err := embedded.ReadFile("assets/index.html")
 	if err != nil {
@@ -889,8 +994,27 @@ func TestLightboxMarkupHoldsTheWindowAndItsChrome(t *testing.T) {
 		`class="lightbox-keys"`,
 	} {
 		if !strings.Contains(page, needle) {
-			t.Errorf("index.html has no %s - app.css styles it and app.js reaches for it", needle)
+			t.Errorf("index.html has no %s - framepanel.css styles it and frame-panel.js "+
+				"reaches for it", needle)
 		}
+	}
+
+	// THE WRAPPER, AND THE DIALOG BEING INSIDE IT. Both, because either alone
+	// passes while the panel is dead: a <frame-panel> with the dialog outside
+	// it upgrades fine and then throws in connectedCallback with "no dialog
+	// inside the element", and a dialog with no wrapper leaves app.js holding
+	// null.
+	wrap := strings.Index(page, "<frame-panel>")
+	wrapEnd := strings.Index(page, "</frame-panel>")
+	if wrap < 0 || wrapEnd < 0 {
+		t.Fatalf("index.html has no <frame-panel> element (open=%d close=%d) - the panel's "+
+			"behaviour is a custom element now, so without the tag nothing registers it "+
+			"against any markup and clicking a frame throws on a null panel", wrap, wrapEnd)
+	}
+	if dialog := strings.Index(page, `<dialog id="lightbox"`); dialog < wrap || dialog > wrapEnd {
+		t.Errorf("the lightbox <dialog> is at %d, outside <frame-panel> (%d..%d) - "+
+			"frame-panel.js finds every part with this.querySelector, so markup outside "+
+			"the element is markup it cannot see", dialog, wrap, wrapEnd)
 	}
 
 	view := strings.Index(page, `id="lightbox-view"`)

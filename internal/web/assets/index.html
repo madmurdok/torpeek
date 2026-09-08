@@ -164,6 +164,16 @@
      decide the fit. The close button and the caption live INSIDE it on
      purpose - both sit over the footage, both carry their own ground for it
      (TOR-122), and both stay put while the picture pans beneath them. -->
+<!-- TOR-192: the panel's BEHAVIOUR lives in frame-panel.js as a custom
+     element; its structure stays here. The element finds its parts inside
+     itself, so this markup is what it operates on rather than a template
+     literal in the module - which is what keeps the comments below (the
+     chamfer, the scrims, the bracket placement) next to the elements they
+     explain. Light DOM on purpose: framepanel.css's rules would not reach
+     inside a shadow root, and the module's header says what that would have
+     cost. The children are not re-indented, so this wrapper reads as what it
+     is - a boundary, not a new level of structure. -->
+<frame-panel>
 <dialog id="lightbox" class="lightbox">
   <p class="lightbox-bar">
     <span class="lightbox-tab">
@@ -191,6 +201,7 @@
        available to solve it. -->
   <span class="lightbox-marks" aria-hidden="true"></span>
 </dialog>
+</frame-panel>
 
 <!-- type="module" is not optional and not a style choice: since TOR-191 split
      the page's script into app.js -> events.js -> state.js, app.js opens with
