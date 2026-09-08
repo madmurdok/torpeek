@@ -97,7 +97,7 @@
      way, because the stage also has to bound its own height (a portrait or
      4:3 source is taller than the viewport at full width) and only a number
      can be multiplied inside a calc(). */
-  --compare-aspect: 1.7778;
+  --compare-aspect: 1.7778;  /* @kind other */
 
   /* four surfaces */
   --bg:  #03070B;
@@ -186,10 +186,11 @@
      there, silently and differently on every machine. Embedding woff2 in
      the binary is the way to a guaranteed face and would be the project's
      first binary asset - a decision worth taking on its own. */
-  --sans: "Torpeek Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --sans: "Torpeek Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;  /* @kind font */
   /* Every figure this tool shows is meant to be compared down a column:
      timecodes, byte counts, bits per pixel, infohashes. Monospace is
      functional here, not a costume. */
+  /* @kind font */
   --mono: "Torpeek Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
   /* The page's own body size. A token rather than a number written into
