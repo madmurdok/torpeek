@@ -280,6 +280,11 @@ function applyRunState(ev) {
   // looks right and is wrong in exactly one direction - see the field's own
   // doc in state.js for the row-with-two-passes-behind-it case it gets wrong.
   entry.fetching = new Set(ev.fetching || []);
+  // TOR-197, and the absent key falls the safe way here as well: the server
+  // sends this only while the row is queueable, so an empty set means
+  // "nothing here can be taken back out", which leaves the box disabled.
+  // Guessing the other way would offer a narrowing the server would refuse.
+  entry.narrowable = new Set(ev.narrowable || []);
   // false when the key is missing, which cannot happen for a run this
   // server holds (it is sent on every run_state, true or false) and is the
   // safe direction if it ever does: a live checkbox the server would

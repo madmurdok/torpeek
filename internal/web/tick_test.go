@@ -972,16 +972,17 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 			"then refuses is a control that lies, and a live box on a file nothing is " +
 			"fetching offers a stop with nothing to stop")
 	}
-	// The verdict itself, and every one of the four answers, because dropping
-	// one of them silently is how this control would come to mean the wrong
-	// thing in one state - which is TOR-184's whole subject.
+	// The verdict itself, and every one of the FIVE answers since TOR-197 -
+	// dropping one of them silently is how this control would come to mean
+	// the wrong thing in one state, which is TOR-184's whole subject.
 	if !strings.Contains(fn, `const untick = !asked ? ""`) ||
 		!strings.Contains(fn, `entry.deferred.has(index) ? "drop"`) ||
+		!strings.Contains(fn, `entry.narrowable.has(index) ? "narrow"`) ||
 		!strings.Contains(fn, `entry.fetching.has(index) ? "stop"`) ||
 		!strings.Contains(fn, `clearable ? "clear"`) {
-		t.Error("the row no longer decides which of drop/stop/clear an un-tick would be, " +
-			"so the box, the sentence on the row and tickFile's routing have nothing to " +
-			"agree on (TOR-184)")
+		t.Error("the row no longer decides which of drop/narrow/stop/clear an un-tick " +
+			"would be, so the box, the sentence on the row and tickFile's routing have " +
+			"nothing to agree on (TOR-184, TOR-197)")
 	}
 	if !strings.Contains(fn, "const clearable = asked && FINAL.has(entry.state) && framesOnDisk(entry, index) > 0") {
 		t.Error("the clear is not gated on all three of asked, settled and having frames " +
@@ -996,16 +997,26 @@ func TestABoxThatCannotBeTickedSaysWhyAndDoesNotLookClickable(t *testing.T) {
 	// by the order it is written in, and reading the strings alone would pass
 	// on a chain that answers "stop" for a deferred file.
 	dropAt := strings.Index(fn, `entry.deferred.has(index) ? "drop"`)
+	narrowAt := strings.Index(fn, `entry.narrowable.has(index) ? "narrow"`)
 	stopAt := strings.Index(fn, `entry.fetching.has(index) ? "stop"`)
 	clearAt := strings.Index(fn, `clearable ? "clear"`)
-	if dropAt < 0 || stopAt < 0 || clearAt < 0 {
-		t.Fatalf("cannot locate the three verdicts: drop at %d, stop at %d, clear at %d",
-			dropAt, stopAt, clearAt)
+	if dropAt < 0 || narrowAt < 0 || stopAt < 0 || clearAt < 0 {
+		t.Fatalf("cannot locate the four verdicts: drop at %d, narrow at %d, stop at %d, "+
+			"clear at %d", dropAt, narrowAt, stopAt, clearAt)
 	}
-	if !(dropAt < stopAt && stopAt < clearAt) {
-		t.Errorf("the verdicts are written drop@%d stop@%d clear@%d; a later arm of a "+
-			"ternary chain is only reached when the earlier ones are false, so this order "+
-			"is what decides which act a box performs", dropAt, stopAt, clearAt)
+	// TOR-197's arm sits between drop and stop, and the placement is the same
+	// argument as the rest of the order rather than a preference: it is the
+	// other case where nothing has been asked of the swarm, so it must be
+	// decided before the arm whose scope is a whole torrent. The two cannot
+	// both be true - "deferred" only ever holds files on a RUNNING row and
+	// "narrowable" only on a queueable one - but a chain of ternaries is
+	// decided by what is written first, and asserting the order is how a
+	// future edit that reverses them is caught rather than reasoned about.
+	if !(dropAt < narrowAt && narrowAt < stopAt && stopAt < clearAt) {
+		t.Errorf("the verdicts are written drop@%d narrow@%d stop@%d clear@%d; a later arm "+
+			"of a ternary chain is only reached when the earlier ones are false, so this "+
+			"order is what decides which act a box performs",
+			dropAt, narrowAt, stopAt, clearAt)
 	}
 	if !strings.Contains(fn, "row.row.title = entry.tickRefusal") {
 		t.Error("a disabled box carries no reason - the server sends its own sentence " +

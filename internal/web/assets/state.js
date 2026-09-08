@@ -977,6 +977,20 @@ function newRunState(id) {
     // rather than leaving the page to reconstruct it and be wrong on the row
     // with two passes behind it.
     fetching: new Set(),
+    // narrowable is the part of picked that can still come back OUT, from
+    // run_state's own "narrowable" (runEntry.narrowableLocked): the pass a
+    // person has chosen and the engine has not been handed. Only ever
+    // non-empty while the row is queued or parked.
+    //
+    // A THIRD SET RATHER THAN A DERIVATION, for the same reason as fetching
+    // and one of its own. "Neither deferred nor fetching nor settled" looks
+    // like it would identify this case and does not: it is also true of a
+    // file an earlier pass captured while the row runs on, which can neither
+    // be narrowed nor cleared. And the rule about WHICH states are narrowable
+    // lives in refuseUntick (RunState.queueable); a copy of it here would be
+    // free to disagree the moment a state is added, which is exactly what
+    // TOR-184's own comment says this page must not do.
+    narrowable: new Set(),
     // unticked is what somebody has UN-TICKED on this row to be offered the
     // clear (TOR-183), by torrent index. It is the only piece of tick state
     // on this page the server does not own, and that is the whole design:
@@ -1276,6 +1290,10 @@ function resetRunState(entry) {
   // stopping is the one act here that reaches the server without being asked
   // twice.
   entry.fetching.clear();
+  // And what could still be narrowed (TOR-197): the row's request is about
+  // to be re-read, and a stale set here would offer to take a file out of a
+  // pass this page has yet to be told about.
+  entry.narrowable.clear();
   // And the offers on it (TOR-183). The rows those buttons sat on are about
   // to be detached, and the frames they offered to clear are re-read from
   // disk by the history that follows - so an offer kept here would be an

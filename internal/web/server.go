@@ -2031,6 +2031,38 @@ func (s *Server) UntickFile(id, spec string) (RunInfo, error) {
 	entry.pending = withoutFiles(entry.pending, drop)
 	entry.asked = withoutFiles(entry.asked, drop)
 
+	// AND THE PASS IT WILL START WITH (TOR-197), for a row that is waiting
+	// rather than fetching. refuseUntick has already established that this
+	// is one of the queueable states, so nothing has been handed to the
+	// engine and req.Files is still only a request.
+	//
+	// THE LAST BOX IS THE WHOLE TICKET. An empty req.Files means every video
+	// file (asksEveryVideo), so leaving it empty in RunQueued would widen
+	// this run from one file to twenty - the exact outcome TOR-184 refused
+	// the gesture to avoid. But asksEveryVideo reads the STATE as well as
+	// the length, and in RunNeedsAction an empty selection already means the
+	// opposite: nothing decided yet. Which is precisely what no boxes ticked
+	// means. So the row goes back to where it was before the first box was
+	// pressed, and the widening is impossible by construction rather than
+	// forbidden by a rule.
+	//
+	// The queue slot has to go with it. dispatch() pops s.waiting by
+	// position and never looks at state, so a row left in the queue would be
+	// started later with the empty request this branch just created - the
+	// widening again, one dispatch further along.
+	var moved []queuedState
+	if entry.state.queueable() && containsFile(entry.req.Files, spec) {
+		entry.req.Files = withoutFiles(entry.req.Files, drop)
+		if len(entry.req.Files) == 0 && entry.state == RunQueued {
+			s.dropWaitingLocked(entry)
+			entry.state = RunNeedsAction
+			// Everyone behind it moved up one place (TOR-156's queue column).
+			// No dispatch: taking a waiter out frees no slot, so nothing new
+			// can start because of this.
+			moved = s.queueRecordsLocked(nil)
+		}
+	}
+
 	rec := s.runStateRecordLocked(entry, false)
 	info := s.infoLocked(entry)
 	s.mu.Unlock()
@@ -2040,6 +2072,7 @@ func (s *Server) UntickFile(id, spec string) (RunInfo, error) {
 	// changed is what the NEXT pass will ask for, which pendingPass reads at
 	// the end of the current stream.
 	s.hub.publish(entry.id, rec)
+	s.publishQueueRecords(moved)
 	return info, nil
 }
 
@@ -2083,18 +2116,32 @@ func (e *runEntry) refuseUntick(spec string) string {
 			"there is no fetch for this to stop"
 	}
 
-	// A pass accepted and not started. Narrowing it is the one thing that
-	// cannot be done in place, and the trap is the reason rather than an
-	// excuse: a request narrowed to NO files means every video file the
-	// torrent holds (asksEveryVideo), so dropping the last of them would
-	// widen this run from one file to twenty instead of stopping it. Refused
-	// as a whole rather than only on the last one, so the answer does not
-	// depend on how many boxes somebody has already pressed.
-	if !e.state.final() && containsFile(e.req.Files, spec) {
-		return "run " + e.id + " is " + string(e.state) + " with file " + spec + " in the " +
-			"pass it will start with, and a pass narrowed to nothing means every video " +
-			"file rather than none - so this cannot take one file back out of it. Cancel " +
-			"the run and ask for the files you want"
+	// A pass accepted and not started IS narrowable since TOR-197, and the
+	// trap TOR-184 refused over is answered rather than avoided: a request
+	// narrowed to NO files means every video file the torrent holds
+	// (asksEveryVideo), so dropping the last box cannot leave the request
+	// empty in a state where empty means "all of them". UntickFile puts the
+	// row back in RunNeedsAction instead, where an empty selection already
+	// means the opposite - nothing decided yet - which is exactly what no
+	// boxes ticked IS. So no count of pressed boxes decides anything and
+	// there is no last-box special case to be unable to predict.
+	//
+	// The two states that reach here are the queueable ones: running and
+	// replaying are answered above, and settled below. Anything else is a
+	// state this method has not been taught - a third non-final state added
+	// later - and narrowing blind there would be worse than refusing.
+	if !e.state.final() && !e.state.queueable() && containsFile(e.req.Files, spec) {
+		return "run " + e.id + " is " + string(e.state) + ", which is neither waiting to " +
+			"start nor settled, so what narrowing its pass would mean has not been decided"
+	}
+
+	// AND THE YES THAT REPLACED THE REFUSAL. It has to be said explicitly
+	// rather than left to fall through, because the catch-all at the end of
+	// this method refuses everything it has not been given a reason to
+	// accept - which is the right default and is exactly what refused this
+	// case before the guard above was narrowed.
+	if e.state.queueable() && containsFile(e.req.Files, spec) {
+		return ""
 	}
 
 	if e.state.final() {
@@ -2963,6 +3010,23 @@ func (s *Server) runStateFieldsLocked(entry *runEntry, reset bool) map[string]an
 	if fetching := entry.fetchingLocked(); len(fetching) > 0 {
 		m["fetching"] = fetching
 	}
+	// TOR-197: WHICH OF THEM CAN COME BACK OUT before anything is fetched.
+	//
+	// A third set for the same reason the second exists: the page cannot
+	// derive it. "ticked" is cumulative and neither "deferred" nor
+	// "fetching" is present on a row that is merely waiting, so a queued
+	// pass's files look identical to a settled row's from the page's side -
+	// and the two need opposite answers, since one can be narrowed and the
+	// other only cleared.
+	//
+	// Sent rather than computed on the page deliberately: refuseUntick is
+	// the one place the rule lives, and a page that recomputed which states
+	// are narrowable would be a second copy of it, free to disagree the
+	// moment a state is added. Present only while the row is queueable,
+	// which is the same absent-is-not-empty line the two sets above draw.
+	if narrowable := entry.narrowableLocked(); len(narrowable) > 0 {
+		m["narrowable"] = narrowable
+	}
 	// The frames-per-file this row's request carries, so the page can price
 	// the files it has NOT ticked at what they would actually get rather
 	// than at whatever the intake box now shows - DecideRun locks the figure
@@ -3023,6 +3087,27 @@ func (e *runEntry) tickedLocked() []int {
 // begun.
 //
 // The caller must hold s.mu.
+// narrowableLocked is every index of this row's request that an un-tick can
+// take back out (TOR-197) - the pass a person has chosen and the engine has
+// not been handed.
+//
+// asksEveryVideo is deliberately NOT folded in the way fetchingLocked folds
+// it. On a running row an empty request is the widest possible pass and every
+// video is in it; here an empty request belongs to a row that is either
+// parked (nothing decided, so there is nothing to take out) or queued with
+// every video (which is what DecideRun produces for a single-video torrent,
+// and taking the only file out of that would be the widening this ticket
+// exists to prevent). Both are answered by returning nothing, which leaves
+// refuseUntick's own containsFile check as the single gate.
+//
+// The caller must hold s.mu.
+func (e *runEntry) narrowableLocked() []int {
+	if !e.state.queueable() {
+		return nil
+	}
+	return fileIndices(e.req.Files)
+}
+
 func (e *runEntry) fetchingLocked() []int {
 	if e.state != RunRunning {
 		return nil
