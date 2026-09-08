@@ -190,8 +190,7 @@
   /* Every figure this tool shows is meant to be compared down a column:
      timecodes, byte counts, bits per pixel, infohashes. Monospace is
      functional here, not a costume. */
-  /* @kind font */
-  --mono: "Torpeek Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --mono: "Torpeek Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;  /* @kind font */
 
   /* The page's own body size. A token rather than a number written into
      `body` alone because since TOR-138 there is a second place that has to
