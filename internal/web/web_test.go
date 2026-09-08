@@ -453,16 +453,17 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 	fake := &fakeRun{}
 	ts := testServer(t, fake.runner)
 
-	// One needle per served asset, and since TOR-191 that is three scripts
-	// rather than one: a module that is not served is a page that does not
-	// parse, and the three needles are each distinctive to the module they
-	// are in (the socket is events.js's, the run store is state.js's, the
-	// element lookups are app.js's).
+	// One needle per served asset, and since TOR-191 that is more than one
+	// script: a module that is not served is a page that does not parse, and
+	// each needle is distinctive to the module it is in (the socket is
+	// events.js's, the run store is state.js's, the element lookups are
+	// app.js's, and the custom-element registration is run-table.js's).
 	for _, tc := range []struct{ path, contains string }{
 		{"/", "<title>torpeek</title>"},
 		{"/app.js", "document.getElementById"},
 		{"/state.js", "state.runs"},
 		{"/events.js", "new WebSocket("},
+		{"/run-table.js", `customElements.define("run-table"`},
 		{"/tokens.css", ":root"},
 		{"/base.css", "@font-face"},
 		{"/intake.css", ".dropzone"},
@@ -845,8 +846,16 @@ func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
 	// layer deals in, so it is the likeliest of the three to grow a leading
 	// slash - and every one of them is served under the base path the same
 	// way app.js is.
+	//
+	// run-table.js joins them with TOR-194, for a narrower reason: it holds
+	// no URL at all today, and that is exactly the state worth keeping - the
+	// table draws from an entry and asks the page for anything that needs
+	// fetching, so the first absolute path to appear here would be the first
+	// sign that stopped being true. (frame-panel.js and compare-dialog.js are
+	// NOT in this list and should be; see the ticket's own report.)
 	for _, name := range []string{
 		"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
+		"assets/run-table.js",
 	} {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
@@ -1844,10 +1853,30 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// `import "./y.js"`, `export ... from "./y.js"`. A dynamic import()
 	// built from a variable is deliberately not matched - it cannot be
 	// resolved statically, and this project has none.
-	spec := regexp.MustCompile(`(?m)^\s*(?:import|export)\b[^'"\n]*?from\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]`)
+	//
+	// A MULTI-LINE IMPORT LIST COUNTS, which it did not until TOR-194's
+	// falsification run found this: the pattern used to be `[^'"\n]*?`, which
+	// cannot cross a newline, so every
+	//
+	//	import {
+	//	  ...names...
+	//	} from "./state.js";
+	//
+	// was invisible to this walk - and that is the shape of the biggest import
+	// on the page. app.js was only ever checked here through its three
+	// SINGLE-LINE imports (events.js, frame-panel.js, compare-dialog.js);
+	// pointing its state.js import at a file that does not exist left this
+	// test green, which is precisely what it exists to prevent. Newlines are
+	// now allowed inside the clause and quotes still are not, so the match
+	// still cannot run past the end of one import statement.
+	spec := regexp.MustCompile(`(?m)^\s*(?:import|export)\b[^'"]*?from\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]`)
 
 	seen := 0
-	for _, name := range []string{"app.js", "state.js", "events.js"} {
+	// run-table.js is walked from TOR-194 because it has imports of its own
+	// (state.js's derivations), which is what makes it a module whose
+	// specifier can 404 rather than a leaf. Its own import of ./state.js is
+	// resolved by this walk exactly the way app.js's is.
+	for _, name := range []string{"app.js", "state.js", "events.js", "run-table.js"} {
 		src, err := embedded.ReadFile("assets/" + name)
 		if err != nil {
 			t.Errorf("reading the embedded %s: %v - index.html or another module names it, "+
@@ -1878,9 +1907,20 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 
 	// A regex that stopped matching would make every check above vacuous, and
 	// the split's whole premise is that there ARE imports to follow.
-	if seen == 0 {
-		t.Error("no import specifier was found in any of the three scripts, so this test " +
-			"verified nothing. Either the module split was undone, or the pattern above " +
-			"no longer matches the syntax the files use")
+	//
+	// A COUNT rather than a bare "more than none", because "none at all" was
+	// never the way this went vacuous: the multi-line shape above was missed
+	// while three single-line imports kept the total comfortably non-zero.
+	// Seven is what the four modules named here actually carry today, measured
+	// rather than assumed: app.js five (state, events, frame-panel,
+	// compare-dialog, run-table), events.js one, run-table.js one, state.js
+	// none. A floor, not an equality, so adding an import is not a failing
+	// test - but silently matching fewer than the files hold is.
+	if seen < 7 {
+		t.Errorf("only %d import specifiers were found across the scripts named above, and they hold at "+
+			"least 7 - so some of them were not read at all and this test verified less than it looks "+
+			"like. Either the module split was undone, or the pattern above no longer matches the "+
+			"syntax the files use (a multi-line `import {\\n...\\n} from` is the shape it has already "+
+			"missed once)", seen)
 	}
 }

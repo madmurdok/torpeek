@@ -246,7 +246,11 @@ func TestOnlyOneFileDetailIsOpenAtOnce(t *testing.T) {
 	// AND THE LEVEL ABOVE IS UNTOUCHED. The bound belongs on the inner level
 	// precisely so the outer one keeps what it is for: two torrents side by
 	// side, one of them mid-run.
-	run := jsFunc(t, js, "setRunExpanded")
+	//
+	// setRunExpanded is a method of the table element since TOR-194 - the
+	// accordion's mechanism is three attributes on row elements, so it moved
+	// with the rows. What it must not read did not change with the move.
+	run := jsMethod(t, runTableJS(t), "setRunExpanded")
 	for _, forbidden := range []string{"state.runs", "fileEntries", "setFileExpanded"} {
 		if strings.Contains(run, forbidden) {
 			t.Errorf("setRunExpanded now reads %q. It must not: several torrents may be "+
@@ -266,7 +270,8 @@ func TestOnlyOneFileDetailIsOpenAtOnce(t *testing.T) {
 func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 	js := servedScript(t)
 
-	run := jsFunc(t, js, "setRunExpanded")
+	// The table element's, since TOR-194 (see the sibling test above).
+	run := jsMethod(t, runTableJS(t), "setRunExpanded")
 	if !strings.Contains(run, "entry.detailRowEl.hidden = !expanded") {
 		t.Fatal("setRunExpanded no longer collapses by hiding the detail's own row - " +
 			"this test is anchored on that being the only thing it does to the content")

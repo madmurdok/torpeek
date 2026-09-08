@@ -80,6 +80,19 @@
          explain it, and the one genuinely empty state (no torrents at all)
          already has #run-list-empty. app.js builds both rows per entry, so
          the tbody below stays empty here. -->
+    <!-- TOR-194: the table's BEHAVIOUR lives in run-table.js as a custom
+         element, following the pattern frame-panel.js set out; its structure
+         stays here, wrapped and not re-indented, so the comment above stays
+         next to the markup it describes. The wrapper goes OUTSIDE the whole
+         section, not around the <table> alone, because #run-list-empty is one
+         of the element's own parts and it sits outside .run-table-wrap.
+         Light DOM for the reason frame-panel.js gives: table.css's rules
+         would not reach inside a shadow root, and a <table> with its own
+         stylesheet in a string is the last place this project wants one.
+         Three of the nine column headers are here and six are built by the
+         element (LIVE_COLUMNS) - see buildLiveColumnHeaders for why the six
+         are not written out below. -->
+    <run-table>
     <section id="runs" class="runs">
       <h2 class="runs-title">Torrents</h2>
       <div class="run-table-wrap">
@@ -97,6 +110,7 @@
       </div>
       <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
     </section>
+    </run-table>
   </div>
 </div>
 

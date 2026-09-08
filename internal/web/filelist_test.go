@@ -50,10 +50,13 @@ func servedScript(t *testing.T) string {
 // of the same shape (state.js's newRunState and newFileState both open with
 // "  return {") can have either of them asked for by name.
 //
-// Anchored on a two-space-indented close, which is what every literal this is
-// used on actually has: the fields sit at four spaces and nested objects
-// deeper, so the first "\n  };" is the literal's own.
-func jsLiteralAfter(t *testing.T, js, after, open string) string {
+// `close` is the exact text that ends it, and it is a parameter rather than a
+// constant because TOR-194 added a literal one level deeper: run-table.js's
+// newRow returns from inside a class method, so its fields sit at six spaces
+// and it closes at "\n    };" where every other literal here closes at
+// "\n  };". Passing the close in keeps this exact - the first close at the
+// literal's OWN indent - instead of loosening the anchor for all four callers.
+func jsLiteralAfter(t *testing.T, js, after, open, close string) string {
 	t.Helper()
 	at := strings.Index(js, after)
 	if at < 0 {
@@ -65,9 +68,9 @@ func jsLiteralAfter(t *testing.T, js, after, open string) string {
 		t.Fatalf("no %q literal after %q", open, after)
 	}
 	rest = rest[start+len(open):]
-	end := strings.Index(rest, "\n  };")
+	end := strings.Index(rest, close)
 	if end < 0 {
-		t.Fatalf("the %q literal after %q is never closed at a two-space indent", open, after)
+		t.Fatalf("the %q literal after %q is never closed by %q", open, after, close)
 	}
 	return rest[:end]
 }
@@ -143,13 +146,20 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 // fields in most tickets that touch this file, and every one of them is a
 // chance to shadow a field declared two hundred lines away.
 //
-// SINCE TOR-191 THERE ARE TWO LITERALS PER ENTRY AND THE SCAN COVERS THEIR
-// UNION, which is strictly more than it could see before. An entry is the
-// data half state.js owns (newRunState) spread into the DOM half app.js adds
-// (`const entry = {`), and they are ONE object - so a key declared in the
-// second still shadows the same key in the first, silently, exactly as two
-// keys in one literal always did. Scanning either one alone would have made
-// the split a way to reintroduce TOR-180's bug invisibly.
+// SINCE TOR-191 THERE ARE SEVERAL LITERALS PER ENTRY AND THE SCAN COVERS
+// THEIR UNION, which is strictly more than it could see before. An entry is
+// the data half state.js owns (newRunState) spread into the DOM half app.js
+// adds (`const entry = {`), and they are ONE object - so a key declared in
+// the second still shadows the same key in the first, silently, exactly as
+// two keys in one literal always did. Scanning either one alone would have
+// made the split a way to reintroduce TOR-180's bug invisibly.
+//
+// TOR-194 MADE IT THREE, and it is the riskiest of the three additions so
+// far: run-table.js's newRow returns the row's own elements and app.js
+// spreads them into the same entry, so a field named there and a field named
+// in app.js's own literal are now written by two different people in two
+// different files, with the LAST one silently winning. That is TOR-180's bug
+// with a file boundary in the middle of it.
 //
 // The file entry is scanned the same way and for the same reason, one level
 // in: newFileState plus fileBlock's own literal. It had no check at all
@@ -158,6 +168,7 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
 	page := servedScript(t)
 	derive := stateJS(t)
+	table := runTableJS(t)
 
 	for _, subject := range []struct {
 		what   string
@@ -168,12 +179,18 @@ func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
 		{
 			what:  "run entry",
 			least: 20,
-			// The two that actually collided, named so a later rename cannot
-			// quietly remove the thing this test is about.
-			must: []string{"files", "fileList"},
+			// The two that actually collided, plus one row field and one
+			// detail field from either side of TOR-194's boundary, named so a
+			// later rename cannot quietly remove the thing this test is about.
+			// detailBadge rather than detailEl for the detail side: detailEl is
+			// a shorthand field (`detailEl,`) and the key scan below only sees
+			// `name:` pairs, so naming it here would fail on its spelling
+			// rather than on its absence.
+			must: []string{"files", "fileList", "rowQueueCell", "detailBadge"},
 			halves: map[string]string{
-				"state.js's newRunState": jsLiteralAfter(t, derive, "function newRunState(id) {", "  return {"),
-				"app.js's newRunEntry":   jsLiteralAfter(t, page, "function newRunEntry(id) {", "  const entry = {"),
+				"state.js's newRunState": jsLiteralAfter(t, derive, "function newRunState(id) {", "  return {", "\n  };"),
+				"run-table.js's newRow":  jsLiteralAfter(t, table, "  newRow() {", "    return {", "\n    };"),
+				"app.js's newRunEntry":   jsLiteralAfter(t, page, "function newRunEntry(id) {", "  const entry = {", "\n  };"),
 			},
 		},
 		{
@@ -184,8 +201,8 @@ func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
 			// state at all.
 			must: []string{"media", "heartbeat", "sheetURL"},
 			halves: map[string]string{
-				"state.js's newFileState": jsLiteralAfter(t, derive, "function newFileState(index, entry) {", "  return {"),
-				"app.js's fileBlock":      jsLiteralAfter(t, page, "function fileBlock(entry, index) {", "  fentry = {"),
+				"state.js's newFileState": jsLiteralAfter(t, derive, "function newFileState(index, entry) {", "  return {", "\n  };"),
+				"app.js's fileBlock":      jsLiteralAfter(t, page, "function fileBlock(entry, index) {", "  fentry = {", "\n  };"),
 			},
 		},
 	} {
@@ -363,7 +380,14 @@ func TestTheAmberFrameIsOnlyForARowThatIsBlocking(t *testing.T) {
 // and silently passed. It happens to declare no display; the point is that
 // nothing was checking.
 func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
-	js := servedScript(t)
+	// TWO MODULES SINCE TOR-194, read as one text on purpose: the trap this
+	// guard is about is a CLASS that declares display beating the UA's
+	// [hidden], and it does not care which file wrote `.hidden = true`. Four
+	// of the receivers below (rowCancel, rowRaise, rowLower, detailRowEl) are
+	// row elements and moved into the table element with them; the rest are
+	// the detail's and stayed. Reading only app.js would have quietly dropped
+	// those four out of the scan and left it passing.
+	js := servedScript(t) + "\n" + runTableJS(t)
 	css := stylesheet(t)
 
 	// The detail's own elements app.js takes off screen, as the property
@@ -478,12 +502,24 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	//
 	// Kept as a small table of its own rather than folded above, because the
 	// two halves are found differently and a reader has to know which is
-	// which.
-	for fn, sel := range map[string]string{
-		"renderRunProgress": ".run-progress",
-		"renderReach":       ".reach",
+	// which. Each row names its module too, since TOR-194: renderRunProgress
+	// draws the row's own bar and is a method of the table element, while
+	// renderReach is a file's and stayed a top-level function in app.js - two
+	// files and two extraction shapes.
+	for _, alias := range []struct {
+		fn, sel string
+		method  bool
+	}{
+		{"renderRunProgress", ".run-progress", true},
+		{"renderReach", ".reach", false},
 	} {
-		body := jsFunc(t, js, fn)
+		fn, sel := alias.fn, alias.sel
+		var body string
+		if alias.method {
+			body = jsMethod(t, runTableJS(t), fn)
+		} else {
+			body = jsFunc(t, servedScript(t), fn)
+		}
 		if !strings.Contains(body, "el.hidden") {
 			t.Errorf("%s no longer hides anything through a local alias. If the alias is "+
 				"gone the scan above covers it and this row should go; if the function "+

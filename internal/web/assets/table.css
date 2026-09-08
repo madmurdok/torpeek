@@ -5,11 +5,22 @@
 
    .run-progress lands here, not in framepanel.css, even though its own
    banner comment below ("in the panel row") reads like it could belong to
-   a file's frame panel: app.js builds it inside the run TABLE row's status
-   cell (buildLiveColumnHeaders), not inside a file's own detail - it is
-   the row's segmented progress bar, one level above any file. This is
-   exactly the kind of banner TOR-190 asked to be checked against the JS
-   that actually builds the markup rather than assumed from its prose. */
+   a file's frame panel: run-table.js builds it inside the run TABLE row's
+   status cell (newRow), not inside a file's own detail - it is the row's
+   segmented progress bar, one level above any file. This is exactly the kind
+   of banner TOR-190 asked to be checked against the JS that actually builds
+   the markup rather than assumed from its prose. */
+
+/* TOR-194 wrapped the whole section in a <run-table> custom element, whose
+   behaviour lives in run-table.js. An unknown element is display: inline by
+   default, which would put a block-level <section> inside an inline box - so
+   this one line is what keeps the wrapper invisible to layout. Nothing else:
+   no padding, no border and no margin, so .runs' own bottom margin still
+   collapses through it exactly as it did when the section was a direct child
+   of .main. display: contents would also work and is not used - a wrapper
+   with no box of its own is one more thing to reason about at every later
+   layout change, and a plain block that changes nothing is cheaper to trust. */
+run-table { display: block; }
 
 /* TOR-137: the torrent table's new home, between the pinned intake above and
    the detail pane below. */
