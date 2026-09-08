@@ -1387,3 +1387,124 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 // the missing name. The swap itself is covered by execution instead:
 // TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing
 // (eventstate_test.go) runs it through apply() and fails on the broken module.
+
+// TOR-205's browser pass: A SUBTREE CONNECTED BEFORE IT FINISHES ARRIVING,
+// STREAMED IN BY HAND, AND A GENUINELY MISSING PART THAT NEVER DOES.
+//
+// settle_test.go's own header explains why this is a browser pass and not
+// another text guard: wire()/awaitParts()/partsNeverArrived() are not
+// DOM-free the way state.js and events.js are (eventstate_test.go's whole
+// premise), so running them for real needs an actual DOM, which plain node
+// does not have and this repository ships no jsdom for. Criterion 1 asks for
+// exactly that - "tested by BUILDING the element and its subtree in an order
+// that connects it early, not only by reading the code" - so this is where
+// that happens.
+//
+// torpeek was served headless on 127.0.0.1:8973 with -dht=false over an out
+// dir holding the browser fixture's stock result set (no swarm needed - see
+// this ticket's own instructions: the bug is about connection order, not
+// about anything a torrent does). Every check below ran as real JavaScript
+// in the loaded page's own console, against the SHIPPED, REGISTERED classes
+// (customElements.define already ran via app.js's normal bootstrap) - not a
+// copy, not a mock DOM.
+//
+// FIRST, THE COST CLAIM ITSELF, CHECKED RATHER THAN ASSUMED: on torpeek's own
+// page, `document.querySelector("frame-panel").partsObserver` and the same
+// for `compare-dialog` and `run-table` were all `null` - the observer this
+// ticket adds was never created at all, because index.html is fully parsed
+// before app.js's deferred module ever calls customElements.define. Every
+// one of the three was already `.wired === true` at that point.
+//
+// THE THREE ELEMENTS THAT CAN ACTUALLY STREAM (run-table, frame-panel,
+// compare-dialog - see settle_test.go's header for why the other three
+// cannot), each driven the same way: `document.createElement(tag)`, appended
+// to the page EMPTY (connecting it with no subtree at all - the exact TOR-205
+// scenario), then its markup appended back in over two steps with
+// `await Promise.resolve()` between them so the MutationObserver's callback
+// gets a chance to run without any real clock time passing.
+//
+//   frame-panel: connected empty -> not wired, an observer created
+//     (partsObserver truthy). .lightbox appended alone (TOR-204's own probe's
+//     exact shape - the wrapper exists, #lightbox-img does not yet) -> still
+//     not wired, 1.3ms in. The rest of the subtree (.lightbox-view,
+//     #lightbox-img, .lightbox-caption, .lightbox-close, .lightbox-zoom)
+//     appended together -> WIRED, at 2ms total - four orders of magnitude
+//     under the 10s deadline - with partsObserver and partsDeadline both back
+//     to null. Called .open("/x.jpg", "test caption") on it afterward:
+//     dialog.open became true and the caption read "test caption" - not just
+//     "wired" but actually working.
+//   compare-dialog: same shape, #compare-close held back as the one part
+//     still missing after everything else arrived (1.8ms in, not wired) ->
+//     WIRED at 2.2ms once it arrived. Proved the listener itself works, not
+//     only that the field exists: showModal()'d the dialog, clicked
+//     closeButton, and dialog.open read false afterward.
+//   run-table: connected empty -> waiting. .run-table-wrap containing
+//     table#run-table (thead/tr/th.run-actions-header, tbody#run-list)
+//     appended, #run-list-empty held back -> still not wired at 1.3ms.
+//     #run-list-empty appended -> WIRED at 3ms, with buildLiveColumnHeaders
+//     having actually run: this.columns read 7 (the one actions header plus
+//     the six live columns), this.sortHeaders.length read 6, and
+//     this.columnWidths was a real object - the element did not just flip a
+//     flag, it ran the rest of what connectedCallback always did.
+//
+// THE OTHER HALF OF CRITERION 2 - "NEVER", NOT "NOT YET" - for the same three,
+// each connected with EVERY part except one, which was never added:
+//
+//   frame-panel, missing #lightbox-img/.lightbox-view/.lightbox-caption/
+//     .lightbox-close/.lightbox-zoom entirely (dialog only): console read
+//     "frame-panel: no view, img, caption, closeButton, zoomReadout inside
+//     the element, 10s after connecting - giving up rather than waiting
+//     forever" - caught by a window "error" listener, i.e. a real uncaught
+//     error, not a swallowed one. This case doubled as an accidental but
+//     genuine demonstration of the deadline racing real wall-clock time
+//     across two separate tool calls: the element was created in one call and
+//     checked again after enough real latency between calls had passed for
+//     the 10s deadline to already be gone - which is exactly the scenario the
+//     mechanism has to survive, not only a tight in-page loop.
+//   compare-dialog, missing only #compare-close: connected, then the page
+//     was left running a real setTimeout(11000) inside one script call.
+//     Date.now() before and after read 13432ms elapsed (real wall clock, not
+//     simulated) - the console read exactly "compare-dialog: no closeButton
+//     inside the element, 10s after connecting - giving up rather than
+//     waiting forever" once, naming the ONE part actually missing rather than
+//     every part queried.
+//   run-table, missing only #run-list-empty: same recipe, 16957ms real
+//     elapsed, console read "run-table: no emptyNote inside the element, 10s
+//     after connecting - giving up rather than waiting forever".
+//
+// In every one of the three "never" cases, `.wired` stayed `false` and
+// `.partsObserver` read back `null` afterward - the failed deadline still
+// tears down its own observer, so a genuinely dead element does not go on
+// polling the page forever either.
+//
+// THE OTHER THREE ELEMENTS - run-detail, file-list, file-detail - build their
+// own markup synchronously (settle_test.go's header has the full reasoning
+// for why that means no settle mechanism was needed), so "shown able to
+// fail" for them is TOR-192's original guard, unchanged, forced with a
+// legitimate technique rather than by editing shipped source: one instance's
+// own `querySelector` was shadowed (an own-property function on the
+// instance, which JavaScript resolves before the prototype's) so ONE
+// specific selector returned `null`, `build()` was called, the throw was
+// read, and the shadow was removed before creating a second, ordinary
+// instance to confirm normal construction still works:
+//
+//   run-detail: querySelector(".run-detail-cancel") shadowed to null ->
+//     build() threw "run-detail: no detailCancel inside the element". A
+//     fresh instance built clean: detailEl existed, no error.
+//   file-list: querySelector(".picker-armed") shadowed to null -> build()
+//     threw "file-list: no pickerArmed inside the element". A fresh instance
+//     built clean: pickerEl existed, no error.
+//   file-detail: querySelector shadowed to return null unconditionally (its
+//     FIRST stage, build(), looks up only the one .file-detail slot) ->
+//     build() threw "file-detail: no body inside the element" - the one
+//     explicitly two-staged guard detailtree_test.go's own
+//     TestEachDetailElementFindsItsPartsAndFailsLoudly names. A fresh
+//     instance built clean: body existed, no error.
+//
+// Cleanup: every synthetic element created above was removed from the
+// document before the pass ended, and the page's own six singletons were
+// re-checked as the very last step - one of each tag, every one still
+// `.wired === true` - so nothing this pass did left the real page any
+// different from how it started. The server (pid captured from the
+// foreground process, not a `go run` wrapper) was killed and
+// `lsof -nP -iTCP:8973 -sTCP:LISTEN` confirmed the port free afterward.

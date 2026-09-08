@@ -205,20 +205,27 @@ func TestTheRunTableIsAnElementWrappingThePagesOwnMarkup(t *testing.T) {
 			"after the scroll wrap; check the wrapper still contains both")
 	}
 
-	// A MISSING PART IS A WIRING ERROR. buildLiveColumnHeaders used to return
-	// quietly on a missing header row, which meant a page that had lost its
-	// thead rendered three columns and said nothing at all.
-	connected := jsMethod(t, js, "connectedCallback")
+	// A MISSING PART IS A WIRING ERROR - UNLESS THE SUBTREE HAS NOT FINISHED
+	// ARRIVING YET (TOR-205). connectedCallback now goes through wire(),
+	// which is where every part is looked up and checked; runtabledom_test.go
+	// covers wire()'s corrected behaviour (bail quietly, settle, or fail
+	// loudly after the deadline) in full - this is only the shape.
+	if !strings.Contains(js, "connectedCallback() {\n    this.wire();\n  }") {
+		t.Error("connectedCallback no longer just calls this.wire() - see runtabledom_test.go for why " +
+			"the part-finding moved there (TOR-205)")
+	}
+	wired := jsMethod(t, js, "wire")
 	for _, part := range []string{"table", "headRow", "actionsHeader", "list", "emptyNote", "wrap"} {
-		if !strings.Contains(connected, part+": this."+part+",") {
-			t.Errorf("connectedCallback does not check %q for absence - every method below dereferences "+
-				"it, so a missing part has to name itself here rather than surface as \"cannot read "+
-				"property of null\" from whichever handler fires first", part)
+		if !strings.Contains(wired, part+": this."+part+",") {
+			t.Errorf("wire() does not check %q for absence - every method below dereferences it, so a "+
+				"missing part has to name itself here rather than surface as \"cannot read property of "+
+				"null\" from whichever handler fires first", part)
 		}
 	}
-	if !strings.Contains(connected, `throw new Error("run-table: no " + name + " inside the element");`) {
-		t.Error("connectedCallback does not throw on a missing part - the loop above would be collecting " +
-			"names and doing nothing with them")
+	if !strings.Contains(wired, "this.awaitParts(missing);") {
+		t.Error("wire() does not bail into awaitParts() on a missing part - the loop above would be " +
+			"collecting names and doing nothing with them, and a subtree still arriving would never " +
+			"get a second try")
 	}
 
 	// AND THE PAGE REACHES IT BY TAG, not by id: the element IS the thing

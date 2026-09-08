@@ -194,6 +194,11 @@ const COLUMN_WIDTHS_KEY = "torpeek.columnWidths";
 const COLUMN_MIN_WIDTH = 44;
 const COLUMN_MAX_WIDTH = 640;
 
+// "NOT YET" IS NOT "NEVER" (TOR-205). frame-panel.js's own block carries the
+// full reasoning for the mechanism below (wire/awaitParts/partsNeverArrived)
+// and for this deadline's value, not repeated here.
+const SETTLE_TIMEOUT_MS = 10000;
+
 function clampColumnWidth(px) {
   return Math.min(COLUMN_MAX_WIDTH, Math.max(COLUMN_MIN_WIDTH, px));
 }
@@ -215,13 +220,32 @@ class RunTable extends HTMLElement {
     // The interval's handle, so it can be stopped. null when it is not running,
     // which is the same null-until-started shape the drag state uses.
     this.stallTimer = null;
-    // Filled in by connectedCallback: the parts, the header count the detail
-    // row spans, and the widths a drag has produced.
+    // Filled in by wire(): the parts, the header count the detail row spans,
+    // and the widths a drag has produced.
     this.columns = 1;
     this.columnWidths = {};
+
+    // wired, partsObserver and partsDeadline are wire()'s own bookkeeping
+    // (TOR-205) - see frame-panel.js for the full reasoning, and its wire()
+    // for the shape this one repeats.
+    this.wired = false;
+    this.partsObserver = null;
+    this.partsDeadline = null;
   }
 
   connectedCallback() {
+    this.wire();
+  }
+
+  // wire finds this element's parts and, if every one exists, wires it -
+  // what connectedCallback used to do inline, until a part missing meant a
+  // quiet bail into awaitParts() instead of a throw (TOR-205; frame-panel.js
+  // carries the reasoning). Idempotent: awaitParts()'s observer calls this
+  // again on every mutation until it succeeds, and it must do nothing after
+  // that.
+  wire() {
+    if (this.wired) return;
+
     // Found inside THIS element rather than by document id, so a second table
     // could not steal the first one's parts. The ids stay on the markup for
     // the Go tests, for #run-list-empty's own rule and for the aria wiring.
@@ -235,22 +259,27 @@ class RunTable extends HTMLElement {
     // it.
     this.wrap = this.querySelector(".run-table-wrap");
 
-    // A missing part is a wiring error, not a state to degrade into: every
-    // method below dereferences these, so failing here names the part that is
-    // absent instead of throwing "cannot read property of null" out of
-    // whichever handler happens to fire first. buildLiveColumnHeaders used to
-    // `return` on a missing header row, which meant a page that had lost its
-    // thead rendered a three-column table and said nothing.
-    for (const [name, node] of Object.entries({
+    // buildLiveColumnHeaders used to `return` on a missing header row, which
+    // meant a page that had lost its thead rendered a three-column table and
+    // said nothing. Every part below is still checked for absence - but a
+    // part missing here is no longer necessarily THAT bug (TOR-205): it may
+    // be a subtree still arriving, so a miss bails quietly into awaitParts()
+    // rather than throwing on the spot.
+    const missing = Object.entries({
       table: this.table,
       headRow: this.headRow,
       actionsHeader: this.actionsHeader,
       list: this.list,
       emptyNote: this.emptyNote,
       wrap: this.wrap,
-    })) {
-      if (!node) throw new Error("run-table: no " + name + " inside the element");
+    }).filter(([, node]) => !node).map(([name]) => name);
+
+    if (missing.length) {
+      this.awaitParts(missing);
+      return;
     }
+    this.stopAwaitingParts();
+    this.wired = true;
 
     // IN THIS ORDER, and the order is the whole of what keeps the three counts
     // below agreeing: the six live columns are built first, and only then is
@@ -290,10 +319,57 @@ class RunTable extends HTMLElement {
     this.stallTimer = setInterval(this.onStallTick, 1000);
   }
 
+  // awaitParts/stopAwaitingParts/partsNeverArrived: the same three as
+  // frame-panel.js's, for the same reason - see its own copy for the
+  // reasoning behind each.
+  awaitParts(missing) {
+    if (this.partsObserver) return;
+    console.error("run-table: waiting for " + missing.join(", ") +
+      " to appear inside the element - connected before its subtree finished arriving");
+    this.partsObserver = new MutationObserver(() => this.wire());
+    this.partsObserver.observe(this, { childList: true, subtree: true });
+    this.partsDeadline = setTimeout(() => this.partsNeverArrived(), SETTLE_TIMEOUT_MS);
+  }
+
+  stopAwaitingParts() {
+    if (this.partsObserver) {
+      this.partsObserver.disconnect();
+      this.partsObserver = null;
+    }
+    if (this.partsDeadline != null) {
+      clearTimeout(this.partsDeadline);
+      this.partsDeadline = null;
+    }
+  }
+
+  partsNeverArrived() {
+    this.partsDeadline = null;
+    this.wire();
+    if (this.wired) return;
+
+    const missing = Object.entries({
+      table: this.querySelector("#run-table"),
+      headRow: this.querySelector("#run-table thead tr"),
+      actionsHeader: this.querySelector("#run-table thead th.run-actions-header"),
+      list: this.querySelector("#run-list"),
+      emptyNote: this.querySelector("#run-list-empty"),
+      wrap: this.querySelector(".run-table-wrap"),
+    }).filter(([, node]) => !node).map(([name]) => name);
+    this.stopAwaitingParts();
+    const message = "run-table: no " + missing.join(", ") + " inside the element, " +
+      (SETTLE_TIMEOUT_MS / 1000) + "s after connecting - giving up rather than waiting forever";
+    console.error(message);
+    throw new Error(message);
+  }
+
   disconnectedCallback() {
     window.removeEventListener("resize", this.onResize);
     clearInterval(this.stallTimer);
     this.stallTimer = null;
+    // A table removed from the page while still waiting for its subtree has
+    // nothing left to wire - and an observer left running on a detached
+    // element would keep firing for nothing.
+    this.stopAwaitingParts();
   }
 
   // buildLiveColumnHeaders inserts the six <th>s into the existing thead row,

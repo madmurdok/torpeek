@@ -94,11 +94,65 @@ it follows:
    literal. This is not sentiment: the comments explaining the chamfer, the
    scrims and the bracket placement sit *next to* the elements they explain,
    and inside a string they would read as prose about code.
-3. **Parts are found with `this.querySelector` in `connectedCallback`**, with
-   a loud `throw` naming any part that is missing. A missing part is a wiring
-   error, not a state to degrade into - failing there names the part instead
-   of throwing "cannot read property of null" from whichever handler fires
-   first.
+3. **Parts are found with `this.querySelector`, in `wire()`** (called once
+   from `connectedCallback`, and again by the mechanism below): if every part
+   exists, the element wires itself exactly as it always did; if one is
+   missing, it fails **loudly by name, unless the element's own markup could
+   still be arriving, in which case it bails quietly and waits.**
+
+   **Corrected by TOR-205, and worth stating what was right and what was
+   wrong about the original rule.** `connectedCallback` throwing on the first
+   missing part was right for the case it was written for: a wrapper deleted
+   from `index.html`. That is a wiring error, and `docs/front-end.md`
+   originally called it one without qualification, because every one of the
+   six elements' markup was fully parsed before `app.js`'s deferred
+   `type="module"` script could possibly connect it - so "the part is
+   missing" and "the part is a mistake" were the same fact on this page. They
+   are not the same fact for a consumer whose HTML **streams**: TOR-204's own
+   probe connected `<frame-panel>` after `.lightbox` existed but before
+   `#lightbox-img` did, hit the throw, and never got a second chance -
+   `connectedCallback` does not run again on its own, so the element stayed
+   permanently dead with nothing on screen saying so. A subtree still
+   arriving is not a wiring error; it is a moment in time, and treating it as
+   the former traded a real bug for a worse one.
+
+   **The two cases still have to be told apart, or TOR-192's guard is traded
+   away rather than corrected** - so only the three elements that can
+   actually be connected against an incomplete subtree (`<run-table>`,
+   `<frame-panel>`, `<compare-dialog>` - the three whose markup is parsed,
+   declarative HTML per point 2) grew the mechanism: a `MutationObserver` on
+   the element's own `childList` and `subtree`, created **only** the first
+   time `wire()` finds a part missing, and disconnected the instant wiring
+   succeeds. Its callback re-runs `wire()`; once every part exists, wiring
+   proceeds exactly as `connectedCallback` always did. A part still missing
+   `SETTLE_TIMEOUT_MS` (10s) after the element's first connection is deemed
+   **never**, not **not yet**: `partsNeverArrived()` `console.error()`s the
+   still-missing names (a throw from a timer callback reaches no caller the
+   way the original synchronous throw did, so this is what still says which
+   part is absent) and then throws - TOR-192's guard, delayed but intact.
+   That bound is a stated guess, not a measurement: too short and a
+   legitimately slow stream throws while genuinely still arriving; too long
+   and a truly missing part takes that long to say so out loud, instead of
+   failing on the very next line the way it used to.
+
+   **What this costs, and where it is paid.** One short-lived
+   `MutationObserver` per element instance that connects early - and on
+   torpeek's own page it is never created at all, because `index.html` is
+   fully parsed before `customElements.define` ever runs, so every upgrade
+   here finds a complete subtree on the first try. The cost lands entirely on
+   a consumer that streams, which is the only place the bug existed.
+
+   The other three elements - `<run-detail>`, `<file-list>`, `<file-detail>` -
+   are the exception point 2 above does not cover: since there is one instance
+   per torrent (or per video file) rather than one on the whole page, their
+   markup is a template literal assigned with `this.innerHTML = TEMPLATE`
+   inside `build()`, not declarative HTML in `index.html` (each module's own
+   header carries the reasoning). That assignment is synchronous, so the
+   instant it returns every part it wrote exists in the same turn - there is
+   no window in which one of these three can be connected with part of its
+   subtree missing. For them the original reasoning was never wrong, and
+   their `throw` is unchanged: a missing part there is exactly what it always
+   was, a wiring error, with no "not yet" to distinguish it from.
 4. **Every listener is an instance-bound field**, so `disconnectedCallback`
    removes the same function object `addEventListener` was given. Handlers on
    `window` are the ones that genuinely leak.
@@ -114,7 +168,7 @@ it follows:
    the first closes over the page's token and `document.baseURI`, the second
    writes to the activity log element.
 
-### Two traps this pattern has already paid for
+### Three traps this pattern has already paid for
 
 - **`this` in a function used as a listener.** A `function` declaration
   registered with `addEventListener` gets the LISTENING ELEMENT as its `this`,
@@ -127,6 +181,17 @@ it follows:
   `toggle()` method from the moment it is set. This was caught in TOR-195 by
   executing the code, not by reading it. `TestNoInstanceFieldShadowsAMethod`
   walks every class in every element module because of it.
+- **A loud throw that assumed "missing" always means "wrong".** TOR-192's
+  guard (point 3, above) was right about a wrapper deleted from `index.html`
+  and wrong about a consumer whose HTML streams: TOR-204's own probe
+  connected `<frame-panel>` between two parts of its subtree arriving, hit the
+  throw, and the element stayed dead for the rest of the page's life because
+  `connectedCallback` never runs a second time on its own. TOR-205 is the
+  fix - wait and retry via a `MutationObserver`, bounded by a deadline so a
+  genuinely missing part still fails loudly rather than silently forever -
+  and the trap worth naming here is the one still open in this shape of
+  reasoning: a rule proven right for the failure you were looking at can be
+  wrong about a failure that had not happened yet.
 
 ## Light DOM, and the token consequence
 
