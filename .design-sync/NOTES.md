@@ -306,3 +306,60 @@ classifies correctly does no harm.
 One value-derived case for contrast: `--text: 14px` is `kind: "font"` with no
 annotation at all. Annotate only what the checker gets wrong.
 
+
+---
+
+# What the checker calls a component: NAMED EXPORTS (TOR-209)
+
+Established by changing one variable and re-reading the manifest, not inferred.
+The three candidate rules all fitted the original evidence equally, because in
+`frame-panel.js` the top-level declarations, the exports and the
+capitalised-looking names were the SAME three names - so the first reading
+could not tell them apart at all.
+
+    before:  export { FramePanel, PAN_STEP, ARROWS };
+             components: FramePanel, PAN_STEP, ARROWS      (three)
+
+    after:   export { FramePanel };
+             components: FramePanel                        (one)
+
+`PAN_STEP` and `ARROWS` are still declared at module top level and still read
+inside the element (`panBySteps`, the keydown handler). Only the export list
+changed. So **"every top-level declaration" is falsified** and the rule is the
+module's named exports.
+
+Kind does not matter: `PAN_STEP` is a plain number and it indexed. Do not
+expect the checker to keep classes and skip values.
+
+## The consequence for the other five, and it does not fully go away
+
+Every element module lists its surface in one trailing `export { ... }` block,
+and `app.js` imports exactly ONE name from each of the five - `setServices`.
+Nothing imports any of the classes, and `frame-panel.js` is taken with a bare
+`import "./frame-panel.js"` for the side effect. So the current lists are:
+
+    run-table.js       RunTable, LIVE_COLUMNS, MAX_PROGRESS_SEGMENTS, setServices
+    run-detail.js      RunDetail, DETAIL, LIMIT_LEVER, LIMIT_NOTE, setServices
+    file-list.js       FileList, LIST, WHY_NOT_VIDEO, framesLabel, setServices
+    file-detail.js     (a multi-line list)
+    compare-dialog.js  CompareDialog, setServices
+
+Shipped as they are, that is around twenty entries for five components. Narrowed
+to what each one actually needs - the class, so the component appears, plus
+`setServices`, which `app.js` genuinely imports - it becomes TWO entries each.
+
+**So there is an irreducible residue of one phantom entry per element:
+`setServices` itself.** It cannot simply be dropped: the injected-services
+setter is point 7 of the element pattern (docs/front-end.md) and app.js calls
+it by name. Removing it from the export would break the page to tidy a
+consumer's index, which is the wrong way round. Five phantom entries instead of
+twenty is the realistic target; getting to zero would mean changing how
+services are injected, which is a decision for TOR-208 to take deliberately or
+to accept, not something to smuggle in as a cleanup.
+
+## And a rule for adding a name to any element's export block
+
+An extra name in that block is not free any more: it becomes a component a
+design agent is offered and can do nothing with. Export what is imported, plus
+the class. `frame-panel.js`'s own export line now carries this warning beside
+it, where somebody about to add a name will read it.
