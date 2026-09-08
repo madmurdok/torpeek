@@ -406,3 +406,59 @@ func TestTheStallTickerCannotOutliveTheTable(t *testing.T) {
 		}
 	}
 }
+
+// TestTheDragEndKeepsTheElementAsIts_this pins the shape of one function,
+// which is not normally worth a test - except that this one was wrong in the
+// shipped code and nothing could see it.
+//
+// endColumnDrag runs as a listener on the resize handle, so written as
+// `function endColumnDrag(...)` its `this` is the <span>, and
+// `this.saveColumnWidths(...)` throws TypeError on every drag that ends. The
+// statements before it still run, so the drag LOOKS finished - the "dragging"
+// class comes off and the column keeps its new width on screen. What silently
+// does not happen is the save, so no width ever reaches localStorage and
+// TOR-157's whole point (drag a border and it is remembered) is gone; and
+// syncRunDetailWidth never runs, so TOR-174's recheck after a column drag goes
+// with it.
+//
+// A CONTENT CHECK CANNOT CATCH THE BUG ITSELF. `this.saveColumnWidths(...)`
+// reads exactly as it should whichever way the enclosing function is written -
+// that is why the original passed every guard in this file and only a real
+// drag in a browser, plus the console, found it. So this test does the one
+// thing text CAN do: it pins the arrow form, and says why, so the next person
+// to "tidy" it into a declaration is told what that costs.
+func TestTheDragEndKeepsTheElementAsIts_this(t *testing.T) {
+	// COMMENTS STRIPPED, and not as a formality: the comment this fix left in
+	// run-table.js quotes `function endColumnDrag(...)` while explaining why
+	// that spelling is wrong, so a check over the raw text matches the prose
+	// and fails on the fixed file. Two guards in this same batch were written
+	// against raw text and passed on a commented-out subject for the mirror
+	// image of this reason.
+	js := liveJS(t, runTableJS(t))
+
+	if strings.Contains(js, "function endColumnDrag(") {
+		t.Error("endColumnDrag is a function declaration. It is registered with " +
+			"handle.addEventListener, so `this` inside it is the <span> handle rather than " +
+			"the element, and this.saveColumnWidths(...) throws TypeError on every drag that " +
+			"ends - silently, because the lines before it have already removed the class and " +
+			"the column keeps its width on screen. No width is ever saved and " +
+			"syncRunDetailWidth never runs")
+	}
+	if !strings.Contains(js, "const endColumnDrag = (event) =>") {
+		t.Error("endColumnDrag is no longer `const endColumnDrag = (event) =>`. It has to " +
+			"close over the element's `this` lexically, because it is used as a listener on " +
+			"the handle in four places (pointerup, pointercancel, lostpointercapture, and " +
+			"the no-button-held branch of pointermove) and every one of them would otherwise " +
+			"call it with the handle as `this`")
+	}
+
+	// And the two calls that make the binding matter, so this test fails if the
+	// body is gutted rather than only if the wrapper is rewritten.
+	for _, want := range []string{"this.saveColumnWidths(this.columnWidths);", "this.syncRunDetailWidth();"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("the drag's end no longer calls %q - the arrow form above exists so that "+
+				"this call resolves against the element, and without the call there is "+
+				"nothing for it to resolve", want)
+		}
+	}
+}

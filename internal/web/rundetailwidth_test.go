@@ -127,9 +127,19 @@ func TestSyncRunDetailWidthIsWiredToEveryPlaceThePaneCanChange(t *testing.T) {
 	// two-space one bounds it - this slices instead, from its own declaration
 	// to the addEventListener call that registers it a few lines later, which
 	// is a real anchor rather than a guessed offset.
-	dragStart := strings.Index(js, "function endColumnDrag(event) {")
+	//
+	// AN ARROW, and this test is how the shape change announced itself: it was
+	// a `function` declaration until a browser pass found that `this` inside
+	// it was then the <span> handle, so the this.syncRunDetailWidth() call
+	// below - the very thing this block checks for - threw TypeError on every
+	// drag instead of running. TestTheDragEndKeepsTheElementAsIts_this pins
+	// the arrow form; this anchor has to agree with it, and failing loudly
+	// when it does not is the behaviour that caught the change.
+	dragStart := strings.Index(js, "const endColumnDrag = (event) => {")
 	if dragStart < 0 {
-		t.Fatal("run-table.js has no endColumnDrag(event) function")
+		t.Fatal("run-table.js has no `const endColumnDrag = (event) =>` - it must be an " +
+			"arrow function so `this` is the element rather than the handle it is " +
+			"registered on (see TestTheDragEndKeepsTheElementAsIts_this)")
 	}
 	dragEnd := strings.Index(js[dragStart:], `handle.addEventListener("pointerup", endColumnDrag);`)
 	if dragEnd < 0 {
