@@ -1,0 +1,218 @@
+/* THE PAGE SHELL (TOR-190).
+   Split out of app.css along with the rest of its 96 section banners: the
+   embedded typeface (TOR-120), the page's one global reset (body/h1-h3),
+   the workspace's own flex shell (.workspace/.main), and the two widgets
+   that belong to the page as a whole rather than to any one feature area -
+   the drag-and-drop overlay and the activity log.
+
+   Loaded right after tokens.css and before every area file below, the same
+   way tokens.css itself is loaded ahead of everything (TOR-189): the
+   typeface and the page shell are read by every area that follows, so
+   nothing here should depend on anything after it. Order among the area
+   files below this one is NOT load-bearing on its own - each area's
+   classes are its own namespace - except where a rule's own comment says
+   otherwise (see table.css's .run-priority and filelist.css's
+   .picker-item[data-detail] for the two places order still decides which
+   value wins at equal specificity). */
+
+/* THE TYPEFACE, EMBEDDED (TOR-120).
+   Subsets of IBM Plex, Copyright 2017 IBM Corp., SIL Open Font License 1.1.
+   Full licence text: packaging/licenses/fonts/OFL.txt, and in every release
+   archive under licenses/fonts/. Provenance and hashes: third_party/fonts.lock.
+
+   Presented here as "Torpeek Sans" and "Torpeek Mono" because IBM Plex is
+   released `with Reserved Font Name "Plex"`, and OFL clause 3 forbids a
+   Modified Version from using a reserved name as the primary name shown to
+   users. Every file below is a subset, and a subset deletes glyphs, so every
+   file below is a Modified Version. The rename is the licence being obeyed, not
+   a disguise - the typeface is IBM Plex and the notices say so.
+
+   Loaded by relative URL from the binary's own embedded filesystem, never from
+   fonts.googleapis.com: the UI runs headless on a seedbox behind somebody's
+   proxy, where an external face fails silently and differently per machine.
+
+   Latin, Latin Extended and Cyrillic only. That is a deliberate stopping point,
+   not full coverage: prose and labels are English, but the UI also renders
+   torrent names, which are arbitrary text in arbitrary scripts. A name in a
+   script not covered here falls through the stack in --sans/--mono to the
+   system face, per glyph, and renders - it does not go tofu. Covering every
+   script would cost megabytes to prevent nothing.
+
+   The sans is one variable file per subset spanning 400-700; the mono is two
+   static weights, because Google publishes no variable cut of Plex Mono. See
+   third_party/fonts.lock for why that asymmetry is the smaller answer. */
+
+@font-face {
+  font-family: "Torpeek Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/plex-sans-var-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Torpeek Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/plex-sans-var-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Torpeek Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("fonts/plex-sans-var-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/plex-mono-400-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/plex-mono-400-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/plex-mono-400-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/plex-mono-600-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/plex-mono-600-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Torpeek Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/plex-mono-600-cyrillic.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+/* THE TOKEN RULE MOVED (TOR-189): the whole design system that used to sit
+   here as :root - the palette, the type scale, the spacing rhythm, both glow
+   tokens, --col-w-* and --compare-aspect included - now lives in its own
+   stylesheet, tokens.css, loaded by a second <link> ahead of this file (see
+   index.html and tokens.css's own header comment for why a <link> and not an
+   @import). Every comment that explains what a token MEANS travelled with it
+   unchanged; only the file moved. Every :root reference elsewhere in this
+   file - and there are many, in comments explaining a component's own
+   colour choice - still means exactly what it always meant, just not in this
+   file any more. */
+
+body {
+  margin: 0;
+  font: var(--text)/1.5 var(--sans);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+h1 { font-size: 1.4rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0; }
+h3 {
+  font-size: .72rem;
+  margin: .6rem 0 .2rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+}
+
+/* The whole page: one column that starts with the pinned intake - which
+   since TOR-168 also carries the page's title and its live connection
+   indicator, the left panel's two occupants before that ticket removed the
+   panel and its divider (see TOR-168's own ticket description for their
+   former shape, kept accurate there in case either is wanted back) - above
+   the torrent table, with the selected torrent's detail below.
+   Narrow viewports drop the forced full-height minimum, which mattered when
+   a second column had to be kept the same height as this one. */
+.workspace {
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+  max-width: 76rem;
+  margin: 0 auto;
+}
+
+@media (max-width: 52rem) {
+  .workspace { min-height: 0; }
+}
+
+.main {
+  flex: 1 1 0;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 1.25rem 1.5rem 4rem;
+}
+
+@media (max-width: 52rem) {
+  .main { padding: 1.25rem 1rem 4rem; }
+}
+
+/* Drag-and-drop feedback, shown while a file is dragged over the page. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-dim);
+  border: .4rem dashed var(--accent);
+  z-index: 10;
+  pointer-events: none;
+}
+/* A class selector otherwise beats the UA rule for [hidden] at equal
+   specificity, which would leave this shown at page load. */
+.drop-overlay[hidden] { display: none; }
+.drop-overlay p {
+  background: var(--s1);
+  color: var(--ink);
+  padding: .75rem 1.25rem;
+  border-radius: .5rem;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
+
+/* body no longer carries page padding - the workspace above provides its
+   own - so this recreates it for what comes after: the same horizontal
+   gutter and max-width, still centered. */
+.log-details { max-width: 76rem; margin: 2rem auto 4rem; padding: 0 1rem; box-sizing: border-box; }
+.log-details summary { cursor: pointer; font-size: .85rem; opacity: .75; }
+.log {
+  max-height: 22rem;
+  overflow: auto;
+  padding: .6rem;
+  background: var(--s2);
+  font-family: var(--mono);
+  font-size: .74rem;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  margin-top: .5rem;
+}

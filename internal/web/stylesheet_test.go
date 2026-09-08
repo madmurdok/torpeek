@@ -80,7 +80,7 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 			}
 		case '*':
 			if i+1 < len(css) && css[i+1] == '/' {
-				t.Fatalf("app.css:%d: stray */ with no /* open to close - a "+
+				t.Fatalf("the stylesheet:%d: stray */ with no /* open to close - a "+
 					"comment terminator with nothing before it to terminate", line)
 			}
 		case '{':
@@ -88,7 +88,7 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 			openBraceLines = append(openBraceLines, line)
 		case '}':
 			if depth == 0 {
-				t.Fatalf("app.css:%d: unmatched } - a closing brace with no "+
+				t.Fatalf("the stylesheet:%d: unmatched } - a closing brace with no "+
 					"{ open to close it", line)
 			}
 			depth--
@@ -97,11 +97,11 @@ func TestTheStylesheetIsWellFormed(t *testing.T) {
 	}
 
 	if inComment {
-		t.Fatalf("app.css:%d: /* opened here is never closed - everything "+
+		t.Fatalf("the stylesheet:%d: /* opened here is never closed - everything "+
 			"after it, to the end of the file, is silently commented out", commentOpenedAt)
 	}
 	if depth != 0 {
-		t.Fatalf("app.css:%d: { opened here is never closed (%d brace(s) "+
+		t.Fatalf("the stylesheet:%d: { opened here is never closed (%d brace(s) "+
 			"still open at end of file)", openBraceLines[0], depth)
 	}
 }
@@ -1023,5 +1023,184 @@ func TestSaveAndCancelStayPinnedRegardlessOfEachOther(t *testing.T) {
 	if regexp.MustCompile(`(?s)\.run-detail-cancel\[data-idle\]\s*\{[^}]*display:\s*none`).MatchString(live) {
 		t.Error(".run-detail-cancel[data-idle] sets display: none - that removes Cancel from the " +
 			"flow, which is exactly what reserving its box with visibility was meant to avoid")
+	}
+}
+
+// TestTheConcatenationOrderIsThePagesOwn is what the split made necessary,
+// and it defends a claim that was until now only WRITTEN DOWN.
+//
+// While there was one app.css, "later in the file wins" was a fact about the
+// file, and tick_test.go's byte-offset assertion could read it directly. The
+// split (TOR-189 for :root, TOR-190 for the rest) moved the cascade's second
+// axis out of the stylesheet and into index.html: the order of its <link>
+// elements now decides which of two equal-specificity rules in DIFFERENT
+// files wins, and stylesheet() reproduces that order from a hand-written
+// list, stylesheetFiles, so the tests can keep reading one text.
+//
+// stylesheetFiles' own comment asserts it is "in the exact order index.html
+// links them", and nothing checked that. A list that silently disagrees with
+// the page is the worst of the available failures: every CSS test keeps
+// passing, tick_test.go's byte-offset comparison still returns two numbers
+// and still compares them - against a concatenation the browser never builds.
+// That is the same defect one level up as the one tick_test.go's cursor block
+// was rewritten to remove: an assertion whose message promises a guarantee it
+// does not provide.
+//
+// So the page is the source of truth and the list is checked against it,
+// rather than the two being maintained in parallel and hoped to agree.
+func TestTheConcatenationOrderIsThePagesOwn(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+
+	// Matched in document order, which is the only order that matters here -
+	// FindAllStringSubmatch returns matches left to right, so the resulting
+	// slice IS the cascade order the browser applies.
+	re := regexp.MustCompile(`<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"`)
+	var linked []string
+	for _, m := range re.FindAllStringSubmatch(string(html), -1) {
+		linked = append(linked, m[1])
+	}
+
+	if len(linked) == 0 {
+		t.Fatal("index.html links no stylesheet at all - either the page stopped " +
+			"styling itself or this test's regex stopped matching the markup; " +
+			"both are failures, and a silent pass here would hide either")
+	}
+
+	if len(linked) != len(stylesheetFiles) {
+		t.Fatalf("index.html links %d stylesheets %v, stylesheetFiles has %d %v; "+
+			"every CSS test reads the concatenation of the latter, so a file the "+
+			"page loads and this list omits is a file no test looks at",
+			len(linked), linked, len(stylesheetFiles), stylesheetFiles)
+	}
+
+	for i, href := range linked {
+		if href != stylesheetFiles[i] {
+			t.Errorf("index.html loads %q at position %d, stylesheetFiles has %q there; "+
+				"at equal specificity the later file wins, so a list in a different "+
+				"order than the page builds a cascade the browser never applies - and "+
+				"tick_test.go's byte-offset assertion would then compare offsets "+
+				"inside a fiction and pass\nlinked: %v\nlist:   %v",
+				href, i, stylesheetFiles[i], linked, stylesheetFiles)
+		}
+	}
+}
+
+// positionDecidedPairs are the rule pairs whose winner is decided by POSITION
+// rather than specificity. Each follows the same shape: a GROUPED rule sets a
+// value for several controls at once, and a later STANDALONE rule overrides it
+// for one of them. Both selectors weigh the same, so only order separates them.
+//
+// TOR-190's commit message names all four and states that each pair stayed
+// inside one file, in its original relative order, so no cross-file load order
+// can un-decide it. That statement was true when written and nothing held it
+// true afterwards: only the cursor pair had a test (tick_test.go's byte-offset
+// assertion), and that one reads stylesheet()'s concatenation, which cannot
+// tell "both rules are in filelist.css" from "they are in two files that
+// happen to be concatenated in this order".
+//
+// EACH ANCHOR IS THE RULE'S OWN TEXT, and uniqueness is asserted below rather
+// than assumed. The first version of this test anchored on the bare selectors
+// `.run-cancel` and `.run-priority`, which was inert: `.run-priority` occurs
+// seven times in table.css (:hover, :disabled, :focus-visible), so moving the
+// standalone rule to another file left the substring behind and the guard
+// passed. A guard that cannot fail is worse than none, so the anchors are the
+// full declarations and a match count that is not exactly one fails the test.
+var positionDecidedPairs = []struct {
+	what     string
+	grouped  string
+	override string
+	breakage string
+}{
+	{
+		what:     "the file picker's cursor",
+		grouped:  `.picker-item[data-tick="asked"] .picker-file,`,
+		override: `.picker-item[data-detail="true"] > .picker-file { cursor: pointer; }`,
+		breakage: "an asked row would look inert while still opening its detail (TOR-181/TOR-182)",
+	},
+	{
+		what:     "the queue arrows' opacity",
+		grouped:  ".run-cancel,\n.run-priority {",
+		override: ".run-priority { font-size: .7rem; padding: .3rem .15rem; opacity: .45; }",
+		breakage: "the arrows would take Cancel's weight, and a control that reads as " +
+			"equally weighty as the destructive one beside it is one people hesitate over",
+	},
+	{
+		what:     "the comparison dialog's step font",
+		grouped:  ".compare-step, .compare-flip {",
+		override: ".compare-step { font-family: var(--mono); }",
+		breakage: "the step label would lose its mono figures",
+	},
+	{
+		what:     "the comparison dialog's key hints",
+		grouped:  ".compare-note, .compare-keys {",
+		override: ".compare-keys { font-family: var(--mono); font-size: .72rem; }",
+		breakage: "the key hints would render in the note's font and size",
+	},
+}
+
+// TestEveryPositionDecidedPairStaysInOneFile asserts what the split's safety
+// rests on. It is deliberately a statement about FILES, not about
+// stylesheet()'s concatenated text: within one file the relative order is a
+// fact about that file and survives any reordering of index.html, which is
+// precisely the property that makes a pair safe. A pair spread across two
+// files is not necessarily wrong today - that depends on the link order - but
+// it has stopped being decided by anything local, and that is the regression.
+func TestEveryPositionDecidedPairStaysInOneFile(t *testing.T) {
+	texts := map[string]string{}
+	for _, name := range stylesheetFiles {
+		b, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Fatalf("reading the embedded %s: %v", name, err)
+		}
+		texts[name] = string(b)
+	}
+
+	// holder returns the one stylesheet containing sel, failing if the count
+	// across every served file is anything but exactly one - zero means the
+	// rule was renamed or deleted and this guard has quietly stopped guarding;
+	// more than one means the anchor is too loose to locate anything.
+	holder := func(t *testing.T, what, sel string) string {
+		t.Helper()
+		var in []string
+		total := 0
+		for _, name := range stylesheetFiles {
+			if n := strings.Count(texts[name], sel); n > 0 {
+				in = append(in, name)
+				total += n
+			}
+		}
+		if total != 1 {
+			t.Errorf("%s: %q matches %d times across %v, want exactly 1 - an anchor that "+
+				"matches nothing guards nothing, and one that matches twice cannot say "+
+				"where the rule is", what, sel, total, in)
+			return ""
+		}
+		return in[0]
+	}
+
+	for _, p := range positionDecidedPairs {
+		groupedIn := holder(t, p.what, p.grouped)
+		overrideIn := holder(t, p.what, p.override)
+		if groupedIn == "" || overrideIn == "" {
+			continue
+		}
+
+		if groupedIn != overrideIn {
+			t.Errorf("%s: the grouped rule is in %s and its override in %s, so which one wins "+
+				"is decided by index.html's link order instead of by one file's own "+
+				"contents; %s", p.what, groupedIn, overrideIn, p.breakage)
+			continue
+		}
+
+		css := texts[groupedIn]
+		g, o := strings.Index(css, p.grouped), strings.Index(css, p.override)
+		if o < g {
+			t.Errorf("%s: in %s the override is at byte %d, BEFORE the grouped rule at %d; "+
+				"at equal specificity the later rule wins, so the override no longer "+
+				"overrides anything and %s", p.what, groupedIn, o, g, p.breakage)
+		}
 	}
 }

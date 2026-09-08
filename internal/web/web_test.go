@@ -439,6 +439,15 @@ func TestUploadWhileARunIsGoingIsQueued(t *testing.T) {
 
 // TestServesEmbeddedFrontend is the acceptance criterion in miniature: the
 // binary has to be able to show a UI with nothing beside it on disk.
+//
+// One entry per stylesheet, not just one for "the CSS": TOR-189 split :root
+// into tokens.css and TOR-190 split the rest of what used to be app.css into
+// one file per area (see index.html's own <link> list), and //go:embed
+// assets covering the whole directory is exactly the kind of thing that can
+// look right in dev and 404 a new file in the shipped build if nothing here
+// actually asks the server for it. Each marker is a rule this test already
+// knew to expect from the old single-file app.css, now checked against
+// whichever split file actually declares it.
 func TestServesEmbeddedFrontend(t *testing.T) {
 	fake := &fakeRun{}
 	ts := testServer(t, fake.runner)
@@ -446,7 +455,14 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 	for _, tc := range []struct{ path, contains string }{
 		{"/", "<title>torpeek</title>"},
 		{"/app.js", "WebSocket"},
-		{"/app.css", ".grid"},
+		{"/tokens.css", ":root"},
+		{"/base.css", "@font-face"},
+		{"/intake.css", ".dropzone"},
+		{"/table.css", ".run-table"},
+		{"/detail.css", ".run-detail"},
+		{"/filelist.css", ".picker"},
+		{"/framepanel.css", ".grid"},
+		{"/compare.css", ".compare-stage"},
 	} {
 		resp, err := http.Get(ts.URL + tc.path)
 		if err != nil {
@@ -784,7 +800,12 @@ func TestWorksUnderABasePath(t *testing.T) {
 		t.Errorf("GET /torpeek redirects to %q, want /torpeek/", location)
 	}
 
-	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/app.css"} {
+	// One representative stylesheet, not all nine (TOR-189/TOR-190 split
+	// :root and the rest of what used to be app.css across several files):
+	// this test is about the base-path rewrite applying to every static
+	// asset alike, and TestServesEmbeddedFrontend is where every split file
+	// is checked by name.
+	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/tokens.css"} {
 		resp, err := http.Get(ts.URL + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
@@ -880,7 +901,12 @@ func TestConfiguredBasePathIsServedEndToEnd(t *testing.T) {
 
 	// The shell itself is not gated (authGuard's doc comment says why), so
 	// it loads with no token at all.
-	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/app.css"} {
+	// One representative stylesheet, not all nine (TOR-189/TOR-190 split
+	// :root and the rest of what used to be app.css across several files):
+	// this test is about the base-path rewrite applying to every static
+	// asset alike, and TestServesEmbeddedFrontend is where every split file
+	// is checked by name.
+	for _, path := range []string{"/torpeek/", "/torpeek/app.js", "/torpeek/tokens.css"} {
 		resp, err := http.Get(root + path)
 		if err != nil {
 			t.Fatalf("GET %s: %v", path, err)
