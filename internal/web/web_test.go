@@ -851,11 +851,16 @@ func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
 	// no URL at all today, and that is exactly the state worth keeping - the
 	// table draws from an entry and asks the page for anything that needs
 	// fetching, so the first absolute path to appear here would be the first
-	// sign that stopped being true. (frame-panel.js and compare-dialog.js are
-	// NOT in this list and should be; see the ticket's own report.)
+	// sign that stopped being true. frame-panel.js and compare-dialog.js
+	// were missing from BOTH lists until TOR-194's report pointed it out:
+	// TOR-192 and TOR-193 added the modules without adding them here, so two
+	// served scripts went unswept for a font CDN and unwalked for their own
+	// import specifiers. Adding a module to the page and not to these lists
+	// is the easy half of the mistake to make, which is why each list now
+	// says out loud that it is the set of SERVED scripts.
 	for _, name := range []string{
 		"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
-		"assets/run-table.js",
+		"assets/run-table.js", "assets/frame-panel.js", "assets/compare-dialog.js",
 	} {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
@@ -1871,12 +1876,17 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// still cannot run past the end of one import statement.
 	spec := regexp.MustCompile(`(?m)^\s*(?:import|export)\b[^'"]*?from\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]`)
 
-	seen := 0
-	// run-table.js is walked from TOR-194 because it has imports of its own
-	// (state.js's derivations), which is what makes it a module whose
-	// specifier can 404 rather than a leaf. Its own import of ./state.js is
-	// resolved by this walk exactly the way app.js's is.
-	for _, name := range []string{"app.js", "state.js", "events.js", "run-table.js"} {
+	seen := map[string]int{}
+	// EVERY SERVED SCRIPT, which is the list this walk has twice failed to
+	// be: run-table.js joined it with TOR-194, and frame-panel.js and
+	// compare-dialog.js only when TOR-194's report noticed TOR-192 and
+	// TOR-193 had added modules to the page without adding them here. A
+	// module absent from this list is a module whose import specifiers
+	// nothing resolves.
+	for _, name := range []string{
+		"app.js", "state.js", "events.js",
+		"run-table.js", "frame-panel.js", "compare-dialog.js",
+	} {
 		src, err := embedded.ReadFile("assets/" + name)
 		if err != nil {
 			t.Errorf("reading the embedded %s: %v - index.html or another module names it, "+
@@ -1888,7 +1898,7 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 			if target == "" {
 				target = m[2]
 			}
-			seen++
+			seen[name]++
 			// A bare or absolute specifier would not survive the base path,
 			// which TestTheFrontendUsesNoAbsolutePaths covers for `src="/`;
 			// an import specifier is a different syntax and needs saying here.
@@ -1908,19 +1918,32 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// A regex that stopped matching would make every check above vacuous, and
 	// the split's whole premise is that there ARE imports to follow.
 	//
-	// A COUNT rather than a bare "more than none", because "none at all" was
-	// never the way this went vacuous: the multi-line shape above was missed
-	// while three single-line imports kept the total comfortably non-zero.
-	// Seven is what the four modules named here actually carry today, measured
-	// rather than assumed: app.js five (state, events, frame-panel,
-	// compare-dialog, run-table), events.js one, run-table.js one, state.js
-	// none. A floor, not an equality, so adding an import is not a failing
-	// test - but silently matching fewer than the files hold is.
-	if seen < 7 {
-		t.Errorf("only %d import specifiers were found across the scripts named above, and they hold at "+
-			"least 7 - so some of them were not read at all and this test verified less than it looks "+
-			"like. Either the module split was undone, or the pattern above no longer matches the "+
-			"syntax the files use (a multi-line `import {\\n...\\n} from` is the shape it has already "+
-			"missed once)", seen)
+	// CHECKED PER MODULE, not as one total, and that is the lesson rather
+	// than a refinement. "None at all" was never how this went vacuous: the
+	// multi-line `import {\n...\n} from` shape was invisible to the pattern
+	// while app.js's three SINGLE-line imports kept the total comfortably
+	// non-zero, so a total - even an exact one - cannot tell "every module
+	// was read" from "one module was read three times". A per-module floor
+	// can, and unlike an exact total it does not fail because somebody added
+	// a legitimate import.
+	//
+	// state.js and frame-panel.js are the leaves: they import nothing, by
+	// design, and demanding a specifier from them would be demanding a
+	// dependency they are better without.
+	for _, name := range []string{"app.js", "events.js", "run-table.js", "compare-dialog.js"} {
+		if seen[name] == 0 {
+			t.Errorf("no import specifier was found in %s, which does import - so this walk did "+
+				"not read it and every check above verified nothing for it. Either the module "+
+				"split was undone, or the pattern no longer matches the syntax the file uses "+
+				"(a multi-line `import {\n...\n} from` is the shape it has already missed once)",
+				name)
+		}
+	}
+	for _, name := range []string{"state.js", "frame-panel.js"} {
+		if seen[name] != 0 {
+			t.Errorf("%s has grown %d import(s). That is not wrong in itself, but it is one of "+
+				"the two leaves of the graph - nothing under it to fetch - so the fact is worth "+
+				"stating deliberately rather than discovering", name, seen[name])
+		}
 	}
 }
