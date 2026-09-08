@@ -23,16 +23,21 @@ import (
 // landed point whether replayed or freshly captured - which is exactly the
 // signal the row's own bar/line must also read from.
 //
-// This is the same "reach into app.js" guard TestTheServedPageOffersToppingUpAndRetrying
-// (again_test.go) uses: there is no JS runner in this project, so served
-// text is what can be asserted here. It catches the fix being reverted or
-// never wired into the events that carry a landed frame; it CANNOT prove the
-// bar actually renders correctly - that is the browser pass TOR-167's own
-// notes require.
+// This is the same "reach into the served source" guard
+// TestTheServedPageOffersToppingUpAndRetrying (again_test.go) uses. It
+// catches the fix being reverted or never wired into the events that carry a
+// landed frame; it CANNOT prove the bar actually renders correctly - that is
+// the browser pass TOR-167's own notes require.
+//
+// SINCE TOR-191 IT READS events.js: applyFrameProgress folds a message's own
+// count into what the grid has already proven landed, which is a state change
+// driven by a message, so it moved with the handlers that call it. The row's
+// two fields it writes (entry.framesDone/framesTotal) are declared in
+// state.js's newRunState, and renderRunProgress in app.js is what draws them.
 func TestTopUpProgressReadsLandedFramesNotJustTheHeartbeat(t *testing.T) {
-	js, err := embedded.ReadFile("assets/app.js")
+	js, err := embedded.ReadFile("assets/events.js")
 	if err != nil {
-		t.Fatalf("reading the embedded page: %v", err)
+		t.Fatalf("reading the embedded event layer: %v", err)
 	}
 	page := string(js)
 
@@ -48,7 +53,7 @@ func TestTopUpProgressReadsLandedFramesNotJustTheHeartbeat(t *testing.T) {
 		"Math.max(landed, wireDone",
 	} {
 		if !strings.Contains(page, want) {
-			t.Errorf("the served app.js never mentions %q", want)
+			t.Errorf("the served events.js never mentions %q", want)
 		}
 	}
 
@@ -56,7 +61,15 @@ func TestTopUpProgressReadsLandedFramesNotJustTheHeartbeat(t *testing.T) {
 	// straight onto entry.framesDone, with nothing else able to raise it
 	// once a replay landed frames the heartbeat never mentioned.
 	if strings.Contains(page, "entry.framesDone = ev.frames_done") {
-		t.Error("the served app.js still sets entry.framesDone straight from the heartbeat alone; " +
+		t.Error("the served events.js still sets entry.framesDone straight from the heartbeat alone; " +
 			"a top-up's replayed frames need a way to raise it too (TOR-167)")
+	}
+
+	// And the row's bar reads those two fields rather than a message, which is
+	// the half that stayed in app.js.
+	if bar := jsFunc(t, appJS(t), "renderRunProgress"); !strings.Contains(bar, "entry.framesTotal") ||
+		!strings.Contains(bar, "entry.framesDone") {
+		t.Error("app.js's renderRunProgress no longer draws from entry.framesDone/framesTotal - " +
+			"the bar and the line above it would be two readings of one thing again")
 	}
 }

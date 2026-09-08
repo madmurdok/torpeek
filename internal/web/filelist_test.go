@@ -45,6 +45,33 @@ func servedScript(t *testing.T) string {
 	return string(b)
 }
 
+// jsLiteralAfter returns the body of the `{ ... }` object literal that opens
+// on the line `open`, searching from `after` - so a file holding two literals
+// of the same shape (state.js's newRunState and newFileState both open with
+// "  return {") can have either of them asked for by name.
+//
+// Anchored on a two-space-indented close, which is what every literal this is
+// used on actually has: the fields sit at four spaces and nested objects
+// deeper, so the first "\n  };" is the literal's own.
+func jsLiteralAfter(t *testing.T, js, after, open string) string {
+	t.Helper()
+	at := strings.Index(js, after)
+	if at < 0 {
+		t.Fatalf("no %q to search from - this check is anchored on it", after)
+	}
+	rest := js[at:]
+	start := strings.Index(rest, open)
+	if start < 0 {
+		t.Fatalf("no %q literal after %q", open, after)
+	}
+	rest = rest[start+len(open):]
+	end := strings.Index(rest, "\n  };")
+	if end < 0 {
+		t.Fatalf("the %q literal after %q is never closed at a two-space indent", open, after)
+	}
+	return rest[:end]
+}
+
 // TestTheFileListIsTheRowsContentNotAState is the shape of the whole ticket.
 // Before it, one line in syncEntry read `state === "needs-action"` and that
 // alone decided whether the list was on screen - so a running, finished or
@@ -103,7 +130,7 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 	}
 }
 
-// TestNoRunEntryFieldIsDeclaredTwice exists because this ticket walked into
+// TestNoRunEntryFieldIsDeclaredTwice exists because TOR-180 walked into
 // exactly that and got away with it for a while. The run entry is one large
 // object literal, and a duplicate key there is not an error in JavaScript -
 // the LAST one silently wins. TOR-180 added a `files` list beside the
@@ -115,45 +142,85 @@ func TestTheFileListIsTheRowsContentNotAState(t *testing.T) {
 // makes it worth a standing check rather than a lesson: the entry gains
 // fields in most tickets that touch this file, and every one of them is a
 // chance to shadow a field declared two hundred lines away.
+//
+// SINCE TOR-191 THERE ARE TWO LITERALS PER ENTRY AND THE SCAN COVERS THEIR
+// UNION, which is strictly more than it could see before. An entry is the
+// data half state.js owns (newRunState) spread into the DOM half app.js adds
+// (`const entry = {`), and they are ONE object - so a key declared in the
+// second still shadows the same key in the first, silently, exactly as two
+// keys in one literal always did. Scanning either one alone would have made
+// the split a way to reintroduce TOR-180's bug invisibly.
+//
+// The file entry is scanned the same way and for the same reason, one level
+// in: newFileState plus fileBlock's own literal. It had no check at all
+// before this ticket, and it grew three fields in it (media, heartbeat,
+// sheetURL).
 func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
-	js := servedScript(t)
+	page := servedScript(t)
+	derive := stateJS(t)
 
-	start := strings.Index(js, "const entry = {")
-	if start < 0 {
-		t.Fatal("app.js no longer builds a `const entry = {` literal - this check is " +
-			"anchored on it")
-	}
-	end := strings.Index(js[start:], "\n  };")
-	if end < 0 {
-		t.Fatal("the run entry literal is never closed")
-	}
-	// Comments first: several of them name other fields in prose, including
-	// this very collision.
-	body := regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(js[start:start+end], "")
+	for _, subject := range []struct {
+		what   string
+		least  int
+		must   []string
+		halves map[string]string
+	}{
+		{
+			what:  "run entry",
+			least: 20,
+			// The two that actually collided, named so a later rename cannot
+			// quietly remove the thing this test is about.
+			must: []string{"files", "fileList"},
+			halves: map[string]string{
+				"state.js's newRunState": jsLiteralAfter(t, derive, "function newRunState(id) {", "  return {"),
+				"app.js's newRunEntry":   jsLiteralAfter(t, page, "function newRunEntry(id) {", "  const entry = {"),
+			},
+		},
+		{
+			what:  "file entry",
+			least: 10,
+			// The three TOR-191 added, which are the whole reason a file's
+			// metadata, progress line and contact sheet can be redrawn from
+			// state at all.
+			must: []string{"media", "heartbeat", "sheetURL"},
+			halves: map[string]string{
+				"state.js's newFileState": jsLiteralAfter(t, derive, "function newFileState(index, entry) {", "  return {"),
+				"app.js's fileBlock":      jsLiteralAfter(t, page, "function fileBlock(entry, index) {", "  fentry = {"),
+			},
+		},
+	} {
+		// Comments first: several of them name other fields in prose,
+		// including this very collision.
+		comments := regexp.MustCompile(`(?m)//.*$`)
+		key := regexp.MustCompile(`(?m)(?:^|[{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:`)
 
-	// A key is a name that opens the literal, follows a comma, or opens a
-	// line - which is every shape this literal actually uses, shorthand
-	// (`id`, `detailEl`) aside, and shorthand cannot collide silently
-	// because it names a variable that has to exist.
-	seen := map[string]bool{}
-	for _, m := range regexp.MustCompile(`(?m)(?:^|[{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:`).FindAllStringSubmatch(body, -1) {
-		if seen[m[1]] {
-			t.Errorf("the run entry declares %q twice. JavaScript keeps the LAST one "+
-				"silently, so whichever reader wanted the first is now reading the "+
-				"other one's type", m[1])
+		seen := map[string]string{}
+		for where, body := range subject.halves {
+			body = comments.ReplaceAllString(body, "")
+			for _, m := range key.FindAllStringSubmatch(body, -1) {
+				// A key is a name that opens the literal, follows a comma, or
+				// opens a line - which is every shape these literals actually
+				// use, shorthand (`id`, `detailEl`) aside, and shorthand
+				// cannot collide silently because it names a variable that
+				// has to exist.
+				if prev, ok := seen[m[1]]; ok {
+					t.Errorf("the %s declares %q twice - in %s and in %s. JavaScript keeps the "+
+						"LAST one silently (and a spread loses to a literal key beside it), so "+
+						"whichever reader wanted the first is now reading the other one's type",
+						subject.what, m[1], prev, where)
+				}
+				seen[m[1]] = where
+			}
 		}
-		seen[m[1]] = true
-	}
-	if len(seen) < 20 {
-		t.Fatalf("only %d fields were found in the run entry; the scan is broken, not "+
-			"the literal", len(seen))
-	}
-	// The two that actually collided, named so a later rename cannot quietly
-	// remove the thing this test is about.
-	for _, want := range []string{"files", "fileList"} {
-		if !seen[want] {
-			t.Errorf("the run entry has no %q field - if it was renamed, rename it here "+
-				"too rather than leaving this check pointing at nothing", want)
+		if len(seen) < subject.least {
+			t.Fatalf("only %d fields were found across the %s's two literals; the scan is "+
+				"broken, not the literals", len(seen), subject.what)
+		}
+		for _, want := range subject.must {
+			if _, ok := seen[want]; !ok {
+				t.Errorf("the %s has no %q field - if it was renamed, rename it here too rather "+
+					"than leaving this check pointing at nothing", subject.what, want)
+			}
 		}
 	}
 }
@@ -167,14 +234,21 @@ func TestNoRunEntryFieldIsDeclaredTwice(t *testing.T) {
 func TestTheFileListRendersEveryFileAndFallsBackWhenItCannotKnow(t *testing.T) {
 	js := servedScript(t)
 	fn := jsFunc(t, js, "renderFileList")
+	// SINCE TOR-191 the two halves of this are in two files, and each is
+	// where it belongs: reading the message is the event layer's
+	// (applyFileList), building the rows is the page's (renderFileList).
+	// Neither half alone is the guard - a fallback that reached the entry but
+	// no row that read it, or rows built off a list nothing filled, would
+	// each satisfy one of them.
+	apply := jsFunc(t, eventsJS(t), "applyFileList")
 
-	if !regexp.MustCompile(`entry\.fileList = ev\.files \|\| entry\.videos`).MatchString(fn) {
-		t.Error("renderFileList does not fall back from ev.files to the video list - an " +
+	if !regexp.MustCompile(`entry\.fileList = ev\.files \|\| entry\.videos`).MatchString(apply) {
+		t.Error("applyFileList does not fall back from ev.files to the video list - an " +
 			"absent \"files\" key means \"cannot say\", never \"holds nothing\", and no " +
 			"torrent holds no files")
 	}
-	if !strings.Contains(fn, "entry.fileListKnown = !!ev.files") {
-		t.Error("renderFileList does not record whether the whole list was actually " +
+	if !strings.Contains(apply, "entry.fileListKnown = !!ev.files") {
+		t.Error("applyFileList does not record whether the whole list was actually " +
 			"known - without it the title reports one list's length as the other's")
 	}
 	// The rows come from the whole list, and tickability from the video one.

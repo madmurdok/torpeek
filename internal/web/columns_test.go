@@ -18,9 +18,10 @@ import (
 // never render or sort as though it were a measured zero), and availability
 // is copies per piece, not a percentage.
 //
-// Every test in this file but one reads app.js as served text (embedded FS,
-// same as TestServesEmbeddedFrontend does for "WebSocket" and ".grid") and
-// asserts on substrings of it - this file's own precedent since TOR-139, and
+// Every test in this file but one reads one of the shipped modules as served
+// text (embedded FS, same as TestServesEmbeddedFrontend does for "WebSocket"
+// and ".grid") and asserts on substrings of it - this file's own precedent
+// since TOR-139, and
 // the right call while the risk was a deletion or a rename: delete the
 // absent-sinking branch from compareEntries and
 // TestAbsentValuesSortToTheEndRegardlessOfDirection reddens, because the
@@ -30,6 +31,22 @@ import (
 // computes passes all of them (TOR-148 measured this - see
 // TestCompareEntriesAndSortValueExecuteForReal's own doc for the exact
 // rewrite and which guards below stay green through it).
+//
+// WHICH MODULE EACH TEST READS, since TOR-191 split app.js into three. The
+// derivations these tests are mostly about - sortValue, compareEntries,
+// hasLive, arrivalOrdinal and the cell helpers - are state.js's now, and the
+// two extractors below take whichever source they are handed rather than
+// reaching for app.js themselves. The exports are transparent to both: each
+// module lists its surface in one `export { ... };` block at the bottom
+// instead of welding `export` onto every declaration, precisely so that
+// `function sortValue(entry, key) {` is still the exact text a test can lift
+// and a node process can run.
+//
+// A test that straddles two modules now says which half it expects where -
+// TestLiveColumnsAreWiredIntoBothHeadersAndSorting is the clearest case, and
+// the split makes its subject MORE worth guarding rather than less: the
+// header list and the sort switch can now drift apart in two files instead of
+// one.
 //
 // TOR-148's DECISION, recorded here because seven front-end extraction
 // tickets after it build on the answer: yes, this suite may depend on a JS
@@ -58,8 +75,8 @@ func appJS(t *testing.T) string {
 	return string(b)
 }
 
-// extractJSFunction pulls one top-level function's EXACT source out of the
-// shipped app.js, by name - the same "match the closing brace at the start
+// extractJSFunction pulls one top-level function's EXACT source out of one of
+// the shipped modules, by name - the same "match the closing brace at the start
 // of a line" shape TestAbsentValuesSortToTheEndRegardlessOfDirection already
 // uses for compareEntries alone, generalised so
 // TestCompareEntriesAndSortValueExecuteForReal can assemble a node program
@@ -69,13 +86,18 @@ func appJS(t *testing.T) string {
 // own nested { } blocks (compareEntries and sortValue both do): every nested
 // close sits indented, so the first bare "}" the regex can reach is the
 // function's own.
+//
+// It also steps over a module's `export` keyword for free, since the match
+// starts at `function NAME(` - which is what lets the harness below run text
+// lifted out of an ES module in a plain node script.
 func extractJSFunction(t *testing.T, js, name string) string {
 	t.Helper()
 	re := regexp.MustCompile(`(?s)function ` + regexp.QuoteMeta(name) + `\([^)]*\) \{.*?\n\}`)
 	m := re.FindString(js)
 	if m == "" {
-		t.Fatalf("app.js has no function %s(...) to extract - a rename or a signature change would strand this "+
-			"test on a function that no longer exists under this name", name)
+		t.Fatalf("the module handed to this test has no function %s(...) to extract - a rename, a signature "+
+			"change, or a move to another of the three modules would strand this test on a function that no "+
+			"longer exists under this name here", name)
 	}
 	return m
 }
@@ -89,7 +111,8 @@ func extractJSConst(t *testing.T, js, name string) string {
 	re := regexp.MustCompile(`const ` + regexp.QuoteMeta(name) + ` = \{[^\n]*\};`)
 	m := re.FindString(js)
 	if m == "" {
-		t.Fatalf("app.js has no const %s = {...}; to extract", name)
+		t.Fatalf("the module handed to this test has no const %s = {...}; to extract - it has to stay one "+
+			"physical line for this to lift it", name)
 	}
 	return m
 }
@@ -102,15 +125,22 @@ func extractJSConst(t *testing.T, js, name string) string {
 // "when" default, which would silently sort every new column exactly like
 // the date column instead of by its own figure). A column present in one and
 // not the other is a column that looks wired but is not.
+//
+// THE TWO HALVES NOW SIT IN TWO FILES (TOR-191): the header list is the
+// page's (app.js) and the sort switch is a derivation over an entry
+// (state.js). That makes this test's own subject more likely rather than
+// less - a column can now be added to one file by somebody who never opens
+// the other - so it reads both and says which half is missing.
 func TestLiveColumnsAreWiredIntoBothHeadersAndSorting(t *testing.T) {
-	js := appJS(t)
+	headers := appJS(t)
+	sorting := stateJS(t)
 
 	for _, key := range []string{"peers", "seeds", "download_bps", "upload_bps", "availability", "priority"} {
-		if !strings.Contains(js, `key: "`+key+`"`) {
+		if !strings.Contains(headers, `key: "`+key+`"`) {
 			t.Errorf("app.js's LIVE_COLUMNS declares no %q column - it would have no header cell, so nothing to click", key)
 		}
-		if !strings.Contains(js, `case "`+key+`":`) {
-			t.Errorf("app.js's sortValue() has no case for %q - its header would exist but clicking it would fall "+
+		if !strings.Contains(sorting, `case "`+key+`":`) {
+			t.Errorf("state.js's sortValue() has no case for %q - its header would exist but clicking it would fall "+
 				"through to the default (When) ordering instead of sorting by its own figure", key)
 		}
 	}
@@ -148,7 +178,7 @@ func TestAvailabilityHeaderNamesItsUnitOnThePage(t *testing.T) {
 // substring check for "hasLive(entry)" alone would stay green through
 // exactly the regression this test exists to catch.
 func TestAbsentLiveFiguresAreNullNeverZero(t *testing.T) {
-	js := appJS(t)
+	js := stateJS(t)
 
 	for _, want := range []string{
 		`case "peers": return hasLive(entry) ? entry.live.peers : null;`,
@@ -157,7 +187,7 @@ func TestAbsentLiveFiguresAreNullNeverZero(t *testing.T) {
 		`case "upload_bps": return hasLive(entry) && entry.live.upload_bps != null ? entry.live.upload_bps : null;`,
 	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("app.js's sortValue() does not contain %q - an absent reading may be falling back to 0 "+
+			t.Errorf("state.js's sortValue() does not contain %q - an absent reading may be falling back to 0 "+
 				"(a real, comparable value) instead of null (excluded from comparison, see compareEntries)", want)
 		}
 	}
@@ -168,10 +198,10 @@ func TestAbsentLiveFiguresAreNullNeverZero(t *testing.T) {
 	// checks the block returns null on both of the ways it can be absent.
 	m := regexp.MustCompile(`case "availability": \{([^}]*)\}`).FindStringSubmatch(js)
 	if m == nil {
-		t.Fatal(`app.js's sortValue() has no case "availability": { ... } block`)
+		t.Fatal(`state.js's sortValue() has no case "availability": { ... } block`)
 	}
 	if !strings.Contains(m[1], "return s ? s.copies_per_piece : null;") {
-		t.Errorf("app.js's availability sortValue case does not return null when the swarm reading is absent: %q", m[1])
+		t.Errorf("state.js's availability sortValue case does not return null when the swarm reading is absent: %q", m[1])
 	}
 }
 
@@ -190,11 +220,11 @@ func TestAbsentLiveFiguresAreNullNeverZero(t *testing.T) {
 // direction, which is exactly the bug this test exists to catch, and a
 // regex for "aAbsent" alone would not notice the reordering.
 func TestAbsentValuesSortToTheEndRegardlessOfDirection(t *testing.T) {
-	js := appJS(t)
+	js := stateJS(t)
 
 	m := regexp.MustCompile(`(?s)function compareEntries\(a, b\) \{.*?\n\}`).FindString(js)
 	if m == "" {
-		t.Fatal("app.js has no compareEntries(a, b) function to check")
+		t.Fatal("state.js has no compareEntries(a, b) function to check")
 	}
 
 	absentIdx := strings.Index(m, "return aAbsent ? 1 : -1;")
@@ -306,15 +336,22 @@ type jsSortCase struct {
 	Entries []jsEntry `json:"entries"`
 }
 
-// compareEntriesHarness assembles a standalone node program out of app.js's
+// compareEntriesHarness assembles a standalone node program out of state.js's
 // OWN shipped source - the exact functions compareEntries' call graph
 // reaches, extracted by name rather than retyped, so a real change to any of
 // them changes what this test runs. Nothing DOM-shaped is pulled in: state,
 // hasLive, availabilityReading, arrivalOrdinal, badgeLabel, displayName and
 // shortId (displayName's own last-resort fallback) are the whole of what
 // compareEntries and sortValue call, and every one of them is pure over an
-// `entry` object - see app.js's own "Table sorting" block comment, just
+// `entry` object - see state.js's own "Table sorting" block comment, just
 // above hasLive, for why that block was written to stay that way.
+//
+// SINCE TOR-191 THE WHOLE FILE IS PURE IN THAT SENSE, which is why
+// eventstate_test.go can import state.js outright rather than lifting eight
+// functions out of it. This harness still lifts them: it CONCATENATES them
+// into one flat script, with no imports and no module wrapper, so what it
+// proves is that each of these declarations is self-contained on its own
+// text - the property TOR-148 bought and this ticket had to not break.
 func compareEntriesHarness(t *testing.T, js string) string {
 	t.Helper()
 
@@ -429,7 +466,7 @@ func runCompareEntriesCases(t *testing.T, js string, cases []jsSortCase) [][]str
 // definition, and reflect.DeepEqual/slices.Equal against the fixed
 // expectation fails.
 func TestCompareEntriesAndSortValueExecuteForReal(t *testing.T) {
-	js := appJS(t)
+	js := stateJS(t)
 
 	live := func(peers int) *jsLive { return &jsLive{Peers: peers} }
 	swarm := func(copies float64) *jsLive { return &jsLive{Swarm: &jsSwarmReading{CopiesPerPiece: copies}} }
@@ -551,7 +588,13 @@ func TestCompareEntriesAndSortValueExecuteForReal(t *testing.T) {
 // (there is exactly ONE notion of queue position, and the page renders it
 // rather than deciding it), opposite direction.
 func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T) {
-	js := appJS(t)
+	page := appJS(t)
+	events := eventsJS(t)
+	derive := stateJS(t)
+	// The retirement below has to hold across the WHOLE front end, not just
+	// wherever the derivation used to live - a split is a fine place to
+	// smuggle one back in.
+	all := page + "\n" + events + "\n" + derive
 
 	// The derived version has to be GONE, not merely unused: two notions of
 	// queue position is exactly what a reorder makes disagree, which is the
@@ -559,18 +602,28 @@ func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T)
 	// comment explaining the retirement is not a second notion, so this looks
 	// for the call/definition shape rather than the bare word.
 	for _, gone := range []string{"function queueRank(", "queueRank(entry)", "refreshQueuePositions("} {
-		if strings.Contains(js, gone) {
-			t.Errorf("app.js still contains %q - TOR-139's client-side queue ranking must be retired now that "+
-				"the server reports a reorderable position, not kept alongside it", gone)
+		if strings.Contains(all, gone) {
+			t.Errorf("the front end still contains %q - TOR-139's client-side queue ranking must be retired now "+
+				"that the server reports a reorderable position, not kept alongside it", gone)
 		}
 	}
 
-	// And the server's own two fields have to be the ones that are read -
-	// from the listing at page load, and from run_state for every row a
-	// reorder, a cancel or a start moved afterwards.
-	for _, want := range []string{"row.queue_position", "ev.queue_position", "row.priority", "ev.priority"} {
-		if !strings.Contains(js, want) {
-			t.Errorf("app.js never reads %q - the queue column would not be showing what the server actually holds", want)
+	// And the server's own two fields have to be the ones that are read. Since
+	// TOR-191 they are read in two places for two reasons, and each belongs
+	// where it is: the LISTING's fields at page load (app.js's loadRuns, which
+	// is the only thing that reads GET /runs), and run_state's own on every
+	// message afterwards (events.js, which is the only thing that reads the
+	// socket).
+	for _, want := range []string{"row.queue_position", "row.priority"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("app.js's loadRuns never reads %q - the queue column would not be showing what the "+
+				"server actually holds at page load", want)
+		}
+	}
+	for _, want := range []string{"ev.queue_position", "ev.priority"} {
+		if !strings.Contains(events, want) {
+			t.Errorf("events.js never reads %q - a reorder, a cancel or a start would move a row's place in "+
+				"the queue with nothing on this page following it", want)
 		}
 	}
 
@@ -579,9 +632,9 @@ func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T)
 	// 1-based, so zero means "not waiting at all" and sorting it as a real
 	// value would file a finished run among the waiting ones (see
 	// compareEntries' own absence handling).
-	if !strings.Contains(js, "return entry.queuePosition > 0 ? entry.queuePosition : null;") {
-		t.Error("app.js's queuePosition() does not answer null for a row with no position - a 0 would sort and " +
-			"render as a real place in a 1-based queue")
+	if !strings.Contains(derive, "return entry.queuePosition > 0 ? entry.queuePosition : null;") {
+		t.Error("state.js's queuePosition() does not answer null for a row with no position - a 0 would sort " +
+			"and render as a real place in a 1-based queue")
 	}
 	// The Queue column must sort by the figure it DISPLAYS. That subject is
 	// unchanged since TOR-140; which figure it is changed in TOR-156, when
@@ -590,15 +643,15 @@ func TestQueueColumnRendersTheServersOwnPositionAndNeverDerivesOne(t *testing.T)
 	// still checked just above, because that line still needs it). A header
 	// left sorting by the position would now reorder the table by a number
 	// most rows do not have while printing one they all do.
-	if !strings.Contains(js, `case "priority": return arrivalOrdinal(entry);`) {
-		t.Error(`app.js's sortValue() does not answer the "priority" column from arrivalOrdinal() - the Queue ` +
+	if !strings.Contains(derive, `case "priority": return arrivalOrdinal(entry);`) {
+		t.Error(`state.js's sortValue() does not answer the "priority" column from arrivalOrdinal() - the Queue ` +
 			`header would sort by something other than the figure it displays`)
 	}
 	// And the ordinal's own absent case, the same null-not-zero shape
 	// queuePosition() is held to above: only a row read off disk has none,
 	// and a 0 would sort it as though it had been added before everything.
-	if !strings.Contains(js, "return entry.arrival > 0 ? entry.arrival : null;") {
-		t.Error("app.js's arrivalOrdinal() does not answer null for a row with no ordinal - a 0 would sort " +
+	if !strings.Contains(derive, "return entry.arrival > 0 ? entry.arrival : null;") {
+		t.Error("state.js's arrivalOrdinal() does not answer null for a row with no ordinal - a 0 would sort " +
 			"and render as a real place in a 1-based count")
 	}
 }
@@ -971,24 +1024,40 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 // The console carried no errors or exceptions throughout.
 
 // TestFileDoneNoLongerLinksManifest is TOR-171: the page has no use for the
-// raw JSON manifest a finished file's event carries, so onFileDone must not
-// turn ev.manifest_url into a link the way it still does for ev.sheet_url -
-// unrelated to this file's own ticket, but placed here because app.js's
-// served-text tests all live in this one file. manifest_url itself stays on
-// the wire (server.go's record() is unchanged) for whatever else reads the
-// NDJSON stream - this test is only about what the page renders from it.
+// raw JSON manifest a finished file's event carries, so nothing may turn
+// manifest_url into a link the way it still does for the contact sheet -
+// unrelated to this file's own ticket, but placed here because the front
+// end's served-text tests mostly live in this one file. manifest_url itself
+// stays on the wire (server.go's record() is unchanged) for whatever else
+// reads the NDJSON stream - this test is only about what the page renders
+// from it.
+//
+// SINCE TOR-191 THE GUARD IS STRONGER, because the field is now kept or not
+// kept rather than linked or not linked: events.js records the contact sheet
+// on the file entry (fentry.sheetURL) and deliberately records nothing for
+// the manifest, so a manifest link is not merely absent from the renderer -
+// there is no state for one to be drawn from. Both halves are checked, since
+// either alone could be satisfied while the other brought it back.
 func TestFileDoneNoLongerLinksManifest(t *testing.T) {
-	js := appJS(t)
+	page := appJS(t)
+	events := eventsJS(t)
 
-	if strings.Contains(js, `link(ev.manifest_url`) {
-		t.Error("app.js's onFileDone still turns ev.manifest_url into a link - the page should not offer a " +
-			"manifest link at all, live or reopened from disk")
+	for _, gone := range []string{"link(ev.manifest_url", "link(fentry.manifestURL", "manifestURL"} {
+		if strings.Contains(page+"\n"+events, gone) {
+			t.Errorf("the front end still contains %q - the page should not offer a manifest link at all, "+
+				"live or reopened from disk, and should not keep the field to draw one from", gone)
+		}
 	}
 
 	// The contact sheet link is the one an end user does want, and must
-	// survive this change untouched.
-	if !strings.Contains(js, `link(ev.sheet_url, "contact sheet")`) {
-		t.Error("app.js's onFileDone no longer links ev.sheet_url as \"contact sheet\" - that link should stay")
+	// survive both this change and the split untouched: kept by the event
+	// layer, drawn by the page.
+	if !strings.Contains(events, `fentry.sheetURL = ev.sheet_url || "";`) {
+		t.Error("events.js's file_done handler no longer records the contact sheet on the file entry - " +
+			"there would be nothing for the page to draw a link from")
+	}
+	if !strings.Contains(page, `link(fentry.sheetURL, "contact sheet")`) {
+		t.Error("app.js no longer links fentry.sheetURL as \"contact sheet\" - that link should stay")
 	}
 }
 
@@ -1008,3 +1077,127 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 // What this did not verify: manifest_url actually still arriving over a
 // live NDJSON stream end to end (server.go's record() is unchanged, so this
 // is read off the source, not observed on the wire, in this pass).
+
+// ---------------------------------------------------------------------------
+// TOR-191's BROWSER PASS: the three states the acceptance criterion names -
+// a live run, a reconnect and a replay from disk - against a real binary
+// built from this branch, serving on 127.0.0.1:8813 out of a seeded results
+// tree (one torrent, three files, one of them a video with six frames on
+// disk including a "shifted" and a "stepped" one, real JPEGs).
+//
+// THE ONE THING THAT HAD TO BE PROVED FIRST, because nothing else could be
+// true without it: the three modules actually load and resolve each other in
+// a browser. The network log for a page load reads
+//
+//	GET /  200 · /tokens.css 200 · /app.css 200
+//	GET /app.js 200 · /state.js 200 · /events.js 200
+//	GET /defaults 200 · GET /runs 200
+//
+// - app.js requested and then its two import specifiers requested, which only
+// happens if the page parsed it AS A MODULE and followed them; and /defaults
+// and /runs after that, which are app.js's own bootstrap, which sits BELOW
+// the setRunFactory/setFileFactory/setView block. A view missing a hook would
+// have thrown in setView and neither fetch would have been made. All three
+// are served as text/javascript, which a module script requires.
+//
+// THE CONSOLE CARRIED NO PAGE ERRORS AT ANY POINT in the session - page load,
+// the replay, the socket drop, the reconnect, and two live runs. The only
+// exceptions logged came from an ad-blocking browser extension's own content
+// scripts (chrome-extension://gighmm…/vendor/@eyeo/…, "Cannot read properties
+// of undefined (reading 'useCache')" and "Could not establish connection"),
+// none of them from this page.
+//
+// REPLAY FROM DISK. On load the disk row rendered from GET /runs alone:
+// "Sintel (browser pass)", badge "on disk", "1 of 1 file(s) complete"
+// (metaTitle's disk branch), all five live cells titled "no reading - this
+// row was read off disk, never a live client" (absentReason), the queue cell
+// titled "no arrival number: this row was read off disk, from a run of the
+// server before this one" (queueCellTitle), and the nine sortable headers
+// buildLiveColumnHeaders() builds. Reopening it replayed the whole history
+// over the socket, and every part of the new state->render seam came out
+// right:
+//
+//   - metadata_ready: the file list rebuilt to "3 file(s), 1 video" with the
+//     .nfo and the .jpg carrying WHY_NOT_VIDEO and no checkbox;
+//   - file_started: the Metadata disclosure showed Resolution 1280×720, Video
+//     "h264 · High · 24.00 fps · 1.1 Mbps", Duration "888.0s" and BOTH track
+//     groups ("eng · aac · 5.1 · default", "rus · ac3 · stereo ·
+//     \"commentary\"", "eng · subrip · default", "unknown language · subrip ·
+//     forced"). That is the whole point of fentry.media: those lines are
+//     drawn from state, and nothing but state was left by the time they were;
+//   - frame_ready: six cells at 01:00/03:01/05:00/07:00/09:01/11:00, each
+//     with a real <img> that LOADED - so a frame storing the server's PATH
+//     and frameFigure resolving it with url() produces a fetchable src. The
+//     shifted cell read "taken at 03:01 - the exact point was not held by any
+//     peer, so a nearby one was taken" and the stepped one "taken at 09:01 -
+//     the frame there was blank, so the neighbouring keyframe was taken";
+//   - file_done: the contact sheet link appeared, drawn from fentry.sheetURL,
+//     resolved to http://127.0.0.1:8813/files/23b6bc33…; and its
+//     loadFileDetail read the sets back, which is why the reach strip said
+//     "where the frames came from was not recorded for this set" (this
+//     fixture's manifest carries no byte ranges - renderReach's absent
+//     branch, correctly);
+//   - done: Save .torrent appeared in the detail header;
+//   - the row's summary sentence "Sintel (browser pass)" under the header,
+//     from entry.summaryLine; the row's own "1280×720 · 6 frames" from
+//     fentry.media plus capturedCells; and the file's row titled "this row
+//     captured this file - un-tick it to be offered a clear…", which is
+//     TOR-183's offer path with picked, FINAL and framesOnDisk all true.
+//
+// A LIVE RUN, twice. A retry re-armed the same run id and failed for real:
+// badge "failed" on the row and in the detail, the engine's own message
+// "internal: source is neither a magnet URI nor a readable file:" under it
+// (entry.error), a progressbar reading "6 of 6 frames captured" - which is
+// entry.framesDone/framesTotal, the two fields TOR-191 newly declares in
+// newRunState, written by events.js's applyFrameProgress - and renderAgain's
+// "This run produced nothing, so there is nothing to top up…". A second live
+// run from a magnet showed TOR-117's provisional name ("Sintel — from the
+// magnet link, not yet confirmed by the torrent's own metadata"), badge
+// "running", and metaTitle's waiting-for-metadata branch ("still waiting for
+// the torrent's own metadata - no peer has answered yet, or none has offered
+// the file list"), which is refreshStallDurations redrawing from
+// entry.runningSince every second. It sorted to the top of the table, which
+// is reorderRuns/compareEntries under the default newest-first sort.
+//
+// THE RECONNECT. The server was stopped with the page open: the status
+// indicator went from "live" to "reconnecting" - events.js's socket.onclose
+// calling view.status, which is app.js's setStatus - and every row kept
+// exactly what it held, frames included. The server was restarted on the same
+// port and the page reconnected on its own (connect()'s 1s retry), the
+// indicator returned to "live", and the run list was unchanged: the
+// reconnected server holds no runs, so the only thing replayed was the
+// connection marker (a run_state with no "run" key), which applyRunState
+// returns on immediately. Read back afterwards, both rows were identical to
+// before the drop.
+//
+// WHAT THIS PASS DID NOT COVER, and how each is covered instead:
+//
+//   - A RESET REPLAYED ONTO A ROW THAT ALREADY HELD CONTENT, which is
+//     TOR-184's trap proper. Only two things publish reset: true - a run's own
+//     first record (server.go's StartRun/ReopenRun) - and neither could be
+//     aimed at an existing entry from outside the page here, because the
+//     entry has to be `reopening` or `claiming` for resolveIncomingRun to
+//     fold the new id into it, and both flags are set by a CLICK. The retry
+//     used instead publishes reset: FALSE on purpose (server.go's again,
+//     TOR-152), which is why the row kept its list and frames through it -
+//     correct, not a defect. The trap itself is checked by running the exact
+//     message sequence: TestAReconnectLeavesNoStalePassBehind and
+//     TestResetRunStateEmptiesEverythingAReplayWillStateAgain
+//     (eventstate_test.go).
+//   - CLICKS AND PIXELS. Script injection into the page was unavailable in
+//     this environment (the browser tooling's inject/screenshot calls timed
+//     out throughout, while its accessibility-tree, console and network
+//     readers worked), so the DOM was read as an accessibility tree rather
+//     than screenshotted, and every state was driven by real messages from
+//     the server side rather than by clicking. What that means precisely: the
+//     text and structure above are what the page actually rendered, and no
+//     claim here rests on a pointer event, a layout measurement or a colour.
+//     The reopen was therefore triggered by POST /runs/reopen rather than by
+//     clicking the disk row, which is why the replayed run arrived as a
+//     SECOND row beside the disk one - resolveIncomingRun found no entry
+//     expecting that id, so ensureRun made one, exactly as documented.
+//   - index.html. This branch does not change it (TOR-190 owns that file),
+//     and the ES-module split cannot load without
+//     `<script type="module" src="app.js"></script>` there. The line was
+//     applied for this pass only, and reverted afterwards with a
+//     byte-for-byte comparison against a pre-pass snapshot.

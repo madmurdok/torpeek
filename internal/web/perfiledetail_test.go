@@ -24,14 +24,18 @@ import (
 // above the function, which in this file is where most of the reasoning
 // actually lives - jsFunc deliberately starts at the `function` keyword, so a
 // check for a ticket reference run through it would report every doc comment
-// in app.js as missing.
+// as missing.
+//
+// Like jsFunc it reads whichever of the three shipped modules it is handed
+// (TOR-191), which is what lets the table below say where each piece of
+// reasoning now lives rather than assuming all of it is in app.js.
 func jsFuncWithDoc(t *testing.T, js, name string) string {
 	t.Helper()
 
 	body := jsFunc(t, js, name)
 	head := strings.Index(js, body)
 	if head < 0 {
-		t.Fatalf("jsFunc's answer for %s is not in app.js", name)
+		t.Fatalf("jsFunc's answer for %s is not in the module handed to it", name)
 	}
 
 	lines := strings.Split(js[:head], "\n")
@@ -320,7 +324,15 @@ func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 // fileBlock is holding a reference to - on a row whose frames are on screen.
 func TestASecondFileListMessageDoesNotWipeTheDetailsInsideIt(t *testing.T) {
 	js := servedScript(t)
-	fn := jsFunc(t, js, "renderFileList")
+	// SINCE TOR-191 THE DECISION IS THE EVENT LAYER'S, and that is the whole
+	// improvement: renderFileList used to compute the signature and return
+	// early, so "did it redraw" was a fact about a function's control flow.
+	// Now events.js either asks the page for a rebuild or does not, which is
+	// a fact something can COUNT - and
+	// TestASecondIdenticalFileListRebuildsNothing (eventstate_test.go) counts
+	// it, against four real messages, which is the only way to tell a
+	// suppressed rebuild from a suppressed everything.
+	fn := jsFunc(t, eventsJS(t), "applyFileList")
 
 	// The signature is the list ITSELF, not a counter or a length: two
 	// different lists of the same length must not compare equal.
@@ -344,45 +356,60 @@ func TestASecondFileListMessageDoesNotWipeTheDetailsInsideIt(t *testing.T) {
 			"same paths mean a different list in those two cases", sig[1])
 	}
 
-	if !regexp.MustCompile(`if \(sig !== "" && sig === entry\.fileListSig\) \{`).MatchString(fn) {
-		t.Error("renderFileList does not skip the rebuild for a list it has already " +
+	if !regexp.MustCompile(`if \(sig !== "" && sig === entry\.fileListSig\) return;`).MatchString(fn) {
+		t.Error("applyFileList does not skip the rebuild for a list it has already " +
 			"drawn. The empty-signature half matters too: an empty list must not match " +
 			"the next empty one and suppress the first real draw")
 	}
-	// It still restates everything a repeat message can legitimately have
-	// changed - the boxes, the prices, the frame, the title.
-	if !regexp.MustCompile(`(?s)sig === entry\.fileListSig\) \{.*?syncFileList\(entry\);\s*\n\s*return;`).MatchString(fn) {
-		t.Error("the early return does not re-sync the list's state - the shape is " +
-			"unchanged, but the ticks, the prices and the parked frame all still have " +
-			"to follow the message that arrived")
+	// The repeat message must not go silent: everything about a row that is
+	// not its SHAPE - the boxes, the prices, the frame, the title - still has
+	// to follow it. That is the syncEntry both callers end on, so it is read
+	// out of them rather than out of the early return.
+	for _, caller := range []string{"applyMetadataReady", "applyNeedsAction"} {
+		body := jsFunc(t, eventsJS(t), caller)
+		if !strings.Contains(body, "applyFileList(entry, ev);") {
+			t.Errorf("%s does not go through applyFileList - the signature would not be "+
+				"consulted at all for the message it carries", caller)
+		}
+		if !strings.Contains(body, "view.syncEntry(entry);") {
+			t.Errorf("%s does not re-sync the row - the list's shape is unchanged on a "+
+				"repeat, but the ticks, the prices and the parked frame all still have "+
+				"to follow the message that arrived", caller)
+		}
 	}
 
 	// AND WHEN IT DOES REBUILD, the blocks go with the rows that held them.
 	// Every fentry points at elements inside a row a rebuild detaches, so a
 	// map left standing would have fileBlock hand back a block whose DOM is
 	// off the page - and that file's detail would never appear again, in
-	// silence, for the rest of the row's life.
-	if !regexp.MustCompile(`(?s)entry\.pickerRows = new Map\(\);.*?entry\.fileEntries\.clear\(\)`).MatchString(fn) {
-		t.Error("renderFileList rebuilds the rows without clearing the file entries - " +
-			"they are references into the rows it just detached, and fileBlock returns " +
-			"them again rather than rebuilding")
+	// silence, for the rest of the row's life. The order is load-bearing and
+	// now spans two files: the file entries are the only handle on those
+	// blocks, so they go BEFORE the page is asked to detach the rows.
+	if !regexp.MustCompile(`(?s)entry\.fileEntries\.clear\(\);\s*\n\s*entry\.autoExpanded = false;\s*\n\s*view\.rebuildFileList\(entry\);`).MatchString(fn) {
+		t.Errorf("applyFileList does not clear the file entries and re-arm the auto-expand "+
+			"immediately before asking for the rebuild - they are references into the rows "+
+			"that rebuild detaches, and the latch is what makes only the FIRST file open "+
+			"itself: %q", fn)
 	}
-	if !regexp.MustCompile(`(?s)entry\.fileEntries\.clear\(\);\s*\n\s*entry\.autoExpanded = false`).MatchString(fn) {
-		t.Error("a rebuilt list does not re-arm the auto-expand - the latch is what makes " +
-			"only the FIRST file open itself, and a list rebuilt with it still set would " +
-			"come back with every file closed")
+	// The page's own half: a fresh map, since every bundle in the old one
+	// points into a row that is about to go.
+	if !strings.Contains(jsFunc(t, js, "renderFileList"), "entry.pickerRows = new Map();") {
+		t.Error("renderFileList reuses the row map across a rebuild - its bundles are " +
+			"references into the rows it is replacing")
 	}
 
 	// A genuine fresh start still rebuilds, which is what keeps this from
 	// being a way to lose the list entirely.
-	reset := jsFunc(t, js, "resetRunContent")
+	// Comments stripped: both lines below are named in resetRunState's own
+	// prose as well as executed by it, and a comment satisfies strings.Contains.
+	reset := stripJSComments(jsFunc(t, stateJS(t), "resetRunState"))
 	if !strings.Contains(reset, `entry.fileListSig = ""`) {
-		t.Error("resetRunContent does not clear the signature. Left behind, it tells the " +
+		t.Error("resetRunState does not clear the signature. Left behind, it tells the " +
 			"replayed metadata_ready that follows a reset \"you already drew this\", and " +
 			"the row comes back from a reconnect with an empty list")
 	}
 	if !strings.Contains(reset, "entry.fileEntries.clear()") {
-		t.Error("resetRunContent no longer clears the file entries - they are the only " +
+		t.Error("resetRunState no longer clears the file entries - they are the only " +
 			"handle on blocks that are about to be detached with the rows holding them")
 	}
 }
@@ -419,33 +446,52 @@ func TestTheMovedBlocksKeepTheReasonsAttachedToThem(t *testing.T) {
 	// beside the element (fileBlock's own template) or on the function that
 	// fills it, and this checks whichever of the two it is rather than
 	// requiring it to be moved to where a test would find it more easily.
-	for _, want := range []struct{ where, ticket, what string }{
-		{"fileBlock", "TOR-153", "the swarm chip beside the reach strip, and why it " +
+	//
+	// SINCE TOR-191 "the place it actually sits" includes WHICH MODULE, and
+	// that is the point rather than an inconvenience: this table is the
+	// clearest statement in the suite of where each of these decisions ended
+	// up, and a piece of reasoning that arrived in the wrong module is a
+	// piece of reasoning nobody editing that code will read.
+	modules := map[string]string{
+		"app.js":    js,
+		"state.js":  stateJS(t),
+		"events.js": eventsJS(t),
+	}
+	for _, want := range []struct{ module, where, ticket, what string }{
+		{"app.js", "fileBlock", "TOR-153", "the swarm chip beside the reach strip, and why it " +
 			"stays a separate shape rather than a fill on the strip's own axis"},
-		{"fileBlock", "TOR-109", "why Compare sits beside Regenerate"},
-		{"fileBlock", "TOR-110", "the plan-shaped grid, laid out at final size before " +
-			"any piece is fetched, and the reserved cell that is the reason for it"},
-		{"fileBlock", "TOR-71", "the metadata accordion, one level inside a file's own"},
-		{"setMetaExpanded", "TOR-71", "the single function that may open or close a " +
+		{"app.js", "fileBlock", "TOR-109", "why Compare sits beside Regenerate"},
+		// The plan itself is what a file KNOWS, so it moved to state.js's own
+		// file-entry shape - and the reserved cell's reasoning went with the
+		// field rather than staying beside the elements it explains.
+		{"state.js", "newFileState", "TOR-110", "the plan-shaped grid, laid out at final size " +
+			"before any piece is fetched, and the reserved cell that is the reason for it"},
+		{"app.js", "fileBlock", "TOR-71", "the metadata accordion, one level inside a file's own"},
+		{"app.js", "setMetaExpanded", "TOR-71", "the single function that may open or close a " +
 			"file's metadata"},
-		{"onFileDone", "TOR-171", "why the manifest link is not offered beside the " +
-			"contact sheet"},
-		{"applyFrameProgress", "TOR-167", "which of two signals the row's bar reads from"},
-		{"renderReach", "TOR-179", "where the strip's data comes from, now that it is " +
+		// onFileDone split in two: what a finished file KNOWS (events.js) and
+		// the link drawn from it (app.js's renderFileLinks). TOR-171 is about
+		// what is drawn, so it travelled with the drawing.
+		{"app.js", "renderFileLinks", "TOR-171", "why the manifest link is not offered beside " +
+			"the contact sheet"},
+		{"events.js", "applyFrameProgress", "TOR-167", "which of two signals the row's bar " +
+			"reads from"},
+		{"app.js", "renderReach", "TOR-179", "where the strip's data comes from, now that it is " +
 			"the frames' own byte ranges rather than the last run's claim log"},
-		{"frameState", "TOR-118", "a point that produced nothing, given a cell of its " +
+		{"state.js", "frameState", "TOR-118", "a point that produced nothing, given a cell of its " +
 			"own rather than left looking like one still on its way"},
 	} {
-		if !strings.Contains(jsFuncWithDoc(t, js, want.where), want.ticket) {
-			t.Errorf("%s no longer names %s, which is where %s was decided - a move that "+
+		if !strings.Contains(jsFuncWithDoc(t, modules[want.module], want.where), want.ticket) {
+			t.Errorf("%s's %s no longer names %s, which is where %s was decided - a move that "+
 				"keeps the element and drops the reasoning loses the knowledge, not just "+
-				"the prose", want.where, want.ticket, want.what)
+				"the prose", want.module, want.where, want.ticket, want.what)
 		}
 	}
 
 	// The grid's four cell states, still four: the two the disk shape can
-	// report and the two only a plan-shaped grid has.
-	cells := jsFunc(t, js, "gridCells")
+	// report and the two only a plan-shaped grid has. gridCells is a
+	// derivation over a file's own frames and plan, so it is state.js's.
+	cells := jsFunc(t, stateJS(t), "gridCells")
 	for _, state := range []string{`"exact"`, `"shifted"`, `"failed"`, `"pending"`} {
 		if !strings.Contains(cells, state) {
 			t.Errorf("gridCells no longer produces the %s cell state - TOR-110's answer "+

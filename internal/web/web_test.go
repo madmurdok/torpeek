@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -452,9 +453,16 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 	fake := &fakeRun{}
 	ts := testServer(t, fake.runner)
 
+	// One needle per served asset, and since TOR-191 that is three scripts
+	// rather than one: a module that is not served is a page that does not
+	// parse, and the three needles are each distinctive to the module they
+	// are in (the socket is events.js's, the run store is state.js's, the
+	// element lookups are app.js's).
 	for _, tc := range []struct{ path, contains string }{
 		{"/", "<title>torpeek</title>"},
-		{"/app.js", "WebSocket"},
+		{"/app.js", "document.getElementById"},
+		{"/state.js", "state.runs"},
+		{"/events.js", "new WebSocket("},
 		{"/tokens.css", ":root"},
 		{"/base.css", "@font-face"},
 		{"/intake.css", ".dropzone"},
@@ -832,7 +840,14 @@ func TestWorksUnderABasePath(t *testing.T) {
 // a single leading slash in the markup would survive every test above, because
 // they all ask for the right URL themselves.
 func TestTheFrontendUsesNoAbsolutePaths(t *testing.T) {
-	for _, name := range []string{"assets/index.html", "assets/app.js"} {
+	// state.js and events.js are in this list from the moment they exist
+	// (TOR-191): "/events" and "/runs" are precisely the strings the event
+	// layer deals in, so it is the likeliest of the three to grow a leading
+	// slash - and every one of them is served under the base path the same
+	// way app.js is.
+	for _, name := range []string{
+		"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js",
+	} {
 		data, err := embedded.ReadFile(name)
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
@@ -1773,5 +1788,99 @@ func TestDefaultsReportsTheServersFrameCount(t *testing.T) {
 	}
 	if count, ok := decodeBody(t, resp)["count"].(float64); !ok || int(count) != 6 {
 		t.Errorf("count = %v, want 6", decodeBody(t, resp)["count"])
+	}
+}
+
+// TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed guards the one line
+// that decides whether the page runs at all.
+//
+// Since TOR-191 split the script into app.js -> events.js -> state.js, app.js
+// opens with `import`, which is a syntax error in a classic script. So
+// `type="module"` is not a style choice: without it the page does not partly
+// work, it parses nothing, and no other Go test here would notice - they all
+// read the assets as text or ask the server for them by name, and both keep
+// answering exactly as before while the browser runs none of it.
+//
+// The second half is the part a by-name check cannot cover.
+// TestServesEmbeddedFrontend asks for /state.js and /events.js because this
+// test's author knew to name them; that guarantees those two are served, not
+// that they are the two app.js actually asks for. Rename a module and update
+// the import, and the by-name list keeps passing while the browser 404s a
+// specifier nobody checked. So the IMPORTS are read out of the shipped script
+// and each one is required to resolve to an embedded asset - the page's own
+// text is the source of truth, the same way index.html is for the stylesheet
+// order (TestTheConcatenationOrderIsThePagesOwn).
+func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
+	html, err := embedded.ReadFile("assets/index.html")
+	if err != nil {
+		t.Fatalf("reading the embedded index.html: %v", err)
+	}
+
+	if !strings.Contains(string(html), `<script type="module" src="app.js">`) {
+		t.Error(`index.html does not load app.js with type="module". app.js begins with ` +
+			`import statements, which are a syntax error in a classic script, so the ` +
+			`page would execute nothing at all - not a degraded page, a blank one`)
+	}
+	if strings.Contains(string(html), `<script src="app.js">`) {
+		t.Error(`index.html still has a classic <script src="app.js">. Two tags would run ` +
+			`the module twice or the classic one would throw on its first import; either ` +
+			`way the surviving tag is not the one that was reasoned about`)
+	}
+
+	// Only the page's own script is followed. A module's transitive imports
+	// are covered because each imported file is itself checked below when it
+	// appears in this same walk.
+	assets := map[string]bool{}
+	entries, err := embedded.ReadDir("assets")
+	if err != nil {
+		t.Fatalf("listing the embedded assets: %v", err)
+	}
+	for _, e := range entries {
+		assets[e.Name()] = true
+	}
+
+	// Matches the specifier of a static import or re-export, which is the only
+	// kind the browser resolves at load: `import x from "./y.js"`,
+	// `import "./y.js"`, `export ... from "./y.js"`. A dynamic import()
+	// built from a variable is deliberately not matched - it cannot be
+	// resolved statically, and this project has none.
+	spec := regexp.MustCompile(`(?m)^\s*(?:import|export)\b[^'"\n]*?from\s*['"]([^'"]+)['"]|^\s*import\s*['"]([^'"]+)['"]`)
+
+	seen := 0
+	for _, name := range []string{"app.js", "state.js", "events.js"} {
+		src, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Errorf("reading the embedded %s: %v - index.html or another module names it, "+
+				"so it has to be in the binary", name, err)
+			continue
+		}
+		for _, m := range spec.FindAllStringSubmatch(string(src), -1) {
+			target := m[1]
+			if target == "" {
+				target = m[2]
+			}
+			seen++
+			// A bare or absolute specifier would not survive the base path,
+			// which TestTheFrontendUsesNoAbsolutePaths covers for `src="/`;
+			// an import specifier is a different syntax and needs saying here.
+			if !strings.HasPrefix(target, "./") {
+				t.Errorf("%s imports %q, which is not a relative specifier - the page is served "+
+					"under a configurable base path, so only './x.js' resolves", name, target)
+				continue
+			}
+			if base := strings.TrimPrefix(target, "./"); !assets[base] {
+				t.Errorf("%s imports %q, and no such file is embedded under assets/ - the browser "+
+					"fetches this path itself, so it 404s and the whole module graph fails to "+
+					"load, whatever the by-name checks in this file say", name, target)
+			}
+		}
+	}
+
+	// A regex that stopped matching would make every check above vacuous, and
+	// the split's whole premise is that there ARE imports to follow.
+	if seen == 0 {
+		t.Error("no import specifier was found in any of the three scripts, so this test " +
+			"verified nothing. Either the module split was undone, or the pattern above " +
+			"no longer matches the syntax the files use")
 	}
 }

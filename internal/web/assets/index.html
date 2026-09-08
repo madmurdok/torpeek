@@ -192,6 +192,20 @@
   <span class="lightbox-marks" aria-hidden="true"></span>
 </dialog>
 
-<script src="app.js"></script>
+<!-- type="module" is not optional and not a style choice: since TOR-191 split
+     the page's script into app.js -> events.js -> state.js, app.js opens with
+     `import`, which is a syntax error in a classic script. A page served
+     without it does not partly work - it parses nothing at all.
+
+     It also means the two modules must be SERVED, not merely embedded: the
+     browser fetches them itself, by the relative paths in app.js's own import
+     statements, so they answer under the base path the way app.js does
+     (TestTheFrontendUsesNoAbsolutePaths keeps those paths relative, and
+     TestServesEmbeddedFrontend asks the server for all three by name).
+
+     No build step, which is the whole point of TOR-190/TOR-191 being possible
+     at all: modules are native, so nothing here is bundled, transpiled or
+     inlined away, and the file the browser runs is the file in the repo. -->
+<script type="module" src="app.js"></script>
 </body>
 </html>

@@ -175,14 +175,20 @@ func TestNoFontIsFetchedFromTheNetwork(t *testing.T) {
 	// and the stylesheets name the CDN in prose precisely to say it is not
 	// used.
 	comment := regexp.MustCompile(`(?s)/\*.*?\*/`)
-	// Every served stylesheet (stylesheetFiles, theme_test.go - tokens.css
-	// from TOR-189 plus the area files TOR-190 split the rest of what used
-	// to be app.css into), not just whichever one file happened to hold
-	// :root or the typeface: a stray @import from a font CDN could slip into
-	// any of them unnoticed, and ReadFile erroring here is now treated as a
-	// real failure rather than silently skipped - a missing split file is
-	// exactly the kind of thing this loop exists to catch, not excuse.
-	names := []string{"assets/index.html", "assets/app.js"}
+	// Every served asset, not just whichever one file happened to hold :root
+	// or the typeface. Two lists feed it: the stylesheets come from
+	// stylesheetFiles (theme_test.go - tokens.css from TOR-189 plus the area
+	// files TOR-190 split the rest of app.css into), and the scripts are
+	// app.js plus the two modules TOR-191 separated out of it. A stray
+	// @import from a font CDN could slip into any of them unnoticed, and the
+	// sweep is only worth having if it covers what is actually served rather
+	// than what existed when it was written.
+	//
+	// ReadFile erroring here is a real failure rather than a silent skip: a
+	// missing split file or a renamed module is exactly the kind of thing
+	// this loop exists to catch, not to excuse. It used to `continue`, which
+	// meant a typo in a name quietly checked nothing.
+	names := []string{"assets/index.html", "assets/app.js", "assets/state.js", "assets/events.js"}
 	for _, css := range stylesheetFiles {
 		names = append(names, "assets/"+css)
 	}

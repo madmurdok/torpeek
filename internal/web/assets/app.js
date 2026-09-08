@@ -1,11 +1,85 @@
-// The whole UI: submit a magnet or drop a .torrent, watch the events arrive,
-// watch the frames land. It reads the event stream and does nothing else -
-// the run lives in the core, and a client that started deciding things would
-// be a second place where the run is defined (ARCHITECTURE.md).
+// THE PAGE ITSELF: every element, every listener, every redraw (TOR-191).
+//
+// ONE FILE BECAME THREE, and the reason is the one this whole batch stands on.
+// app.js used to be the UI, the state and the event dispatch at once: twelve
+// message types wrote entry fields and text nodes in the same breath, and
+// every rendering function reached into a shared state.runs and into the
+// entry/fentry objects directly. That coupling is what made a component
+// impossible - there was nothing to HAND a component, so it had to go looking.
+//
+//   state.js   what a run and a file KNOW, and every derivation over it.
+//              No DOM, no fetch, no message shapes. Executable on its own.
+//   events.js  the socket, and the one place a message becomes a state
+//              change. No DOM either: it names redraws through a view this
+//              file installs (setView, at the bottom).
+//   app.js     this file. The elements, the listeners, the requests, and
+//              every function that draws - each of which is now handed STATE
+//              and reads only state, never a message.
+//
+// The imports run one way (app.js -> events.js -> state.js) so that neither
+// of the other two can reach the DOM even by accident, which is what lets both
+// be run for real in a plain node process rather than only read as text.
+//
+// It reads the event stream and does nothing else - the run lives in the core,
+// and a client that started deciding things would be a second place where the
+// run is defined (ARCHITECTURE.md).
 //
 // Every URL is resolved against document.baseURI rather than written from the
 // site root, so the page works unchanged under /torpeek behind a proxy.
 //
+// NO BUILD STEP: all three are served straight out of the embedded assets and
+// loaded natively as ES modules. index.html's own <script> is what says so,
+// and it has to say `type="module"` or none of this parses at all.
+
+import {
+  ABSENT,
+  FINAL,
+  PRIORITY_HIGH,
+  PRIORITY_LOW,
+  arrivalOrdinal,
+  availabilityCellText,
+  availabilityCellTitle,
+  availabilityMetaText,
+  availabilityReading,
+  badgeLabel,
+  badgeState,
+  bytesLabel,
+  cancellable,
+  capturedCells,
+  claimReopenedRun,
+  compareEntries,
+  displayName,
+  ensureRun,
+  framesOnDisk,
+  gridCells,
+  hasLive,
+  hasPriority,
+  metaLabel,
+  metaTitle,
+  newFileState,
+  newRunState,
+  passCount,
+  peersCellText,
+  peersCellTitle,
+  priorityLabel,
+  queueCellMetaText,
+  queueCellText,
+  queueCellTitle,
+  rateCellText,
+  rateCellTitle,
+  seconds,
+  seedsCellText,
+  seedsCellTitle,
+  setFileFactory,
+  setRunFactory,
+  shortId,
+  state,
+  untickedVideos,
+  waitingForMetadata,
+  whenLabel,
+} from "./state.js";
+import { connect, setView } from "./events.js";
+
 // TOKEN is this page's proof of authorization when the server was started
 // with one (TOR-30): the URL printed at startup carries it as a query
 // parameter, since that is the one representation that reaches every kind of
@@ -24,19 +98,11 @@ const TOKEN = new URLSearchParams(location.search).get("token") || "";
 // queue position, added to the table TOR-137 moved into the right pane and
 // TOR-138 made expandable.
 //
-// ABSENT IS NOT ZERO, everywhere in this block. GET /runs' "live" object
-// (listing.go's Live) is present only for a row with an actual client that
-// has spoken at least once, and even then download_bps/upload_bps/swarm can
-// still be individually absent (before the run's second heartbeat, or before
-// the swarm has answered what it holds). A queued row and a running row with
-// nobody connected are opposite situations, and rendering both as "0" would
-// make them read the same - so every cell below reads ABSENT, never a
-// literal 0, whenever the reading itself is missing rather than measured.
-const ABSENT = "—"; // em dash
-
 // LIVE_COLUMNS builds both the header cells (below) and, by the same keys,
-// the sortValue() switch further down - one list rather than two, so a
-// column added here cannot forget to be wired into sorting or the reverse.
+// state.js's sortValue() switch - one list rather than two, so a column
+// added here cannot forget to be wired into sorting or the reverse. The two
+// halves now sit in two files, which is why each has a test naming the other
+// (TestLiveColumnsAreWiredIntoBothHeadersAndSorting).
 // unit, when present, is shown on its own line under the label: the
 // availability column needs it (its figure is copies per piece, not a
 // percentage, and commonly exceeds 1.0) to be legible without a tooltip
@@ -135,34 +201,6 @@ const el = {
   runTableWrap: document.querySelector(".run-table-wrap"),
 };
 
-// Every torrent this page knows about lives here, keyed by run id - or, for a
-// run known only from disk (GET /runs found it, but this process never
-// minted an id for it), by a synthetic "disk:<infohash>:<params>" key until
-// it is reopened. Nothing is ever destroyed wholesale any more: a second
-// torrent must not erase the first, and a finished one must stay clickable
-// for as long as the page remembers it.
-//
-// There is no state.selected any more (TOR-138). Selection was the singleton
-// detail pane's own idea - one entry shown on the right, everything else
-// hidden - and the accordion has no single slot to be the one thing in. Which
-// rows are open is now a per-entry flag (entry.expanded, changed only by
-// setRunExpanded), exactly as a file's own accordion has carried its state on
-// its fentry since TOR-63. Keeping it on the object rather than in a set of
-// ids also removes a whole class of bug for free: claimReopenedRun swaps an
-// entry's KEY when a disk row is reopened under a fresh run id, and the old
-// code had to remember to move state.selected across with it.
-//
-// sort is the table's current order: key names the column (a <th data-sort>
-// value), dir is "asc" or "desc". The default - date, newest first - is what
-// the panel already showed before it became a table (TOR-62).
-// watch says whether this server was started with a watch directory
-// (-watch-dir), which GET /defaults answers. It gates one button and nothing
-// else: without a watch directory the button is absent rather than present
-// and failing, so the page has to be told before it draws one. False until
-// loadDefaults answers, which is the safe way round - a button that appears a
-// moment late is better than one that is there and cannot work.
-const state = { runs: new Map(), watch: false, sort: { key: "when", dir: "desc" } };
-
 function url(path) {
   const u = new URL(path, document.baseURI);
   if (TOKEN) u.searchParams.set("token", TOKEN);
@@ -179,10 +217,6 @@ function showError(message) {
   el.error.hidden = !message;
 }
 
-function shortId(id) {
-  return (id || "").replace(/^disk:/, "").slice(0, 8);
-}
-
 function log(line) {
   el.log.textContent += line + "\n";
   el.log.scrollTop = el.log.scrollHeight;
@@ -193,11 +227,6 @@ function log(line) {
 // unreadable the moment a second torrent is added.
 function logFor(entry, line) {
   log("[" + shortId(entry.id) + "] " + line);
-}
-
-function seconds(ms) {
-  if (!ms && ms !== 0) return "";
-  return (ms / 1000).toFixed(1) + "s";
 }
 
 // timecode is where a frame came from, as a person reads a video position:
@@ -221,77 +250,6 @@ function bitrateLabel(bps) {
   return bps + " bps";
 }
 
-function bytesLabel(n) {
-  if (!n) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let value = n, i = 0;
-  while (value >= 1024 && i < units.length - 1) {
-    value /= 1024;
-    i++;
-  }
-  return (i === 0 ? value : value.toFixed(1)) + " " + units[i];
-}
-
-// stallDuration is "how long" for a stall reading - the load-bearing part of
-// TOR-141's own acceptance criterion. Distinct from seconds() above: that one
-// prints a single measurement to a tenth of a second ("21.3s"), useful for a
-// run's own total elapsed time; this is meant to be read at a glance while it
-// keeps climbing, so it drops the fraction and grows a minutes field rather
-// than ever showing something like "812.4s".
-function stallDuration(ms) {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  if (total < 60) return total + "s";
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return m + "m " + String(s).padStart(2, "0") + "s";
-}
-
-// STALL_REASON gives each of the causes core.ErrorCode can name on a stall
-// reading (core.Progress.Stall, wire.go's "stall" key) a short phrase in a
-// person's own words, rather than the bare wire code - the same vocabulary
-// errors.go's own doc comments use for each one, kept short enough to sit
-// under a badge. An unrecognised code (there should never be one; core's own
-// classifyPointFailure/classifyLiveStall only ever produce these four) falls
-// back to the bare code rather than hiding the reading entirely.
-const STALL_REASON = {
-  no_peers: "no peers connected",
-  unavailable: "peers connected, but nobody holds this yet",
-  no_metadata: "no metadata yet",
-  read_stalled: "a read timed out",
-};
-
-// stallPhrase renders one stall reading as the row's own status line reads
-// it: which cause, for how long. now is the caller's current clock (Date.now()
-// by default) rather than always "right now" internally, so the same
-// function drives both a fresh render and the ticking refresh below
-// (refreshStallDurations) off one consistent instant per pass, rather than
-// each row computing its own now() microseconds apart.
-function stallPhrase(stall, now) {
-  now = now == null ? Date.now() : now;
-  // observedAt is stamped by apply()'s "progress" case the moment this
-  // reading arrived (Date.now() at receipt, never the server's own clock,
-  // which this page has no synchronised way to compare against) - since_ms
-  // is only ever as fresh as that last heartbeat, and adding the wall time
-  // since then is what keeps the displayed duration ticking up smoothly
-  // between heartbeats (at most stallHeartbeatInterval, 5s, apart) instead
-  // of visibly standing still and then jumping.
-  const liveMS = stall.since_ms + Math.max(0, now - stall.observedAt);
-  return (STALL_REASON[stall.code] || stall.code) + " for " + stallDuration(liveMS);
-}
-
-// waitingForMetadata is true for the one stall-shaped state the engine
-// cannot yet report a Stall reading for at all (TOR-141's own scope note):
-// the run is running, but no client has spoken - not even once, per hasLive
-// - and no name has been confirmed either. There is no torrent object to
-// read peers from during this phase (pool.Attach is still resolving it), so
-// this is computed here, client-side, from what the row already carries
-// rather than invented on the wire - and it clears itself the instant either
-// a name or a live reading arrives, which is the same run_state/progress
-// traffic that already flows regardless.
-function waitingForMetadata(entry) {
-  return entry.state === "running" && !entry.name && !hasLive(entry) && !entry.stall;
-}
-
 function channelsLabel(n) {
   switch (n) {
     case 1: return "mono";
@@ -304,111 +262,6 @@ function channelsLabel(n) {
 
 function langLabel(code) {
   return code && code !== "und" ? code : "unknown language";
-}
-
-// A run can still be cancelled while it is queued, running, or parked
-// waiting for a file selection; every other state is final (runs.go's
-// RunState.final), and "replaying" is a cache hit already well underway by
-// the time this page can react to it.
-//
-// needs-action belongs here precisely because nothing will ever end it on
-// its own: a torrent waiting for someone to tick boxes waits forever, so
-// cancelling is the only way out other than deciding.
-function cancellable(state) {
-  return state === "queued" || state === "running" || state === "needs-action";
-}
-
-// entry.partial is GET /runs' own verdict on whether some of what was asked
-// for has frames and some does not (RunSummary.Partial in listing.go),
-// carried on the wire as row.partial and copied onto the entry by loadRuns -
-// never recomputed here. TOR-72 first wrote this comparison twice, once in
-// Go and once in a JS isPartial() that alone painted the badge; the two were
-// free to drift because nothing ever called the Go copy outside its own
-// tests. TOR-80 deleted the second copy: this page reads the answer, it does
-// not derive it, so a change to the one surviving rule (listing.go's
-// Partial()) changes what every badge shows, rather than leaving a Go test
-// green while the page keeps its own opinion.
-//
-// A live run's badge can turn partial while the page is watching it happen,
-// as of TOR-87: the run_state that announces running -> done also carries
-// files/complete/selected/partial, read straight off the record this run
-// just wrote to disk (server.go's pump), and apply() copies partial from it
-// the same way loadRuns copies it from row.partial - never recomputing it.
-// Every earlier run_state for this run (queued, running, ...) carries none
-// of those fields, so entry.partial keeps whatever loadRuns' initial fetch
-// gave it (false, since a run mid-flight has nothing merged in) until this
-// one arrives.
-
-// badgeState is what the badge is coloured by, which is not always the run's
-// own state: a finished run whose selected files did not all come out whole
-// reads "partial", and colouring that with done's green would say the
-// opposite of the word inside it. Partial is not a state (cache.Run does not
-// record how a run ended, and TOR-72 derives this from counts alone) - it is
-// only ever a way of showing one.
-function badgeState(entry) {
-  if (entry.disk) return "disk";
-  if (entry.state === "done" && entry.partial) return "partial";
-  return entry.state;
-}
-
-function badgeLabel(entry) {
-  if (entry.disk) return entry.partial ? "on disk (partial)" : "on disk";
-  switch (entry.state) {
-    case "queued": return "queued";
-    case "running": return "running";
-    case "replaying": return "reopening…";
-    case "needs-action": return "choose files";
-    // cache.Run does not record how a run ended, only what it covered - so
-    // "done" from the registry says the run itself finished, not that every
-    // selected file came out whole. entry.partial is what tells the two
-    // apart, exactly as it does for a disk row above (TOR-72, wired to
-    // GET /runs' own "partial" field by TOR-80).
-    case "done": return entry.partial ? "partial" : "done";
-    case "failed": return "failed";
-    case "cancelled": return "cancelled";
-    default: return entry.state || "…";
-  }
-}
-
-// What the row says under its badge. The panel is the one genuinely tight
-// surface in the layout, so this is deliberately terse: a finished run's
-// counts are a bare ratio rather than a sentence, because "1 / 1 file(s)
-// complete" was long enough to push the whole table wider than the panel and
-// collapse the torrent's name to an ellipsis (TOR-121). The ratio still says
-// what the badge cannot - PARTIAL tells you a run is incomplete, 3/6 tells
-// you how incomplete - and metaTitle below keeps the full sentence for the
-// tooltip, so nothing is actually lost.
-// TOR-141: a stall reading (or, before there is even a torrent to read
-// peers from, waitingForMetadata) takes priority over the plain frame
-// ratio. Distinguishable from a run that is merely slow is this ticket's own
-// acceptance criterion, and showing "4/20 frames" unchanged while a run sits
-// stalled is exactly the failure it names - a slow run's ratio keeps
-// climbing, a stalled one's would not, but nothing about the TEXT says so.
-// now, when passed, is the caller's current clock (refreshStallDurations'
-// own ticking redraw); omitted, both branches fall back to Date.now().
-function metaLabel(entry, now) {
-  if (entry.stall) return stallPhrase(entry.stall, now);
-  if (waitingForMetadata(entry)) {
-    return "waiting for metadata, " + stallDuration((now == null ? Date.now() : now) - entry.runningSince);
-  }
-  if (entry.progress) return entry.progress;
-  if (entry.disk) return entry.complete + "/" + entry.selected;
-  if (entry.error) return entry.error;
-  return "";
-}
-
-// The long form, on hover, for the row whose label was shortened.
-function metaTitle(entry, now) {
-  if (entry.stall) {
-    const base = "stalled: " + (STALL_REASON[entry.stall.code] || entry.stall.code);
-    return entry.progress ? base + " (" + entry.progress + " so far)" : base;
-  }
-  if (waitingForMetadata(entry)) {
-    return "still waiting for the torrent's own metadata - no peer has answered yet, " +
-        "or none has offered the file list";
-  }
-  if (entry.disk) return entry.complete + " of " + entry.selected + " file(s) complete";
-  return metaLabel(entry, now);
 }
 
 // renderRunProgress draws a run's progress as a segmented bar in its row
@@ -482,427 +335,6 @@ function renderRunProgress(entry) {
 // panel row. A plan of twenty is the common case and draws one each; a plan of
 // two hundred would ask for segments a third of a pixel wide.
 const MAX_PROGRESS_SEGMENTS = 24;
-
-// applyFrameProgress sets entry.framesDone/entry.framesTotal - and the
-// "N/M frames" line (entry.progress) that sits above the bar and must never
-// disagree with it - from whichever file (ev.file) just reported something,
-// on file_started, frame_ready, frame_skipped and progress alike (TOR-167).
-//
-// WHY NOT JUST READ core.Progress's OWN frames_done, which is what this used
-// to do: that heartbeat counts only frames THIS RUN captured fresh. A top-up
-// mostly REPLAYS frames an earlier run already wrote to disk (TOR-166's own
-// pricing depends on that reuse being free), and engine.go's processFile
-// publishes a frame_ready for a reused point but no Progress heartbeat for
-// it - only real captures get one. So a top-up whose two still-missing
-// points fall early in the plan can report "1 of 20" from its very first
-// heartbeat and never correct itself: every point after that is a replay,
-// which never heartbeats again, while the file quietly finishes at 20 of 20
-// on disk. The grid beside the bar does not have this gap, because
-// frame_ready fires for a landed point whether it was replayed or freshly
-// captured, and the grid is built from exactly that stream (addFrame).
-//
-// So this reads the same stream the grid already reads - the count of cells
-// with a frame, gridCells' own "cell.url" test, identical to what
-// updateFileSummary already shows under the grid - rather than the sparser
-// heartbeat. That is not a new measurement: it is still "frames landed out
-// of frames planned" (TOR-123's own definition), taken from the signal that
-// never misses a landed frame instead of the one that only speaks when this
-// run did the work itself. wireDone, core.Progress's own frames_done when
-// this call came from a progress event, is folded in with Math.max rather
-// than trusted alone or discarded - it can never be fewer than what the grid
-// has already proven landed, but nothing stops it being the fresher of the
-// two on a heartbeat that arrives between two frame_ready events.
-function applyFrameProgress(entry, file, wireDone) {
-  const fentry = entry.fileEntries.get(file);
-  if (!fentry || !fentry.plan.length) return;
-
-  const landed = gridCells(fentry).filter((cell) => cell.url).length;
-  entry.framesTotal = fentry.plan.length;
-  entry.framesDone = Math.max(landed, wireDone || 0);
-  if (cancellable(entry.state)) {
-    entry.progress = entry.framesDone + "/" + entry.framesTotal + " frames";
-  }
-}
-
-// displayName is what a row's name cell shows, and whether that answer is
-// confirmed or merely offered (TOR-117).
-//
-// entry.name is never invented - GET /runs and the run's own events only
-// ever set it from what the torrent's own metadata, or a finished run's own
-// disk record, actually said. entry.provisionalName is the one exception: a
-// magnet's own dn= parameter, which anybody can put anything into, so a row
-// showing it must stay visibly distinct from one showing a confirmed name
-// (syncEntry marks it) rather than let a person mistake a guess for a
-// verified answer. Falling all the way through to the raw source (a magnet
-// URI, unreadable as it is) or the id is the same last resort this always
-// had - now reached only when nothing has offered even a dn=, which after
-// this ticket is the one case truly left with nothing to say.
-function displayName(entry) {
-  if (entry.name) return { text: entry.name, provisional: false };
-  if (entry.provisionalName) return { text: entry.provisionalName, provisional: true };
-  return { text: entry.source || shortId(entry.id), provisional: false };
-}
-
-// noteConfirmedName logs the moment a provisional name (a magnet's own dn=)
-// is superseded by the torrent's own confirmed metadata - only when the two
-// actually disagree, and only the first time a confirmed name arrives for
-// this run (the entry.name guard). A dn= is never authoritative: anyone can
-// put anything after it, and the metadata a session actually fetches can
-// disagree with it. So the transition off a provisional name must not be a
-// silent swap - a person who has been reading "Sintel" deserves to see the
-// record say so explicitly if the torrent's own metadata turns out to name
-// it something else, rather than watch the row's text change with nothing
-// to explain why.
-function noteConfirmedName(entry, confirmed) {
-  if (entry.name || !entry.provisionalName || entry.provisionalName === confirmed) return;
-  logFor(entry, "name confirmed as \"" + confirmed + "\" (the magnet link said \"" + entry.provisionalName + "\")");
-}
-
-function whenLabel(ms) {
-  if (!ms) return "";
-  const d = new Date(ms);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " +
-    d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-}
-
-// ---------------------------------------------------------------------------
-// Table sorting. All client-side, over what state.runs already holds - GET
-// /runs is small enough that a server-side sort parameter would only add a
-// second place order is decided (TOR-62).
-
-// hasLive is the one question every one of the six live columns asks first:
-// does this row have a client that has spoken at all. entry.live is null
-// until it does (loadRuns copies GET /runs' own "live" object, the
-// "progress" case in apply() below keeps it current), never a zeroed
-// stand-in - see this block's own opening comment.
-function hasLive(entry) {
-  return !!entry.live;
-}
-
-// absentReason is the title text for a peers/seeds/rate/availability cell
-// that has nothing to show, so a person who does wonder why gets an answer
-// that matches what the cell actually knows rather than a bare dash.
-function absentReason(entry) {
-  if (entry.disk) return "no reading - this row was read off disk, never a live client";
-  if (!hasLive(entry)) return "no reading yet - this torrent has no client (queued, needs-action, or not yet started)";
-  return "";
-}
-
-function peersCellText(entry) {
-  return hasLive(entry) ? String(entry.live.peers) : ABSENT;
-}
-function peersCellTitle(entry) {
-  return hasLive(entry) ? entry.live.peers + " connected peer(s)" : absentReason(entry);
-}
-
-function seedsCellText(entry) {
-  return hasLive(entry) ? String(entry.live.seeds) : ABSENT;
-}
-function seedsCellTitle(entry) {
-  return hasLive(entry) ? entry.live.seeds + " connected seed(s)" : absentReason(entry);
-}
-
-// rateCellText/rateCellTitle serve both the download and upload columns -
-// bps is entry.live.download_bps or entry.live.upload_bps, already null
-// (never 0) when this heartbeat has nothing to report, per Live's own doc.
-function rateCellText(bps) {
-  return bps == null ? ABSENT : bytesLabel(bps) + "/s";
-}
-function rateCellTitle(entry, bps, label) {
-  if (bps != null) return label + ": " + bytesLabel(bps) + "/s";
-  if (!hasLive(entry)) return absentReason(entry);
-  return "no reading yet - a rate needs an interval between two heartbeats, so it is absent until this run's second one";
-}
-
-function availabilityReading(entry) {
-  return hasLive(entry) ? entry.live.swarm : null;
-}
-function availabilityCellText(entry) {
-  const s = availabilityReading(entry);
-  return s ? s.copies_per_piece.toFixed(2) + "×" : ABSENT;
-}
-// availabilityMetaText is deliberately shorter than the title
-// (availabilityCellTitle) that carries the full "N of M pieces" sentence:
-// measured in a real browser at this column's width, "N of M unavailable"
-// wraps to three lines and makes the row taller than every other one, which
-// is worse than the information it was trying to fit. "N missing" is what
-// actually stays legible on a single line - the total is one hover away.
-function availabilityMetaText(entry) {
-  const s = availabilityReading(entry);
-  return s ? s.unavailable + " missing" : "";
-}
-function availabilityCellTitle(entry) {
-  const s = availabilityReading(entry);
-  if (s) {
-    return s.copies_per_piece.toFixed(2) + " copies per piece, on average, across the swarm - not a " +
-      "percentage. " + s.unavailable + " of " + s.pieces + " pieces are held by no connected peer.";
-  }
-  if (!hasLive(entry)) return absentReason(entry);
-  return "no reading yet - this torrent has not been asked for bytes, so nothing has reported what the swarm holds";
-}
-
-// ---------------------------------------------------------------------------
-// THE QUEUE COLUMN, AND THE ONE PLACE ITS POSITION COMES FROM (TOR-140).
-//
-// TOR-139 had to DERIVE this. GET /runs reported no priority and no position,
-// the queue was strict FIFO over arrival, and so ranking every queued row by
-// its own reported queued time recovered the server's order exactly - a
-// queueRank() function that lived here and answered from state.runs.
-//
-// It is gone, and deliberately not kept alongside the server's answer. The
-// moment a queue can be REORDERED, arrival time stops predicting position,
-// and a page holding its own derivation would draw one order while the server
-// dispatched another - with nothing on screen to say which was real. So the
-// position is now a fact the server reports (listing.go's
-// RunSummary.QueuePosition, and the same field on every run_state that
-// concerns a waiting row) and this file renders it. There is exactly one
-// notion of queue position in the codebase, and it is not this one.
-//
-// Absent (0 or missing) means this row is not waiting for a slot at all -
-// running, parked for a file selection, finished, or read off disk - and
-// answers null, the same ABSENT IS NOT ZERO rule the five live figures
-// follow: position 0 is not a place in a 1-based queue.
-function queuePosition(entry) {
-  return entry.queuePosition > 0 ? entry.queuePosition : null;
-}
-
-// ---------------------------------------------------------------------------
-// TWO FACTS IN ONE COLUMN, AND WHICH OF THEM IS THE FIGURE (TOR-156).
-//
-// The owner asked for "в каком порядке торренты добавлены" - the order
-// torrents were added - after watching 1.2.0 with the queue width at 5
-// (TOR-149), where almost nothing ever queues and so the column read as a
-// feature that does not work. TOR-140 had built the column honestly for what
-// it meant: a queue POSITION, set only on the rows the queue still has
-// something to say about, an em dash everywhere else.
-//
-// The trap this ticket is written around is that those are TWO facts which
-// look like one number:
-//
-//   - ARRIVAL ORDINAL: "the third torrent you added". True for the life of
-//     the row, unmoved by priority, still meaningful on a row that finished
-//     an hour ago. This is the one the owner named.
-//   - QUEUE POSITION: "one ahead of you". Exists only while waiting, and
-//     moves whenever anything ahead finishes or a priority changes.
-//
-// TOR-153 had just been bitten by the mirror image of this - two bars saying
-// the same thing - so shipping these two as two numbers in two columns would
-// have repeated it from the other side. THE DECISION, and the reason it is
-// written here rather than only in the ticket:
-//
-//   - ONE COLUMN carries both, in the two-line shape TOR-140 already gave
-//     this very cell (a figure, and a muted second line under it). Nothing
-//     grows a column, and nothing has to be sorted twice.
-//   - THE ORDINAL IS THE FIGURE. It is the fact that is never absent, so it
-//     is the one that fixes the empty column; it is the fact the owner asked
-//     for; and it is the fact that means something on the finished rows,
-//     which are most of the table.
-//   - THE POSITION IS THE SECOND LINE, marked ("#2"), present only while it
-//     applies. Marked because two bare numbers stacked in one narrow cell is
-//     precisely the confusion this ticket exists to avoid - the figure needs
-//     nothing under a header that says Queue, the one that is only sometimes
-//     there does. See queueCellMetaText for why it is "#2" and not the
-//     spelled-out "queue 2" it started as.
-//   - THE ADDED COLUMN STAYS A TIMESTAMP. It is not redundant with the
-//     ordinal and the ordinal is not redundant with it: a date answers
-//     arrival order only RELATIONALLY, by comparing rows, and only under the
-//     default sort - sorted by peers, the timestamps scatter and nothing on a
-//     row says it was the third. A cardinal number reads the same whatever
-//     order the rows are in, which is TOR-140's own argument for a priority
-//     LEVEL over a dragged position, applied to the same table one column
-//     over.
-//
-// What was considered and rejected: giving the ordinal to the Added column
-// (two numbers in two places again, and it would make a date column carry
-// something that is not a date), and dropping the position (it is TOR-140's
-// own acceptance criterion - the person who reorders a queue has to be able
-// to see the order - and no other cell answers "how long until mine starts").
-//
-// Absent means one thing only: a row this session never gave a number,
-// i.e. one read off disk from an earlier run of the server (see
-// RunSummary.Arrival for why the counter cannot honestly outlive its
-// process). Never "not waiting" - that is what the second line says by
-// staying empty.
-function arrivalOrdinal(entry) {
-  return entry.arrival > 0 ? entry.arrival : null;
-}
-
-// The three levels runs.go's Priority declares, mirrored here because the
-// two buttons have to know what the ends of the band are to disable
-// themselves there. Widening the band is a change in both places, which is
-// why the names match exactly.
-const PRIORITY_LOW = -1;
-const PRIORITY_NORMAL = 0;
-const PRIORITY_HIGH = 1;
-
-// hasPriority is "does the queue still have anything to say about this row",
-// which is the server's own question (RunState.queueable) answered by the
-// presence of the field rather than re-derived from entry.state here. A
-// running or finished row carries no priority at all - not a zero - so this
-// is a null check, and it is what gates whether the row gets controls.
-function hasPriority(entry) {
-  return entry.priority === PRIORITY_LOW || entry.priority === PRIORITY_NORMAL || entry.priority === PRIORITY_HIGH;
-}
-
-function priorityLabel(priority) {
-  if (priority > PRIORITY_NORMAL) return "high";
-  if (priority < PRIORITY_NORMAL) return "low";
-  return "normal";
-}
-
-function queueCellText(entry) {
-  const arrival = arrivalOrdinal(entry);
-  return arrival === null ? ABSENT : String(arrival);
-}
-
-// The second line, in the same muted subtitle the availability cell uses.
-//
-// It carries the WAITING POSITION while there is one, and otherwise the
-// priority level when that is not the default - which is TOR-140's own rule
-// for this line, kept for the one row it still applies to: a parked torrent
-// holds a level and no position (it rejoins the queue when someone picks its
-// files, server.go's DecideRun).
-//
-// "#2" RATHER THAN "queue 2", AND THE LEVEL LEFT OFF, both for one measured
-// reason: this line does not wrap, it ELLIPSISES. .run-cell-queue-meta is
-// white-space: nowrap with text-overflow: ellipsis (app.css, TOR-140's own
-// rule, so that a long level could not make the row taller than every other
-// one), and at --col-w-priority (3.4rem) the line holds about seven
-// characters. Measured in a real browser: "queue 2" fits exactly, at 54px of
-// 54px; "queue 12" needs 62px and comes out as "queue 1…".
-//
-// A truncated position is not a cosmetic problem, which is what makes this
-// the deciding argument rather than a preference. Every other clipped label
-// on this page loses letters a person can guess at; this one would lose a
-// DIGIT and leave behind another position that is entirely plausible - a row
-// waiting twelfth reading as first, with an ellipsis as the only sign, and
-// "first" is the one value that also means "this starts next". So the format
-// is the one that cannot run out of room: "#" and the number, four characters
-// at three digits.
-//
-// The level goes the same way. "#2 high" is already eight, and the ▲/▼ pair
-// beside the cell says it without a word - the button at the end of the band
-// is disabled, so high and low are both visible at a glance - with the full
-// sentence in this cell's own title. TOR-140 made the opposite trade for the
-// availability cell's "N of M unavailable" and recorded the same measurement:
-// the fact that MOVES is worth the line, the one a control already shows is
-// not.
-function queueCellMetaText(entry) {
-  const position = queuePosition(entry);
-  if (position !== null) return "#" + position;
-  if (!hasPriority(entry) || entry.priority === PRIORITY_NORMAL) return "";
-  return priorityLabel(entry.priority);
-}
-
-function queueCellTitle(entry) {
-  const arrival = arrivalOrdinal(entry);
-  const position = queuePosition(entry);
-
-  // Both facts, always named apart, and the ordinal first because it is the
-  // figure on the row. A tooltip is where the distinction the whole ticket
-  // rests on can be spelled out at length, which two digits in a 3.4rem cell
-  // cannot do for themselves.
-  const parts = [];
-  if (arrival !== null) {
-    parts.push("added " + ordinalWord(arrival) + " to this server - a number that never changes");
-  } else {
-    parts.push("no arrival number: this row was read off disk, from a run of the server before this one");
-  }
-  if (position !== null) {
-    parts.push("waiting at position " + position + " of the queue the server actually holds, at " +
-      priorityLabel(entry.priority) + " priority" +
-      (position === 1 ? " - this is the next torrent to start" : ""));
-  } else if (hasPriority(entry)) {
-    // A parked torrent: it has a level, and it will re-enter the queue with
-    // it the moment someone picks files (server.go's DecideRun).
-    parts.push("not in the queue while it waits for a file selection - it will rejoin at " +
-      priorityLabel(entry.priority) + " priority");
-  } else if (!entry.disk) {
-    parts.push("not waiting for a slot");
-  }
-  return parts.join(". ");
-}
-
-// ordinalWord turns 3 into "3rd", for the one place a sentence reads better
-// than a bare figure (the cell itself stays a bare figure - .run-cell-metric
-// is a column of numbers meant to be compared straight down, and "3rd" in it
-// would break the tabular alignment every other metric cell keeps).
-function ordinalWord(n) {
-  const tens = n % 100;
-  if (tens >= 11 && tens <= 13) return n + "th";
-  switch (n % 10) {
-    case 1: return n + "st";
-    case 2: return n + "nd";
-    case 3: return n + "rd";
-    default: return n + "th";
-  }
-}
-
-function sortValue(entry, key) {
-  switch (key) {
-    case "name": return displayName(entry).text.toLowerCase();
-    case "status": return badgeLabel(entry).toLowerCase();
-    // The five live figures and the queue position are null, never 0, the
-    // moment their reading is absent (hasLive, queuePosition) - see compareEntries
-    // for what that null is FOR: an absent row is not "the lowest value", it
-    // is excluded from the comparison entirely and sinks to the end.
-    case "peers": return hasLive(entry) ? entry.live.peers : null;
-    case "seeds": return hasLive(entry) ? entry.live.seeds : null;
-    case "download_bps": return hasLive(entry) && entry.live.download_bps != null ? entry.live.download_bps : null;
-    case "upload_bps": return hasLive(entry) && entry.live.upload_bps != null ? entry.live.upload_bps : null;
-    case "availability": {
-      const s = availabilityReading(entry);
-      return s ? s.copies_per_piece : null;
-    }
-    // Sorting the Queue column sorts by the ARRIVAL ORDINAL, because that is
-    // the figure the column shows (TOR-156) - a header that sorted by the
-    // second line would reorder the table by a number most rows do not have.
-    // Ascending is therefore the order the torrents were added, which is what
-    // the owner asked this column for; the rows still waiting keep their
-    // relative order within it unless somebody has reprioritised them, and
-    // the second line is where that shows.
-    //
-    // Until TOR-156 this returned queuePosition(entry), which was right while
-    // the position was what the cell displayed. The two must not disagree:
-    // the column that sorts by one number and prints another is unreadable in
-    // exactly the way a person only discovers after trusting it.
-    //
-    // Absent - a disk row, which this session never numbered - sinks to the
-    // end like every other absent reading (see compareEntries).
-    case "priority": return arrivalOrdinal(entry);
-    case "when":
-    default: return entry.when || 0;
-  }
-}
-
-// compareEntries' first job, before it compares anything: decide where a row
-// with nothing to say goes. An absent value is not zero and must not sort as
-// though it were - the trap the ticket names directly, that a column where
-// most rows are absent would otherwise bury a running torrent with a real
-// zero reading among the queued rows that have none at all, which is exactly
-// backwards. The decision made here is that absent rows sink to the END of
-// EVERY sort, ascending or descending alike - unconditionally, before dir is
-// ever consulted, so a person clicking a header to sort by "most peers" and
-// then again for "fewest peers" finds the running-but-friendless torrents at
-// one end both times, and the never-had-a-client rows at the other,
-// consistently. name/status/when never produce a null/undefined sortValue,
-// so this is a no-op for the three columns that existed before TOR-139.
-function compareEntries(a, b) {
-  const { key, dir } = state.sort;
-  const va = sortValue(a, key);
-  const vb = sortValue(b, key);
-
-  const aAbsent = va === null || va === undefined;
-  const bAbsent = vb === null || vb === undefined;
-  if (aAbsent || bAbsent) {
-    if (aAbsent && bAbsent) return 0;
-    return aAbsent ? 1 : -1;
-  }
-
-  let cmp = typeof va === "number" ? va - vb : String(va).localeCompare(String(vb));
-  if (dir === "desc") cmp = -cmp;
-  return cmp;
-}
 
 // reorderRuns moves every row's existing element into sorted order without
 // rebuilding anything - appendChild on a node already in the table just
@@ -1144,7 +576,7 @@ function newRunEntry(id) {
     // many of the torrent's video files this run had picked ("N of M ...
     // selected") - that half is gone, so this paragraph carries the name
     // alone now. The torrent's own file count (M) did not go with it; see
-    // the "Torrent files" spec onFileStarted adds to each file's own
+    // the "Torrent files" spec renderFileMeta adds to each file's own
     // Metadata disclosure.
     '<p class="torrent-summary" hidden></p>' +
     // What Save .torrent (now in the header above) left behind: sending the
@@ -1232,204 +664,15 @@ function newRunEntry(id) {
   detailCell.append(detailEl);
 
   const entry = {
-    id, disk: false, infohash: "", params: "",
-    state: "", source: "", name: "",
-    // provisionalName is a magnet's own dn=, offered only while name is
-    // still empty (TOR-117) - see displayName for how the two are chosen
-    // between, and noteConfirmedName for how the switch off this one is
-    // announced rather than left silent.
-    provisionalName: "",
-    error: "", progress: "",
-    files: 0, complete: 0, selected: 0,
-    // partial is GET /runs' own "partial" field (RunSummary.Partial in
-    // listing.go, TOR-80) - false here for the same reason files/complete/
-    // selected start at zero: nothing has merged a disk record into this
-    // entry yet, and loadRuns is the only place that changes.
-    partial: false,
-    // live is GET /runs' own "live" object (listing.go's Live) for this row -
-    // null, not a zeroed struct, until the run actually has a client that has
-    // spoken at least once (loadRuns copies row.live; the "progress" case in
-    // apply() below keeps it current for the rest of the page's life). Every
-    // one of the six live columns (TOR-139) reads through hasLive()/this
-    // field rather than defaulting any piece of it to 0 - see that block's
-    // own opening comment for why.
-    live: null,
-    // stall is TOR-141's own reading (core.Progress.Stall, wire.go's "stall"
-    // key on the progress event) - which distinct cause currently explains
-    // no progress, and how long, plus observedAt, THIS page's own wall clock
-    // reading stamped the moment the reading arrived (never the server's
-    // clock, which this page cannot compare against). Null, not a stale
-    // object, whenever the run is progressing or has never run at all - the
-    // same "absent, not zero" shape live above already follows, and cleared
-    // at exactly the same moments entry.progress is (see the run_state and
-    // terminal-event handling in apply()).
-    stall: null,
-    // runningSince is stamped in local wall-clock time the moment this row
-    // is FIRST seen in the "running" state (the run_state handler below) -
-    // used only to compute waitingForMetadata's own duration, since there is
-    // no torrent yet during that phase for a Stall reading to ride on.
-    runningSince: 0,
-    // priority is the queue level the server reports for this row (runs.go's
-    // Priority, TOR-140) and queuePosition its 1-based place in the queue.
-    // null and 0 mean the same thing they mean on the wire: this row is not
-    // one the queue has anything to say about - never "normal" and never
-    // "position zero", which is why the first is null rather than 0 (see
-    // hasPriority, and RunSummary.Priority's own doc for why one field is a
-    // pointer server-side and the other is not).
-    priority: null,
-    queuePosition: 0,
-    // arrival is "this was the Nth torrent added to this server" (TOR-156) -
-    // the figure the Queue column shows. 0 means this row has none, which
-    // happens for exactly one kind of row: one read off disk, from a run of
-    // the server before this one. Unlike the two fields above it never
-    // changes and never goes away once set, which is why the two readers
-    // below keep the value they have rather than clearing it when a message
-    // arrives without one.
-    arrival: 0,
-    // when is this row's sort key for the default (date, newest-first) sort.
-    // Set once, here, at creation - never touched again by a status update -
-    // which is what keeps a live run from jumping position as events arrive.
-    // loadRuns() overwrites it once with the authoritative value GET /runs
-    // reports, for a row it already knows about at page load.
-    when: Date.now(),
-    reopening: false,
-    // TOR-152. topup is GET /runs/{infohash}/topup's own answer for this
-    // row - what finishing this result set would be allowed to spend, and
-    // which ceiling stopped it - or null for a row that has not been asked
-    // about (nothing has finished yet) or has nothing to finish. Null rather
-    // than a zeroed object, the same "absent, not zero" rule live and stall
-    // already follow: an offer of 0 bytes is a real answer (no raise would
-    // help) and must not read the same as "not asked".
-    topup: null,
-    // againKey is the (torrent, set, state, completeness) this row last
-    // asked about, so syncEntry can call refreshAgain on every event
-    // without the page re-fetching the same answer per frame.
-    againKey: "",
-    // claiming is reopening's counterpart for a run started FROM this row -
-    // a top-up or a retry. Both mint or re-arm a run whose id the socket may
-    // announce before the POST settles, and resolveIncomingRun folds that id
-    // into this row rather than spawning a second one for the same torrent
-    // (TOR-140: one torrent, one row).
-    claiming: false,
-    fileEntries: new Map(),
-    // videos is the CAPTURABLE files this torrent holds - the only indices a
-    // selection may name (the server validates a decision against exactly
-    // this list, runEntry.holdsFile) - and fileList is EVERY file it holds,
-    // video or not (TOR-180). Both arrive on the same two messages, a live or
-    // replayed metadata_ready and a parked torrent's needs_action.
+    // The data half, which state.js owns (newRunState) - every field a row
+    // KNOWS, with nothing in it that a browser has to exist for. What follows
+    // is this file's half: the elements it is drawn in.
     //
-    // fileList IS EMPTY FOR TWO DIFFERENT REASONS and the renderer treats
-    // them the way this page treats any absent reading: nothing has arrived
-    // yet (a queued row, whose metadata has not been fetched), or the
-    // message carried no "files" key at all - a replay of a run recorded
-    // before cache.Run.Files existed. Neither means "this torrent holds no
-    // files", so renderFileList falls back to videos rather than drawing an
-    // empty torrent.
-    //
-    // NOT `files`, and the name matters: entry.files above is already GET
-    // /runs' own per-row COUNT of video files (RunSummary.Files), read by
-    // badgeState and metaLabel. Calling this one `files` too put two
-    // different things under one key in the same object literal, where the
-    // second silently won and took the badge's completeness arithmetic with
-    // it - caught by a mutation run, not by reading. The wire key stays
-    // "files" (it is one message type's own key, and metadata_ready has no
-    // count for it to collide with there); it is this object that cannot
-    // afford the overload.
-    videos: [],
-    fileList: [],
-    // fileListKnown tells the two apart: true only when a message actually
-    // carried a "files" key, so fileListTitle can say "5 files, 1 video"
-    // where the whole truth is known and fall back to the video count alone
-    // where it is not, rather than reporting one list's length as the
-    // other's - which is a misreport a reader has no way to check.
-    fileListKnown: false,
-    // picked is what this row HAS ASKED TO CAPTURE, by torrent index, and
-    // since TOR-181 that is the server's answer rather than this page's
-    // staged intention: run_state's "ticked" is written straight into it on
-    // every message, so a tick that was refused, or a second browser tab
-    // ticking the same torrent, cannot leave the boxes disagreeing with what
-    // is actually being fetched. A tick sets it optimistically for the one
-    // frame between the click and the socket, and rolls it back if the POST
-    // is refused (tickFile).
-    //
-    // It is seeded from the run's own selection on metadata_ready and starts
-    // empty for a parked torrent - nothing is pre-ticked there on purpose,
-    // since the count is per file and pre-ticking six variants would put the
-    // most expensive possible run one careless click away (TOR-50).
-    picked: new Set(),
-    // deferred is the part of picked that is NOT in the pass in flight: a
-    // file ticked while this row was already fetching, which the engine
-    // cannot be handed mid-plan, so the server holds it and re-arms this
-    // very entry when the current pass ends (runEntry.pending). Its own set
-    // rather than a flag on picked, because the two say different things on
-    // the row - "in this run" against "in the next pass" - and a reader has
-    // to be able to tell which of their ticks is already spending.
-    deferred: new Set(),
-    // fetching is the part of picked the ENGINE IS HOLDING RIGHT NOW: the
-    // files of the pass in flight, from run_state's own "fetching"
-    // (runEntry.fetchingLocked). Only ever non-empty while the row is
-    // running.
-    //
-    // NOT "picked minus deferred", which is what it looks like and is wrong
-    // in exactly one direction: picked is cumulative, so that difference also
-    // holds every file an EARLIER pass on this row already captured, and
-    // those are files nothing is fetching. The two need opposite answers from
-    // TOR-184 - un-ticking a file being fetched stops this torrent's fetch,
-    // and un-ticking one a previous pass finished must not, because the run
-    // it would stop is fetching something else. So the server sends the set
-    // rather than leaving the page to reconstruct it and be wrong on the row
-    // with two passes behind it.
-    fetching: new Set(),
-    // unticked is what somebody has UN-TICKED on this row to be offered the
-    // clear (TOR-183), by torrent index. It is the only piece of tick state
-    // on this page the server does not own, and that is the whole design:
-    // un-ticking a FINISHED file asks nothing of the server and spends
-    // nothing - the run still asked for the file and cache.Run.Selected still
-    // says so - it only puts the Clear frames button on the row. So there is
-    // nothing for run_state to carry and nothing for it to overwrite, which
-    // matters because run_state ASSIGNS entry.picked on every message: a
-    // local un-tick recorded there would be undone by the next one.
-    //
-    // Its own set for the reason deferred above has one: picked answers "has
-    // this row asked for the file", which stays true after a clear and stays
-    // true while the offer is on screen, and folding two answers into one
-    // would leave a reader unable to tell an un-tick from a file that was
-    // never wanted.
-    //
-    // A stale entry is harmless by construction rather than by tidying:
-    // updateFileCosts only ever reads it together with "and this file has
-    // frames to clear", so an index left here for a file that no longer has
-    // any simply stops being offered and the box goes back to checked. It is
-    // still dropped at the two moments the offer genuinely ends - a re-tick,
-    // and a clear that left the file clean - because a top-up could otherwise
-    // bring the frames back and find the row still offering to delete them.
-    unticked: new Set(),
-    // tickable is the server's own verdict on whether a tick would be
-    // ACCEPTED for this row at all (run_state's "tickable", from
-    // runEntry.refuseTick), and tickRefusal is the sentence to put on the
-    // box when it would not.
-    //
-    // Read rather than re-derived from entry.state, deliberately: the rule
-    // has a case this page cannot see (a torrent dropped as a file, whose
-    // staged copy is gone once its run ends), so a page deciding for itself
-    // would offer live checkboxes the server then refuses. false to begin
-    // with, which is the one safe default - a row this page has not yet
-    // heard a state for must not draw a live box.
-    tickable: false,
-    tickRefusal: "",
-    // passCount is the frames-per-file the pass this row is forming will
-    // use (run_state's "count"). DecideRun locks it to the tick that opened
-    // that pass, so once anything is ticked the remaining rows have to be
-    // priced at THIS number rather than at whatever the intake box now
-    // shows - otherwise a person who retyped the count would read a price
-    // their next tick will not get. 0 means "the server's own -n", which is
-    // exactly what the intake box displays (loadDefaults).
-    passCount: 0,
-    // armed is Select all's confirmation state: it has been pressed once and
-    // is showing what it would cost, waiting for the second press that
-    // spends it (armSelectAll). Per row, because two parked torrents can
-    // each be waiting on their own answer.
-    armed: false,
+    // ONE OBJECT, TWO LITERALS, so a key declared below still shadows the
+    // same key in there, silently, exactly as two keys in one literal always
+    // did (TOR-180). TestNoRunEntryFieldIsDeclaredTwice scans the union of
+    // both rather than either alone.
+    ...newRunState(id),
     // pickerRows maps a torrent index to the elements of its row, so
     // syncFileList can re-state every box's checked/disabled state and every
     // figure without rebuilding the list - the list is rebuilt only when the
@@ -1440,35 +683,15 @@ function newRunEntry(id) {
     // built into (`detail`), which turns "rebuilding it on each event would
     // drop the scroll position" from a courtesy into a correctness rule: a
     // rebuild now throws away every frame grid, every open disclosure and
-    // every element fileBlock is holding a reference to. fileListSig below
-    // is what makes that impossible rather than merely unlikely.
-    pickerRows: new Map(),
-    // fileListSig is the file list this row's DOM was LAST BUILT FROM -
-    // indices, paths and whether the whole list was known - so renderFileList
-    // can tell a message that says something new about the list from one that
-    // repeats what it already drew.
+    // every element fileBlock is holding a reference to. entry.fileListSig
+    // (state.js) is what makes that impossible rather than merely unlikely,
+    // and events.js's applyFileList is what reads it.
     //
-    // It exists because more than one message carries a file list and only
-    // the first of them is a fresh start. A top-up and a retry (TOR-152) mint
-    // a run whose events land on THIS entry (claimReopenedRun), and each of
-    // them publishes its own metadata_ready - so before TOR-182 the second
-    // one merely redrew an identical list, and since TOR-182 it would take
-    // the details nested in that list down with it, mid-run, on a row whose
-    // frames are on screen. A genuine reset comes through resetRunContent,
-    // which clears this along with the list itself.
-    fileListSig: "",
-    // Set once this run's first file block is built, so every file after it
-    // defaults to collapsed - only the first one earns the auto-expand.
-    autoExpanded: false,
-    // torrentURL is the files/{id} handle the run's own done event announced
-    // for its saved .torrent, empty for a run that has none to offer.
-    torrentURL: "",
-    // Whether this torrent's detail is on screen (TOR-138). Changed only
-    // inside setRunExpanded, which is the same discipline setFileExpanded and
-    // setMetaExpanded keep one and two levels down: no event that arrives for
-    // this run may open or close it, so a person's click cannot be undone
-    // from under them by a frame landing.
-    expanded: false,
+    // ON THIS SIDE OF THE SPLIT, not in newRunState, because what it holds is
+    // elements: it is a map of DOM, built by renderFileList and read by
+    // updateFileCosts, and the only thing state.js would be able to say about
+    // it is that it exists.
+    pickerRows: new Map(),
     rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
     rowWhen: whenCell, rowCancel: cancel, rowToggle: main,
     rowPeers: peersCell, rowSeeds: seedsCell, rowDown: downCell, rowUp: upCell,
@@ -1551,89 +774,39 @@ function newRunEntry(id) {
   return entry;
 }
 
-// ensureRun finds a torrent by key, creating it - at the top of the list,
-// since a key that does not exist yet is always something just starting -
-// the first time it is needed.
-function ensureRun(id) {
-  let entry = state.runs.get(id);
-  if (!entry) {
-    entry = newRunEntry(id);
-    state.runs.set(id, entry);
-  }
-  return entry;
-}
-
-// resetRunContent clears one run's files and frames without touching its row
-// or detail container - what a run_state "reset" means now: this run's own
+// resetRunView takes off screen everything resetRunState (state.js) took out
+// of the entry - what a run_state "reset" means for the DOM: this run's own
 // history is starting over (a fresh start, or a reconnecting page about to
 // replay it from the beginning), not "every torrent on the page is gone".
-function resetRunContent(entry) {
+//
+// TWO FUNCTIONS RATHER THAN ONE (TOR-191), and not for tidiness. Every field
+// the state half clears is something the replayed history is about to state
+// again; a renderer keeping its own copy of one of them would be a second
+// place the reset had to be got right, which is exactly how a reconnect comes
+// to leave a stale set behind (TOR-184). So nothing here DECIDES anything - it
+// draws the emptiness the state half already established, which is why every
+// line below reads a field or calls the one function that may draw it.
+//
+// events.js calls the two together, in that order, and nowhere else does.
+function resetRunView(entry) {
   // Since TOR-182 the file blocks live INSIDE the file list's own rows, so
-  // there is no separate container to empty here - entry.pickerList's own
+  // there is no separate container to empty here - pickerList's own
   // replaceChildren below is what takes the blocks off screen with the rows
-  // that hold them. This map still has to be cleared by hand, and before
-  // that happens rather than after: it is the only handle on those blocks,
-  // and every one of them is about to be detached.
-  entry.fileEntries.clear();
-  entry.autoExpanded = false;
-  entry.torrentSummary.hidden = true;
-  entry.torrentSummary.textContent = "";
-  entry.error = "";
-  // A reconnecting page is about to replay this run's history from the
-  // start, the same as every other field cleared here - a stall reading
-  // from before the reset would otherwise sit stale on screen until the
-  // replay's own next progress event happens to overwrite it.
-  entry.stall = null;
-  entry.runningSince = 0;
-  // Same reasoning as the stall reading just above: entry.fileEntries is
-  // gone (cleared two lines up), so applyFrameProgress has nothing to read
-  // until the replay's own file_started rebuilds it - these three would
-  // otherwise sit at whatever the ended run last reported and let
-  // renderRunProgress draw a bar for a file the page no longer has anything
-  // about, however briefly, before that happens (TOR-167).
-  entry.progress = "";
-  entry.framesDone = 0;
-  entry.framesTotal = 0;
-  // The file list goes with everything else this run has shown. It comes back
-  // from the replayed metadata_ready or needs_action that follows in the same
-  // history, so a reconnecting page rebuilds it rather than keeping a stale
-  // copy of a list the server may since have moved past.
-  entry.videos = [];
-  entry.fileList = [];
-  entry.fileListKnown = false;
-  entry.picked.clear();
-  entry.deferred.clear();
-  // And what the engine was holding (TOR-184), for the same reason as the two
-  // above and one of its own: a stale "fetching" would make an un-tick offer
-  // to stop a run whose history this page is in the middle of re-reading, and
-  // stopping is the one act here that reaches the server without being asked
-  // twice.
-  entry.fetching.clear();
-  // And the offers on it (TOR-183). The rows those buttons sat on are about
-  // to be detached, and the frames they offered to clear are re-read from
-  // disk by the history that follows - so an offer kept here would be an
-  // offer about a file this page has yet to be told anything about.
-  entry.unticked.clear();
+  // that hold them. entry.fileEntries, the only handle on those blocks, was
+  // already cleared by resetRunState before this ran.
   entry.pickerRows.clear();
-  // The tick's own two readings go with the list: they are the server's
-  // answer for a state this row is about to be told again, and a stale
-  // "tickable" would draw a live checkbox for one frame on a row whose run
-  // has since ended. false is the safe direction (see the field's own doc).
-  entry.tickable = false;
-  entry.tickRefusal = "";
-  entry.passCount = 0;
-  disarmSelectAll(entry);
   entry.pickerList.replaceChildren();
-  // The signature goes with the list it describes. Left behind, it would
-  // tell the replayed metadata_ready that follows "you already drew this",
-  // and the row would come back from a reset with an empty list (TOR-182).
-  entry.fileListSig = "";
   entry.pickerEl.hidden = true;
-  // The .torrent link goes with the rest of what this run has shown. It comes
-  // back from the done event the replayed history ends on, so a reconnecting
-  // page rebuilds it rather than keeping a handle the server may no longer
-  // resolve.
-  showTorrent(entry, "");
+  // Select all's own two states, redrawn through the one function that may
+  // draw that button. entry.armed itself was cleared by resetRunState - what
+  // is left here is the label and the sentence beside it, and leaving those
+  // standing would put a whole torrent's bill under one stray press on a row
+  // that has just been emptied.
+  syncSelectAll(entry);
+  // The summary paragraph and the run's own .torrent, both of which read a
+  // field the state half emptied rather than being reached into.
+  renderSummaryLine(entry);
+  renderTorrent(entry);
 }
 
 function syncEntry(entry) {
@@ -1669,7 +842,7 @@ function syncEntry(entry) {
   // The six live columns (TOR-139). Each pair of lines below is a text and a
   // title, and every one of them can legitimately be ABSENT rather than a
   // number - see this block's own helpers (peersCellText and friends,
-  // defined beside sortValue) for what decides which.
+  // state.js, beside sortValue) for what decides which.
   entry.rowPeers.textContent = peersCellText(entry);
   entry.rowPeers.title = peersCellTitle(entry);
   entry.rowPeers.dataset.absent = String(!hasLive(entry));
@@ -1729,6 +902,12 @@ function syncEntry(entry) {
   entry.detailBadge.dataset.state = badgeState(entry);
   entry.detailTitle.textContent = shown.text;
   entry.detailTitle.classList.toggle("run-name-provisional", shown.provisional);
+  // The sentence under the header, from entry.summaryLine - which
+  // metadata_ready and needs_action each write their own version of
+  // (events.js). Drawn here, on every event, rather than by those two
+  // handlers reaching in: that is the whole of "rendering reads from state
+  // rather than from whatever the last handler left in scope".
+  renderSummaryLine(entry);
   // data-idle, not .hidden: Save .torrent sits right next to Cancel in
   // .run-detail-header-actions (TOR-169), and [hidden]'s display: none would
   // let Save slide over to fill the gap the instant Cancel is not
@@ -1757,11 +936,6 @@ function syncEntry(entry) {
 // ceiling, RETRY runs one that produced nothing again. Which of them a row
 // offers is decided by what the row actually is, never by asking the person
 // to know the difference.
-
-// FINAL is the three states a run never leaves - runs.go's RunState.final,
-// read here rather than re-derived, because "can this be run again" has to
-// mean the same thing on both sides of the wire.
-const FINAL = new Set(["done", "failed", "cancelled"]);
 
 // refreshAgain asks the server what finishing this row would cost, once per
 // answer worth having.
@@ -2056,7 +1230,7 @@ window.addEventListener("resize", syncRunDetailWidth);
 //      sibling here would be the same theft, at the level above.
 //   3. It costs nothing that the old shape was not already paying. Every
 //      entry's detail DOM has always existed and has always been updated
-//      whether or not it was on screen - addFrame and renderFrames never
+//      whether or not it was on screen - applyFrame and renderFrames never
 //      checked - so N open details is N grids laid out, not N grids kept up
 //      to date. The thumbnails are loading="lazy", so an open row scrolled
 //      off screen fetches nothing.
@@ -2134,65 +1308,6 @@ function reopenRun(entry) {
       syncEntry(entry);
       logFor(entry, "reopen failed: " + entry.error);
     });
-}
-
-// claimReopenedRun trades a disk entry's synthetic key for the real run id
-// the server minted for it, keeping its DOM - its row, its detail container,
-// its place in the list - exactly as it was, so the run_state and events
-// that follow for that id land on this same entry instead of spawning a
-// duplicate row.
-//
-// It is idempotent by design: the reopen response and the socket message
-// that announces the same new run race each other (server.go's ReopenRun
-// runs the whole replay, publishing every event, before the HTTP handler
-// even writes its response - see resolveIncomingRun), and either one can
-// arrive first. Whichever gets here first does the swap; the other finds
-// entry.id already equal to newId and does nothing.
-function claimReopenedRun(entry, newId) {
-  if (entry.id !== newId) {
-    state.runs.delete(entry.id);
-    entry.id = newId;
-    entry.disk = false;
-    entry.reopening = false;
-    entry.claiming = false;
-    state.runs.set(entry.id, entry);
-    syncEntry(entry);
-    return;
-  }
-  // The id it already had. A top-up or retry the server RE-ARMED answers
-  // with the same id this row is keyed by (Server.again), so there is
-  // nothing to swap - but the flag still has to come down, or this row would
-  // go on claiming every other run's id that shares its infohash.
-  entry.claiming = false;
-}
-
-// resolveIncomingRun is ensureRun's counterpart for a run_state message: a
-// brand new id might not be a brand new torrent. If some disk entry is
-// mid-reopen and shares this message's infohash, this id is what that
-// reopen minted, and claimReopenedRun folds the message into that entry
-// instead of ensureRun spawning a second row for the same torrent. Matching
-// on infohash alone cannot tell apart two different plans of the very same
-// torrent (TOR-54) both being reopened at once - a rare case this picks the
-// first match for, rather than handling.
-function resolveIncomingRun(id, infohash) {
-  const existing = state.runs.get(id);
-  if (existing) return existing;
-
-  if (infohash) {
-    for (const candidate of state.runs.values()) {
-      // reopening OR claiming: a disk row being replayed (TOR-55) and a row
-      // whose own run is being topped up or retried (TOR-152) are the same
-      // situation for this function - a row that is expecting an id it does
-      // not have yet - and folding the new id into the row that asked for it
-      // is what keeps one torrent on one row (TOR-140).
-      if ((candidate.reopening || candidate.claiming) && candidate.infohash === infohash) {
-        claimReopenedRun(candidate, id);
-        return candidate;
-      }
-    }
-  }
-
-  return ensureRun(id);
 }
 
 async function cancelRun(id) {
@@ -2288,13 +1403,22 @@ const WHY_NOT_VIDEO =
   "torpeek takes no frames from this file — either its extension is not one " +
   "it opens, or it is a sample or trailer beside a much larger video";
 
-// renderFileList draws the torrent's whole file list, from a metadata_ready
-// or a needs_action - the two messages that carry one.
+// renderFileList BUILDS THE ROWS of the torrent's whole file list, from
+// entry.fileList and entry.videos - never from a message.
+//
+// events.js is what puts those two on the entry, off whichever of
+// metadata_ready or needs_action carried them, and it is also what decides
+// that this function should run AT ALL: the same list is not rebuilt, which
+// since TOR-182 is a correctness rule rather than a courtesy about scroll
+// positions (see applyFileList for the signature that settles it, and point 1
+// below for what a needless rebuild destroys). Reaching this function means
+// the list genuinely changed shape.
 //
 // TICKS COME FROM THE RUN'S OWN SELECTION, not from nothing: a row whose
-// files are already decided shows which of them this run is working on
-// (ev.selected), which is real information the page had and threw away
-// before. A parked torrent is the exception and starts with NOTHING ticked -
+// files are already decided shows which of them this run is working on (the
+// message's own "selected", folded into entry.picked by events.js), which is
+// real information the page had and threw away before. A parked torrent is
+// the exception and starts with NOTHING ticked -
 // it reaches that state precisely because it holds several video files, and
 // pre-ticking them all would put the most expensive possible run one
 // careless click away, since the count is per file and six variants at 20
@@ -2316,9 +1440,10 @@ const WHY_NOT_VIDEO =
 //
 //   1. THE ROW BUILD IS NOW LOAD-BEARING, not a redraw. It used to be free
 //      to rebuild the list on every message that carried one; now a rebuild
-//      detaches every frame grid on the row. The signature below is what
-//      makes a second metadata_ready - which a top-up and a retry both
-//      publish onto this same entry - redraw nothing.
+//      detaches every frame grid on the row. entry.fileListSig - kept in
+//      state.js, read in events.js - is what makes a second metadata_ready,
+//      which a top-up and a retry both publish onto this same entry, never
+//      reach this function at all.
 //   2. THE ROW OWNS THE TOGGLE, not the block inside it. The listener is on
 //      .picker-file and the detail is its SIBLING inside the <li>, never its
 //      descendant - the same shape, and for the same reason, as the run
@@ -2330,71 +1455,12 @@ const WHY_NOT_VIDEO =
 //      asked for - and updateFileCosts disables the box of every asked-for
 //      file. So a row either spends traffic (no detail yet) or opens what
 //      that traffic bought (box disabled), never both.
-function renderFileList(entry, ev) {
-  entry.videos = ev.videos || [];
-  // ABSENT IS NOT EMPTY. A message with no "files" key cannot say what the
-  // torrent holds - a replay of a run recorded before cache.Run.Files
-  // existed is exactly that - so the video list stands in rather than the
-  // page claiming an empty torrent. Every row is then tickable, which is
-  // true of that list by construction.
-  entry.fileListKnown = !!ev.files;
-  entry.fileList = ev.files || entry.videos;
-  // ADDED TO, NEVER ASSIGNED, and this is a bug the browser found rather
-  // than the tests: ev.selected is the pass IN FLIGHT, which for a SECOND
-  // pass names only the files that pass was re-armed with (TOR-181), so
-  // assigning it here cleared the tick beside a file the first pass had
-  // already captured - which reads as the capture having been undone.
-  //
-  // The cumulative answer is the server's (runEntry.asked, run_state's
-  // "ticked"); all this has to do is not throw it away. It is still exactly
-  // right for a parked torrent, whose own record carries no "selected" at
-  // all (server.go's needsActionRecordLocked deliberately omits it) and
-  // whose set is empty because resetRunContent emptied it when the run's
-  // history opened.
-  for (const index of ev.selected || []) entry.picked.add(index);
-
-  // THE SAME LIST IS NOT REDRAWN, and since TOR-182 that is a correctness
-  // rule rather than a courtesy about scroll positions. A top-up or a retry
-  // (TOR-152) mints a run whose events land on this very entry
-  // (claimReopenedRun), and that run publishes its own metadata_ready - so
-  // this function runs a second time, mid-life, on a row whose files are
-  // open with frames on screen. Rebuilding the rows there would detach every
-  // frame grid, every open disclosure and every element fileBlock is holding
-  // a reference to, and the page would look as though the run had lost its
-  // work.
-  //
-  // The signature is the list ITSELF (each file's index and path) plus
-  // whether the whole of it was known, because those are exactly the inputs
-  // the rows are built from - not a message counter or a length, either of
-  // which would call two different lists the same. A genuine fresh start
-  // arrives through resetRunContent, which clears the signature with the
-  // list, so this can never suppress the rebuild that follows a reset.
-  const sig = entry.fileList.length
-    ? (entry.fileListKnown ? "files:" : "videos:") +
-        entry.fileList.map((file) => file.index + " " + file.path).join("\n")
-    : "";
-  if (sig !== "" && sig === entry.fileListSig) {
-    // Everything about the row that is not its shape - the boxes, the prices,
-    // the frame and the title - is restated, which is all this message can
-    // legitimately have changed about a list it has already drawn.
-    syncFileList(entry);
-    return;
-  }
-  entry.fileListSig = sig;
+function renderFileList(entry) {
+  // A FRESH MAP, not a cleared one: every bundle in the old map points at a
+  // row this rebuild is about to detach, and events.js has already dropped
+  // the file entries that pointed into them (applyFileList) - which is the
+  // only handle on the blocks, and had to go first.
   entry.pickerRows = new Map();
-  // AND THE BLOCKS GO WITH THE ROWS THAT HELD THEM. Every fentry points at
-  // elements inside a row this rebuild is about to detach, so keeping the map
-  // would leave fileBlock returning a block whose DOM is no longer on the
-  // page - and that file's detail would then never appear again, silently,
-  // for the rest of the row's life. Cleared here rather than in
-  // resetRunContent alone, because this is the OTHER way the rows can go.
-  //
-  // Reaching this line at all means the list genuinely changed shape (the
-  // signature above is what settles that), which for one torrent on one row
-  // should never happen - so this is the guard for a case that ought to be
-  // impossible rather than a path with a known caller.
-  entry.fileEntries.clear();
-  entry.autoExpanded = false;
 
   const tickable = new Set(entry.videos.map((video) => video.index));
 
@@ -2689,27 +1755,6 @@ function fileListTitle(entry, parked) {
   return entry.fileList.length + " file(s), " + entry.videos.length + " video" + suffix;
 }
 
-// untickedVideos is every capturable file this row has NOT asked for yet -
-// what a tick still has left to reach, and what Select all would start.
-function untickedVideos(entry) {
-  return entry.videos
-    .map((video) => video.index)
-    .filter((index) => !entry.picked.has(index));
-}
-
-// passCount is the frames-per-file THIS ROW'S next start will actually use.
-//
-// It is the intake's number until this row has asked for something, and the
-// server's locked figure afterwards (run_state's "count", DecideRun). Those
-// are different numbers the moment somebody retypes the intake box with a
-// pass already forming, and the row has to quote the one its next tick will
-// get - a price that changes under a person after they read it is worse than
-// no price.
-function passCount(entry) {
-  if (entry.picked.size > 0 && entry.passCount > 0) return entry.passCount;
-  return countValue();
-}
-
 // framesLabel is one file's price, in the unit TOR-50's trap is measured in.
 //
 // Frames rather than bytes, and that is deliberate: the frame count is the
@@ -2731,7 +1776,7 @@ function framesLabel(n) {
 // follows both inputs live: the ticks (through run_state), and the count on
 // the intake line, which a person may well adjust while reading this list.
 function updateFileCosts(entry) {
-  const n = passCount(entry);
+  const n = passCount(entry, countValue());
 
   for (const [index, row] of entry.pickerRows) {
     const asked = entry.picked.has(index);
@@ -2973,7 +2018,7 @@ function syncSelectAll(entry) {
     return;
   }
 
-  const n = passCount(entry);
+  const n = passCount(entry, countValue());
   const total = n ? remaining.length * n : 0;
   const sum = total
     ? remaining.length + " file(s) × " + n + " = " + total + " frames"
@@ -3091,39 +2136,6 @@ function tickFile(entry, index, box) {
   }
 
   startFiles(entry, [index]);
-}
-
-// framesOnDisk is how many frames of one file this row has to show, which is
-// the same question as "is there anything here to clear" (TOR-183).
-//
-// It counts the very cells updateFileSummary states on the row, through the
-// same helper, so the button's figure and the summary's can never disagree -
-// a "Clear 12 frames" beside "8 frames" would be two answers to one question,
-// and only one of them could be right.
-//
-// Zero for a file with no block at all, which is the honest answer rather
-// than "unknown": a block exists from the moment a file says anything, live
-// or replayed off disk - core's cacheHit.publish republishes file_started and
-// every frame_ready for a reopened run, so a finished file's frames reach
-// this page the same way whether the run is happening now or happened last
-// week. A file with no block has said nothing, and there is nothing on this
-// row for a clear to act on.
-function framesOnDisk(entry, index) {
-  const fentry = entry.fileEntries.get(index);
-  return fentry ? capturedCells(fentry) : 0;
-}
-
-// capturedCells counts the cells of one file's grid that actually have a
-// picture.
-//
-// NOT fentry.frames.size, and that distinction is the one the grid acquired
-// when a point that produced nothing started being listed at all (TOR-118):
-// the map holds an entry for every planned point a finished run recorded,
-// failures included, so its plain size reports a holed run of five frames as
-// twelve. A count that is really a plan pretending to be a result is the kind
-// of quiet lie this project keeps finding.
-function capturedCells(fentry) {
-  return gridCells(fentry).filter((cell) => cell.url).length;
 }
 
 // setFileNote writes - or takes away - the sentence beside one file's row.
@@ -3284,15 +2296,17 @@ async function clearFrames(entry, index) {
       // off screen rather than redrawn.
       //
       // AND THE CONTACT SHEET LINK, which the browser found rather than any
-      // test here: it is put on screen by the file's own file_done (onFileDone
-      // reads ev.sheet_url) and nothing else ever takes it away, so after a
-      // clear it stood there offering a picture that had just been deleted -
-      // a link whose only possible answer is a 404. It is exactly the untruth
-      // this ticket is about, one element over from the frames.
+      // test here: it used to be put on screen by the file's own file_done and
+      // nothing ever took it away, so after a clear it stood there offering a
+      // picture that had just been deleted - a link whose only possible answer
+      // is a 404. It is exactly the untruth this ticket is about, one element
+      // over from the frames. Since TOR-191 the link is drawn from
+      // fentry.sheetURL, so removing it is the same act as putting it there
+      // rather than a second, opposite piece of DOM handling.
       if (capturedCells(fentry) === 0) {
         fentry.reach.hidden = true;
-        fentry.links.hidden = true;
-        fentry.links.replaceChildren();
+        fentry.sheetURL = "";
+        renderFileLinks(fentry);
       } else {
         renderReach(fentry, (detail && detail.sets) || []);
       }
@@ -3361,11 +2375,11 @@ async function startFiles(entry, indices) {
     await post("runs/decide", {
       id: entry.id,
       files: files.map(String),
-      count: passCount(entry),
+      count: passCount(entry, countValue()),
     });
     logFor(entry, (later ? "queued for the next pass: " : "capturing: ") +
       files.length + " file(s) of " + entry.videos.length + ", " +
-      framesLabel(passCount(entry)) + " each");
+      framesLabel(passCount(entry, countValue())) + " each");
   } catch (err) {
     // Rolled all the way back. A refusal is a real answer here - a run that
     // has settled, or a torrent dropped as a file whose staged copy is gone
@@ -3452,13 +2466,14 @@ function trackGroup(label, tracks, formatter) {
 // grid - is built and filled in exactly as before, whether or not the file
 // is expanded; only the slot's `hidden` attribute decides what is on
 // screen. A frame_ready for a collapsed file still appends its figure to
-// .grid (addFrame never checks expanded state), so expanding it later shows
+// .grid (events.js's applyFrame never checks expanded state), so expanding
+// it later shows
 // everything that arrived while it was closed - nothing is built lazily,
 // there is nothing to replay.
 //
 // Only the first file built for a run is auto-expanded (entry.autoExpanded
 // latches on the first call and never resets except on a full
-// resetRunContent). Every file after that starts collapsed, and a file's
+// resetRunState). Every file after that starts collapsed, and a file's
 // expanded state changes from then on only in response to its own row being
 // clicked - never from a later file_started/frame_ready/progress event - so
 // a person's click can neither be collapsed out from under them nor have
@@ -3542,6 +2557,10 @@ function fileBlock(entry, index) {
   listRow.item.dataset.detail = "true";
 
   fentry = {
+    // The data half, which state.js owns (newFileState): what this file
+    // KNOWS - its frames, its plan, its media, its last heartbeat. Below it,
+    // this file's half: the elements. Same union-scan rule as the run entry.
+    ...newFileState(index, entry),
     // item is the row's <li>, body the slot inside it. The two are what the
     // old .file article and its .file-body were, one level in - see this
     // function's own heading for what happened to the title line between
@@ -3566,44 +2585,6 @@ function fileBlock(entry, index) {
     reachStrip: body.querySelector(".reach-strip"),
     reachNote: body.querySelector(".reach-note"),
     grid: body.querySelector(".grid"),
-    expanded: false,
-    metaExpanded: false,
-    // frames is this file's grid, keyed by timecode in milliseconds. The key
-    // is what merges the result sets: frames.Plan pins the first and last
-    // point to the window, so every regeneration lands on the first set's
-    // edges exactly, and one moment must be one thumbnail however many sets
-    // hold it (TOR-69). It is also why the grid is rendered from state
-    // rather than appended to: a set fetched after the fact arrives in no
-    // particular order relative to what is already there.
-    frames: new Map(),
-    // plan is the capture points this file's run is going to attempt, in
-    // milliseconds, straight off file_started (TOR-110). While it is set the
-    // grid is laid out FROM it - one cell per planned point, at final size,
-    // before any piece is fetched - so the grid stops shoving itself around
-    // for the minute a run spends waiting.
-    //
-    // It is emptied once the file's frames have been read back from disk,
-    // and that hand-off is deliberate rather than tidy-up. A plan describes
-    // one run; the disk holds every result set this torrent has for the
-    // file, and the sets merge by timecode into cells no single plan
-    // accounts for (see frames above). Once nothing is arriving there is
-    // also nothing left to reflow, so the truthful view costs nothing.
-    plan: [],
-    // skipped is what the engine reported as unreachable, by plan index -
-    // frame_skipped's code and reason. Without it a point that failed live
-    // leaves its reserved cell looking like a frame still on its way, which
-    // is the one thing the reserved cell must not do.
-    skipped: new Map(),
-    detailLoaded: false,
-    width: 0,
-    height: 0,
-    // index and entry are how a frame addresses an action on itself: a
-    // delete names the torrent (entry.infohash), the file, the result set
-    // and the frame's own number in that set's manifest. Everything else on
-    // this page is driven by events arriving with a run already in hand;
-    // this is the one thing a click on a thumbnail has to look up.
-    index,
-    entry,
   };
   entry.fileEntries.set(index, fentry);
 
@@ -3697,7 +2678,7 @@ function toggleFileDetail(entry, index) {
   // Opening a file is when it is worth reading the other result sets off
   // disk - not on every run_state, and not for a file nobody looked at.
   // Once is enough: a set only gains frames by a run finishing, which
-  // asks again itself (onFileDone).
+  // asks again itself (renderFileDone, on the file's own file_done).
   if (expanded && !fentry.detailLoaded) loadFileDetail(entry, fentry, index);
 }
 
@@ -3772,7 +2753,7 @@ function setFileExpanded(fentry, expanded) {
 // metadata (.specs and .tracks) is on screen, called from exactly two
 // places - the metadata toggle's own click handler, and once at creation to
 // start every file's metadata collapsed, with no auto-expand exception. No
-// event that rebuilds .specs/.tracks in place (onFileStarted) touches
+// event that rebuilds .specs/.tracks in place (renderFileMeta) touches
 // fentry.metaExpanded, so a person who opens the metadata keeps it open
 // through every event that follows.
 function setMetaExpanded(fentry, expanded) {
@@ -3805,7 +2786,12 @@ function setMetaExpanded(fentry, expanded) {
 // thing is two chances to be wrong about it.
 function updateFileSummary(fentry) {
   const parts = [];
-  if (fentry.width && fentry.height) parts.push(fentry.width + "×" + fentry.height);
+  // fentry.media, not two fields of its own: the picture's size is one of the
+  // things file_started said about this file, and it lives with the rest of
+  // them (state.js's newFileState). Absent until the file has started, which
+  // is why this is a guard and not a truthiness test on two numbers.
+  const media = fentry.media;
+  if (media && media.width && media.height) parts.push(media.width + "×" + media.height);
 
   const cells = gridCells(fentry);
   const captured = capturedCells(fentry);
@@ -3819,11 +2805,45 @@ function updateFileSummary(fentry) {
   fentry.summary.textContent = parts.join(" · ");
 }
 
-// The summary panel: audio tracks, subtitles, bitrate, resolution, filled the
-// moment the file's media is known - before a single frame exists.
-function onFileStarted(entry, ev) {
-  const fentry = fileBlock(entry, ev.file);
-  if (!fentry) return;
+// renderSummaryLine draws the sentence under a run's detail header from
+// entry.summaryLine - the torrent's own confirmed name, or for a parked one
+// the name plus what it holds and that nothing is captured yet.
+//
+// ONE FUNCTION, so the paragraph can never be left visible and empty or
+// filled and hidden: an empty string IS the absence, exactly the rule
+// setFileNote already follows for a file's own note one level in. The two
+// sentences themselves are written by the two messages that carry a name
+// (events.js's applyMetadataReady and applyNeedsAction); nothing here
+// chooses between them, which is why a parked row's sentence does not change
+// the instant its first tick moves it out of needs-action.
+function renderSummaryLine(entry) {
+  entry.torrentSummary.textContent = entry.summaryLine;
+  entry.torrentSummary.hidden = !entry.summaryLine;
+}
+
+// renderFileMeta draws everything a file's own metadata says: its name on the
+// row, and inside its Metadata disclosure the specs and the two track groups.
+// All of it from fentry.media, which is where file_started's message now
+// lands (events.js's applyFileStarted).
+//
+// IT IS HANDED STATE, NOT A MESSAGE, and that is the ticket rather than a
+// preference. Written straight out of `ev` the way this used to be, the
+// codecs, the tracks and the duration existed nowhere but in these text
+// nodes - so nothing except another file_started could ever draw them again,
+// and for a finished file another one never comes. Now file_started is the
+// only writer of the fact and this is the only drawer of it, and either can
+// happen without the other.
+//
+// A file with no media yet draws nothing rather than a row of zeroes: absent
+// is not zero one level in either (state.js's newFileState).
+//
+// It never touches fentry.metaExpanded, which is what lets a person who
+// opened the metadata keep it open through every event that follows
+// (setMetaExpanded's own rule, unchanged by the move).
+function renderFileMeta(fentry) {
+  const media = fentry.media;
+  if (!media) return;
+
   // The engine's own path, restated on the row in the LIST's convention
   // rather than the block's: a base name with the whole path on its title
   // (renderFileList). The two used to differ - the block's title line showed
@@ -3831,16 +2851,8 @@ function onFileStarted(entry, ev) {
   // directory twenty-five times over - and since TOR-182 there is one line
   // to show it on, so one of the two conventions had to win. This one did
   // because the list is read as a column.
-  fentry.name.textContent = basename(ev.path);
-  fentry.name.title = ev.path;
-  fentry.width = ev.width;
-  fentry.height = ev.height;
-
-  // The whole grid, at final size, before the first piece is fetched.
-  fentry.plan = Array.isArray(ev.plan) ? ev.plan : [];
-  fentry.skipped.clear();
-  renderFrames(fentry);
-  updateFileSummary(fentry);
+  fentry.name.textContent = basename(media.path);
+  fentry.name.title = media.path;
 
   fentry.specs.replaceChildren();
   // TOR-178: how many video files the TORRENT holds (M), not this one file's
@@ -3853,42 +2865,62 @@ function onFileStarted(entry, ev) {
   // same reason: cheaper than building a place that says it exactly once,
   // and every file's own Metadata is where a person already goes looking
   // for facts about the file's container.
-  addSpec(fentry.specs, "Torrent files", entry.videos.length ? String(entry.videos.length) : "");
-  addSpec(fentry.specs, "Resolution", ev.width && ev.height ? ev.width + "×" + ev.height : "");
+  //
+  // Read off fentry.entry rather than taken as a parameter, which is the
+  // small version of this whole ticket: a file entry knows which torrent it
+  // belongs to, so whoever asks for a redraw does not have to carry one
+  // along.
+  addSpec(fentry.specs, "Torrent files",
+    fentry.entry.videos.length ? String(fentry.entry.videos.length) : "");
+  addSpec(fentry.specs, "Resolution",
+    media.width && media.height ? media.width + "×" + media.height : "");
   addSpec(fentry.specs, "Video",
-    [ev.codec, ev.profile, ev.fps ? ev.fps.toFixed(2) + " fps" : "", bitrateLabel(ev.video_bitrate)]
-      .filter(Boolean).join(" · "));
-  addSpec(fentry.specs, "Overall bitrate", bitrateLabel(ev.bitrate));
-  addSpec(fentry.specs, "Duration", seconds(ev.duration_ms));
+    [media.codec, media.profile, media.fps ? media.fps.toFixed(2) + " fps" : "",
+      bitrateLabel(media.videoBitrate)].filter(Boolean).join(" · "));
+  addSpec(fentry.specs, "Overall bitrate", bitrateLabel(media.bitrate));
+  addSpec(fentry.specs, "Duration", seconds(media.durationMs));
 
   fentry.tracks.replaceChildren(
-    trackGroup("Audio", ev.audio || [], audioLine),
-    trackGroup("Subtitles", ev.subtitles || [], subtitleLine),
+    trackGroup("Audio", media.audio, audioLine),
+    trackGroup("Subtitles", media.subtitles, subtitleLine),
   );
-
-  logFor(entry, "file " + ev.file + ": " + ev.path + " — " + seconds(ev.duration_ms) +
-      ", " + ev.width + "x" + ev.height + " " + ev.codec + ", " + ev.planned + " points");
 }
 
-// addFrame records one frame the event stream just announced and re-renders
-// the file's grid. It records rather than appends: two result sets of the
-// same file share timecodes, and the grid is one list ordered by time.
-function addFrame(entry, ev) {
-  const fentry = fileBlock(entry, ev.file);
-  // Nowhere to put it (see fileBlock): the frame is on disk either way, and
-  // it is reachable again the moment a row for this file exists.
-  if (!fentry) return;
-  const at = ev.actual_ms;
+// renderFileProgress draws one file's own heartbeat line - frames, bytes,
+// peers - from fentry.heartbeat, and takes it off screen when there is none.
+//
+// TWO ROWS LEGITIMATELY HAVE NONE and they are opposite situations: a file
+// that has not started, and a file that has FINISHED (file_done sets the
+// field back to null, so the line goes because the reading went, not because
+// something remembered to hide an element still holding a stale
+// "11 / 12 frames").
+//
+// The stall heartbeat never reaches here - events.js drops it before this
+// field, since frames_total 0 on it means "no capture point has been
+// attempted" rather than a real 0-of-0 plan, and applying it would blink a
+// genuine 3/12 to 0/0 and back every five seconds.
+function renderFileProgress(fentry) {
+  const beat = fentry.heartbeat;
+  fentry.progress.hidden = !beat;
+  fentry.progress.textContent = beat
+    ? beat.framesDone + " / " + beat.framesTotal + " frames · " +
+        bytesLabel(beat.downloaded) + " downloaded · " + beat.peers + " peer(s)"
+    : "";
+}
 
-  // No params: a frame straight off the event stream has no result set to
-  // address until its manifest exists, so it carries no cross yet. The
-  // file_done that follows re-reads every frame from disk moments later
-  // (loadFileDetail) and replaces this one with an addressable version.
-  fentry.frames.set(at, { url: url(ev.url), timeMs: at, shift: ev.shift || "", params: "", index: ev.index });
+// renderFileGrid is the pair the grid and the row's own count of it always
+// move as: renderFrames rebuilds the cells from fentry.frames/plan/skipped,
+// updateFileSummary restates what they add up to. Every event that changes
+// the grid changes that count, so this is the single hook events.js names
+// rather than the two of them separately.
+//
+// frame_skipped now restates the count as well, which it did not before the
+// split. Nothing on screen moves: a skipped point already had a planned cell,
+// so capturedCells and the planned total both come out the same - what it
+// buys is one fewer way for the grid and its own caption to disagree.
+function renderFileGrid(fentry) {
   renderFrames(fentry);
   updateFileSummary(fentry);
-
-  logFor(entry, "frame " + ev.index + " at " + seconds(at) + (ev.shift ? " (" + ev.shift + ")" : ""));
 }
 
 // renderFrames rebuilds the grid from what the file is known to have.
@@ -4094,68 +3126,13 @@ function renderAvail(fentry) {
 }
 
 // refreshAvailForEntry re-draws every one of this entry's open file chips
-// with a fresh swarm reading (the "progress" case in apply(), below). The
+// with a fresh swarm reading (events.js's "progress" case, through the view's
+// renderSwarm hook). The
 // reading is torrent-wide, not per-file (renderAvail's own doc), so every
 // file card shares the identical figure and all of them redraw together
 // rather than only the one file this particular heartbeat happened to name.
 function refreshAvailForEntry(entry) {
   for (const fentry of entry.fileEntries.values()) renderAvail(fentry);
-}
-
-// gridCells is the grid as a list of cells, each carrying the state it should
-// be drawn in. There are two ways to build it and which one applies is the
-// difference between a run in flight and a run that is over.
-//
-// FROM THE PLAN, while fentry.plan is set. One cell per capture point the
-// engine said it would attempt, in plan order, whether or not anything has
-// arrived for it yet - which is the point: every cell exists at final size
-// before the first piece is fetched, so nothing reflows during the minute a
-// run spends waiting. A frame claims its cell by INDEX rather than by
-// timecode, because a shifted frame lands somewhere other than where it was
-// asked for and still belongs to the point that asked.
-//
-// FROM THE DISK, once the plan has been handed over. Ordered by time and
-// keyed by it, so the result sets merge exactly as fentry.frames does - a
-// view no single plan can describe, and one nothing is arriving into, so it
-// has no reflow to avoid.
-function gridCells(fentry) {
-  if (fentry.plan.length) {
-    const byIndex = new Map();
-    for (const frame of fentry.frames.values()) {
-      if (Number.isInteger(frame.index)) byIndex.set(frame.index, frame);
-    }
-    return fentry.plan.map((plannedMs, index) => {
-      const frame = byIndex.get(index);
-      if (frame) return { ...frame, plannedMs, state: frame.shift ? "shifted" : "exact" };
-
-      const skip = fentry.skipped.get(index);
-      if (skip) {
-        return {
-          state: "failed", timeMs: plannedMs, plannedMs, index,
-          url: null, shift: "", error: skip.code, reason: skip.reason, params: "",
-        };
-      }
-      return {
-        state: "pending", timeMs: plannedMs, plannedMs, index,
-        url: null, shift: "", error: "", params: "",
-      };
-    });
-  }
-
-  return [...fentry.frames.values()]
-    .sort((a, b) => a.timeMs - b.timeMs)
-    .map((frame) => ({ ...frame, state: frameState(frame) }));
-}
-
-// frameState reads a disk-shaped frame's own fields. A point that produced
-// nothing has no URL and carries the engine's reason instead (TOR-118); one
-// that produced a frame somewhere other than where it was asked says so in
-// shift; everything else is exactly what was planned, and gets no marking at
-// all, because most cells are this one and a grid that marks every cell marks
-// none of them.
-function frameState(frame) {
-  if (!frame.url) return "failed";
-  return frame.shift ? "shifted" : "exact";
 }
 
 // What a shift and a failure code mean in words, for the cell's own tooltip.
@@ -4194,7 +3171,12 @@ function frameFigure(frame, fentry) {
   let img = null;
   if (frame.url) {
     img = document.createElement("img");
-    img.src = frame.url;
+    // RESOLVED HERE, not where the frame was recorded (TOR-191): url() needs
+    // document.baseURI and the access token, which is a fact about this page
+    // rather than about the frame - so a frame keeps the PATH the server
+    // named and both of its sources (events.js's applyFrame off the socket,
+    // detailFrame off disk) store one shape.
+    img.src = url(frame.url);
     img.alt = "frame at " + timecode(frame.timeMs);
     img.loading = "lazy";
   } else {
@@ -4234,7 +3216,8 @@ function frameFigure(frame, fentry) {
 
   // The cross, only for a frame that both exists and names the result set it
   // lives in. The set is the other half of its address on disk (see
-  // addFrame); the existence is the rest - a failed point has no file to
+  // events.js's applyFrame); the existence is the rest - a failed point has
+  // no file to
   // delete, and offering the cross on one would be offering an action that
   // cannot succeed.
   if (fentry && frame.params && frame.url) {
@@ -4340,9 +3323,16 @@ async function deleteFrame(fentry, frame) {
 // half-addressable in one of them and whole in the other.
 function detailFrame(f) {
   return {
-    // f.url is empty for a failed point (TOR-118) - nothing to resolve into
-    // a fetchable URL, and url("") would resolve to this very page.
-    url: f.url ? url(f.url) : null, timeMs: f.time_ms, shift: f.shift || "",
+    // f.url is empty for a failed point (TOR-118), and null rather than ""
+    // is what gridCells and capturedCells read as "nothing was captured
+    // here" - url("") would also have resolved to this very page.
+    //
+    // THE PATH, NOT A RESOLVED URL, since TOR-191: frameFigure resolves it
+    // when it sets the src, so a frame off the socket and a frame off disk
+    // are one shape. That is this doc's own promise - "a frame is never
+    // half-addressable in one of them and whole in the other" - and it used
+    // to hold only for `params`.
+    url: f.url || null, timeMs: f.time_ms, shift: f.shift || "",
     params: f.params || "", index: f.index, error: f.error || "",
   };
 }
@@ -5004,30 +3994,40 @@ el.compare.addEventListener("keydown", (event) => {
   event.preventDefault();
 });
 
-function onFileDone(entry, ev) {
-  const fentry = fileBlock(entry, ev.file);
-  if (!fentry) return;
-  fentry.progress.hidden = true;
+// renderFileLinks draws the one artefact link a finished file offers, from
+// fentry.sheetURL.
+//
+// TOR-171: the contact sheet and nothing else. ev.manifest_url still rides
+// the NDJSON stream (server.go's record() keeps publishing it) and is
+// deliberately never kept on the file entry, so there is nothing here that
+// COULD turn the raw JSON manifest into a link - the page has no use for one,
+// and something else reading the stream might, which is the whole reason the
+// field is still there to read.
+//
+// AND IT TAKES THE LINK AWAY, which is the half a browser found rather than
+// any test (TOR-183). While the link was built by the file_done handler and
+// nothing ever removed it, a clear left it standing there offering a picture
+// that had just been deleted - a link whose only possible answer is a 404.
+// Drawn from a field, taking it away is the same act as putting it there.
+function renderFileLinks(fentry) {
+  const links = fentry.sheetURL ? [link(fentry.sheetURL, "contact sheet")] : [];
+  fentry.links.replaceChildren(...links);
+  fentry.links.hidden = links.length === 0;
+}
 
-  const links = [];
-  if (ev.sheet_url) links.push(link(ev.sheet_url, "contact sheet"));
-  // TOR-171: no manifest link here on purpose. ev.manifest_url still rides
-  // the NDJSON stream (server.go's record() keeps publishing it) - the page
-  // itself just has no use for the JSON manifest a person would open, only
-  // the contact sheet does. Something other than the page reading the
-  // stream might still want it, which is the whole reason the field is
-  // still there to read.
-  if (links.length) {
-    fentry.links.replaceChildren(...links);
-    fentry.links.hidden = false;
-  }
-
-  logFor(entry, "file " + ev.file + " done: " + ev.frames + " frames, " + ev.skipped + " skipped");
-
-  // The manifest exists from now on, so this is the first moment the other
-  // result sets of this file can be read off disk - and the moment this
-  // run's own frames become part of what a later open would find.
-  loadFileDetail(entry, fentry, ev.file);
+// renderFileDone is what a finished file redraws: the heartbeat line goes (the
+// reading is null by now), the contact sheet appears, and the other result
+// sets of this file are read back off disk.
+//
+// That last one is a request rather than a redraw, and it belongs to this
+// moment rather than to any other: the manifest loadFileDetail reads is
+// written when a file finishes, so this is the first instant the sibling sets
+// can be reached at all - and the instant this run's own frames become part
+// of what a later open would find.
+function renderFileDone(fentry) {
+  renderFileProgress(fentry);
+  renderFileLinks(fentry);
+  loadFileDetail(fentry.entry, fentry, fentry.index);
 }
 
 function link(href, text) {
@@ -5039,9 +4039,9 @@ function link(href, text) {
   return a;
 }
 
-// showTorrent reveals - or takes away - the run's own .torrent, in the
-// header (the save link) and, if this server has somewhere to send it, the
-// group below it (TOR-169).
+// renderTorrent draws the run's own .torrent - the save link in the header,
+// and where this server has somewhere to send it, the group below it
+// (TOR-169) - from entry.torrentURL.
 //
 // The one thing that decides whether the save link is there is whether the
 // run announced a URL for it, which the server only does when the file is
@@ -5060,8 +4060,13 @@ function link(href, text) {
 // .torrent AND a watch directory (state.watch) to have anything to show, so
 // it is gated on both rather than mirroring the save link's single
 // condition - see the block's own comment in the template above.
-function showTorrent(entry, href) {
-  entry.torrentURL = href || "";
+//
+// IT IS NOT CALLED FROM syncEntry, deliberately, even though it reads nothing
+// but state: it clears entry.torrentNote, and syncEntry runs on every event -
+// so "sent to /path/to/watch" would be wiped a moment after it appeared. Its
+// two callers are the two moments the link itself can change: the run's own
+// done event, and a reset (both events.js).
+function renderTorrent(entry) {
   entry.torrentSave.hidden = !entry.torrentURL;
   entry.torrentNote.textContent = "";
   if (!entry.torrentURL) {
@@ -5099,342 +4104,6 @@ async function sendTorrent(entry) {
   }
 }
 
-function apply(ev) {
-  if (ev.type === "run_state") {
-    // The one message with no "run" key is the connection marker: it opens
-    // the whole replay a fresh (or reconnected) socket is about to send, but
-    // it is not itself about any torrent, so there is nothing on the page to
-    // update for it - the per-run reset that follows for each run already
-    // rebuilds that run's own content from scratch.
-    if (!ev.run) return;
-
-    const entry = resolveIncomingRun(ev.run, ev.infohash);
-    if (ev.reset) resetRunContent(entry);
-    entry.disk = false;
-    // TOR-141: stamped the FIRST time this row is seen running, in this
-    // page's own wall clock - waitingForMetadata's only source of "how
-    // long", since there is no torrent yet at that point for a Stall
-    // reading (core.Progress.Stall) to ride on. Guarded on the transition
-    // rather than stamped unconditionally, so a run_state that merely
-    // repeats "running" (a reordering elsewhere, TOR-140's own note two
-    // paragraphs down) does not reset a clock already ticking.
-    if (ev.state === "running" && entry.state !== "running") {
-      entry.runningSince = Date.now();
-    }
-    entry.state = ev.state;
-    if (ev.source) entry.source = ev.source;
-    if (ev.infohash) entry.infohash = ev.infohash;
-    // TOR-117: run_state carries whichever of the two the server has -
-    // never both (see runStateFieldsLocked). This is what a page that was
-    // already open sees during the exact gap the ticket is about: accepted,
-    // nothing confirmed yet, a magnet's dn= is all there is.
-    if (ev.name) {
-      noteConfirmedName(entry, ev.name);
-      entry.name = ev.name;
-    } else if (ev.provisional_name) {
-      entry.provisionalName = ev.provisional_name;
-    }
-    entry.error = ev.error || "";
-    // TOR-140: run_state carries the queue's two fields only while this run
-    // is still one the queue has something to say about (server.go's
-    // runStateFieldsLocked, gated on RunState.queueable). Their ABSENCE is
-    // information, so both are CLEARED rather than left at their last value:
-    // the run_state announcing queued -> running is exactly the message that
-    // must stop the row showing the position it held a moment ago.
-    //
-    // This message also arrives for rows nobody touched. Reordering, a
-    // cancel, or a run simply starting moves everybody behind it, and the
-    // server publishes a run_state to each of them - so a row's position
-    // stays right without this page recomputing anything.
-    entry.priority = ev.priority === undefined ? null : ev.priority;
-    entry.queuePosition = ev.queue_position || 0;
-    // TOR-156: on every run_state (server.go's runStateFieldsLocked), not
-    // only a queueable one, and kept rather than cleared when it is missing -
-    // see the same two lines in loadRuns for why this field's absence is not
-    // the information the two above it carry.
-    entry.arrival = ev.arrival || entry.arrival;
-    // ev.partial rides on exactly one run_state a run ever publishes: the one
-    // sent after this run's own record was written to disk (server.go's
-    // pump, TOR-87) - the only moment the verdict this page is already
-    // showing (false, from GET /runs, since a live entry had nothing merged
-    // in yet) could turn out to be wrong. Every other run_state - queued,
-    // running, needs-action - carries no such field, so entry.partial stays
-    // whatever loadRuns or the previous run_state left it at; this still
-    // reads it rather than recomputing it from entry.complete/entry.selected
-    // for the same reason loadRuns does (see the comment above badgeState).
-    if (ev.partial !== undefined) {
-      entry.files = ev.files || 0;
-      entry.complete = ev.complete || 0;
-      entry.selected = ev.selected || 0;
-      entry.partial = !!ev.partial;
-    }
-    // TOR-181: what this row has asked to capture, and whether it can be
-    // asked for more. All four ride on run_state rather than on a message of
-    // their own for the reason the queue's two fields do (server.go's
-    // runStateFieldsLocked): the hub replays a run's LAST run_state to a
-    // reconnecting page, so a field overwritten by the run's own next state
-    // can never be replayed stale.
-    //
-    // OVERWRITTEN, NEVER MERGED. entry.picked is the server's answer, not
-    // this page's intention: a tick that was refused, a second tab ticking
-    // the same torrent, or a pass ending and taking the deferred files into
-    // itself all arrive here, and keeping whatever the page thought would be
-    // the one way the boxes could come to disagree with what is fetching.
-    // Absent means empty here, which is safe for exactly this message - the
-    // server always knows the answer for a live entry, and nothing replays a
-    // run_state off disk for an older shape's silence to be mistaken for a
-    // fact.
-    entry.picked = new Set(ev.ticked || []);
-    entry.deferred = new Set(ev.deferred || []);
-    // TOR-184, and the direction an absent key falls is the safe one here
-    // too: the server sends this only while the row is running, so an empty
-    // set means "the engine is holding nothing", which draws no offer to stop
-    // anything. Guessing the other way would put a run-stopping gesture on a
-    // row that has already finished.
-    entry.fetching = new Set(ev.fetching || []);
-    // false when the key is missing, which cannot happen for a run this
-    // server holds (it is sent on every run_state, true or false) and is the
-    // safe direction if it ever does: a live checkbox the server would
-    // refuse is worse than a disabled one it would have taken.
-    entry.tickable = !!ev.tickable;
-    entry.tickRefusal = ev.tick_refusal || "";
-    // 0 is "the server's own -n", which the intake box already displays, so
-    // passCount falls back to that rather than quoting a zero.
-    entry.passCount = ev.count || 0;
-    // A stall reading belongs to a run that is actively going nowhere; a
-    // run that just left a cancellable state (done, failed, cancelled) is
-    // not stalled any more, it is over - cleared the same moment and by the
-    // same test entry.progress already is.
-    if (!cancellable(entry.state)) {
-      entry.progress = "";
-      entry.stall = null;
-    }
-    syncEntry(entry);
-    return;
-  }
-
-  const entry = ev.run ? state.runs.get(ev.run) : null;
-  if (!entry) return;
-
-  switch (ev.type) {
-    case "metadata_ready":
-      noteConfirmedName(entry, ev.name);
-      entry.name = ev.name;
-      // TOR-178: entry.videos used to be set only by needs_action (the
-      // undecided path). metadata_ready is the OTHER path - a torrent whose
-      // selection was already made - and its own file lists are stored the
-      // same way, so a file's Metadata disclosure (onFileStarted's "Torrent
-      // files" spec) has an answer on both paths, not only the one that
-      // happens to park first.
-      //
-      // TOR-180 renders the list from here too, which is what makes it the
-      // row's ordinary content: this event is the one every state that has
-      // a file list goes through - a live run, and the replay a disk row's
-      // reopen produces.
-      renderFileList(entry, ev);
-      entry.torrentSummary.hidden = false;
-      // TOR-178: this used to also state how many of the torrent's video
-      // files this run had picked ("N of M ... selected"). The owner asked
-      // for that gone - the row's own badge (DONE/PARTIAL) already carries
-      // whether this run's selection came out whole. This paragraph's other
-      // job, carrying the torrent's name, is untouched - see
-      // .torrent-summary's own doc in the detail template.
-      entry.torrentSummary.textContent = ev.name;
-      syncEntry(entry);
-      logFor(entry, "metadata: " + ev.name + " (" + ev.infohash + ")");
-      break;
-
-    case "needs_action":
-      // Not a core event and deliberately not a metadata_ready: no run is
-      // running. The torrent's name and file lists arrive here, and the
-      // run_state that follows this record is what turns the list's own
-      // controls on (syncFileList).
-      noteConfirmedName(entry, ev.name);
-      entry.name = ev.name;
-      if (ev.infohash) entry.infohash = ev.infohash;
-      entry.torrentSummary.hidden = false;
-      entry.torrentSummary.textContent =
-        ev.name + " — " + (ev.videos || []).length + " video file(s), none captured yet";
-      renderFileList(entry, ev);
-      syncEntry(entry);
-      logFor(entry, "waiting for a file selection: " + (ev.videos || []).length + " video file(s)");
-      break;
-
-    case "file_started":
-      onFileStarted(entry, ev);
-      // The row's bar/line pick up this file's plan the moment it is known
-      // (TOR-167) - not on the first progress heartbeat, which for a top-up
-      // may be seconds away and may already be behind what a moment's worth
-      // of replayed frame_ready events is about to show.
-      applyFrameProgress(entry, ev.file);
-      syncEntry(entry);
-      break;
-
-    case "frame_ready":
-      addFrame(entry, ev);
-      // Every landed frame keeps the row's bar/line current (TOR-167),
-      // whether this point was just captured or replayed off disk - see
-      // applyFrameProgress's own doc for why the heartbeat alone is not
-      // enough for a top-up.
-      applyFrameProgress(entry, ev.file);
-      syncEntry(entry);
-      break;
-
-    case "frame_skipped": {
-      // Mark the cell this point had reserved, rather than only saying so in
-      // the log: a reserved cell that never fills is indistinguishable from
-      // one still waiting, and a person watching cannot tell a slow read
-      // from a dead one (TOR-110).
-      const fentry = fileBlock(entry, ev.file);
-      // The log line still goes out for a file with no row of its own: the
-      // skip is what a person is owed here, and the cell it would have
-      // marked does not exist to mark.
-      if (fentry) {
-        fentry.skipped.set(ev.index, { code: ev.code || "", reason: ev.reason || "" });
-        renderFrames(fentry);
-      }
-      logFor(entry, "frame " + ev.index + " skipped: " + ev.code + " " + ev.reason);
-      break;
-    }
-
-    case "progress": {
-      // TOR-141: frames_total is 0 on a stall heartbeat (engine.go's
-      // startFileHeartbeat) - a reading of peers/seeds/rates/swarm/stall
-      // taken whether or not any capture point has even been attempted,
-      // never a real 0-of-0 plan (frames.Plan.Validate rejects an empty
-      // one, so a genuine per-point heartbeat never reports that). Applying
-      // it to the per-file card would blank out real progress between two
-      // genuine capture-point heartbeats - "3 / 12 frames" flashing to
-      // "0 / 0 frames" and back every five seconds - so it is skipped here;
-      // the six live columns and the stall reading below still update every
-      // time regardless, which is the whole point of that heartbeat.
-      if (ev.frames_total > 0) {
-        const fentry = fileBlock(entry, ev.file);
-        if (fentry) {
-          fentry.progress.hidden = false;
-          fentry.progress.textContent =
-            ev.frames_done + " / " + ev.frames_total + " frames · " +
-            bytesLabel(ev.downloaded) + " downloaded · " + ev.peers + " peer(s)";
-        }
-        // The row's own line and bar, which read from the fuller of two
-        // signals rather than this heartbeat alone - see applyFrameProgress's
-        // own doc for why a top-up needs that (TOR-167). ev.frames_done still
-        // goes in, as the floor it always was; it just no longer wins on its
-        // own when the grid has already proven more landed than this one
-        // heartbeat knows about.
-        applyFrameProgress(entry, ev.file, ev.frames_done);
-      }
-      // TOR-139: the same heartbeat carries this run's current swarm reading
-      // - peers, seeds, both rates and the availability figure - under the
-      // identical keys GET /runs' own "live" object uses (wire.go's
-      // core.Progress case, listing.go's Live), so the six live columns keep
-      // updating after page load rather than only once at loadRuns(). Built
-      // fresh every time rather than merged onto the previous reading,
-      // because that is what the registry itself does before this ever
-      // reaches the wire (runEntry.applyProgress's own doc: "a whole new
-      // *Live replaces the old one rather than being edited field by
-      // field") - merging here instead could keep a stale rate or swarm
-      // reading on screen past the heartbeat that actually dropped it.
-      // download_bps/upload_bps/swarm are checked with "in" rather than
-      // ev.download_bps (etc.) being truthy, because a real reading of 0
-      // must stay 0, not fall through to absent.
-      entry.live = {
-        peers: ev.peers, seeds: ev.seeds,
-        download_bps: "download_bps" in ev ? ev.download_bps : null,
-        upload_bps: "upload_bps" in ev ? ev.upload_bps : null,
-        swarm: ev.swarm || null,
-      };
-      // TOR-141: which distinct cause currently explains no progress for
-      // THIS file, and how long - core.Progress.Stall's own doc has the
-      // rule that keeps the duration from restarting on every heartbeat
-      // that merely repeats the same finding. observedAt is stamped here,
-      // in this page's own clock, at the moment the reading arrived -
-      // stallPhrase adds the wall time since then, which is what keeps the
-      // displayed duration ticking between heartbeats rather than only
-      // updating once every stallHeartbeatInterval. Absent (ev.stall is
-      // undefined) means progressing, which clears whatever this row showed
-      // a moment ago rather than leaving it stuck on an old cause.
-      entry.stall = ev.stall ? { ...ev.stall, observedAt: Date.now() } : null;
-      // TOR-142: the third strip's own swarm chip, on every file card already
-      // open - see refreshAvailForEntry's own doc for why it is every file
-      // rather than only ev.file.
-      refreshAvailForEntry(entry);
-      syncEntry(entry);
-      logFor(entry, "progress: " + ev.frames_done + "/" + ev.frames_total +
-          ", " + ev.downloaded + " bytes, " + ev.peers + " peers");
-      break;
-    }
-
-    case "budget_warning":
-      // Two sentences rather than one with the numbers swapped in. At scope
-      // "client" the figures are every run's together and this run may have
-      // spent almost none of them, so the run-scoped wording would read as
-      // an accusation of the wrong run (core.LimitScope).
-      if (ev.scope === "client") {
-        logFor(entry, "warning: " + ev.spent + " of the client-wide traffic roof of " +
-            ev.limit + " bytes used, by every run together; all runs stop when it is reached");
-      } else {
-        logFor(entry, "warning: " + ev.spent + " of " + ev.limit + " bytes used");
-      }
-      break;
-
-    case "file_done":
-      onFileDone(entry, ev);
-      break;
-
-    case "done":
-      entry.progress = "";
-      // Whatever this run's own clock last said stopped mattering the
-      // moment the run itself did - a finished run cannot still be
-      // "stalled", it is simply over.
-      entry.stall = null;
-      // The run's own .torrent rides on this event because there is one per
-      // run: a live run announces the file it just wrote, and a run reopened
-      // from disk announces the same one, so the link does not depend on
-      // which process captured it.
-      showTorrent(entry, ev.torrent_url);
-      syncEntry(entry);
-      logFor(entry, "done: " + ev.reason + ", " + ev.frames + " frames from " + ev.files +
-          " file(s), " + ev.downloaded + " bytes in " + seconds(ev.elapsed_ms));
-      // The reason spelled out, for the three that are not self-explanatory
-      // from a word. A run that hit the client-wide roof must not read like
-      // a run that hit its own ceiling, and a run that hit its own TIME
-      // ceiling must not read like one that hit its own TRAFFIC ceiling: the
-      // first is about traffic this run may not have caused and cannot
-      // narrow its way out of, the second two are about this run's own
-      // spending but call for different responses - more traffic helps one
-      // and does nothing for the other (core.StopRoof, core.StopBudget and
-      // core.StopTime are three separate reasons since TOR-161).
-      if (ev.reason === "traffic_roof") {
-        logFor(entry, "stopped at the client-wide traffic roof, not at this run's own limit; " +
-            "what was produced is kept");
-      } else if (ev.reason === "budget") {
-        logFor(entry, "stopped at this run's own traffic limit; what was produced is kept");
-      } else if (ev.reason === "time") {
-        logFor(entry, "stopped at this run's own time limit; what was produced is kept");
-      }
-      // A run that finished and still left something out says so here rather
-      // than by reading as failed, which is what it used to do when its
-      // .torrent could not be written (TOR-79). The badge stays "done"
-      // because the run is: the warning is about an artefact, not the frames.
-      for (const warning of ev.warnings || []) {
-        logFor(entry, "warning: " + warning);
-      }
-      break;
-
-    case "failed":
-      entry.progress = "";
-      // TOR-141: a run-scoped failure IS the final answer to "why" - the
-      // engine already names it (ev.code) below the badge via entry.error,
-      // so a stall reading from a moment ago would only repeat, in fainter
-      // words, what the row is about to say plainly.
-      entry.stall = null;
-      syncEntry(entry);
-      logFor(entry, "failed: " + ev.code + " " + ev.error);
-      break;
-  }
-}
-
 // TOR-141: a stall's (or a metadata wait's) own "how long" would otherwise
 // only refresh when a new heartbeat happens to redraw this row - every
 // stallHeartbeatInterval (5s) at best, or not at all while metadata is still
@@ -5455,29 +4124,17 @@ function refreshStallDurations() {
 }
 setInterval(refreshStallDurations, 1000);
 
-// The socket carries events only. Reconnecting replays every run the server
-// still holds from the start, so a dropped connection costs nothing but a
-// redraw of what it covers - a torrent this page never heard of before
-// reconnecting (or one whose history the server has since trimmed,
-// keepFinishedRuns) is unaffected either way.
-function connect() {
+// socketAddress is the events socket's own URL, and the reason events.js asks
+// the page for one instead of building it: url() resolves against
+// document.baseURI and attaches the access token, and both of those are facts
+// about THIS PAGE rather than about the event stream (see TOKEN's own note at
+// the top of this file, and why a WebSocket handshake is exactly the request
+// that cannot carry a header). The ws/wss swap rides along because it is the
+// same one decision - which address to open.
+function socketAddress() {
   const address = url("events");
   address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
-
-  const socket = new WebSocket(address);
-
-  socket.onopen = () => setStatus("live", "live");
-  socket.onclose = () => {
-    setStatus("reconnecting", "lost");
-    setTimeout(connect, 1000);
-  };
-  socket.onmessage = (message) => {
-    try {
-      apply(JSON.parse(message.data));
-    } catch (err) {
-      log("unreadable event: " + err);
-    }
-  };
+  return address;
 }
 
 async function post(path, body) {
@@ -5605,7 +4262,7 @@ async function loadRuns() {
     // through as-is, null rather than defaulted to anything with numbers in
     // it, exactly like every other "absent, not zero" field this page reads
     // (row.partial above, entry.provisionalName). This is the one place
-    // loadRuns sets it; from here on the "progress" case in apply() keeps it
+    // loadRuns sets it; from here on events.js's "progress" case keeps it
     // current, the same relationship entry.partial has with run_state's own
     // "partial" field.
     entry.live = row.live || null;
@@ -5616,7 +4273,7 @@ async function loadRuns() {
     // null on a fresh load and the page picks the reading up from its next
     // WebSocket heartbeat instead, same as row.live itself does for a run
     // this page has never seen a "progress" for yet. Read defensively
-    // anyway, the same shape apply()'s "progress" case gives it, so the
+    // anyway, the same shape events.js's "progress" case gives it, so the
     // follow-up needs nothing here once it lands.
     entry.stall = row.live && row.live.stall
       ? { ...row.live.stall, observedAt: Date.now() } : null;
@@ -5965,7 +4622,50 @@ for (const th of el.sortHeaders) {
   handle.addEventListener("click", (event) => event.stopPropagation());
 }
 
+// ---------------------------------------------------------------------------
+// THE WIRING (TOR-191), and it sits here rather than at the top of the file
+// for a reason that can be checked rather than trusted: nothing above it
+// reaches the store or the socket. The header build, the element lookups, the
+// sort and drag listeners, the intake handlers, the drop handlers and the
+// column widths are every top-level statement in this file, and not one of
+// them calls ensureRun or connect - so registering at the last possible
+// moment cannot be too late, and beside the bootstrap it enables is where a
+// reader goes looking for it.
+//
+// THE TWO FACTORIES are how state.js reaches a builder only this file has: an
+// entry's DOM half (newRunEntry) and a file's whole block (fileBlock).
+// Without them the store still works and still hands back valid entries -
+// data-only ones, which is exactly what a headless test wants and exactly
+// what a browser must not get.
+//
+// THE VIEW is every redraw events.js is allowed to name, and setView REFUSES
+// one that is missing a hook (events.js's VIEW_HOOKS). That check is the
+// point: five more extraction tickets each add a component something in
+// events.js has to redraw, and the failure it forecloses - a handler quietly
+// calling undefined, on a live run, at the one moment nobody is watching the
+// console - is worth a loop over an array.
+//
+// Every hook below is handed STATE. Not one of them takes a message.
+setRunFactory(newRunEntry);
+setFileFactory(fileBlock);
+setView({
+  log: logFor,
+  note: log,
+  status: setStatus,
+  socketURL: socketAddress,
+  syncEntry,
+  resetRunView,
+  rebuildFileList: renderFileList,
+  renderFileMeta,
+  renderFrames: renderFileGrid,
+  renderFileProgress,
+  renderFileDone,
+  renderSwarm: refreshAvailForEntry,
+  renderTorrent,
+});
+
 updateSortIndicators();
 loadDefaults();
 loadRuns();
 connect();
+
