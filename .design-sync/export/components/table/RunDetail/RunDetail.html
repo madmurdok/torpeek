@@ -1,0 +1,206 @@
+<!-- @dsCard group="Table" name="RunDetail" subtitle="What an expanded row says about the run, and the price of finishing it" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>RunDetail</title>
+<!-- The design system's own entry sheet, so this card is drawn by the same
+     rules a rendered design gets. detail.css draws this component; table.css
+     draws the badge in its header and the cell it is mounted in; filelist.css
+     draws the abbreviated file list at the bottom; intake.css carries the bare
+     `select, button` rules Cancel, Send and Top up inherit. -->
+<link rel="stylesheet" href="../../../styles.css">
+<style>
+  body { margin: 0; padding: 1.2rem; background: var(--bg); }
+  .card-pane { max-width: 74rem; margin: 0 auto; }
+</style>
+
+<!-- STATIC ON PURPOSE, AND THREE THINGS THIS CARD HAS TO CARRY THAT NOTHING
+     ELSE WOULD DRAW.
+
+     1. THE MARKUP ITSELF. <run-detail> builds its own subtree - build() runs
+        `this.innerHTML = '<div class="run-detail">' + DETAIL + "</div>"` - so
+        there is nothing declarative anywhere to lift. Everything below is
+        what that template writes, with the values syncDetail() and
+        renderAgain() would have written into it.
+
+     2. THE TABLE AROUND IT. The detail's own ground and its accent rail come
+        from `.run-table .run-detail-cell` in detail.css, and that selector
+        REQUIRES the table's class: `.run-table td` sets the shared cell
+        padding at (0,1,1), so a bare `.run-detail-cell` at (0,1,0) would lose
+        to it. Rendered without a table this component sits on the page's own
+        ground with no rail - which is not what an open row looks like. In
+        real use <run-table>'s newRow() hands out the colspanned cell and
+        app.js mounts one of these in it; this card reproduces exactly that
+        much of the row and no more.
+
+     3. A SETTLED RUN, so the top-up offer is on screen. The offer only exists
+        on a row that has finished (renderAgain gates it on FINAL), and the
+        same fact makes Cancel `data-idle` - which is `visibility: hidden`,
+        NOT display: none, so Save .torrent cannot slide sideways into the gap
+        the moment Cancel stops applying. So Cancel is deliberately an
+        invisible reserved box here. On a live row it is the other way round:
+        Cancel is visible and .run-again is absent entirely. -->
+<div class="card-pane">
+<table class="run-table"><tbody>
+<tr class="run-detail-row">
+<td class="run-detail-cell" colspan="10">
+
+<run-detail>
+<div class="run-detail" id="run-detail-1">
+  <header class="run-detail-header">
+    <!-- The same badge the row above wears, from the same two derivations
+         (badgeLabel/badgeState). "partial" is not a state the server records:
+         it is done plus entry.partial, which GET /runs computes from the
+         counts. -->
+    <span class="run-badge" data-state="partial">partial</span>
+    <h2 class="run-detail-title">Tears.of.Steel.2012.Season.Pack</h2>
+    <!-- Save .torrent and Cancel, pinned level with the name in a fixed order
+         so neither moves when the other appears or disappears - a top-up can
+         put both on screen at once. The anchor carries a BARE `download`: the
+         server sends a Content-Disposition that already names the file after
+         the torrent, and a filename here would only be a second name that
+         never takes effect. -->
+    <span class="run-detail-header-actions">
+      <a class="torrent-save" download href="runs/5a8062c07b3e6a1d0c9f4b2e8a1d7c3f5e9b0a24/torrent"
+         title="The info dictionary is the one the swarm sent, so this file's infohash is the torrent's. The wrapper around it is generated: the creation date is when the file was written, and the comment and created-by name the BitTorrent library, not whoever published the torrent.">Save .torrent</a>
+      <button class="run-detail-cancel" type="button" data-idle>Cancel</button>
+    </span>
+  </header>
+  <!-- Present and empty on every row that did not fail. It is `hidden`, and
+       hidden alone - there is no class doing the collapsing. -->
+  <p class="run-detail-error" hidden></p>
+  <!-- The torrent's own confirmed name, written by metadata_ready. It carries
+       the name and nothing else: TOR-178 took the "N of M ... selected" half
+       away, and the torrent's own file count went to each file's Metadata
+       disclosure instead. -->
+  <p class="torrent-summary">Tears of Steel (2012) 1080p</p>
+  <!-- Sending the same .torrent to a watch directory on THIS host, which is a
+       different act from the link above rather than a fallback for it: the
+       link saves the file where the BROWSER is, which on a seedbox deployment
+       is somebody's laptop. It needs both a .torrent and a watch directory
+       (state.watch, answered by GET /defaults) - a server started without
+       -watch-dir has this whole paragraph hidden rather than a button that
+       cannot work. -->
+  <p class="torrent-actions">
+    <button type="button" class="torrent-send">Send to my client</button>
+    <span class="torrent-note"></span>
+  </p>
+  <!-- RUNNING THIS ROW AGAIN (TOR-152), and the figures are the SERVER's
+       arithmetic, priced off the manifest on disk - never this page's guess.
+       The line states the multiplication (frames × files) because that is
+       TOR-50's trap: -n is per video file, so the ceiling a person meets is
+       the per-file figure times the files selected.
+
+       It sits above the file list rather than in it because it is about the
+       RUN, not about any one file - and since TOR-195 that is structural: the
+       files are in a nested <file-list>, and this offer is outside it. -->
+  <section class="run-again">
+    <p class="run-again-line">19 of 24 frames (8 × 3 file(s)) — 5 point(s) still missing across 2 file(s), stopped at this run's own traffic ceiling of 2.0 GB</p>
+    <p class="run-again-foot">
+      <button type="button" class="run-again-go">Top up</button>
+      <!-- Retry is the OTHER verb, and never on screen at the same time: it is
+           for a run that ended with no result at all (failed, or cancelled),
+           where there is nothing to top up. -->
+      <button type="button" class="run-again-retry" hidden>Retry</button>
+      <!-- The figure, in the accent each file row's own cost line wears,
+           because it is the same promise: this is what pressing the button
+           spends. A CEILING, said so in as many words, not an estimate. -->
+      <span class="run-again-cost" title="Tears.of.Steel/01-tears-of-steel-1080p.mkv: 8/8&#10;Tears.of.Steel/02-behind-the-scenes.mkv: 5/8&#10;Tears.of.Steel/03-vfx-breakdown.mkv: 6/8">up to 384.0 MB more traffic — a ceiling sized to finish in one press, not an estimate of what it will cost</span>
+    </p>
+    <!-- Said rather than left to be discovered: pieces are discarded after
+         every run, so a top-up is NOT a download resuming where it stopped.
+         The frames come back for free off disk and the piece data behind the
+         missing points is fetched again. -->
+    <p class="run-again-note">The 19 frame(s) already taken are reused off disk. The piece data for the 5 point(s) still missing is fetched again - pieces are discarded after every run, so only the frames survive, never the download.</p>
+  </section>
+
+  <!-- WHAT THE TORRENT HOLDS, and the LAST block in this pane since TOR-182:
+       each file's own detail hangs off that file's row inside this list, so
+       there is nothing left to put after it. The element creates this
+       <file-list> in its own build() and appends it here, and never learns
+       what went in.
+
+       ABBREVIATED ON PURPOSE. Four rows of a settled run, enough to show the
+       composition; FileList.html is the full sample and shows the five
+       verdicts an un-tick can carry, which only exist on a row that is still
+       fetching. -->
+  <file-list>
+  <section class="picker" data-parked="false">
+    <p class="picker-head">
+      <span class="picker-title">4 file(s), 3 video</span>
+      <!-- Parked rows only: "all of it" is the answer to a torrent whose whole
+           list is undecided. On a row already fetching, the files left are the
+           ones somebody chose not to take. -->
+      <button type="button" class="picker-all" hidden>Select all</button>
+      <span class="picker-armed" role="status"></span>
+    </p>
+    <ul class="picker-list">
+      <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+        <label class="picker-file" for="file-tick-2" title="this row captured this file - un-tick it to be offered a clear, which deletes its frames from disk; un-ticking by itself changes nothing">
+          <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-3" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for 01-tears-of-steel-1080p.mkv"></button>
+          <input type="checkbox" value="1" id="file-tick-2" checked>
+          <span class="picker-name" title="Tears.of.Steel/01-tears-of-steel-1080p.mkv">01-tears-of-steel-1080p.mkv</span>
+          <span class="picker-size">1.1 GB</span>
+          <span class="picker-cost"></span>
+          <span class="picker-state"></span>
+          <span class="picker-summary">1920×800 · 8 frames</span>
+          <button type="button" class="picker-clear" hidden></button>
+        </label>
+        <p class="picker-note" hidden></p>
+        <file-detail><div class="file-detail" id="file-detail-3" hidden></div></file-detail>
+      </li>
+      <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+        <label class="picker-file" for="file-tick-4" title="this row captured this file - un-tick it to be offered a clear, which deletes its frames from disk; un-ticking by itself changes nothing">
+          <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-5" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for 02-behind-the-scenes.mkv"></button>
+          <input type="checkbox" value="2" id="file-tick-4" checked>
+          <span class="picker-name" title="Tears.of.Steel/02-behind-the-scenes.mkv">02-behind-the-scenes.mkv</span>
+          <span class="picker-size">256.0 MB</span>
+          <span class="picker-cost"></span>
+          <span class="picker-state"></span>
+          <!-- "5 of 8" rather than "5 frames": the summary says how many the
+               file has AND what it was trying for, whenever the two differ.
+               These are the two files the top-up above is priced for. -->
+          <span class="picker-summary">1920×800 · 5 of 8 frames</span>
+          <button type="button" class="picker-clear" hidden></button>
+        </label>
+        <p class="picker-note" hidden></p>
+        <file-detail><div class="file-detail" id="file-detail-5" hidden></div></file-detail>
+      </li>
+      <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+        <label class="picker-file" for="file-tick-6" title="this row captured this file - un-tick it to be offered a clear, which deletes its frames from disk; un-ticking by itself changes nothing">
+          <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-7" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for 03-vfx-breakdown.mkv"></button>
+          <input type="checkbox" value="3" id="file-tick-6" checked>
+          <span class="picker-name" title="Tears.of.Steel/03-vfx-breakdown.mkv">03-vfx-breakdown.mkv</span>
+          <span class="picker-size">150.0 MB</span>
+          <span class="picker-cost"></span>
+          <span class="picker-state"></span>
+          <span class="picker-summary">1920×800 · 6 of 8 frames</span>
+          <button type="button" class="picker-clear" hidden></button>
+        </label>
+        <p class="picker-note" hidden></p>
+        <file-detail><div class="file-detail" id="file-detail-7" hidden></div></file-detail>
+      </li>
+      <!-- The non-video row: no checkbox, an em dash where one would have sat,
+           and the reason in prose on the row's own title. Three carriers say
+           "you cannot tick this" and only one of them is a colour. -->
+      <li class="picker-item" data-video="false">
+        <span class="picker-file" title="torpeek takes no frames from this file — either its extension is not one it opens, or it is a sample or trailer beside a much larger video">
+          <span class="picker-open" aria-hidden="true"></span>
+          <span class="picker-mark" aria-hidden="true">—</span>
+          <span class="picker-name" title="Tears.of.Steel/tears-of-steel.nfo">tears-of-steel.nfo</span>
+          <span class="picker-size">3.0 KB</span>
+        </span>
+      </li>
+    </ul>
+  </section>
+  </file-list>
+</div>
+</run-detail>
+
+</td>
+</tr>
+</tbody></table>
+</div>
+
+<!-- No script. Top up, Retry, Send to my client and the whole file list's
+     behaviour belong to <run-detail> and <file-list> in _ds_bundle.js and are
+     exercised where a design actually runs, not in a thumbnail. -->

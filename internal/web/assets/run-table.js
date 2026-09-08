@@ -1140,4 +1140,21 @@ class RunTable extends HTMLElement {
 // el.runTable is an element with its parts already found.
 customElements.define("run-table", RunTable);
 
-export { RunTable, LIVE_COLUMNS, MAX_PROGRESS_SEGMENTS, setServices };
+// THE SURFACE IS THE CLASS PLUS setServices, AND NOTHING ELSE (TOR-209,
+// applied to the remaining five by TOR-208). frame-panel.js's own export block
+// carries the full reasoning; the two facts that decide this one:
+//
+//   - LIVE_COLUMNS and MAX_PROGRESS_SEGMENTS were imported by NOBODY, checked
+//     across the whole repository. They are read here (buildLiveColumnHeaders,
+//     renderRunProgress) and named in columns_test.go, which lifts them out of
+//     this module's TEXT and needs no export to do it. So this narrows a DEAD
+//     export - something this module wants on its own terms.
+//   - setServices STAYS, and is the irreducible residue: app.js imports it by
+//     name (setRunTableServices), and the injected-services setter is point 7
+//     of the element pattern in docs/front-end.md. Removing it to tidy a
+//     consumer's index would break the page, which is the wrong way round.
+//
+// Before adding a name here: Claude Design's checker indexes a component
+// module's named exports as COMPONENTS, so every extra name becomes an entry a
+// design agent is offered and can do nothing with.
+export { RunTable, setServices };

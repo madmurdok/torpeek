@@ -66,9 +66,19 @@ export function FramePanel({ src, caption = "", open = false, onClose }) {
           </span>
           <span className="lightbox-ticks" aria-hidden="true"></span>
         </p>
-        <div id="lightbox-view" className="lightbox-view" tabindex="0" role="button"
+        {/* tabIndex and the self-closing <img/> are JSX's spellings, not
+            HTML's, and TOR-208 corrected them here rather than leaving the
+            question open. `tabindex` reaches the DOM either way (React passes
+            an unknown attribute through with a warning), but an UNCLOSED void
+            element is a JSX parse error in every strict parser - and a parse
+            error compiles the whole bundle to zero components, silently, which
+            is the exact failure the HTML-comment conversion already cost this
+            file one round trip. Whether the platform's own compiler happens to
+            tolerate it is not worth another: valid JSX is accepted by a
+            lenient parser too. */}
+        <div id="lightbox-view" className="lightbox-view" tabIndex={0} role="button"
              aria-label="The frame - press to zoom to 100%, then the arrow keys pan it">
-          <img id="lightbox-img" alt="">
+          <img id="lightbox-img" alt="" />
           <button id="lightbox-close" className="lightbox-close" type="button" aria-label="Close">&times;</button>
           <p id="lightbox-caption" className="lightbox-caption"></p>
         </div>

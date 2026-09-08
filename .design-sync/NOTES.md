@@ -363,3 +363,271 @@ An extra name in that block is not free any more: it becomes a component a
 design agent is offered and can do nothing with. Export what is imported, plus
 the class. `frame-panel.js`'s own export line now carries this warning beside
 it, where somebody about to add a name will read it.
+
+---
+
+# The other five elements (TOR-208)
+
+All six components are now authored under `.design-sync/export/`. **Nothing has
+been uploaded and the manifest has not been read** - see "What is still open"
+at the end of this section, which is the first thing to read before continuing.
+
+## WHAT EACH ELEMENT IS GIVEN, and the answer turned out to be structural
+
+The ticket asks for a decision per element - example data, an empty shell, or a
+fixed sample - and the honest answer is not five separate judgements. It falls
+out of ONE fact about each element, which is checkable in its source rather
+than argued about: **where its markup lives.**
+
+    <run-table>       markup declarative in index.html, WRAPPED
+    <compare-dialog>  markup declarative in index.html, WRAPPED
+    <frame-panel>     markup declarative in index.html, WRAPPED
+      -> the element never overwrites its own subtree, so children written in
+         JSX SURVIVE. The .jsx renders the markup; a design may compose rows or
+         frames into it; the card is the finished state statically.
+
+    <run-detail>      build(): this.innerHTML = '<div class="run-detail">' + DETAIL + '</div>'
+    <file-list>       build(): this.innerHTML = LIST, then renderFileList replaces the <ul>
+    <file-detail>     build(): this.innerHTML = '<div class="file-detail" hidden>'
+                      mount(): this.body.innerHTML = BODY
+      -> anything passed as a child is DESTROYED on connect. The .jsx renders
+         the element EMPTY and the card is the only sample there is.
+
+**Example data is not available for any of the five.** Every one of them is
+drawn from a run ENTRY, and an entry is assembled out of state.js's
+newRunState, `<run-table>`'s own row parts (newRow's return value) and app.js's
+detail half - three literals, one object, scanned by
+TestNoRunEntryFieldIsDeclaredTwice. Nothing outside a running torpeek can mint
+one, and a wrapper that faked a subset would be a second app.js free to drift
+from the first. So the bridges translate no props into calls except the one
+real door each has (`entry` for run-detail and file-list, `open`/`infohash` for
+compare-dialog, a ref for run-table, nothing at all for file-detail, whose
+mount() takes a bundle of live row elements).
+
+**An empty shell shows nothing for four of the five.** run-detail, file-list
+and file-detail render blank or hidden until something is bound; compare-dialog
+is a `<dialog>` with no `open`, which is `display: none` in every UA
+stylesheet - the lesson the panel's first card already paid for. `<run-table>`
+is the one exception, and its empty shell is a real state of the page (a header
+row and "Nothing yet - paste a magnet link to start") that teaches nothing
+about the component, because the table IS the rows.
+
+**Two elements cannot be drawn standalone at all**, and that is worth knowing
+before designing with them:
+
+  - `<run-detail>`'s ground and accent rail come from
+    `.run-table .run-detail-cell`, whose selector REQUIRES the table's class.
+    Its card carries a one-row `<table class="run-table">` for that reason.
+  - `<file-detail>` has no title line of its own: since TOR-182 THE ROW is the
+    file's title line, and four row elements are handed to it at mount. Its
+    card carries the one `<li>` that owns it.
+
+## THE FIVE UN-TICK VERDICTS CANNOT BE ON ONE LIST
+
+Established from the three sets' own docs in state.js, not from taste:
+
+    entry.fetching    "only ever non-empty while the row is running"          -> "stop"
+    entry.deferred    ticked while the row was ALREADY fetching               -> "drop"
+    entry.narrowable  "only ever non-empty while the row is queued or parked" -> "narrow"
+    FINAL + frames on disk                                                    -> "clear"
+    none of those, on a running row                                           -> ""
+
+A row cannot be running and queued at once, so `stop`/`drop` and `narrow` are
+on different rows by construction and `clear` is on a third. Select all is
+parked-only for its own reason. So FileList.html is FOUR lists, one per row
+state, each labelled - one list would have had to fake a state.
+
+And four of the six row states look IDENTICAL on screen (a ticked, live
+checkbox). The difference is the row's own `title`, which is TOR-184's
+legibility requirement, so the card carries all of them verbatim.
+
+## CARD-CRITICAL FACTS, each of which would have rendered a wrong card
+
+Beyond "a card runs no scripts", which was already known:
+
+1. **`table-layout: fixed` reads every column's width off its `<th>` alone**,
+   and wireColumnResizers() is what writes `style="width: var(--col-w-KEY)"`
+   on the nine sortable headers. A card without those inline widths gets nine
+   equal columns and is not the component. The `.col-resizer` handles are
+   appended by the same function and are also the card's to carry.
+2. **THE COLSPAN IS TEN, NOT NINE.** Measured in a browser
+   (`table.columns === 10`), and the first draft of both cards said nine. The
+   header row holds the nine SORTABLE columns plus the unlabelled actions one,
+   and `this.columns` is `querySelectorAll("thead th").length`. The project's
+   own prose says "the nine-column table" and "the nine resizable headers",
+   which is true of the sortable ones and is what misled the draft. A short
+   colspan leaves an empty cell at the end of the detail row.
+3. **The six live headers must be in the CARD and must NOT be in the `.jsx`.**
+   The element builds them in connectedCallback; a `.jsx` shell that also
+   carried them would give the page sixteen columns.
+4. **`.avail-swarm` lives INSIDE `<figure class="reach">`**, so it is hidden
+   whenever the reach strip is. A file mid-capture therefore shows no swarm
+   chip at all - the chip is not an independently placeable part.
+5. **A pending grid cell and the reach strip cannot be on screen together.**
+   Pending cells exist only while `fentry.plan` is set, and loadFileDetail
+   clears the plan at the same moment it puts the strip up. FileDetail.html
+   shows the two shapes as two grids and says so, rather than drawing a state
+   that cannot happen.
+6. **`whenLabel()` is the viewer's locale.** The design test rendered
+   `9 сент. 00:29` where the card writes `Sep 8 21:41`. A mock must not
+   hard-code a date format.
+7. **The embedded picture is ffmpeg's own test pattern**, downscaled from the
+   data: URI FramePanel.html already carried (`sips`, in the scratchpad). So no
+   new asset provenance was introduced, and the two cards that needed a picture
+   reuse it: FileDetail at 176px, CompareDialog at 640px in two encodes (one
+   heavily compressed, so the flip actually shows something).
+
+## FramePanel.jsx carried invalid JSX, and it is now valid
+
+`<img id="lightbox-img" alt="">` - an UNCLOSED void element - is a parse error
+in every strict JSX parser, and `tabindex` is HTML's spelling rather than
+JSX's. Both were corrected to `<img ... />` and `tabIndex={0}`.
+
+This is not a claim that the platform's compiler rejected the old form: the
+manifest's own component list proves that file compiled at least once. It is
+that a parse error compiles the whole bundle to ZERO components silently -
+which the HTML-comment conversion already cost this export one round trip - and
+valid JSX is accepted by a lenient parser too. Not worth a second round trip to
+learn which parser it is.
+
+## The checker's phantom entries: from twenty-odd to five
+
+TOR-209's rule ("export what is imported, plus the class") applied to the
+remaining five modules. Every name was checked by grep across the whole
+repository before removal, and the finding is that the Go tests which NAME
+these constants all lift them out of the module's TEXT - `jsConst`, `jsFunc`,
+`jsMethod`, `strings.Contains` - so an export is not what they depend on:
+
+    run-table.js       - LIVE_COLUMNS, MAX_PROGRESS_SEGMENTS
+    run-detail.js      - DETAIL, LIMIT_LEVER, LIMIT_NOTE
+    file-list.js       - LIST, WHY_NOT_VIDEO, framesLabel
+    file-detail.js     - BODY, MAX_BLOCKS, REACH_FLOOR, SHIFT_REASON,
+                         FAILURE_REASON, cellTitle, detailFrame
+    compare-dialog.js  - nothing to remove; already the class plus setServices
+
+`app.js` imports exactly ONE name from each of the five - `setServices` - and
+`frame-panel.js` is taken with a bare side-effect import. So the surface is now
+eleven names for six components: six classes and five setters. **The five
+setters are the irreducible residue** and each `.prompt.md` says so under a
+heading of its own ("`setServices` is not a component"), so a design agent
+offered one knows what it is instead of guessing.
+
+## The stylesheet closure is now ALL EIGHT, and here is the third mismatch
+
+`styles.css` imports every area file, in index.html's order. The ticket named
+one mismatch (framepanel.css holds the reach strip and the swarm chip, which
+`<file-detail>` builds). There are three, and the one it did not name is the
+sharpest:
+
+**intake.css is not the intake's.** It carries `select, button`,
+`input[type="number"]`, `button:hover:not(:disabled)`, `button:disabled` and
+`select:focus-visible` as BARE ELEMENT rules, so every control in every one of
+the six elements is drawn by it: the run detail's Cancel/Top up/Retry, the file
+list's Select all and Clear frames, a file's Regenerate/Compare and its
+frame-count field, and both of the compare dialog's pickers. A closure that
+skipped it "because no element is in the intake" would leave every button in
+the export unstyled, and it has to come BEFORE the area files, which override
+it per control.
+
+The third is `detail.css`'s `.run-table .run-detail-cell`, a rule about a cell
+`<run-table>` builds whose selector requires the table's class.
+
+So "one stylesheet per component" is not available, it is said rather than
+papered over (README.md, styles.css's own header, and each `.prompt.md`), and
+the export ships the whole closure.
+
+**A GAP WORTH KNOWING: nothing keeps `export/styles.css` in step with
+index.html.** `TestTheConcatenationOrderIsThePagesOwn` holds the Go test
+helper's list to the page's own `<link>` order; the export's `@import` list is
+a third copy of that order with no test at all. Filed as TOR-210 (backlog, no
+release) rather than fixed here.
+
+## WHAT THE UPLOAD HAS TO DERIVE, and it is more than the panel needed
+
+`frame-panel.js` imports nothing, so TOR-204 never met this: **each component
+directory needs the element's module PLUS that module's transitive import
+closure**, because the `.jsx` imports the element and the element imports its
+siblings.
+
+    RunTable/       run-table.js, state.js
+    RunDetail/      run-detail.js, file-list.js, file-detail.js, state.js
+    FileList/       file-list.js, file-detail.js, state.js
+    FileDetail/     file-detail.js, state.js
+    CompareDialog/  compare-dialog.js, state.js
+    FramePanel/     frame-panel.js                     (imports nothing)
+
+Plus, as before: `tokens.css`, `base.css`, `intake.css`, `table.css`,
+`detail.css`, `filelist.css`, `framepanel.css`, `compare.css` and `fonts/` at
+the export root. None of it is stored here - it is a copy of
+`internal/web/assets/`, derived at sync time so there is no second version to
+drift.
+
+## HOW THE CARDS WERE LOOKED AT, and it is repeatable
+
+Criterion 4 asks for a look at every card before upload, and the platform is
+not needed for it. Build the upload's own layout in the scratchpad - the
+export's `components/`, `styles.css` and `README.md`, plus the eight
+stylesheets and `fonts/` copied from `internal/web/assets/` - serve it with
+`python3 -m http.server`, and open each `.html`. The relative
+`../../../styles.css` each card links resolves exactly as it will after upload.
+
+All six were looked at: five new ones, and FramePanel again, to confirm the
+closure growing from three imports to eight did not disturb the one card known
+to work. It did not.
+
+## CRITERION 6: a design built against the live elements, and it works
+
+`.design-sync/` has no committed copy of this - it is a scratchpad page, and
+the result is what matters. A page that imports the real modules, injects the
+services with stubs, and then:
+
+    creates <run-table> and appends it EMPTY, with no subtree at all
+    -> asserts it did NOT wire, and that awaitParts() said so on the console
+    streams the markup in ~60ms later, with NOTHING removed or re-inserted
+    -> asserts the MutationObserver retried and the element wired itself
+
+**TOR-205's fix is confirmed: a streaming consumer no longer needs the
+remove-and-reinsert dance the design agent had to write against the panel.**
+The element bails quietly, logs, waits, and wires when the subtree lands.
+
+The rest of the page composes the whole tree and checks it DID something rather
+than merely rendered: two real entries built the way app.js builds them,
+syncRow drawing live figures and absences, a click on a row reaching the
+injected toggleRun, `--run-detail-w` written from the pane, the run detail
+building itself and creating its nested file list, the list building one row per
+file with the "stop" verdict's own title on the fetched one, a file detail
+mounted and drawing metadata, a heartbeat line, a 96-block reach strip stating
+"each block is 13 pieces", the swarm chip judging `bad`, all four grid cell
+states, a click on a thumbnail opening the frame panel as a modal, and the
+compare dialog opening and explaining why there is nothing to flip against.
+
+**42 checks, 0 failures.** And two controls, because a green suite proves
+nothing until it is shown capable of going red:
+
+    control A: the subtree never arrives   -> 6 of the 9 checks that ran fail,
+                                              and the run aborts at newRow()
+    control B: the QUEUED row is given a
+               zeroed live reading         -> exactly ONE check flips, the
+                                              absent-is-not-zero one
+
+One incidental finding from running it: `requestAnimationFrame` never fires in
+a background tab, so a check that awaits one hangs forever and reports nothing.
+Use `setTimeout`. And the browser extension's `javascript_tool` evaluates in an
+isolated world, so a page's `window.__x` is invisible to it - put the result in
+a `data-` attribute instead.
+
+## WHAT IS STILL OPEN, and it is the upload
+
+**This agent had no DesignSync tool in its toolset**, so three things could not
+be done and are not claimed:
+
+  - `_ds_manifest.json` was not read. Nothing here reports what the checker
+    says about the five new components, the eleven exports, or the cards.
+  - Nothing was uploaded. `finalize_plan`/`write_files` were never called.
+  - The `_ds_needs_recompile` sentinel was not written, so the app's own
+    self-check has not been armed and the project has not been reopened.
+
+The predictions this section makes about the checker are therefore PREDICTIONS:
+eleven components (six classes, five `setServices`), six cards, eight
+stylesheets, forty tokens, nine font faces. Read the manifest after the next
+reopen and correct whatever is wrong here rather than trusting it.
