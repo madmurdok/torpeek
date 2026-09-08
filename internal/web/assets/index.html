@@ -7,6 +7,13 @@
 <!-- Every reference here is relative on purpose. The UI has to work under an
      arbitrary base path such as /torpeek behind a reverse proxy, and a single
      leading slash anywhere would break that (REQUIREMENTS.md section 3.3). -->
+<!-- tokens.css ahead of app.css, and a <link> rather than an @import inside
+     app.css (TOR-189): app.css's component rules read var(--bg) etc. with no
+     fallback, so this order is load-bearing, and stating the dependency here
+     as two ordered <link>s - instead of hiding it in a CSS-level import - is
+     what lets a consumer take just the design system by linking tokens.css
+     alone. See tokens.css's own header comment for the full reasoning. -->
+<link rel="stylesheet" href="tokens.css">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
