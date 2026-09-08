@@ -1,7 +1,13 @@
 package web
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -12,13 +18,33 @@ import (
 // never render or sort as though it were a measured zero), and availability
 // is copies per piece, not a percentage.
 //
-// There is no JS test runner in this repository (see internal/web's other
-// _test.go files, none of which run app.js - they all read it as served
-// text, the same way TestServesEmbeddedFrontend does for "WebSocket" and
-// ".grid"). These tests follow that precedent: they assert on the exact
-// source app.js ships, which is a real - if narrower - guard than executing
-// it would be. What they do NOT and cannot cover is documented on each test
-// and summarized at the bottom of this file.
+// Every test in this file but one reads app.js as served text (embedded FS,
+// same as TestServesEmbeddedFrontend does for "WebSocket" and ".grid") and
+// asserts on substrings of it - this file's own precedent since TOR-139, and
+// the right call while the risk was a deletion or a rename: delete the
+// absent-sinking branch from compareEntries and
+// TestAbsentValuesSortToTheEndRegardlessOfDirection reddens, because the
+// guarded text goes with it. It stops being enough the moment the risk is a
+// WRONG ANSWER instead: a rewrite that keeps every guarded substring in this
+// file and silently changes what compareEntries or sortValue actually
+// computes passes all of them (TOR-148 measured this - see
+// TestCompareEntriesAndSortValueExecuteForReal's own doc for the exact
+// rewrite and which guards below stay green through it).
+//
+// TOR-148's DECISION, recorded here because seven front-end extraction
+// tickets after it build on the answer: yes, this suite may depend on a JS
+// runtime, and where node is absent it FAILS rather than skips - see
+// requireNode's doc for why a skip was rejected and exactly what running
+// `go test ./...` (== `make check`) does on a machine with none. Everything
+// else in this file stays a text guard on purpose: LIVE_COLUMNS is a static
+// list no runtime input ever reaches, and badgeLabel/displayName/the rest of
+// this file's own subjects are already covered honestly by matching their
+// exact source. Only compareEntries and sortValue - the two functions whose
+// job is a right ANSWER rather than a right SHAPE, and the ones
+// TestAbsentValuesSortToTheEndRegardlessOfDirection could only ever confirm
+// by reading, never by running - are executed for real, against real entry
+// objects, absent cases included. What every text-guard test here still does
+// NOT and cannot cover remains documented on each one.
 
 // appJS returns the embedded app.js source, the same way stylesheet(t) in
 // theme_test.go reads app.css - from the embedded FS, because that is the
@@ -30,6 +56,42 @@ func appJS(t *testing.T) string {
 		t.Fatalf("reading the embedded app.js: %v", err)
 	}
 	return string(b)
+}
+
+// extractJSFunction pulls one top-level function's EXACT source out of the
+// shipped app.js, by name - the same "match the closing brace at the start
+// of a line" shape TestAbsentValuesSortToTheEndRegardlessOfDirection already
+// uses for compareEntries alone, generalised so
+// TestCompareEntriesAndSortValueExecuteForReal can assemble a node program
+// out of app.js's OWN text rather than a hand-copied duplicate that could
+// drift from what actually ships. Anchored on a column-0 "\n}", which is
+// exactly what makes this safe against a function whose body contains its
+// own nested { } blocks (compareEntries and sortValue both do): every nested
+// close sits indented, so the first bare "}" the regex can reach is the
+// function's own.
+func extractJSFunction(t *testing.T, js, name string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?s)function ` + regexp.QuoteMeta(name) + `\([^)]*\) \{.*?\n\}`)
+	m := re.FindString(js)
+	if m == "" {
+		t.Fatalf("app.js has no function %s(...) to extract - a rename or a signature change would strand this "+
+			"test on a function that no longer exists under this name", name)
+	}
+	return m
+}
+
+// extractJSConst pulls one top-level `const NAME = { ... };` declaration's
+// exact source - state, in practice, since compareEntries reads state.sort
+// and this test has to set it the same way the real page does (a click
+// handler assigning state.sort, not a parameter compareEntries takes).
+func extractJSConst(t *testing.T, js, name string) string {
+	t.Helper()
+	re := regexp.MustCompile(`const ` + regexp.QuoteMeta(name) + ` = \{[^\n]*\};`)
+	m := re.FindString(js)
+	if m == "" {
+		t.Fatalf("app.js has no const %s = {...}; to extract", name)
+	}
+	return m
 }
 
 // TestLiveColumnsAreWiredIntoBothHeadersAndSorting guards against the two
@@ -152,6 +214,323 @@ func TestAbsentValuesSortToTheEndRegardlessOfDirection(t *testing.T) {
 		t.Error("compareEntries does not special-case two absent rows against each other - without it they " +
 			"would be ordered by whichever of aAbsent/bAbsent the ternary checks first, which is not a decision, " +
 			"it's an accident of comparator order")
+	}
+}
+
+// requireNode is TOR-148's decision made concrete, not just stated: this
+// suite MAY require a JS runtime, and the one test in this file that does
+// (TestCompareEntriesAndSortValueExecuteForReal) is not allowed to skip past
+// its absence.
+//
+// The tempting precedent runs the other way - internal/frames/extract_test.go's
+// locateTools() calls t.Skipf when ffmpeg.LocateIn() fails, and that has been
+// this project's answer to a missing external tool up to now. It is not
+// reused here on purpose. `go test ./...` (what `make check` runs) is never
+// invoked by CI in this repository today - only .github/workflows/archives.yml
+// exists, and it runs a scoped `go test -tags archivecheck ./archivecheck/`,
+// never the general suite - so `make check` is entirely a human-or-agent-run
+// gate (RELEASING.md step 3). A Skip here would let that gate go green on a
+// machine that never actually ran the one test in this file able to catch a
+// wrong ANSWER rather than a deleted or renamed one, with nothing printed to
+// say so - exactly the failure mode the ticket names: "a test that skips when
+// node is missing is a test that silently does not run in the one place it
+// matters." Fatal instead: on a machine with no node on PATH, `go test ./...`
+// and therefore `make check` FAIL, loudly, with the line below naming why.
+//
+// This does not strain the CGO_ENABLED=0 promise (README.md, Makefile): that
+// promise is about what scripts/package.sh SHIPS - a static torpeek binary -
+// and node is no more compiled into that binary than the GPL ffmpeg
+// extract_test.go looks for is. Both are dev-time preconditions for running
+// part of the test suite, never a runtime dependency of the archive a user
+// unpacks.
+func requireNode(t *testing.T) string {
+	t.Helper()
+	path, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatalf("node not found on PATH (%v) - TOR-148 decided this suite may depend on a JS runtime rather "+
+			"than silently skip the one test that executes app.js's own compareEntries/sortValue for real; "+
+			"install Node.js (any recent LTS) to run `make check` in full", err)
+	}
+	return path
+}
+
+// jsSwarmReading mirrors the "swarm" object listing.go's Live carries on the
+// wire, as far as sortValue's availability case reads it.
+type jsSwarmReading struct {
+	CopiesPerPiece float64 `json:"copies_per_piece"`
+	Unavailable    int     `json:"unavailable"`
+	Pieces         int     `json:"pieces"`
+}
+
+// jsLive mirrors GET /runs' "live" object - present only once a real client
+// has spoken (hasLive's own subject) - closely enough for compareEntries and
+// sortValue to read it exactly as the served page does. No omitempty on
+// Swarm: a present-but-not-yet-reported swarm (entry.live present,
+// entry.live.swarm absent) is a real, distinct case sortValue has to answer
+// null for, and Go's zero value for a pointer already marshals to JSON null,
+// which is exactly the shape that case needs.
+type jsLive struct {
+	Peers       int             `json:"peers"`
+	Seeds       int             `json:"seeds"`
+	DownloadBps *int64          `json:"download_bps"`
+	UploadBps   *int64          `json:"upload_bps"`
+	Swarm       *jsSwarmReading `json:"swarm"`
+}
+
+// jsEntry is the slice of a run-table "entry" (app.js's own state.runs
+// value) that compareEntries and sortValue actually read across the six
+// columns and name/status/priority - never the whole object app.js builds,
+// because nothing here needs the rest of it. Live has no omitempty: a
+// missing client (hasLive's false case) has to marshal as a literal JSON
+// null, not an absent key indistinguishable from one Go forgot to set.
+type jsEntry struct {
+	ID      string  `json:"id"`
+	Name    string  `json:"name,omitempty"`
+	State   string  `json:"state,omitempty"`
+	Disk    bool    `json:"disk,omitempty"`
+	Partial bool    `json:"partial,omitempty"`
+	Arrival int     `json:"arrival,omitempty"`
+	Live    *jsLive `json:"live"`
+}
+
+type jsSort struct {
+	Key string `json:"key"`
+	Dir string `json:"dir"`
+}
+
+// jsSortCase is one call to Array.prototype.sort(compareEntries): the
+// state.sort the real page would have set from a header click, and the rows
+// it would be sorting.
+type jsSortCase struct {
+	Sort    jsSort    `json:"sort"`
+	Entries []jsEntry `json:"entries"`
+}
+
+// compareEntriesHarness assembles a standalone node program out of app.js's
+// OWN shipped source - the exact functions compareEntries' call graph
+// reaches, extracted by name rather than retyped, so a real change to any of
+// them changes what this test runs. Nothing DOM-shaped is pulled in: state,
+// hasLive, availabilityReading, arrivalOrdinal, badgeLabel, displayName and
+// shortId (displayName's own last-resort fallback) are the whole of what
+// compareEntries and sortValue call, and every one of them is pure over an
+// `entry` object - see app.js's own "Table sorting" block comment, just
+// above hasLive, for why that block was written to stay that way.
+func compareEntriesHarness(t *testing.T, js string) string {
+	t.Helper()
+
+	var b strings.Builder
+	b.WriteString(extractJSConst(t, js, "state"))
+	b.WriteString("\n")
+	for _, name := range []string{
+		"hasLive", "availabilityReading", "arrivalOrdinal", "badgeLabel", "displayName", "shortId",
+		"sortValue", "compareEntries",
+	} {
+		b.WriteString(extractJSFunction(t, js, name))
+		b.WriteString("\n")
+	}
+
+	// The driver: one process, one JSON round trip for every case, rather
+	// than a node invocation per case - `go test` already pays node's
+	// startup cost once per TEST, and this keeps it to once per RUN. Reads
+	// {"cases":[{"sort":{...},"entries":[...]}]} off stdin (fd 0, no temp
+	// file needed) and writes back each case's resulting id order.
+	// Array.prototype.sort has been stable since V8 7.0 / Node 11 - load
+	// bearing here, because a stable sort is what lets the "two absent rows
+	// keep their ORIGINAL relative order" case below be checked at all
+	// (compareEntries ties them at 0; an unstable sort would leave that tie
+	// broken arbitrarily instead).
+	b.WriteString(`
+const input = JSON.parse(require("fs").readFileSync(0, "utf8"));
+const out = input.cases.map((c) => {
+  state.sort = c.sort;
+  return c.entries.slice().sort(compareEntries).map((e) => e.id);
+});
+process.stdout.write(JSON.stringify(out));
+`)
+	return b.String()
+}
+
+// runCompareEntriesCases runs compareEntriesHarness's node program for real
+// and returns each case's resulting id order. Any node failure - a bad
+// extraction, a thrown exception, output that isn't the JSON the driver
+// promises - is t.Fatalf'd with the FULL stdout and stderr, never a tail of
+// either: this harness is exactly the kind of thing that fails in a way a
+// truncated diagnostic hides (see this project's own standard on that).
+func runCompareEntriesCases(t *testing.T, js string, cases []jsSortCase) [][]string {
+	t.Helper()
+	node := requireNode(t)
+	script := compareEntriesHarness(t, js)
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "compare_entries_real.js")
+	if err := os.WriteFile(scriptPath, []byte(script), 0o600); err != nil {
+		t.Fatalf("writing the node harness to a temp file: %v", err)
+	}
+
+	input, err := json.Marshal(struct {
+		Cases []jsSortCase `json:"cases"`
+	}{cases})
+	if err != nil {
+		t.Fatalf("marshalling this test's own sort cases to JSON: %v", err)
+	}
+
+	cmd := exec.Command(node, scriptPath)
+	cmd.Stdin = bytes.NewReader(input)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("node exited with an error running compareEntries/sortValue for real: %v\n--- stderr ---\n%s\n"+
+			"--- stdout ---\n%s\n--- script ---\n%s", err, stderr.String(), stdout.String(), script)
+	}
+
+	var results [][]string
+	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
+		t.Fatalf("node's stdout was not the JSON array of id-order arrays this harness expects: %v\n"+
+			"--- stdout ---\n%s\n--- stderr ---\n%s", err, stdout.String(), stderr.String())
+	}
+	return results
+}
+
+// TestCompareEntriesAndSortValueExecuteForReal is TOR-148's acceptance
+// criterion: at least compareEntries and sortValue, executed against real
+// inputs rather than matched as text, absent cases included - and the new
+// test shown able to fail on a behaviour change that keeps every substring
+// TestAbsentValuesSortToTheEndRegardlessOfDirection and
+// TestAbsentLiveFiguresAreNullNeverZero guard intact.
+//
+// That rewrite, run and confirmed by hand rather than only asserted here
+// (see this test's git history / the task's own report for the transcript):
+// change compareEntries' absence DETECTION -
+//
+//	const aAbsent = va === null || va === undefined;
+//	const bAbsent = vb === null || vb === undefined;
+//
+// - to check only `=== undefined`, dropping the `null` half:
+//
+//	const aAbsent = va === undefined;
+//	const bAbsent = vb === undefined;
+//
+// sortValue's absent cases all return `null`, never `undefined` (that is
+// what TestAbsentLiveFiguresAreNullNeverZero itself guards), so after this
+// rewrite an absent row's va/vb is null, aAbsent/bAbsent both stay false, and
+// compareEntries falls all the way through to
+// `typeof va === "number" ? va - vb : String(va).localeCompare(String(vb))`
+// - null is typeof "object", so a present numeric row now gets
+// String(number).localeCompare("null") against an absent one instead of
+// being sunk to the end. Every substring
+// TestAbsentValuesSortToTheEndRegardlessOfDirection checks
+// ("return aAbsent ? 1 : -1;", "if (aAbsent && bAbsent) return 0",
+// "dir === "desc"" position) is still there, verbatim, so that test - and
+// TestAbsentLiveFiguresAreNullNeverZero, which never looks at this line at
+// all - both stay green through the rewrite. This test does not: the peers
+// and availability cases below stop landing their absent rows at the end,
+// because they no longer are absent by this comparator's own (mutated)
+// definition, and reflect.DeepEqual/slices.Equal against the fixed
+// expectation fails.
+func TestCompareEntriesAndSortValueExecuteForReal(t *testing.T) {
+	js := appJS(t)
+
+	live := func(peers int) *jsLive { return &jsLive{Peers: peers} }
+	swarm := func(copies float64) *jsLive { return &jsLive{Swarm: &jsSwarmReading{CopiesPerPiece: copies}} }
+
+	cases := []jsSortCase{
+		// peers, ascending: two present rows in numeric order, two absent
+		// (no live client at all) sunk to the end IN THEIR ORIGINAL RELATIVE
+		// ORDER - compareEntries ties two absent rows at 0, and a stable
+		// sort leaves a 0-comparison pair exactly where it found them.
+		{
+			Sort: jsSort{Key: "peers", Dir: "asc"},
+			Entries: []jsEntry{
+				{ID: "p1", Live: live(5)},
+				{ID: "p2", Live: nil},
+				{ID: "p3", Live: live(1)},
+				{ID: "p4", Live: nil},
+			},
+		},
+		// Same four rows, descending: the two absent rows stay LAST either
+		// way - the ticket's own trap. Treating absence as "the lowest
+		// value" would move it to the FRONT on a descending sort, burying a
+		// running-but-friendless torrent's real, low peer count behind rows
+		// that never had a client at all.
+		{
+			Sort: jsSort{Key: "peers", Dir: "desc"},
+			Entries: []jsEntry{
+				{ID: "p1", Live: live(5)},
+				{ID: "p2", Live: nil},
+				{ID: "p3", Live: live(1)},
+				{ID: "p4", Live: nil},
+			},
+		},
+		// availability reads a NESTED entry.live.swarm, absent two different
+		// ways - no live client at all (a3), and a live client that has not
+		// yet reported what the swarm holds (a2, live present, swarm null) -
+		// and both have to sink exactly like a bare missing peers count
+		// does.
+		{
+			Sort: jsSort{Key: "availability", Dir: "asc"},
+			Entries: []jsEntry{
+				{ID: "a1", Live: swarm(0.5)},
+				{ID: "a2", Live: &jsLive{}},
+				{ID: "a3", Live: nil},
+				{ID: "a4", Live: swarm(2.0)},
+			},
+		},
+		// priority sorts by arrivalOrdinal, whose absent case is a
+		// different field and a different guard (arrival <= 0: a disk row
+		// this session never numbered) than hasLive() answers for the other
+		// five columns - included so the absence path is checked through
+		// both of app.js's two absent-detection routes, not only one.
+		{
+			Sort: jsSort{Key: "priority", Dir: "desc"},
+			Entries: []jsEntry{
+				{ID: "q1", Arrival: 3},
+				{ID: "q2", Arrival: 0},
+				{ID: "q3", Arrival: 1},
+				{ID: "q4", Arrival: 5},
+			},
+		},
+		// name and status never produce an absent sortValue - included so
+		// this test also exercises compareEntries' OTHER branch (the string
+		// compare) and badgeLabel/displayName's real logic, not only the
+		// absence path the rest of this test is about.
+		{
+			Sort: jsSort{Key: "name", Dir: "asc"},
+			Entries: []jsEntry{
+				{ID: "n1", Name: "Charlie"},
+				{ID: "n2", Name: "alpha"},
+				{ID: "n3", Name: "Bravo"},
+			},
+		},
+		{
+			Sort: jsSort{Key: "status", Dir: "asc"},
+			Entries: []jsEntry{
+				{ID: "s1", State: "queued"},
+				{ID: "s2", State: "running"},
+				{ID: "s3", State: "done", Partial: true}, // badgeLabel's own "partial" branch
+				{ID: "s4", State: "failed"},
+			},
+		},
+	}
+
+	want := [][]string{
+		{"p3", "p1", "p2", "p4"},
+		{"p1", "p3", "p2", "p4"},
+		{"a1", "a4", "a2", "a3"},
+		{"q4", "q1", "q3", "q2"},
+		{"n2", "n3", "n1"},
+		{"s4", "s3", "s1", "s2"},
+	}
+
+	got := runCompareEntriesCases(t, js, cases)
+	if len(got) != len(want) {
+		t.Fatalf("node returned %d case results, want %d - got %v", len(got), len(want), got)
+	}
+	for i := range want {
+		if !slices.Equal(got[i], want[i]) {
+			t.Errorf("case %d (sort %s %s): compareEntries sorted the entries to %v, want %v",
+				i, cases[i].Sort.Key, cases[i].Sort.Dir, got[i], want[i])
+		}
 	}
 }
 
