@@ -550,6 +550,41 @@ reach:
   is the trap the two-`<tr>` arrangement existed to avoid and TOR-215 wrote
   down when it built the wrapper.
 
+### And the honest consequence: this task did not need the grid
+
+Worth writing down because the whole TOR-211..216 line was justified by it, and
+the justification was WRONG.
+
+The premise was: the accordion cannot be a component because a run's line and
+its detail are two adjacent `tr`s in one `tbody`, and HTML hoists any wrapper
+out from between them. True about a wrapper - TOR-214 measured the hoist - but
+it assumed the component would BE that wrapper. It is not, for the three
+structural reasons above, and a plain class needs no wrapper at all.
+
+Checked rather than reasoned: the three writes `apply()` owns existed verbatim
+in the pre-grid module. At `e01091b`, `run-table.js`'s `setRunExpanded` ended
+
+    entry.detailRowEl.hidden = !expanded;
+    entry.rowEl.dataset.expanded = String(expanded);
+    entry.rowToggle.setAttribute("aria-expanded", String(expanded));
+
+which is `apply()`'s triple, against `tr` elements. `accordion.js` mentions the
+grid only in comments - none in its live code - so it would have worked
+unchanged on the table.
+
+**What that does and does not invalidate.** TOR-215 keeps its own value, which
+was measured independently of the accordion: the columns are now exactly their
+tokens instead of having `width: 100%`'s slack smeared over all ten, the row
+has a real box for its hover ground and accent rail, and TOR-214 filled a
+silence this project had carried since 1.2.0 about why a table at all. Those
+stand. What does not stand is the sentence that started the line - that TOR-212
+was blocked on it. It was not.
+
+The lesson for the next such line: "X cannot be a component until Y" is a claim
+about the SHAPE the component would take, and the shape is worth settling
+before the prerequisite is built. One prototype of the component itself, of the
+kind TOR-214 built for the layout, would have found this at the start.
+
 So the component owns no listener at all: three levels activate from three
 different elements with three different exceptions (the checkbox-target
 exclusion at the file level, `stopPropagation` on Cancel and the two priority
