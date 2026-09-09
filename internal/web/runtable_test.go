@@ -182,7 +182,13 @@ func TestTheRunTableIsAnElementWrappingThePagesOwnMarkup(t *testing.T) {
 	wrapped := markup[open:shut]
 	for _, part := range []string{
 		`<div id="run-table" class="run-grid">`,
-		`<div id="run-list" class="run-grid-rows">`,
+		// The band, and #run-list with no class of its own: TOR-221's two
+		// markup changes. The header cells moved inside .run-grid-head-row,
+		// which is the grid that lays them out over --run-tracks, and
+		// #run-list dropped .run-grid-rows along with the display: contents
+		// that class existed for - a row is an ordinary block now.
+		`<div class="run-grid-head-row">`,
+		`<div id="run-list"></div>`,
 		`<p id="run-list-empty"`,
 		`<div class="run-table-wrap">`,
 		`class="run-grid-head run-actions-header"`,
@@ -342,13 +348,15 @@ func TestTheTableOwnsTheRowAndTheDetailIsNotItsBusiness(t *testing.T) {
 	}
 	// AND NO COUNT COMES BACK (TOR-215). The detail used to be given a
 	// colSpan read off the header row, which is the kind of number that goes
-	// wrong silently - it spans `1 / -1` in table.css now, and -1 is the last
-	// line of whatever the grid has. A colSpan reappearing here would mean
-	// somebody put the <table> back.
+	// wrong silently. It spanned `1 / -1` under TOR-215's one grid, and since
+	// TOR-221 it needs even less than that: the row's grid ends at the row, so
+	// the detail is an ordinary block and is as wide as its container because
+	// that is what blocks are. A colSpan reappearing here would mean somebody
+	// put the <table> back.
 	for _, gone := range []string{"colSpan", "this.columns"} {
 		if strings.Contains(js, gone) {
-			t.Errorf("run-table.js still mentions %q - the detail spans every column from the "+
-				"stylesheet now (grid-column: 1 / -1), so there is no column count to keep", gone)
+			t.Errorf("run-table.js still mentions %q - the detail is as wide as the row above it "+
+				"without being told how many columns that is, so there is no count to keep", gone)
 		}
 	}
 

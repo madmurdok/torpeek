@@ -13,8 +13,9 @@
 // and the behaviour below did not have to change for it (table.css's own
 // banner says why, and docs/front-end.md carries the measurements). The row
 // building is div-per-cell now, wireColumnResizers is untouched, and the one
-// thing that got SMALLER is the column count: the detail spans `1 / -1`, so
-// there is nothing to count. The six live columns (TOR-139), client-side
+// thing that got SMALLER is the column count: the detail spans its container
+// rather than a counted number of cells, so there is nothing to count. The
+// six live columns (TOR-139), client-side
 // sorting over what state.runs already holds, the queue column and the one
 // place its figure comes from (TOR-140, TOR-156), the
 // drag-a-border-and-remember-it column widths (TOR-157), the accordion's own
@@ -256,12 +257,19 @@ class RunTable extends HTMLElement {
     // Found inside THIS element rather than by document id, so a second table
     // could not steal the first one's parts. The ids stay on the markup for
     // the Go tests, for #run-list-empty's own rule and for the aria wiring.
-    // this.grid IS the header's parent since TOR-215: the ten header cells
-    // are the grid's own first ten items, so there is no header ROW element
-    // left to find - a grid has rows, not <tr>s. buildLiveColumnHeaders
-    // inserts into it directly.
+    //
+    // THE HEADER BAND IS AN ELEMENT AGAIN SINCE TOR-221, and this is the only
+    // shape change the ticket cost this file. TOR-215 had made the whole table
+    // one grid, so the ten header cells were the grid's own first ten items
+    // and there was no header row element to find; now the columns are a grid
+    // PER ROW (table.css's .run-grid-head-row and .run-row, both reading
+    // tokens.css's one --run-tracks token), so the cells sit inside the band
+    // that lays them out. this.grid stays the outer box - it is what
+    // syncRunDetailWidth measures the pane against - and this.headRow is what
+    // buildLiveColumnHeaders inserts into.
     this.grid = this.querySelector("#run-table");
-    this.actionsHeader = this.querySelector("#run-table > .run-actions-header");
+    this.headRow = this.querySelector(".run-grid-head-row");
+    this.actionsHeader = this.querySelector(".run-grid-head-row > .run-actions-header");
     this.list = this.querySelector("#run-list");
     this.emptyNote = this.querySelector("#run-list-empty");
     // No id on this one in index.html - it is the scroll wrapper, not a
@@ -277,6 +285,7 @@ class RunTable extends HTMLElement {
     // rather than throwing on the spot.
     const missing = Object.entries({
       grid: this.grid,
+      headRow: this.headRow,
       actionsHeader: this.actionsHeader,
       list: this.list,
       emptyNote: this.emptyNote,
@@ -296,16 +305,23 @@ class RunTable extends HTMLElement {
     // taken before the build would hold the three headers index.html ships
     // with and every column past them would be unsortable and unresizable.
     this.buildLiveColumnHeaders();
-    this.sortHeaders = this.querySelectorAll("#run-table > [data-sort]");
+    // A DIRECT-CHILD SELECTOR, on the band rather than on #run-table since
+    // TOR-221: the header cells are the band's own children now. Direct on
+    // purpose - a descendant selector here would also collect any [data-sort]
+    // a row's cell ever grew, and this NodeList is what gets a sort listener
+    // and a drag handle each.
+    this.sortHeaders = this.querySelectorAll(".run-grid-head-row > [data-sort]");
     // NO COLUMN COUNT IS KEPT ANY MORE, and that is TOR-215's doing rather
     // than an omission. Until the grid, this line read the header count off
     // the DOM (`querySelectorAll("#run-table thead th").length`) so the detail
     // row's colSpan could be set from it - a literal would have gone wrong
     // silently the moment TOR-139 added six columns, leaving an empty cell at
-    // the end of the detail row and the detail a column narrow. A grid needs
-    // no count at all: .run-detail-row spans `1 / -1` (table.css), and -1 is
-    // the last line of whatever the grid has. The thing the count existed to
-    // keep correct is no longer a thing that can be wrong.
+    // the end of the detail row and the detail a column narrow. Neither shape
+    // since needs a count: under TOR-215's one grid the detail spanned
+    // `1 / -1`, and since TOR-221 the row's grid ends at the row, so the
+    // detail is an ordinary block as wide as its container (table.css). The
+    // thing the count existed to keep correct is no longer a thing that can
+    // be wrong.
 
     this.wireSorting();
     // columnWidths holds only the entries a drag (or a valid stored value) has
@@ -358,7 +374,8 @@ class RunTable extends HTMLElement {
 
     const missing = Object.entries({
       grid: this.querySelector("#run-table"),
-      actionsHeader: this.querySelector("#run-table > .run-actions-header"),
+      headRow: this.querySelector(".run-grid-head-row"),
+      actionsHeader: this.querySelector(".run-grid-head-row > .run-actions-header"),
       list: this.querySelector("#run-list"),
       emptyNote: this.querySelector("#run-list-empty"),
       wrap: this.querySelector(".run-table-wrap"),
@@ -421,7 +438,7 @@ class RunTable extends HTMLElement {
       }
       frag.append(head);
     }
-    this.grid.insertBefore(frag, this.actionsHeader);
+    this.headRow.insertBefore(frag, this.actionsHeader);
   }
 
   // wireSorting makes every header a sort control - a click, and Enter or
@@ -497,9 +514,15 @@ class RunTable extends HTMLElement {
   // THREE ELEMENTS PER ENTRY SINCE TOR-215, and the middle one is the whole
   // reason that ticket exists:
   //
-  //   .run-row-group  the wrapper, spanning all ten columns as a subgrid
-  //     .run-row        the torrent's own line, ten cells, also a subgrid
-  //     .run-detail-row the detail, spanning 1 / -1
+  //   .run-row-group  the wrapper, a plain block around both
+  //     .run-row        the torrent's own line: ten cells, and its OWN grid
+  //     .run-detail-row the detail, a block as wide as the row above it
+  //
+  // ALL THREE ARE PLAIN BLOCKS EXCEPT THE ROW SINCE TOR-221. Under TOR-215
+  // the wrapper and the row were both subgrids of one table-wide grid, which
+  // meant the wrapper had to be a DIRECT grid item of it and nothing could be
+  // inserted between them; now the row carries the ten tracks itself (from
+  // tokens.css's --run-tracks) and the other two need no layout rule at all.
   //
   // A <table> could not have the wrapper. An unknown element written between
   // <tbody> and <tr> is hoisted out in front of the whole table and left
@@ -634,9 +657,11 @@ class RunTable extends HTMLElement {
     // .detail-empty to gate on any more, because a torrent that is not open
     // simply has no detail on screen.
     //
-    // NO colSpan SINCE TOR-215: the detail spans every column because
-    // table.css says `grid-column: 1 / -1`, and -1 is the last line of
-    // whatever the grid has. There is no count to write, keep or get wrong.
+    // NO colSpan SINCE TOR-215, and since TOR-221 not even a grid-column:
+    // the row's grid ends at the row, so this is an ordinary block and is as
+    // wide as the wrapper it sits in - which is as wide as every row. There
+    // is no count to write, keep or get wrong, and nothing to keep it in step
+    // with the number of columns.
     const detailRow = document.createElement("div");
     detailRow.className = "run-detail-row";
     detailRow.hidden = true;
@@ -1094,18 +1119,20 @@ class RunTable extends HTMLElement {
 
   // One custom property per column, on :root - the shape the left panel's own
   // width used before TOR-168 removed the panel, and the reason it is worth
-  // keeping: nothing has to be told that a column moved. table.css's
-  // grid-template-columns names the same nine tokens, so writing one here
-  // re-sizes that track, and with it every cell in the column.
+  // keeping: nothing has to be told that a column moved. tokens.css's
+  // --run-tracks names the same nine tokens, and since TOR-221 both grids
+  // that lay a run's columns out read that one list - so writing one token
+  // here re-sizes that track in the header band and in every row at once.
   applyColumnWidth(key, px) {
     document.documentElement.style.setProperty("--col-w-" + key, px + "px");
   }
 
   // Every sortable header gets a drag handle at its own right edge - the
   // border between it and the next column. Its WIDTH it gets from its track
-  // (table.css's .run-grid reads the matching --col-w-* token; tokens.css
-  // declares the defaults and wire()'s own loop has already overridden any
-  // that were stored), so nothing about the width is set here.
+  // (table.css's .run-grid-head-row lays the band out over --run-tracks,
+  // which reads the matching --col-w-* token; tokens.css declares the
+  // defaults and wire()'s own loop has already overridden any that were
+  // stored), so nothing about the width is set here.
   //
   // TOR-215 DELETED ONE LINE FROM THIS LOOP, and what it was is worth knowing
   // because the rest of the function is untouched:
@@ -1121,13 +1148,17 @@ class RunTable extends HTMLElement {
   // 329.6px in a 320px track). The drag itself never touched the table: it
   // writes --col-w-KEY on :root and reads getBoundingClientRect().width off
   // the header, and both are still exactly true of a grid, which is why
-  // nothing below this comment had to change.
+  // nothing below this comment had to change. TOR-221 moved the header cells
+  // inside a band element and neither half stopped being true: the token is
+  // still on :root, and a header cell still stretches to its own track, so
+  // the rect it measures is still the column's width. Verified with a real
+  // pointer drag rather than assumed, both directions and both clamps.
   //
   // The actions header is deliberately excluded: it is not in
   // this.sortHeaders (no data-sort), so it grows no handle of its own, since
   // there is no column past it for a border to belong to - and its track is
   // the flexible one, the only track that must not be pinned to a width (see
-  // table.css's .run-grid).
+  // table.css's .run-row).
   wireColumnResizers() {
     for (const head of this.sortHeaders) {
       const key = head.dataset.sort;

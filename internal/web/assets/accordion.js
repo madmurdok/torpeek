@@ -123,16 +123,25 @@
 //
 // ---------------------------------------------------------------------------
 // NOT A CUSTOM ELEMENT, unlike the six of docs/front-end.md's element pattern,
-// and the reason is structural rather than stylistic. A custom element has to
-// BE somewhere in the tree, and at every one of the three levels the only
-// place to put it is between a grid container and its items:
+// and the reason is structural rather than stylistic - though there is one
+// fewer reason than there was, and it is worth saying which:
 //
-//   - .run-row-group carries `grid-template-columns: subgrid`, which only
-//     works on a DIRECT grid item of .run-grid; an element wrapped around it
-//     would break the column alignment TOR-214 measured to 0.00px.
-//   - at the file level the toggle is inside the row's <label> and the region
-//     is the row's sibling inside the <li>; there is no box that holds both
-//     and only both.
+//   - THE RUN LEVEL NO LONGER OBJECTS. It used to: .run-row-group carried
+//     `grid-template-columns: subgrid`, which only works on a DIRECT grid
+//     item of .run-grid, so an element wrapped around it would have broken
+//     the column alignment TOR-214 measured to 0.00px. TOR-221 removed that
+//     - each row is its own grid over one shared track list now - and
+//     measured the removal: with an element inserted between the container
+//     and the rows, per-row grids held every cell to 0.0000px of its header
+//     across 24 rows, where the shared grid drifted 922.3906px. So the run
+//     level could have one; nothing here is waiting on layout any more.
+//   - AT THE FILE LEVEL there is still no box: the toggle is inside the row's
+//     <label> and the region is the row's sibling inside the <li>, so nothing
+//     holds both and only both.
+//   - AND THE RUN LEVEL'S LISTENER still must stay on .run-row rather than on
+//     any wrapper (see NO LISTENER above), which is what actually keeps this
+//     a class: an element around the pair would be the obvious place to
+//     listen and the wrong one.
 //
 // So this is a plain class over elements the page already has, and the
 // element pattern's points that still apply are applied: parts are checked by

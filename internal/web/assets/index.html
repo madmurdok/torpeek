@@ -80,17 +80,20 @@
          the one genuinely empty state (no torrents at all) already has
          #run-list-empty. app.js builds a row and its detail per entry, so
          #run-list below stays empty here. -->
-    <!-- TOR-215: A CSS GRID, NOT A <table>. The ten columns are ten tracks on
-         #run-table (table.css's .run-grid rule reads the same --col-w-*
-         tokens the drag writes), the header cells are the grid's own first ten
-         items, and #run-list is display: contents so a row still has a list to
-         be appended to while its cells sit in the outer grid's tracks. What
-         the change bought, and the only reason it was made: a row and its
-         detail can now live inside ONE element (.run-row-group), which the
-         <table> parser forbade - an unknown element between <tbody> and <tr>
-         is hoisted out of the table empty, measured in TOR-214's own control.
-         docs/front-end.md carries the ten tracks, the six behaviours and the
-         numbers for each.
+    <!-- TOR-215: A CSS GRID, NOT A <table>. What the change bought, and the
+         only reason it was made: a row and its detail can now live inside ONE
+         element (.run-row-group), which the <table> parser forbade - an
+         unknown element between <tbody> and <tr> is hoisted out of the table
+         empty, measured in TOR-214's own control. docs/front-end.md carries
+         the ten tracks, the six behaviours and the numbers for each.
+         TOR-221: ONE GRID PER ROW, not one grid for the table. #run-table is
+         a plain block now; the ten columns are laid out by the header band
+         (.run-grid-head-row, the div the header cells moved inside) and by
+         each row, both reading the one --run-tracks token (tokens.css), so
+         every element here is a whole thing rather than a fragment that only
+         means something inside one specific parent. #run-list needs no
+         display: contents any more and the band is why the header cells are
+         wrapped: they are grid items of the band, not of #run-table.
          TOR-194: the list's BEHAVIOUR lives in run-table.js as a custom
          element, following the pattern frame-panel.js set out; its structure
          stays here, wrapped and not re-indented, so the comment above stays
@@ -115,14 +118,16 @@
       <h2 class="runs-title">Torrents</h2>
       <div class="run-table-wrap">
         <div id="run-table" class="run-grid">
-          <div class="run-grid-head" scope="col" data-sort="name" tabindex="0" role="button"
-               aria-sort="none"><span class="run-th-label">Name</span></div>
-          <div class="run-grid-head" scope="col" data-sort="when" tabindex="0" role="button"
-               aria-sort="descending"><span class="run-th-label">Added</span></div>
-          <div class="run-grid-head" scope="col" data-sort="status" tabindex="0" role="button"
-               aria-sort="none"><span class="run-th-label">Status</span></div>
-          <div class="run-grid-head run-actions-header" scope="col" aria-hidden="true"></div>
-          <div id="run-list" class="run-grid-rows"></div>
+          <div class="run-grid-head-row">
+            <div class="run-grid-head" scope="col" data-sort="name" tabindex="0" role="button"
+                 aria-sort="none"><span class="run-th-label">Name</span></div>
+            <div class="run-grid-head" scope="col" data-sort="when" tabindex="0" role="button"
+                 aria-sort="descending"><span class="run-th-label">Added</span></div>
+            <div class="run-grid-head" scope="col" data-sort="status" tabindex="0" role="button"
+                 aria-sort="none"><span class="run-th-label">Status</span></div>
+            <div class="run-grid-head run-actions-header" scope="col" aria-hidden="true"></div>
+          </div>
+          <div id="run-list"></div>
         </div>
       </div>
       <p id="run-list-empty" class="run-list-empty">Nothing yet - paste a magnet link to start.</p>
