@@ -867,7 +867,8 @@ func TestColumnWidthsKeyOffElSortHeaders(t *testing.T) {
 	// would fail on the explanation instead of on the mistake.
 	if strings.Contains(liveJS(t, js), "style.width") {
 		t.Error("run-table.js sets an inline width on a header again - the column's width is its GRID " +
-			"TRACK's since TOR-215 (table.css's .run-grid reads the same --col-w-* token), and an " +
+			"TRACK's since TOR-215 (--run-tracks reads the same --col-w-* token, and since TOR-221 " +
+			"every row's grid reads that one list), and an " +
 			"inline width on a content-box grid item overflows that track by its own padding")
 	}
 }
@@ -1109,19 +1110,40 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 	}
 
 	// THE TRACK LIST IS WHERE A COLUMN'S WIDTH COMES FROM SINCE TOR-215, and
-	// it is checked whole - every track, in order - rather than by looking for
-	// each token somewhere in it. The list is the one place the nine draggable
-	// columns, their order and the tenth flexible one all have to agree, and
-	// the shape of a track matters as much as its presence (below).
-	grid := regexp.MustCompile(`\.run-grid\s*\{[^}]*\}`).FindString(css)
-	if grid == "" {
-		t.Fatal("app.css has no .run-grid rule at all - the run table is a CSS grid since TOR-215, and " +
-			"without this rule there are no columns for the tokens above to size")
+	// SINCE TOR-221 IT IS ONE VALUE - --run-tracks. It is checked whole - every
+	// track, in order - rather than by looking for each token somewhere in it.
+	// The list is the one place the nine draggable columns, their order and the
+	// tenth flexible one all have to agree, and the shape of a track matters as
+	// much as its presence (below).
+	//
+	// ONE VALUE rather than one rule is TOR-221's whole claim: alignment stops
+	// being a dependency on a PARENT (a row had to be a direct grid item of
+	// .run-grid carrying grid-template-columns: subgrid) and becomes one on
+	// this token, which every grid that lays a run's columns out reads.
+	// TestNoRowDependsOnItsContainerToFindItsColumns is the other half - that
+	// nothing has quietly gone back to depending on the parent instead.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	if n := strings.Count(live, "--run-tracks:"); n != 1 {
+		t.Fatalf("the served stylesheet declares --run-tracks %d times, want exactly 1 - two "+
+			"declarations are two track lists that can drift apart, which is the one way per-row "+
+			"grids can come to misalign at all", n)
 	}
-	decl := regexp.MustCompile(`grid-template-columns:([^;]*);`).FindStringSubmatch(grid)
+	decl := regexp.MustCompile(`(?s)--run-tracks:([^;]*);`).FindStringSubmatch(live)
 	if decl == nil {
-		t.Fatal("app.css's .run-grid rule declares no grid-template-columns - every column would be " +
-			"one auto track wide and no --col-w-* token would reach the page")
+		t.Fatal("the served stylesheet declares no --run-tracks - since TOR-221 that token IS the ten " +
+			"columns, so without it .run-grid-head-row and .run-row would each lay out a single auto " +
+			"track and no --col-w-* token would reach the page at all")
+	}
+	// AND IT IS ON :root, not on a container. On a container it would reach a
+	// row only by INHERITANCE, which looks like it works and is the same
+	// coupling wearing inheritance's clothes: a row moved out of that box
+	// silently loses every column, because an unresolvable var() makes the
+	// whole declaration invalid at computed-value time and grid-template-columns
+	// falls back to none.
+	if rootRule := regexp.MustCompile(`(?s):root \{.*?\n\}`).FindString(live); !strings.Contains(rootRule, "--run-tracks:") {
+		t.Error("--run-tracks is declared outside the :root token rule - on a container it reaches a " +
+			"row only by inheritance, so a row put anywhere else loses all ten columns; on :root it " +
+			"reaches a row wherever the row is (TOR-221)")
 	}
 	// ", " -> "," first, so minmax(3.8rem, 1fr) is one field rather than two.
 	tracks := strings.Fields(strings.ReplaceAll(decl[1], ", ", ","))
@@ -1154,24 +1176,58 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 		"minmax(3.8rem,1fr)",
 	}
 	if len(tracks) != len(want) {
-		t.Fatalf("app.css's .run-grid declares %d column tracks, want %d - the header cells are the grid's "+
-			"own first items, so a track too few or too many shifts every column after it off its own "+
-			"data: %q", len(tracks), len(want), tracks)
+		t.Fatalf("--run-tracks declares %d column tracks, want %d - the header band's cells are that "+
+			"grid's own items and a row's cells are its own, so a track too few or too many shifts "+
+			"every column after it off its own data, in both at once: %q", len(tracks), len(want), tracks)
 	}
 	for i, w := range want {
 		if tracks[i] != w {
-			t.Errorf("app.css's .run-grid track %d is %q, want %q - a column has to be a BARE length read "+
+			t.Errorf("--run-tracks track %d is %q, want %q - a column has to be a BARE length read "+
 				"from its own token (TOR-214 measured minmax/min-content/auto all letting content win at "+
 				"822.43px where a bare 44px track gave 44px), and the tenth has to stay minmax(3.8rem, 1fr) "+
-				"or the grid stops filling the pane the way the <table>'s width: 100%% did",
+				"or the rows stop filling the pane the way the <table>'s width: 100%% did",
 				i+1, tracks[i], w)
 		}
 	}
 
-	// AND THE GRID OUTGROWS THE PANE RATHER THAN THE PAGE. width: max-content
-	// with min-width: 100% is the pair: at rest min-width wins and the grid
-	// fills the pane, and the moment a drag makes the tracks sum wider,
-	// max-content wins and .run-table-wrap's own overflow-x scrolls.
+	// AND BOTH GRIDS READ IT, by var() and not by a copy of the list. Two
+	// copies would resolve identically on the day they were written and drift
+	// on the day one of them is edited, which is a misalignment nobody sees
+	// for a year - the exact failure TOR-221's own measurement was aimed at.
+	for _, sel := range []string{".run-grid-head-row", ".run-row"} {
+		rule := regexp.MustCompile(`(?s)\` + sel + `\s*\{.*?\n\}`).FindString(live)
+		if rule == "" {
+			t.Fatalf("app.css has no %s rule - since TOR-221 the ten columns are laid out per row, and "+
+				"that rule IS one of the two grids that does it", sel)
+		}
+		if !strings.Contains(rule, "grid-template-columns: var(--run-tracks);") {
+			t.Errorf("%s does not lay out `grid-template-columns: var(--run-tracks)` - a second copy of "+
+				"the track list aligns on the day it is written and drifts on the day one copy is "+
+				"edited, and a cell an eighth of a pixel out of its column is the failure nobody "+
+				"notices (TOR-221)", sel)
+		}
+		if !strings.Contains(rule, "display: grid;") {
+			t.Errorf("%s does not declare display: grid - grid-template-columns on a non-grid box is "+
+				"inert, so every cell in it would stack in one column", sel)
+		}
+	}
+
+	// AND THE ROWS OUTGROW THE PANE RATHER THAN THE PAGE. width: max-content
+	// with min-width: 100% is the pair, and it stays on .run-grid - the one
+	// job that box still has since TOR-221 took the grid off it: at rest
+	// min-width wins and it fills the pane, every row stretching to it and
+	// resolving the same 1fr from the same width; the moment a drag makes the
+	// tracks sum wider, max-content wins and .run-table-wrap's own overflow-x
+	// scrolls. Measured on the running page: 1168px at rest against a 1168px
+	// pane, 1303.19px after a drag to the 640px ceiling, with the wrap
+	// scrolling at 1303/1168 and documentElement.scrollWidth still equal to
+	// its clientWidth.
+	grid := regexp.MustCompile(`(?s)\.run-grid \{.*?\n\}`).FindString(live)
+	if grid == "" {
+		t.Fatal("app.css has no .run-grid rule at all - it is no longer a grid (TOR-221) but it is " +
+			"still the box whose width: max-content/min-width: 100% decides whether the wrap " +
+			"scrolls or the page does")
+	}
 	for _, w := range []string{"width: max-content;", "min-width: 100%;"} {
 		if !strings.Contains(grid, w) {
 			t.Errorf("app.css's .run-grid rule does not set %q - one of the two halves of \"fills the "+
@@ -1179,6 +1235,154 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 				"either be clamped by the pane or push the whole page sideways", w)
 		}
 	}
+}
+
+// rowParts are the three elements a run is built from (run-table.js's newRow):
+// the wrapper, the torrent's own line and the detail's row. TOR-221's claim is
+// about exactly these - that none of them needs to be anywhere in particular
+// to look right.
+var rowParts = []string{".run-row-group", ".run-row", ".run-detail-row"}
+
+// TestNoRowDependsOnItsContainerToFindItsColumns is TOR-221's fifth criterion,
+// and it is deliberately not the check that criterion could be read as asking
+// for. "`subgrid` appears nowhere in the served stylesheets" is one grep and it
+// is weak: subgrid is one of at least four ways to write "this row's layout
+// comes from its parent", and a reintroduction would almost certainly arrive as
+// one of the others - most likely by someone restoring the shared grid because
+// two rules with the same track list looked like duplication.
+//
+// So each arm below names a DIFFERENT way to make a row depend on its
+// container, and the wrong implementations they catch are:
+//
+//	subgrid on a row part          the original coupling, back by its own name
+//	display: contents anywhere     the same coupling one level up - a container
+//	                               with no box makes its children items of the
+//	                               GRANDPARENT's grid, which is how #run-list
+//	                               used to work and why it needed that rule
+//	display: grid on .run-grid     the shared grid restored, which makes every
+//	                               row a grid ITEM again (and, with the row's
+//	                               own tracks still in place, a nested grid
+//	                               inside one column - measured at 922.3906px
+//	                               out in TOR-221's control arm)
+//	grid-column/-row/-area on a
+//	  row part                     properties that only mean anything to a
+//	                               grid item, so declaring one asserts a parent
+//	a row part as the key selector
+//	  under any combinator         `.run-grid > .run-row-group { ... }` says in
+//	                               the selector what subgrid used to say in the
+//	                               value: this only works in that box
+//
+// What it cannot catch is a track list copied instead of read
+// (TestColumnWidthTokensMatchThePanelWidthFamily's own var(--run-tracks) arm
+// covers that) and anything about what a browser actually renders - the
+// 0.0000px across 22 rows is in docs/front-end.md with the control that makes
+// it a measurement.
+func TestNoRowDependsOnItsContainerToFindItsColumns(t *testing.T) {
+	css := stylesheet(t)
+	// Comments stripped, and that matters more here than in most of these
+	// tests: table.css, tokens.css and accordion.js all EXPLAIN the subgrid
+	// that was removed, by name, because a reader who does not know what was
+	// there cannot know why the token exists. A guard that could not tell
+	// prose from code would fail on the explanation instead of on the mistake.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+
+	if strings.Contains(live, "subgrid") {
+		t.Error("`subgrid` is back in the served stylesheet. It only resolves on a DIRECT grid item " +
+			"of the grid it borrows from, so whatever carries it cannot have anything inserted " +
+			"above it - which is the coupling TOR-221 removed and the first reason front-end.md " +
+			"used to give for the accordion not being an element")
+	}
+	if strings.Contains(live, "display: contents") {
+		t.Error("`display: contents` is back in the served stylesheet. It is the same dependency one " +
+			"level up: a box that is not there makes its children items of the GRANDPARENT's grid, " +
+			"so a row would again only lay out correctly at one exact depth. #run-list carried it " +
+			"until TOR-221 and needs nothing now")
+	}
+
+	// .run-grid must not be a grid. If it is, every row is a grid item again -
+	// and worse than before, because the row still carries its own tracks, so
+	// it lays its ten columns out inside whatever single column it landed in.
+	if grid := regexp.MustCompile(`(?s)\.run-grid \{.*?\n\}`).FindString(live); grid != "" {
+		for _, banned := range []string{"display: grid", "display: inline-grid", "grid-template-columns"} {
+			if strings.Contains(grid, banned) {
+				t.Errorf(".run-grid declares %q again - the shared grid is what made a row a fragment "+
+					"of its container rather than a whole thing (TOR-221). The rows carry their own "+
+					"tracks now, so a row would lay its ten columns out inside one column of this one",
+					banned)
+			}
+		}
+	}
+
+	// Rule by rule: a row part may not be given a grid ITEM's properties, and
+	// may not be reached through a combinator as the thing a rule is about.
+	for _, rule := range splitRules(live) {
+		for _, sel := range strings.Split(rule.selector, ",") {
+			sel = strings.TrimSpace(sel)
+			if sel == "" {
+				continue
+			}
+			key := keyCompound(sel)
+			part := ""
+			for _, p := range rowParts {
+				if strings.Contains(key, p) {
+					part = p
+				}
+			}
+			if part == "" {
+				continue
+			}
+			for _, prop := range []string{"grid-column", "grid-row", "grid-area"} {
+				if regexp.MustCompile(`(^|[;{\s])` + prop + `\s*:`).MatchString(rule.body) {
+					t.Errorf("%q declares %s. That property only means anything to a grid ITEM, so it "+
+						"is an assertion about this element's PARENT - exactly what TOR-221 took out. "+
+						"A row part spans its container because it is a block, not because it was "+
+						"placed on somebody else's lines", sel, prop)
+				}
+			}
+			if key != sel {
+				t.Errorf("%q reaches %s through a combinator. A rule written that way says in the "+
+					"selector what subgrid used to say in the value - this element only lays out "+
+					"correctly inside that box - so the accordion could not be wrapped around it "+
+					"again (TOR-221). Style the part by its own class", sel, part)
+			}
+		}
+	}
+}
+
+// styleRule is one declaration block with the selector list it belongs to.
+type styleRule struct {
+	selector string
+	body     string
+}
+
+// splitRules cuts comment-stripped CSS into rules. Flat by design: this
+// stylesheet has no @media and no nesting (theme_test.go's own guard is what
+// keeps the first true), so a rule is everything between one "}" and the next.
+func splitRules(css string) []styleRule {
+	var out []styleRule
+	for _, chunk := range strings.Split(css, "}") {
+		i := strings.Index(chunk, "{")
+		if i < 0 {
+			continue
+		}
+		out = append(out, styleRule{selector: strings.TrimSpace(chunk[:i]), body: chunk[i+1:]})
+	}
+	return out
+}
+
+// keyCompound returns the last compound of one selector - the element the rule
+// is ABOUT, as opposed to the ancestors it is qualified by. Equal to the whole
+// selector exactly when there is no combinator, which is the shape TOR-221
+// wants for a row part.
+func keyCompound(sel string) string {
+	sel = strings.TrimSpace(sel)
+	last := 0
+	for i, r := range sel {
+		if r == ' ' || r == '>' || r == '+' || r == '~' {
+			last = i + 1
+		}
+	}
+	return strings.TrimSpace(sel[last:])
 }
 
 // WHAT THESE TESTS DO NOT COVER, in one place - the summary the top of this
@@ -1878,3 +2082,29 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 // rather than this release, because it is an engine question unrelated to
 // TOR-215's markup change and this task did not diagnose it far enough to say
 // it belongs in this release's scope.
+
+// TOR-221 CHANGED THE MARKUP UNDER THE RECORD ABOVE, so what that record still
+// stands for is worth being exact about rather than leaving to a reader to
+// guess from the ticket numbers.
+//
+// What moved: `#run-table` is no longer a grid, `#run-list` lost
+// `.run-grid-rows` and its `display: contents`, the header cells now sit
+// inside a `.run-grid-head-row` band, and `.run-row-group` /
+// `.run-detail-row` are plain blocks where they were subgrids. So every
+// selector the six checks name still exists and still means the same thing -
+// `.run-row`, `.run-row-main`, `.run-cell-*`, `.picker-item`, `.file-detail`,
+// `#run-detail-N` are untouched - and the one sentence in check 3 that reads
+// as a claim about the wrapper's LAYOUT ("through a `.run-row-group` rather
+// than two `<tr>`s") is now true of a block rather than of a subgrid.
+//
+// What TOR-221's own browser pass re-exercised, against 22 disk rows: the
+// column drag in both directions with its clamps and its localStorage
+// round-trip (check 4's mechanism), a sort click with `aria-sort` moving
+// across all nine headers (check 2's mechanism), three rows open at once with
+// their details measured on screen (check 3's first half), and the alignment
+// and slack numbers TOR-221 exists for. What it did NOT re-run is anything
+// needing a live throttled torrent - checks 1, 5 and 6, and check 2's
+// real-vs-absent split - because those exercise the data path and TOR-221
+// touches no JS that reads or writes a cell's data: the whole of its JS diff
+// is three part lookups and one insertion point. That is a reason, not a
+// claim that they are covered.

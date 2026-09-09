@@ -538,10 +538,22 @@ Every other component in this file is one. This one cannot be, and the reason
 is worth stating because it is the first place the element pattern does not
 reach:
 
-- `.run-row-group` carries `grid-template-columns: subgrid`, which only works
-  on a **direct** grid item of `.run-grid`. An element wrapped around it would
-  break the column alignment TOR-214 measured to 0.00px - so the wrapper this
-  ticket waited for is the thing the component must not become.
+- ~~`.run-row-group` carries `grid-template-columns: subgrid`, which only
+  works on a **direct** grid item of `.run-grid`. An element wrapped around it
+  would break the column alignment TOR-214 measured to 0.00px - so the wrapper
+  this ticket waited for is the thing the component must not become.~~
+  **THIS REASON NO LONGER EXISTS. TOR-221 removed it** - hours after this
+  section was written, at the owner's request, on the principle of high
+  cohesion and low coupling. There is no shared grid and no `subgrid`: each
+  row is its own grid over one shared track list (`--run-tracks`), so an
+  element wrapped around a row and its detail changes nothing about where a
+  cell lands. Measured rather than argued, with the control that makes it a
+  measurement: with an element inserted between the container and the rows,
+  per-row grids held every cell's left edge to **0.0000px** of its own
+  header's across 24 rows, where the shared grid drifted **922.3906px**. The
+  section below ("One grid per row") carries the numbers. **So the run level
+  could have an element today**; what keeps this a plain class is the third
+  reason below, which was never about layout.
 - At the file level the toggle is inside the row's `<label>` and the region is
   the row's sibling inside the `<li>`. There is no box that holds both and
   only both.
@@ -558,8 +570,9 @@ the justification was WRONG.
 The premise was: the accordion cannot be a component because a run's line and
 its detail are two adjacent `tr`s in one `tbody`, and HTML hoists any wrapper
 out from between them. True about a wrapper - TOR-214 measured the hoist - but
-it assumed the component would BE that wrapper. It is not, for the three
-structural reasons above, and a plain class needs no wrapper at all.
+it assumed the component would BE that wrapper. It is not, for the reasons
+above - two of them now that TOR-221 has retired the first - and a plain class
+needs no wrapper at all.
 
 Checked rather than reasoned: the three writes `apply()` owns existed verbatim
 in the pre-grid module. At `e01091b`, `run-table.js`'s `setRunExpanded` ended
@@ -784,3 +797,269 @@ levels 1 and 2 the element carrying the rail is a run-grid row or a file-list
 would construct a disclosure over the wrong elements and dress the Metadata
 section as a torrent's line. The `.d.ts` exports the class for those two
 instead, and the card carries their markup in both states.
+
+## One grid per row, so a row stops depending on its container (TOR-221)
+
+The section above ends by saying the accordion did not need the grid after all.
+This one is the other half of that reckoning, raised by the owner hours after
+TOR-215 landed and on a principle it names: high cohesion, low coupling.
+
+**The coupling, precisely.** TOR-215 made the whole table one grid, so a run's
+wrapper had to pass the parent's tracks through to its children:
+`.run-row-group` carried `grid-template-columns: subgrid`, which resolves only
+on a **direct** grid item of `.run-grid`. Two things followed, and both were
+the coupling rather than a design: nothing could be inserted between the grid
+and a row, and the accordion therefore could not be an element - the first of
+the three reasons the section above gave. A row's internal layout depended on
+its container's identity. That is the zero-cohesion end: the row was not a
+whole thing but a fragment that only meant something inside one specific
+parent.
+
+**The observation to test.** Every track was either a bare token length or the
+one flexible actions track, and *nothing was sized from content* - deliberately
+(TOR-214: a sortable column must be a bare length precisely so a drag can take
+it below its content's width). What a shared grid actually buys is
+content-based sizing *across* rows, and there was none. So alignment should not
+need a shared grid, only a shared **track list**: nine fixed tracks resolve
+identically by definition, and the `1fr` resolves identically too because every
+row is the same width. The dependency moves from a parent to a value.
+
+**The risk nobody had measured**, and the reason this was not a rename: one
+shared grid resolves its tracks once; N independent grids resolve the same
+arithmetic N times, and rows could land fractions of a pixel apart. Columns
+that are *almost* aligned are worse than a visible break, because nobody
+notices for a year.
+
+### Criterion 2, the number this task turned on: 0.0000px
+
+Measured outside the app first (`docs/spikes/TOR-221-per-row-grid/`, runnable,
+`window.probe()` returns every figure below), because criterion 1 asks for
+that and because TOR-214's own spike is the pattern. **Four arms, not two** -
+and the third is what makes the other three a measurement rather than a probe
+that always says zero:
+
+| arm | shape | max deviation of any cell's left edge from its header's |
+| --- | --- | --- |
+| A | shared grid + `subgrid` rows (TOR-215, the baseline) | **0.0000px** |
+| B | one grid per row, one shared track list | **0.0000px** |
+| C | **control**: arm A with one element inserted between grid and rows | **922.3906px** |
+| D | arm B with the same element inserted | **0.0000px** |
+
+24 rows per arm, 10 columns, **240 cells compared per arm**, raw
+`getBoundingClientRect().left` with no rounding before the subtraction - a
+probe that rounds first is how a sub-pixel result comes to be reported as
+0.00px by the test rather than by the browser. The rows are deliberately unlike
+one another: names from 4 to 92 characters (one of them the unbreakable magnet
+name), one-line and two-line status cells, and actions cells of two different
+content widths, since the last of those is the only content that can reach the
+flexible tenth track.
+
+**Fourteen container widths**, whole and fractional, above and below the summed
+tracks: 1168, 1367.11, 1053, 1053.37, 1234.567, 999.999, 1168.5, 978, 903,
+801, 700, 640.25, and the two the window itself gave. Arms A, B and D read
+0.0000px at every one of them; arm C read 922.3906px at every one. (The window
+manager on this machine ignored programmatic window resizes - `resize_window`
+reported success while `window.innerWidth` stayed 1440 - so the container was
+resized directly instead, which is what the grids see either way. Recorded
+because a sweep that silently measured one width five times would have looked
+exactly like a clean result.)
+
+**Before, during and after a real drag**, in both directions, driven with real
+`PointerEvent`s and `wireColumnResizers` pasted in from `run-table.js`: the
+name column to its 44px floor and its 640px ceiling, four moves each way,
+alignment read at every step. Arms A, B and D: 0.0000px throughout. Arm C moved
+with the drag (922.3906 -> 646.3906 -> 1242.3906), which is the other half of
+the control - the probe is live, not stuck.
+
+**Then the same measurement on the running page**, against 22 disk rows: 22
+rows, 220 cells, **0.0000px** - at rest, mid-drag, after the drag in both
+directions, with three details open, and after a sort. So the answer to "can
+independent grids hold it" is yes, with the same figure the shared grid gives,
+and the coupling goes.
+
+### The shape it took
+
+The track list is **one value**, in `tokens.css` beside the `--col-w-*` tokens
+it is built from:
+
+    --run-tracks:
+      var(--col-w-name) var(--col-w-when) var(--col-w-status)
+      var(--col-w-peers) var(--col-w-seeds) var(--col-w-download_bps)
+      var(--col-w-upload_bps) var(--col-w-availability) var(--col-w-priority)
+      minmax(3.8rem, 1fr);
+
+`:root` and not a container, and that is not a filing decision: declared on
+`.run-grid` it would reach a row by *inheritance*, which looks like it works
+and is the same coupling wearing inheritance's clothes - a row moved out of
+that box loses all ten columns silently, because an unresolvable `var()` makes
+the whole declaration invalid at computed-value time and
+`grid-template-columns` falls back to `none`.
+
+Two elements read it: the header band and each row. Everything else stopped
+being a layout participant:
+
+    #run-table  .run-grid            was the grid; now a plain block that keeps
+                                     only width: max-content / min-width: 100%
+      .run-grid-head-row             NEW - the band, a grid over --run-tracks
+        .run-grid-head  x10          the header cells, moved inside it
+      #run-list                      was .run-grid-rows + display: contents;
+                                     now an ordinary block with no rule at all
+        .run-row-group               was a subgrid; now a block with no rule
+          .run-row                   a grid over --run-tracks - its OWN grid
+          .run-detail-row            was grid-column: 1 / -1; now a block
+
+Three rules got shorter and two went away entirely. The `display: contents` on
+`#run-list` - documented in TOR-215 as "the ONE place in this project where
+`display: contents` is right" - was right only because of the outer grid, and
+went with it. There is now no `display: contents` and no `subgrid` anywhere in
+the served stylesheets.
+
+**The JS diff is three part lookups and one insertion point**: `this.headRow`
+is a new part (checked for absence like every other), `this.actionsHeader` and
+`this.sortHeaders` are anchored on the band rather than on `#run-table >`, and
+`buildLiveColumnHeaders` inserts into the band. Nothing that reads or writes a
+cell's data changed.
+
+### The sticky had to move, and the control says why
+
+The header cells each carried `position: sticky; top: 0` - ten items pinned at
+the same offset reading as one band, which is what TOR-214 measured. Inside a
+band element that stops working: a sticky grid item is constrained by its grid
+container, so ten cells inside a band exactly their own height cannot travel at
+all. So the sticky is the band's now, and it travels inside `.run-grid` exactly
+where the cells travelled before. Re-run on the real page after the move, with
+TOR-214's own control: in the wrap given a height and scrolled 250px, the band
+sat at offset **0** from the wrap's top while the first row moved to **-206.4**,
+and the same band set to `position: static` moved to **-250**.
+
+What the cells kept is `position: relative`, because that is all `.col-resizer`
+ever wanted from the position - measured, not assumed: the handle's
+`offsetParent` is still its own `.run-grid-head`.
+
+### Criterion 3: the three behaviours the shared grid was chosen for
+
+Each on the running page, 22 rows, at a 1440x900 window giving the usual 1168px
+pane.
+
+**A column dragged narrower than its content.** Both numbers: the name in the
+first row measured **748.70px** natural (`MAGNETDN_THE_ABSOLUTELY_UNBREAKABLE_`
+and on, 92 characters with no space and no hyphen, so not one soft wrap
+opportunity) and the rendered track was **44px** - `COLUMN_MIN_WIDTH`, 17.0x
+narrower than the string. The cell measured 44.00px, `.run-name`'s
+`scrollWidth` 749 against a `clientWidth` of 20, `text-overflow: ellipsis`. A
+bare length per track is still the whole of why this works.
+
+**The wrap scrolls and the page does not.** After a real drag to the 640px
+ceiling: `.run-grid` measured **1303.19px** (TOR-214's own figure for the same
+drag), `.run-table-wrap` `scrollWidth` **1303** against `clientWidth` **1168**,
+and `documentElement.scrollWidth` **1425** equal to its `clientWidth` **1425**.
+So the wrap scrolls, the page does not.
+
+**The detail spans every column.** Three rows opened at once (the first, the
+twelfth and the last): each detail measured **1168px** against a row of
+**1168px** and a track sum of **1167.9994px**, with `detailLeft` and `rowLeft`
+both 128.5. And it needs no `grid-column` to do it any more - a block is as
+wide as its container, which is a weaker claim than `1 / -1` and therefore a
+safer one. One small gain worth recording: a per-row grid *reports* its
+resolved tracks, where a `subgrid` row's computed `grid-template-columns` reads
+`subgrid [] [] ...` and cannot be summed at all. The row's own arithmetic is
+now measurable from the page.
+
+### Criterion 4: where the slack goes, confirmed per row rather than assumed
+
+The actions track absorbs it, via `minmax(3.8rem, 1fr)`, exactly as before -
+but each row resolves that `1fr` for itself now, so the claim is about a set of
+22 numbers rather than one. Measured as a set every time, reported as the
+*distinct* values:
+
+| state | distinct row widths | distinct actions-cell widths |
+| --- | --- | --- |
+| at rest | `[1168]` | `[245.6094]` |
+| name dragged to 44px | `[1168]` | `[521.6094]` |
+| name dragged to 640px | `[1303.1875]` | `[60.7969]` (the 3.8rem floor) |
+| three details open | `[1168]` | `[245.6094]` |
+
+One value in every case, and in the spike one value at each of fourteen
+container widths. It has to be: every row is a block as wide as `.run-grid`, so
+every row subtracts the same nine lengths from the same width. Stated rather
+than left implied, though: this is *not* the same mechanism as before. Under
+one grid the tenth track was resolved once and shared; now it is resolved 22
+times and agrees. The agreement is a consequence of every row having the same
+width, so anything that ever gives one row a different width - a per-row
+`margin`, a scrollbar inside one row, a row that shrink-wraps - breaks the
+column alignment for that row alone. That is the failure mode this shape has
+and the shared grid did not, and it is the one thing to look at first if a
+column ever looks a pixel out.
+
+### Does the column drag survive? Yes - unchanged again
+
+`applyColumnWidth` still writes `--col-w-KEY` on `:root` and the drag still
+reads `head.getBoundingClientRect().width`, and both are still true: the token
+is still on `:root`, and a header cell still stretches to its own track, so the
+rect it measures *is* the column width. Verified with a real pointer drag
+rather than assumed - `--col-w-name` went `20rem` -> `44px` -> `640px`, clamped
+at both ends, with `localStorage` reading `{"name":44}` and then `{"name":640}`
+after each. Sorting still works from the band (`aria-sort` moved to
+`ascending` on the name header and `none` on the other eight, all nine still
+`tabindex="0"` `role="button"`), and the accordion still opens from
+`.run-row`.
+
+### Criterion 5: the guard, and what it catches that a grep would not
+
+`TestNoRowDependsOnItsContainerToFindItsColumns` (`columns_test.go`).
+"`subgrid` appears nowhere in the served stylesheets" is one grep and it is
+weak: `subgrid` is one of at least five ways to write "this row's layout comes
+from its parent", and a reintroduction would most likely arrive as one of the
+others - most plausibly by someone restoring the shared grid because two rules
+naming the same track list looked like duplication. So each arm names a
+different way in: `subgrid` on a row part; `display: contents` anywhere (the
+same dependency one level up); `display: grid` or a `grid-template-columns`
+back on `.run-grid`; `grid-column`/`grid-row`/`grid-area` on `.run-row-group`,
+`.run-row` or `.run-detail-row` (properties that only mean anything to a grid
+item, so declaring one asserts a parent); and a row part reached through a
+combinator as a rule's key selector (`.run-grid > .run-row-group { ... }` says
+in the selector what `subgrid` used to say in the value). It reads the
+stylesheet with comments stripped, deliberately: three files explain the
+removed `subgrid` by name, and a guard that could not tell prose from code
+would fail on the explanation instead of on the mistake.
+
+**Shown able to fail, one mutation at a time**, each into the real asset and
+each reverted: all five arms above plus seven on the track list -
+`minmax(min-content, ...)` around a token, a track dropped, the row copying the
+list instead of reading it, the band not reading it, the list declared twice,
+the list moved off `:root`, and `width: max-content` dropped from `.run-grid`.
+**Twelve mutations, twelve caught**, and the tree green again afterwards. The
+markup arm (`runtable_test.go`) demonstrated itself: it failed on the real
+change, naming the class that had gone, before it was updated.
+
+What none of it catches is what a browser actually renders. That is what the
+0.0000px above is for, and what the control arm is for.
+
+### What this does not close
+
+- The spike ran in Chrome only, like TOR-214's. Per-row grids need no feature
+  the shared grid did not - one fewer, in fact, since `subgrid` is gone
+  (Chrome 117+, Firefox 71+, Safari 16+ was TOR-215's one non-degradable
+  dependency, and it is not a dependency any more).
+- The accordion **could** be a custom element at the run level now and is not
+  made one here. TOR-221 removes the layout obstacle; the listener reason
+  (above) is the one that keeps it a class, and changing that is its own
+  ticket.
+- Checks 1, 5 and 6 of TOR-216's browser pass, which need live throttled
+  torrents, were not re-run. `columns_test.go`'s own note at the end of that
+  record says exactly which of the six were re-exercised here and why the rest
+  were not.
+- **TOR-212's design export still asserts the constraint this ticket
+  removed.** `.design-sync/export/components/shared/Accordion/`'s card says
+  "LEVEL 1 NEEDS THE GRID AROUND IT" and carries the dead `.run-grid-rows`
+  class, and four sibling files repeat the subgrid claim. The card still
+  renders correctly - a row lays out on its own tracks with or without
+  `.run-grid` around it now, which is the decoupling - so it is stale prose
+  and dead markup rather than a broken preview. Filed as **TOR-224** rather
+  than edited here, because the export is uploaded as a set and its checker
+  cannot be read back from this side (TOR-208's finding), so a partial edit by
+  a ticket not looking at the design side is worse than one deliberate pass.
+- The machine was heavily loaded throughout (`uptime` 1-minute figures between
+  2.78 and 7.67, 5-minute as high as 36.38), which is why no timing is
+  reported anywhere above. Nothing measured here depends on wall-clock speed:
+  every figure is a geometry read.

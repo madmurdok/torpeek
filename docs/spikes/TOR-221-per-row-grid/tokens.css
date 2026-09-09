@@ -66,8 +66,7 @@
   /* TOR-157: one token per
      resizable run-table column rather than one shared box, because each
      column's border moves independently of the others. Read by table.css's
-     --run-tracks below, which names all nine in the one track list every
-     row's grid reads, and
+     .run-grid, which names all nine in its grid-template-columns, and
      overwritten in place by run-table.js when
      that column's border is dragged - a BARE LENGTH per track is what makes
      the token authoritative for the whole column regardless of a row's own
@@ -76,7 +75,7 @@
      deliberately absent here: it carries no data-sort, so nothing drags its
      own border, and it is the one track that must stay flexible so the pane's
      slack has somewhere to go - its 3.8rem is that track's minimum, stated in
-     --run-tracks below. Defaults below match the widths this table rendered at
+     .run-grid. Defaults below match the widths this table already rendered at
      before TOR-157 (see .run-cell-metric and its siblings), so a page that
      has never stored anything looks unchanged. */
   --col-w-name: 20rem;
@@ -88,46 +87,6 @@
   --col-w-upload_bps: 3.4rem;
   --col-w-availability: 5.4rem;
   --col-w-priority: 3.4rem;
-
-  /* THE TEN TRACKS, as ONE VALUE (TOR-221). Every element that lays a run's
-     ten columns out reads this and nothing else - the header row, and each
-     row - so alignment is a dependency on a VALUE rather than on a PARENT.
-
-     That is the whole of TOR-221. Until it, the table was a single grid
-     (TOR-215) and a row was a DIRECT grid item of it carrying
-     grid-template-columns: subgrid, so a row's internal layout depended on
-     its container's identity: nothing could be inserted between the two, and
-     front-end.md's TOR-212 section gave exactly that as the first of the
-     three reasons the accordion could not be a custom element. With the list
-     a token, a row is a whole thing wherever it is put.
-
-     MEASURED BEFORE IT WAS WRITTEN, in docs/spikes/TOR-221-per-row-grid:
-     four arms, 24 rows, 240 cells per arm, fourteen container widths (whole
-     and fractional, above and below the summed tracks) and both drag
-     directions. Per-row grids held every cell's left edge to 0.0000px of its
-     own header's - the same figure the shared grid gives - and the control
-     arm, one element inserted between the shared grid and its rows, reported
-     922.3906px. That control is what makes 0.0000px a measurement rather
-     than a probe that always says zero.
-
-     :root RATHER THAN A CONTAINER, and the difference is the ticket: declared
-     on .run-grid this would inherit, and a row moved out of that box would
-     silently lose its columns - the same coupling wearing inheritance's
-     clothes. Here it reaches a row wherever the row is.
-
-     Nine bare tokens and one flexible track; table.css's .run-row rule
-     carries why each shape has to be what it is. */
-  --run-tracks:
-    var(--col-w-name)
-    var(--col-w-when)
-    var(--col-w-status)
-    var(--col-w-peers)
-    var(--col-w-seeds)
-    var(--col-w-download_bps)
-    var(--col-w-upload_bps)
-    var(--col-w-availability)
-    var(--col-w-priority)
-    minmax(3.8rem, 1fr);
 
   /* The comparison stage's shape, set by app.js once per comparison from the
      first arm's own resolution (TOR-109) and never touched again while it is

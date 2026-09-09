@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TOR-221 - one grid per row, instead of one grid per table (throwaway spike)</title>
+
+<!-- THE REAL TOKENS, copied from internal/web/assets/tokens.css at 1d7ff4d so
+     the column widths measured here are torpeek's own (--col-w-name: 20rem and
+     its eight siblings) rather than invented ones. Nothing in
+     internal/web/assets is touched by this spike - that is criterion 1. -->
+<link rel="stylesheet" href="tokens.css">
+
+<style>
+/* ---------------------------------------------------------------------------
+   TOR-221's question, and it is one question: does alignment need a SHARED
+   grid, or only a shared TRACK LIST?
+
+   Today (TOR-215) the whole table is one grid and a row is a direct grid item
+   of it carrying `grid-template-columns: subgrid`. That is the coupling: a
+   row's internal layout depends on its container's identity, so nothing may
+   be inserted between the two - which is the first of the three reasons
+   front-end.md gives for the accordion not being a custom element.
+
+   FOUR ARMS, so a null result cannot be mistaken for "no difference":
+
+     A  shared grid + subgrid rows            today's shape, the baseline
+     B  one grid per row, same track list     the proposal
+     C  arm A with an element inserted        MUST break - it is what proves
+        between the grid and each row             the metric can report a
+                                                  non-zero number at all
+     D  arm B with the same element inserted  MUST hold - the decoupling
+
+   Arms A and B are expected to agree. C and D are what make that agreement a
+   measurement: if the probe reported 0.00px for all four it would be
+   measuring nothing, and C is the arm on which it is demonstrably able to
+   report otherwise.
+
+   THE TRACK LIST IS ONE VALUE, declared once below. That is the whole of the
+   proposal: alignment stops being a dependency on a PARENT and becomes a
+   dependency on a VALUE. `:root` is where it goes in the app too (next to the
+   --col-w-* tokens it is built from), so a row anywhere in the document gets
+   it - declared on a container it would be the same coupling wearing
+   inheritance's clothes.
+
+   Declared here in the page rather than in the copied tokens.css so that copy
+   stays verbatim; a :root declaration is a :root declaration either way.
+   ------------------------------------------------------------------------ */
+:root {
+  --run-tracks:
+    var(--col-w-name)
+    var(--col-w-when)
+    var(--col-w-status)
+    var(--col-w-peers)
+    var(--col-w-seeds)
+    var(--col-w-download_bps)
+    var(--col-w-upload_bps)
+    var(--col-w-availability)
+    var(--col-w-priority)
+    minmax(3.8rem, 1fr);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans, system-ui, sans-serif);
+}
+
+/* The real pane's geometry, so these numbers are comparable with TOR-214's:
+   .workspace's max-width: 76rem with .main's 1.5rem side padding gives a
+   1168px content box at a 1440px window. */
+.pane {
+  max-width: 76rem;
+  margin: 0 auto;
+  box-sizing: border-box;
+  padding: 0 1.5rem 4rem;
+}
+.arm-title {
+  font-size: .72rem; font-family: var(--mono); font-weight: 600;
+  color: var(--ink-2); text-transform: uppercase; letter-spacing: var(--track);
+  margin: 1.5rem 0 .5rem;
+}
+
+/* .run-table-wrap: the wrap is what scrolls sideways, in every arm. */
+.wrap { overflow-x: auto; }
+
+/* ---- ARM A and ARM C: one shared grid, subgrid rows (today) ------------ */
+.shared {
+  display: grid;
+  grid-template-columns: var(--run-tracks);
+  width: max-content;
+  min-width: 100%;
+  font-size: .82rem;
+}
+.shared > .rows { display: contents; }
+.shared .group { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; }
+.shared .row   { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: center; }
+.shared .detail { grid-column: 1 / -1; }
+
+/* ---- ARM B and ARM D: one grid per row, one shared track list --------- */
+/* The container is a plain BLOCK. It keeps width: max-content with
+   min-width: 100% - the pair that makes the wrap scroll rather than the page -
+   but it lays nothing out in columns any more, so what sits between it and a
+   row is its own business. */
+.perrow {
+  width: max-content;
+  min-width: 100%;
+  font-size: .82rem;
+}
+.perrow .headrow,
+.perrow .row { display: grid; grid-template-columns: var(--run-tracks); }
+.perrow .row { align-items: center; }
+/* No grid-column on the detail: a block child of a block already spans the
+   whole width. Measured below against the track sum rather than asserted. */
+
+/* ---- THE INSERTED ELEMENT (arms C and D) ------------------------------ */
+/* What TOR-212 wanted and could not have: one custom element around a row and
+   its detail. `display: block` is what run-table.js's own wrapper gets in
+   table.css, so this is the same thing that element would be. */
+run-accordion { display: block; }
+
+/* ---- cells: only what carries geometry ------------------------------- */
+.head, .cell, .detail-cell { box-sizing: border-box; }
+.head, .cell { padding: .4rem .3rem; text-align: left; }
+.head {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--s1);
+  font-family: var(--mono); font-size: .66rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: var(--track);
+  color: var(--ink-2); white-space: nowrap;
+  overflow: hidden;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer; user-select: none;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.head.actions { cursor: default; }
+.row { border-bottom: 1px solid var(--rule); }
+.row:hover { background: var(--hover); }
+.name-cell { overflow: hidden; }
+.run-name {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cell-metric { font-family: var(--mono); font-size: .78rem; text-align: right; }
+.cell-status .badge { font-size: .68rem; font-family: var(--mono); color: var(--ink-2); }
+.cell-status .bar { height: 3px; background: var(--s2); margin-top: .2rem; }
+.cell-status .bar > i { display: block; height: 3px; background: var(--accent); }
+.cell-actions { display: flex; gap: .2rem; justify-content: flex-end; }
+.cell-actions button { font: inherit; font-size: .66rem; padding: 0 .2rem; }
+.detail { background: var(--s1); border-bottom: 1px solid var(--rule); }
+.detail-cell { padding: .6rem .3rem; font-size: .78rem; color: var(--ink-2); }
+
+.col-resizer {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+  cursor: col-resize; background: transparent; touch-action: none;
+}
+.col-resizer:hover, .col-resizer.dragging { background: var(--accent-dim); }
+
+.probe-out { font-family: var(--mono); font-size: .7rem; white-space: pre-wrap; padding: 1rem; }
+</style>
+</head>
+<body>
+
+<div class="pane">
+  <h2 class="arm-title">A - shared grid, subgrid rows (today's shape)</h2>
+  <div class="wrap" id="wrap-A"><div class="shared" id="grid-A"></div></div>
+
+  <h2 class="arm-title">B - one grid per row, one shared track list</h2>
+  <div class="wrap" id="wrap-B"><div class="perrow" id="grid-B"></div></div>
+
+  <h2 class="arm-title">C - control: arm A with &lt;run-accordion&gt; inserted (must break)</h2>
+  <div class="wrap" id="wrap-C"><div class="shared" id="grid-C"></div></div>
+
+  <h2 class="arm-title">D - arm B with the same &lt;run-accordion&gt; inserted (must hold)</h2>
+  <div class="wrap" id="wrap-D"><div class="perrow" id="grid-D"></div></div>
+
+  <pre class="probe-out" id="out"></pre>
+</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// The ten columns, in the app's own order (run-table.js's LIVE_COLUMNS plus
+// the three index.html ships and the unlabelled actions column).
+// ---------------------------------------------------------------------------
+const COLUMNS = [
+  { key: "name",         label: "Name" },
+  { key: "when",         label: "Added" },
+  { key: "status",       label: "Status" },
+  { key: "peers",        label: "Peers" },
+  { key: "seeds",        label: "Seeds" },
+  { key: "download_bps", label: "Down" },
+  { key: "upload_bps",   label: "Up" },
+  { key: "availability", label: "Avail" },
+  { key: "priority",     label: "Queue" },
+];
+
+// The string a drag has to be able to go narrower than: 96 characters, no
+// space and no hyphen, so not one soft wrap opportunity. TOR-214's own.
+const UNBREAKABLE =
+  "MAGNETDN_THE_ABSOLUTELY_UNBREAKABLE_NAME_WITH_NO_SPACES_OR_HYPHENS_ANYWHERE_IN_IT_0123456789";
+
+// TWENTY-FOUR ROWS, deliberately unlike one another: criterion 2 asks for at
+// least twenty, and rows that were identical would not tell an
+// arithmetic-per-row problem from a content problem. So the names vary in
+// length, the status cells vary in height (one line, two lines, a progress
+// bar) and the actions cells vary in content width - the last of these is the
+// one that could reach the flexible tenth track.
+const ROWS = [];
+for (let i = 0; i < 24; i++) {
+  const kind = i % 4;
+  ROWS.push({
+    name: kind === 0 ? UNBREAKABLE
+        : kind === 1 ? "ubuntu-24.04.1-desktop-amd64.iso"
+        : kind === 2 ? "clip-" + i
+        : "A Rather Long Human Readable Torrent Name " + i + " (1080p)",
+    when: ["2m ago", "17h ago", "3 days ago", "just now"][kind],
+    status: kind === 1 ? "downloading" : kind === 3 ? "seeding" : "queued",
+    pct: (i * 4) % 101,
+    twoLine: kind === 2,
+    peers: 3 + i, seeds: i % 7, down: (i * 137) % 9000, up: (i * 41) % 900,
+    avail: (1 + (i % 30) / 10).toFixed(1), prio: i + 1,
+    wideActions: kind === 3,     // a Cancel button, which is the widest thing
+  });                            // any actions cell holds in the real table
+}
+
+// ---------------------------------------------------------------------------
+// Building an arm. `shared` picks the arm-A shape (ten header cells as the
+// grid's own first items, #rows display: contents, subgrid rows); `insert`
+// wraps every row group in <run-accordion>.
+// ---------------------------------------------------------------------------
+function buildArm(gridEl, { shared, insert }) {
+  const heads = [];
+  const headHost = shared ? gridEl : Object.assign(document.createElement("div"), { className: "headrow" });
+  if (!shared) gridEl.append(headHost);
+
+  for (const col of COLUMNS) {
+    const h = document.createElement("div");
+    h.className = "head";
+    h.dataset.sort = col.key;
+    h.tabIndex = 0;
+    h.setAttribute("role", "button");
+    h.setAttribute("aria-sort", col.key === "when" ? "descending" : "none");
+    h.textContent = col.label;
+    headHost.append(h);
+    heads.push(h);
+  }
+  const actions = document.createElement("div");
+  actions.className = "head actions";
+  actions.setAttribute("aria-hidden", "true");
+  headHost.append(actions);
+  heads.push(actions);
+
+  const rows = document.createElement("div");
+  rows.className = "rows";
+  gridEl.append(rows);
+
+  const rowEls = [];
+  for (const r of ROWS) {
+    const group = document.createElement("div");
+    group.className = "group";
+
+    const row = document.createElement("div");
+    row.className = "row";
+    group.append(row);
+
+    const nameCell = document.createElement("div");
+    nameCell.className = "cell name-cell";
+    const nameSpan = document.createElement("span");
+    nameSpan.className = "run-name";
+    nameSpan.textContent = r.name;
+    nameCell.append(nameSpan);
+    row.append(nameCell);
+
+    const add = (cls, text) => {
+      const d = document.createElement("div");
+      d.className = "cell " + cls;
+      if (text !== undefined) d.textContent = text;
+      row.append(d);
+      return d;
+    };
+    add("cell-when", r.when);
+
+    const st = add("cell-status");
+    const badge = document.createElement("div");
+    badge.className = "badge";
+    badge.textContent = r.twoLine ? r.status + "\nwaiting for peers" : r.status;
+    badge.style.whiteSpace = r.twoLine ? "pre-line" : "nowrap";
+    st.append(badge);
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("i");
+    fill.style.width = r.pct + "%";
+    bar.append(fill);
+    st.append(bar);
+
+    add("cell-metric", String(r.peers));
+    add("cell-metric", String(r.seeds));
+    add("cell-metric", String(r.down));
+    add("cell-metric", String(r.up));
+    add("cell-metric", r.avail + "x");
+    add("cell-metric", String(r.prio));
+
+    const act = add("cell-actions");
+    for (const label of r.wideActions ? ["Cancel", "▲", "▼"] : ["▲", "▼"]) {
+      const b = document.createElement("button");
+      b.textContent = label;
+      act.append(b);
+    }
+
+    const detail = document.createElement("div");
+    detail.className = "detail";
+    const dc = document.createElement("div");
+    dc.className = "detail-cell";
+    dc.textContent = "detail for " + r.name.slice(0, 40) + " - spans every column";
+    detail.append(dc);
+    detail.hidden = true;
+    group.append(detail);
+
+    if (insert) {
+      const acc = document.createElement("run-accordion");
+      acc.append(group);
+      rows.append(acc);
+    } else {
+      rows.append(group);
+    }
+    rowEls.push(row);
+  }
+  return { heads, rowEls, rows };
+}
+
+const ARMS = {
+  A: buildArm(document.getElementById("grid-A"), { shared: true,  insert: false }),
+  B: buildArm(document.getElementById("grid-B"), { shared: false, insert: false }),
+  C: buildArm(document.getElementById("grid-C"), { shared: true,  insert: true  }),
+  D: buildArm(document.getElementById("grid-D"), { shared: false, insert: true  }),
+};
+
+// ---------------------------------------------------------------------------
+// wireColumnResizers, pasted from internal/web/assets/run-table.js with only
+// its `this.` receivers rebound - the same thing TOR-214's spike did, and for
+// the same reason: a drag that is not the app's drag proves nothing about the
+// app's drag. It writes --col-w-KEY on :root, so ONE drag re-lays out all four
+// arms at once.
+// ---------------------------------------------------------------------------
+const COLUMN_MIN_WIDTH = 44;
+const COLUMN_MAX_WIDTH = 640;
+const clampColumnWidth = (px) => Math.max(COLUMN_MIN_WIDTH, Math.min(COLUMN_MAX_WIDTH, Math.round(px)));
+function applyColumnWidth(key, px) {
+  document.documentElement.style.setProperty("--col-w-" + key, px + "px");
+}
+for (const arm of Object.values(ARMS)) {
+  for (const head of arm.heads) {
+    const key = head.dataset.sort;
+    if (!key) continue;
+    const handle = document.createElement("span");
+    handle.className = "col-resizer";
+    handle.setAttribute("aria-hidden", "true");
+    head.append(handle);
+
+    let drag = null;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      event.stopPropagation();
+      event.preventDefault();
+      drag = { startX: event.clientX, startWidth: head.getBoundingClientRect().width };
+      handle.classList.add("dragging");
+      handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      if (!(event.buttons & 1)) return;
+      event.stopPropagation();
+      applyColumnWidth(key, clampColumnWidth(drag.startWidth + (event.clientX - drag.startX)));
+    });
+    const end = (event) => {
+      if (!drag) return;
+      drag = null;
+      handle.classList.remove("dragging");
+      if (event) event.stopPropagation();
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("lostpointercapture", end);
+    handle.addEventListener("click", (event) => event.stopPropagation());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// THE PROBE
+//
+// alignment(arm) is criterion 2's number: the maximum deviation of any cell's
+// left edge from its own column header's, in pixels, over every row and every
+// column. Raw getBoundingClientRect().left, no rounding before the
+// subtraction - rounding first is how a sub-pixel result gets reported as
+// 0.00px by a probe rather than by a browser.
+// ---------------------------------------------------------------------------
+function alignment(arm) {
+  const headLefts = arm.heads.map((h) => h.getBoundingClientRect().left);
+  let worst = 0, at = null;
+  let compared = 0;
+  for (let r = 0; r < arm.rowEls.length; r++) {
+    const cells = [...arm.rowEls[r].children];
+    for (let c = 0; c < cells.length; c++) {
+      const d = Math.abs(cells[c].getBoundingClientRect().left - headLefts[c]);
+      compared++;
+      if (d > worst) { worst = d; at = { row: r, col: COLUMNS[c] ? COLUMNS[c].key : "actions", dev: d }; }
+    }
+  }
+  return { rows: arm.rowEls.length, cellsCompared: compared, maxDeviationPx: +worst.toFixed(4), worstAt: at };
+}
+
+// Every row's own tenth track, which under per-row grids each row resolves for
+// itself (criterion 4). Reported as the distinct set, so "they all agree" is
+// visible rather than asserted.
+function tracksPerRow(arm) {
+  const lists = arm.rowEls.map((row) => getComputedStyle(row).gridTemplateColumns);
+  const distinct = [...new Set(lists)];
+  const widths = arm.rowEls.map((row) => +row.getBoundingClientRect().width.toFixed(4));
+  const actions = arm.rowEls.map((row) => {
+    const last = row.children[row.children.length - 1].getBoundingClientRect();
+    return +last.width.toFixed(4);
+  });
+  return {
+    distinctComputedTrackLists: distinct.length,
+    firstComputedTrackList: lists[0],
+    distinctRowWidths: [...new Set(widths)],
+    distinctActionsCellWidths: [...new Set(actions)],
+  };
+}
+
+function naturalWidth(text, sampleEl) {
+  const cs = getComputedStyle(sampleEl);
+  const p = document.createElement("span");
+  p.style.cssText =
+    "position:absolute;left:-9999px;top:0;white-space:pre;font:" + cs.font +
+    ";letter-spacing:" + cs.letterSpacing;
+  p.textContent = text;
+  document.body.append(p);
+  const w = p.getBoundingClientRect().width;
+  p.remove();
+  return +w.toFixed(2);
+}
+
+window.probe = () => {
+  const out = {
+    window: { innerWidth: window.innerWidth, innerHeight: window.innerHeight,
+              dpr: window.devicePixelRatio },
+    paneWidth: +document.getElementById("wrap-A").clientWidth.toFixed(2),
+    colWName: getComputedStyle(document.documentElement).getPropertyValue("--col-w-name").trim(),
+    arms: {},
+  };
+  for (const [k, arm] of Object.entries(ARMS)) {
+    const gridEl = document.getElementById("grid-" + k);
+    const wrap = document.getElementById("wrap-" + k);
+    out.arms[k] = {
+      alignment: alignment(arm),
+      perRow: tracksPerRow(arm),
+      containerWidth: +gridEl.getBoundingClientRect().width.toFixed(4),
+      containerDisplay: getComputedStyle(gridEl).display,
+      wrapScrolls: wrap.scrollWidth > wrap.clientWidth,
+      wrapScrollWidth: wrap.scrollWidth, wrapClientWidth: wrap.clientWidth,
+    };
+  }
+  out.pageScrolls = document.documentElement.scrollWidth > document.documentElement.clientWidth;
+  out.pageScrollWidth = document.documentElement.scrollWidth;
+  out.pageClientWidth = document.documentElement.clientWidth;
+  return out;
+};
+
+// The drag's two numbers, for criterion 3: the string's natural width against
+// the rendered track it is squeezed into.
+window.probeNarrow = () => {
+  const res = {};
+  for (const [k, arm] of Object.entries(ARMS)) {
+    const nameCell = arm.rowEls[0].children[0];
+    const span = nameCell.querySelector(".run-name");
+    res[k] = {
+      naturalNameWidthPx: naturalWidth(UNBREAKABLE, span),
+      renderedNameCellPx: +nameCell.getBoundingClientRect().width.toFixed(2),
+      renderedNameHeadPx: +arm.heads[0].getBoundingClientRect().width.toFixed(2),
+      spanScrollWidth: span.scrollWidth, spanClientWidth: span.clientWidth,
+      rowHeightPx: +arm.rowEls[0].getBoundingClientRect().height.toFixed(2),
+    };
+  }
+  return res;
+};
+
+// The detail, for criterion 3: opened on three rows per arm, measured against
+// the row and against the summed tracks.
+window.probeDetail = (open = [0, 11, 23]) => {
+  const res = {};
+  for (const [k, arm] of Object.entries(ARMS)) {
+    const details = [];
+    for (const i of open) {
+      const group = arm.rowEls[i].parentElement;
+      const detail = group.querySelector(".detail");
+      detail.hidden = false;
+      details.push({ i, detail });
+    }
+    res[k] = details.map(({ i, detail }) => {
+      const row = arm.rowEls[i];
+      const tracks = getComputedStyle(row).gridTemplateColumns.split(" ").map(parseFloat);
+      return {
+        row: i,
+        detailWidthPx: +detail.getBoundingClientRect().width.toFixed(4),
+        rowWidthPx: +row.getBoundingClientRect().width.toFixed(4),
+        trackSumPx: +tracks.reduce((a, b) => a + b, 0).toFixed(4),
+        trackCount: tracks.length,
+        detailLeftPx: +detail.getBoundingClientRect().left.toFixed(4),
+        rowLeftPx: +row.getBoundingClientRect().left.toFixed(4),
+      };
+    });
+  }
+  return res;
+};
+
+window.closeDetails = () => {
+  for (const arm of Object.values(ARMS)) {
+    for (const row of arm.rowEls) row.parentElement.querySelector(".detail").hidden = true;
+  }
+  return "closed";
+};
+
+document.getElementById("out").textContent =
+  "probe ready - window.probe(), window.probeNarrow(), window.probeDetail(), window.closeDetails()";
+</script>
+</body>
+</html>

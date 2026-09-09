@@ -86,8 +86,8 @@ run-detail { display: block; }
      lets those two diverge, the moment a drag or a narrow window makes the
      columns sum to more than the pane shows. `left: 0` pins this element's
      left edge to the pane's own left edge as .run-table-wrap scrolls
-     sideways under it - the same primitive .run-grid-head already uses on top
-     (vertical axis) and .run-detail-header-actions already uses on right,
+     sideways under it - the same primitive .run-grid-head-row already uses on
+     top (vertical axis) and .run-detail-header-actions already uses on right,
      both resolving against this same scrolling ancestor.
      VERIFIED LIVE, NOT ASSUMED: sticky inside table structures is exactly
      the kind of thing the spec says one way and a browser does another (the
@@ -165,7 +165,7 @@ run-detail { display: block; }
    sits. Save sits to its left, and position: sticky (below) is what keeps
    the whole group from pinning itself to the ROW's right edge when that
    is wider than what .run-table-wrap's overflow-x: auto (TOR-157) is
-   currently showing - the same primitive .run-grid-head already uses,
+   currently showing - the same primitive .run-grid-head-row already uses,
    on the vertical axis, to stay in view rather than travel with content
    the viewport has scrolled past. */
 .run-detail-header-actions {

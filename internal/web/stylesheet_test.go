@@ -1149,7 +1149,7 @@ func TestSaveAndCancelStayPinnedRegardlessOfEachOther(t *testing.T) {
 		t.Errorf(".run-detail-header-actions position is %q, want sticky - margin-left: auto alone "+
 			"pins the group to the ROW's own right edge, which .run-table-wrap's overflow-x: auto "+
 			"can put off screen; sticky is what keeps it on the visible pane instead, the same "+
-			"primitive .run-grid-head already uses on the vertical axis", got)
+			"primitive .run-grid-head-row already uses on the vertical axis", got)
 	}
 	if got := actions["right"]; got != "0" {
 		t.Errorf(".run-detail-header-actions right is %q, want 0 - the edge sticky measures the "+
