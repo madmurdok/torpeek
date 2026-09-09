@@ -3,23 +3,47 @@
 A thing that opens. torpeek's page has three of them, nested inside each
 other, and this is all three.
 
+**It WRAPS its content, and it takes a `level`.** One bridge, all three
+depths - the level decides the box's, the header's and the region's tag and
+class, and everything else is yours:
+
 ```jsx
-{/* Level 3, the innermost - the one shape the wrapper draws. */}
-<Accordion label="Metadata" open={metaOpen} onToggle={() => setMetaOpen(!metaOpen)}>
+{/* Level 3, the innermost. */}
+<Accordion level={3} label="Metadata"
+           open={metaOpen} onToggle={() => setMetaOpen(!metaOpen)}>
   <dl className="specs">…</dl>
 </Accordion>
 ```
 
-For levels 1 and 2, render your own row - the card carries both, closed and
-open - and drive it with the class, imported from the module rather than from
-the bridge (a second uppercase export would put a second, unrenderable
-"Accordion" in the component list):
+At the outer two levels the HEADER is a row, so its other contents come in as
+`summary` and the click handler goes on the header rather than on the toggle -
+which is what the product does, and is not a detail you can skip (see "It owns
+no listener" below):
+
+```jsx
+<Accordion level={1} label={run.name}
+           summary={<>
+             <div className="run-cell run-cell-when">{run.added}</div>
+             …the other eight cells…
+           </>}
+           summaryProps={{ onClick: () => toggleRun(run) }}
+           open={run.expanded}>
+  <div className="run-detail-cell">…</div>
+</Accordion>
+```
+
+They nest exactly as the page does: a `level={2}` inside a `level={1}`'s
+children, a `level={3}` inside that.
+
+The class itself is still there for markup you built yourself, imported from
+the module rather than from the bridge (a second uppercase export would put a
+second, unrenderable "Accordion" in the component list):
 
 ```jsx
 import { Accordion as Disclosure } from "../../../modules/accordion.js";
 
 const acc = new Disclosure({
-  level: 2, toggle: openBtn, region: slot, dressed: rowItem,
+  level: 2, container: rowItem, summary: rowLabel, toggle: openBtn, region: slot,
 });
 acc.apply(true);
 ```
@@ -37,7 +61,8 @@ dressed.**
 
 | | 1 - run | 2 - file | 3 - meta |
 |---|---|---|---|
-| what carries `data-expanded` | `.run-row` | `.picker-item` | **nothing** |
+| the BOX (carries the level) | `.run-row-group` | `li.picker-item` | `section.meta` |
+| the HEADER, and what carries `data-expanded` | `.run-row` | `label.picker-file` | `h3.meta-title`, **undressed** |
 | open ground | `--accent-dim` | none | none |
 | open rail | `inset 3px 0 0 var(--accent)` | `inset 2px 0 0 var(--accent)` | none |
 | toggle type | 13.1px, opacity 1 | 14px, opacity 1 | 12.8px, opacity **.75** |
@@ -52,9 +77,15 @@ none and the one filled ground appears once, at the top.
 
 The reason level 3 dresses nothing is worth keeping when composing: its rail
 would sit inside the file's rail, which is inside the torrent's ground, and
-three nested filled grounds read as chrome nobody asked for. The component
-**refuses** a `dressed` element at level 3 rather than ignoring one - ignoring
-it is how a level stops meaning anything.
+three nested filled grounds read as chrome nobody asked for. **The LEVEL
+decides it, not the caller**: level 3's row in the component's own table
+carries no rail, so `apply()` writes no `data-expanded` there however it is
+called. There is nothing to pass and nothing to forget.
+
+And the two rails are not prose. A Go test parses the rules that dress an open
+disclosure out of the served stylesheets and requires the component's table to
+match them - widths, the one ground, and that they thin with the depth - so
+this table cannot drift away from what the CSS draws.
 
 ## The triangle does NOT vary with the level
 
@@ -79,21 +110,31 @@ reserved on **every** row - a non-video row's `<span>` included - with
 
 ## What a design consumer is given, and why
 
-**A CARD WITH SIX PANES: all three levels, closed and open.** A preview renders
-without scripts, so every open state is written into the markup - which is also
-what makes the card the thing to copy: `aria-expanded="true"` on the toggle, no
-`hidden` on the region, `data-expanded="true"` on the row. In the product those
-three are one `apply()` call.
+**A CARD WITH SEVEN PANES: all three levels closed and open, plus one more.** A
+preview renders without scripts, so every open state is written into the markup
+- which is also what makes the card the thing to copy: `aria-expanded="true"`
+on the toggle, no `hidden` on the region, `data-expanded="true"` on the header,
+`data-accordion-level` on the box. In the product those first three are one
+`apply()` call and the fourth is the constructor's.
 
-**The wrapper draws level 3 only, and takes no `level` prop at all.** That is a
-refusal rather than laziness: at levels 1 and 2 the toggle and the region belong
-to a row this component does not own - the run grid's ten cells, or the file
-list's `<li>` with its checkbox and its label - so a `level` prop would build a
-disclosure over the wrong elements and dress the Metadata section as though it
-were a torrent's line. A wrapper that drew those rows would be a second
-RunTable and a second FileList. The `.d.ts` exports the class itself
-(`AccordionElement`) for that case: construct it over your own markup and call
-`apply`.
+The seventh pane is the same open level-1 disclosure with `.run-table-wrap` and
+`.run-grid` **removed**, and it is there because "needs no particular
+container" is the kind of claim worth rendering rather than asserting. Measured
+off that card: the two rows resolve byte-identical tracks and identical cell
+offsets to the last decimal. What the bare one loses is the table's, not the
+disclosure's - the wrap's ground, its horizontal scroll, and its type size (the
+row is 14px bare against 13.12px wrapped, since the `.82rem` comes from the
+wrap).
+
+**One bridge with a `level` prop, drawing all three.** The version before this
+one drew level 3 and refused the prop, on the grounds that levels 1 and 2 meant
+"a run-grid ROW or a file-list `<li>` with a checkbox in it, neither of which
+is this component's to draw". That was true of the header's CONTENTS and wrong
+about the disclosure: the box, the header and the region are the same three
+things at every level, and only their tag and class vary. So the bridge draws
+those three and the cells or the checkbox come in as `summary`. Nothing was
+lost - the class is still exported from the module for markup you built
+yourself.
 
 ## Three things it deliberately does not do
 
@@ -113,10 +154,17 @@ never in the DOM to begin with.
 
 **It owns no listener.** Three levels, three activating elements, three
 exceptions - and one of them is load-bearing: a torrent's click listener must
-stay on `.run-row` and never on the wrapper around the row and its detail, or
-every click inside an open detail collapses it (a picker checkbox, a thumbnail,
+stay on `.run-row` and never on the BOX around the row and its detail, or every
+click inside an open detail collapses it (a picker checkbox, a thumbnail,
 Compare). A component that learned all three would be the page. So the listener
 stays with the element it is on, and the component is only ever told the answer.
+
+Worth separating, because it is the one thing about this component that reads
+as a contradiction and is not: "the listener must not go on the box" blocks the
+box from LISTENING. It never blocked the box from EXISTING. The component owned
+no listener before it was a wrapper and owns none now, so `onToggle` is a
+convenience for level 3 and the outer two put their handler on the header
+through `summaryProps`.
 
 **It does not know what opening MEANS.** Opening a torrent's row also rechecks
 the detail pane's width (a detail arriving can add or remove the document's
@@ -141,8 +189,8 @@ So: hide a region with `hidden`, never with a class, and do not give a region a
 | what | where |
 |---|---|
 | `.disclosure-mark` - the triangle, all three levels | **base.css** |
-| `.run-row-main`, `.run-row[data-expanded="true"]`, `.run-row-group`, `.run-detail-row` | **table.css** |
-| `.picker-open`, `.picker-item[data-expanded="true"] > .picker-file`, `.file-detail`, `.meta-toggle`, `.meta-body` | **filelist.css** |
+| `.run-row-main`, `.run-row[data-expanded="true"]`, `.run-row` and its ten tracks (`--run-tracks`, from **tokens.css**) | **table.css** |
+| `.picker-open`, `.picker-file[data-expanded="true"]`, `.file-detail`, `.meta-toggle`, `.meta-body` | **filelist.css** |
 
 The export's split is by **area**, and this one component reaches into three
 areas including the page shell. A rendered design receives all of
@@ -155,8 +203,10 @@ All three toggles are real `<button>`s and always were, so this is unchanged by
 the component - measured with real key presses rather than synthesised events:
 
 - Eighteen `Tab`s from `BODY` reach all three (level 1 at Tab 10 and 11, level
-  2 at 12, level 3 at 14).
-- `Return` and `Space` both activate all three.
+  2 at 12, level 3 at 15 with a Clear-frames button in the row).
+- `Return` and `Space` both activate all three, measured at each level: Return
+  closes and Space reopens, and closing a torrent leaves the file inside it
+  still `aria-expanded="true"`.
 - Levels 2 and 3 draw a `2px var(--accent)` focus ring (offset 1px and -2px
   respectively). **Level 1 wears the browser's default ring**, because
   `.run-row-main` has no `:focus-visible` rule of its own - a known gap, filed

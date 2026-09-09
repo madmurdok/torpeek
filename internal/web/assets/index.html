@@ -94,6 +94,14 @@
          means something inside one specific parent. #run-list needs no
          display: contents any more and the band is why the header cells are
          wrapped: they are grid items of the band, not of #run-table.
+         TOR-222: AND .run-row-group IS NOW THE DISCLOSURE'S OWN BOX - the
+         element accordion.js is handed as its `container` at level 1, which is
+         what it is FOR rather than something it also happens to be. It holds
+         the row and the detail and nothing else, and the accordion checks that
+         rather than trusting it. Nothing in this file changed for that ticket:
+         all three of the page's disclosures are built by JS (run-table.js's
+         newRow, file-list.js's renderFileList, file-detail.js's BODY) and each
+         already had a box.
          TOR-194: the list's BEHAVIOUR lives in run-table.js as a custom
          element, following the pattern frame-panel.js set out; its structure
          stays here, wrapped and not re-indented, so the comment above stays

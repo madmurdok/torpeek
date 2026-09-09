@@ -48,8 +48,11 @@
 //     accordion that closes every sibling, and reading the other result sets
 //     off disk the first time - is the detail's (its toggle()).
 //
-// AND FOUR ROW ELEMENTS CROSS IT, deliberately: a file's detail is handed its
-// row's <li>, its disclosure, its name and its summary span at mount, because
+// AND FIVE ROW ELEMENTS CROSS IT, deliberately: a file's detail is handed its
+// row's <li>, the <label> that is the row proper, its disclosure, its name and
+// its summary span at mount - the <label> since TOR-222, because it is the
+// element the level-2 disclosure dresses and the detail is what applies that
+// state. Because
 // since TOR-182 THE ROW IS THE FILE'S TITLE LINE (see file-detail.js's own
 // heading) - the resolution and frame count it keeps current are a COLUMN of
 // this list, not a line inside the slot. They are handed over once, in one
@@ -600,7 +603,7 @@ class FileList extends HTMLElement {
         // resolution and frame count, kept current by updateFileSummary -
         // moved here with the rest of the block, because the title line it sat
         // on IS this row now. It is written by the file's own detail, which is
-        // handed this span at mount: one of the four row elements that cross
+        // handed this span at mount: one of the five row elements that cross
         // the boundary (see this module's header).
         //
         // Last rather than beside the name, so it takes the place the price

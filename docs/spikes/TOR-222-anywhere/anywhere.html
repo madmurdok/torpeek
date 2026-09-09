@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TOR-222 - the accordion used somewhere that is not torpeek</title>
+<!-- CRITERION 1'S EVIDENCE. "Usable where we want" is only proved by an
+     UNRELATED use: inside torpeek's table the component would be
+     indistinguishable from what shipped in TOR-212, because the table is what
+     it was written against.
+
+     So this page is a plain FAQ. There is no run table, no file list, no
+     torrent, no <li> with a checkbox in it, and - deliberately - NOT ONE LINE
+     OF TORPEEK'S CSS: no tokens.css, no base.css, nothing. Every rule below is
+     this page's own, written in the twenty minutes this page took, which is
+     the point. If the component needed torpeek's stylesheets to work, or
+     torpeek's markup, it would fail here.
+
+     IT IMPORTS THE SHIPPED MODULE, not a copy of it, and that is the one thing
+     that makes this evidence rather than a mock-up:
+
+         import { Accordion } from "../../../internal/web/assets/accordion.js";
+
+     which is why the server has to be started at the REPOSITORY ROOT (see
+     README.md). TOR-214's and TOR-221's spikes freeze a copy of tokens.css on
+     purpose, because they measure a layout against values that must not move
+     under them. This one is the opposite case: the claim is about the module
+     that ships, so a copy would prove nothing, and drift is what it is FOR -
+     TestTheAnywhereSpikeUsesTheShippedModule fails if this ever becomes a
+     copy. -->
+<style>
+  /* This page's own look, and none of it is torpeek's. A serif ground on
+     paper-white, which is about as far from a dark monospace torrent table as
+     a page gets - so nothing below can be passing because it inherited
+     something. */
+  :root {
+    --ink: #1a1a1a;
+    --quiet: #6b6b6b;
+    --line: #d8d2c8;
+    --edge: #7a5cff;
+    --paper: #faf8f4;
+  }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.5rem 6rem;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.55 Georgia, "Times New Roman", serif;
+  }
+  main { max-width: 42rem; margin: 0 auto; }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  .strap { color: var(--quiet); margin: 0 0 2rem; font-style: italic; }
+
+  /* THE THREE LEVELS' LOOKS ARE THIS PAGE'S, and that is worth saying next to
+     them: torpeek's rails are 3px/2px/none in an accent cyan on a dark ground
+     (accordion.js's level table, pinned to the served CSS by
+     TestTheLevelsLooksAreTheStylesheetsOwn). Here they are violet on paper and
+     the ONLY thing shared with torpeek is which element carries the state -
+     `[data-expanded="true"]` on the summary, at the levels that have a rail.
+     The component decides that; it decides nothing about the colour. */
+  [data-accordion] { margin: 0 0 1rem; }
+  [data-accordion-level="1"] { border-top: 1px solid var(--line); padding-top: .9rem; }
+
+  .q, .sub-q, .fine-q { margin: 0; }
+  .q button, .sub-q button, .fine-q button {
+    display: flex;
+    align-items: baseline;
+    gap: .45rem;
+    width: 100%;
+    padding: .35rem .4rem;
+    margin: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  /* THE ONE HOOK THE COMPONENT PUTS ON, and this page draws it ITSELF. The
+     constructor adds .disclosure-mark to the mark at every level - the one
+     thing that does not vary with the depth - and the triangle it draws is
+     base.css's, which this page does not load. So the class arrives and points
+     at nothing until a foreign page writes its own rule for it, which is
+     exactly the right division and is what these three lines are. Without
+     them probe() reports markWidth 0px, which is the measurement that says the
+     class is a HOOK and not an appearance. */
+  .disclosure-mark { flex: 0 0 auto; width: .7em; opacity: .55; }
+  .disclosure-mark::before { content: "▸"; }
+  .disclosure-mark[aria-expanded="true"]::before,
+  [aria-expanded="true"] > .disclosure-mark::before { content: "▾"; }
+
+  .q { font-size: 1.1rem; font-weight: bold; }
+  .sub-q { font-size: 1rem; }
+  .fine-q { font-size: .9rem; color: var(--quiet); }
+
+  /* The rails, thinning with the depth exactly as torpeek's do - because that
+     is what the LEVEL means, and the meaning travels even though the values
+     do not. Level 3 wears nothing, and it wears nothing because the component
+     writes no data-expanded there, not because this page left a rule out. */
+  .q[data-expanded="true"] {
+    background: #f0ecff;
+    box-shadow: inset 3px 0 0 var(--edge);
+  }
+  .sub-q[data-expanded="true"] { box-shadow: inset 2px 0 0 var(--edge); }
+
+  /* `hidden` is the whole of collapse, at every level, and no rule here sets
+     `display` on a region - the same discipline accordion.js's own header
+     insists on, for the same reason: a class rule at equal specificity would
+     beat the UA's [hidden] and the thing would never close. */
+  .a { margin: .3rem 0 .8rem 1.1rem; padding-left: .8rem; border-left: 1px solid var(--line); }
+  .sub-a { margin: .3rem 0 .6rem 1rem; padding-left: .7rem; border-left: 1px solid var(--line); }
+  .fine-a { margin: .2rem 0 .5rem .9rem; font-size: .9rem; color: var(--quiet); }
+
+  .probe {
+    margin-top: 3rem;
+    padding: 1rem;
+    border: 1px dashed var(--line);
+    font: 12px/1.5 ui-monospace, Menlo, monospace;
+    white-space: pre-wrap;
+  }
+  .probe b { display: block; margin-bottom: .5rem; font-family: Georgia, serif; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Growing tomatoes in a cold summer</h1>
+  <p class="strap">Nothing on this page has anything to do with torrents.</p>
+
+  <!-- LEVEL 1. The box holds the summary and the region and nothing else,
+       which is the shape .run-row-group has in the app. The <h2> is the
+       summary - the header the control lives in - and the answer is its
+       SIBLING inside the box, never its child: a region inside the thing that
+       toggles it would close on every click within it, and accordion.js
+       refuses that arrangement outright. -->
+  <section class="faq" data-arm="declared">
+    <h2 class="q">
+      <button type="button" id="q1-toggle">
+        <span class="mark" aria-hidden="true"></span>
+        <span>Why are my tomatoes still green in September?</span>
+      </button>
+    </h2>
+    <div class="a" id="q1-region" hidden>
+      <p>Not enough accumulated warmth. Ripening needs a run of days above
+      about 20&nbsp;&deg;C, and a cold summer never delivers it - the fruit
+      sets and then simply waits.</p>
+
+      <!-- LEVEL 2, nested inside level 1's region, exactly as a file's block
+           sits inside an open torrent's detail. -->
+      <div class="faq-sub">
+        <h3 class="sub-q">
+          <button type="button" id="q2-toggle">
+            <span class="mark" aria-hidden="true"></span>
+            <span>Can I do anything about it now?</span>
+          </button>
+        </h3>
+        <div class="sub-a" id="q2-region" hidden>
+          <p>Pick them and ripen them indoors with a banana in the bag. The
+          ethylene does the rest in about a week.</p>
+
+          <!-- LEVEL 3, one more in, and the one level that dresses nothing. -->
+          <div class="faq-fine">
+            <h4 class="fine-q">
+              <button type="button" id="q3-toggle">
+                <span class="mark" aria-hidden="true"></span>
+                <span>The chemistry, for the curious</span>
+              </button>
+            </h4>
+            <div class="fine-a" id="q3-region" hidden>
+              <p>Ethylene switches on the genes for lycopene synthesis and for
+              the cell-wall enzymes that soften the flesh. A banana is simply
+              the cheapest source of it in a kitchen.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ARM 2: A BOX BUILT IN A FRAGMENT AND NEVER IN THE DOCUMENT while the
+       disclosure is constructed and applied. Nothing here is written in the
+       markup; buildInFragment() below makes it, drives it OPEN while it is
+       still out of the document, and only then inserts it. If the component
+       needed a parent, an ancestor, a layout or a stylesheet, this is where it
+       would come up closed or throw. -->
+  <div id="fragment-slot"></div>
+
+  <!-- ARM 3: two homes for one box, so the same disclosure can be moved
+       between them at runtime the way the run table moves a row on every
+       re-sort. -->
+  <div id="home-a"></div>
+  <div id="home-b"></div>
+
+  <pre class="probe" id="probe"><b>probe() has not run yet</b>open the page's console and call probe()</pre>
+</main>
+
+<script type="module">
+// THE SHIPPED MODULE. Not a copy - see the note at the top of this file.
+import { Accordion } from "../../../internal/web/assets/accordion.js";
+
+const el = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// ARM 1: the three declared disclosures, wired the way the app wires its own.
+//
+// THE STATE LIVES OUT HERE, in this page's own object, because that is the
+// contract: the component takes it as an argument on every call and keeps no
+// field for it. This page is the owner, the way an entry is in the app.
+const open = { 1: false, 2: false, 3: false };
+
+const declared = new Map([
+  [1, new Accordion({
+    level: 1,
+    container: document.querySelector(".faq"),
+    summary: document.querySelector(".q"),
+    toggle: el("q1-toggle"),
+    region: el("q1-region"),
+    mark: document.querySelector(".q .mark"),
+  })],
+  [2, new Accordion({
+    level: 2,
+    container: document.querySelector(".faq-sub"),
+    summary: document.querySelector(".sub-q"),
+    toggle: el("q2-toggle"),
+    region: el("q2-region"),
+    mark: document.querySelector(".sub-q .mark"),
+  })],
+  [3, new Accordion({
+    level: 3,
+    container: document.querySelector(".faq-fine"),
+    summary: document.querySelector(".fine-q"),
+    toggle: el("q3-toggle"),
+    region: el("q3-region"),
+    mark: document.querySelector(".fine-q .mark"),
+  })],
+]);
+
+// THE LISTENERS ARE THIS PAGE'S, one per toggle, and that is the component's
+// design rather than this page's shortcut: the three levels in the app
+// activate from three different elements with three different exceptions, so
+// the class is only ever told the answer. Here the toggle is the obvious
+// place, and nothing about the component pushed it there.
+for (const [level, disclosure] of declared) {
+  disclosure.toggle.addEventListener("click", () => {
+    open[level] = !open[level];
+    disclosure.apply(open[level]);
+  });
+  disclosure.apply(open[level]);
+}
+
+// ---------------------------------------------------------------------------
+// ARM 2: built and driven while OUT of the document.
+function buildInFragment() {
+  const frag = document.createDocumentFragment();
+  const container = document.createElement("section");
+  const summary = document.createElement("h2");
+  summary.className = "q";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  const mark = document.createElement("span");
+  mark.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = "Built in a fragment, opened before it was ever on the page";
+  toggle.append(mark, label);
+  summary.append(toggle);
+  const region = document.createElement("div");
+  region.className = "a";
+  region.textContent =
+    "This disclosure was constructed and applied while its box had no parent, " +
+    "no document and no stylesheet in reach. It arrived open.";
+  container.append(summary, region);
+  frag.append(container);
+
+  const disclosure = new Accordion({
+    level: 1, container, summary, toggle, region, mark,
+  });
+  // Applied OPEN here, before insertion, which is the whole arm.
+  const connectedAtApply = container.isConnected;
+  disclosure.apply(true);
+  const readWhileDetached = {
+    connectedAtApply,
+    aria: toggle.getAttribute("aria-expanded"),
+    hidden: region.hidden,
+    dressed: summary.dataset.expanded,
+    boxLevel: container.dataset.accordionLevel,
+    marked: mark.classList.contains("disclosure-mark"),
+  };
+
+  el("fragment-slot").append(frag);
+  let state = true;
+  toggle.addEventListener("click", () => {
+    state = !state;
+    disclosure.apply(state);
+  });
+  return { readWhileDetached, container, region, summary, toggle };
+}
+const fragment = buildInFragment();
+
+// ---------------------------------------------------------------------------
+// ARM 3: one box, two parents. The run table relocates a row's whole element
+// on every redraw; this is that, on a page with nothing in common with it.
+function buildMovable() {
+  const container = document.createElement("section");
+  const summary = document.createElement("h3");
+  summary.className = "sub-q";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  const mark = document.createElement("span");
+  mark.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = "Move me between two parents";
+  toggle.append(mark, label);
+  summary.append(toggle);
+  const region = document.createElement("div");
+  region.className = "sub-a";
+  region.textContent = "Still open, in whichever box I was last put into.";
+  container.append(summary, region);
+  el("home-a").append(container);
+
+  const disclosure = new Accordion({ level: 2, container, summary, toggle, region, mark });
+  let state = false;
+  toggle.addEventListener("click", () => {
+    state = !state;
+    disclosure.apply(state);
+  });
+  return { disclosure, container, summary, toggle, region, open: () => { state = true; disclosure.apply(true); } };
+}
+const movable = buildMovable();
+
+// ---------------------------------------------------------------------------
+// THE CONTROL ARM, and it is what makes every reading above a measurement
+// rather than a page that always says yes: five wirings the component MUST
+// refuse. A probe on which nothing can fail reports nothing.
+function refusals() {
+  const out = {};
+  const attempt = (name, build) => {
+    try { build(); out[name] = "ACCEPTED - the check is not there"; }
+    catch (err) { out[name] = err.message; }
+  };
+  const plain = () => {
+    const container = document.createElement("div");
+    const summary = document.createElement("div");
+    const toggle = document.createElement("button");
+    const region = document.createElement("div");
+    summary.append(toggle);
+    container.append(summary, region);
+    return { level: 1, container, summary, toggle, region };
+  };
+  attempt("region somewhere else", () => new Accordion(
+    { ...plain(), region: document.createElement("div") }));
+  attempt("box is the summary", () => {
+    const p = plain();
+    return new Accordion({ ...p, container: p.summary });
+  });
+  attempt("region inside the summary", () => {
+    const p = plain();
+    const inner = document.createElement("div");
+    p.summary.append(inner);
+    return new Accordion({ ...p, region: inner });
+  });
+  attempt("toggle outside the summary", () => {
+    const p = plain();
+    const stray = document.createElement("button");
+    p.container.append(stray);
+    return new Accordion({ ...p, toggle: stray });
+  });
+  attempt("a fourth level", () => new Accordion({ ...plain(), level: 4 }));
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// probe() returns every figure this page is evidence for. Raw values, no
+// rounding and no formatting: the caller compares them.
+function probe() {
+  const look = (d) => ({
+    level: d.level,
+    boxTag: d.container.tagName.toLowerCase(),
+    boxLevel: d.container.dataset.accordionLevel,
+    boxName: d.container.dataset.accordion,
+    // What the box does NOT carry: the state. That is the summary's, at the
+    // levels that dress anything.
+    boxDressed: d.container.dataset.expanded ?? null,
+    aria: d.toggle.getAttribute("aria-expanded"),
+    hidden: d.region.hidden,
+    summaryDressed: d.summary.dataset.expanded ?? null,
+    // The level lives on the box and nowhere else since TOR-222.
+    toggleLevel: d.toggle.dataset.accordionLevel ?? null,
+    regionLevel: d.region.dataset.accordionLevel ?? null,
+    markWidth: getComputedStyle(d.toggle.querySelector("[aria-hidden]")).width,
+    railShadow: getComputedStyle(d.summary).boxShadow,
+    regionHeight: d.region.getBoundingClientRect().height,
+    // The structural rule that makes the wrapper safe.
+    regionIsSibling: d.region.parentElement === d.container &&
+      !d.summary.contains(d.region),
+    boxHoldsAll: d.container.contains(d.summary) &&
+      d.container.contains(d.toggle) && d.container.contains(d.region),
+  });
+
+  // ARM 3, driven inside the probe so the move and the reading cannot drift
+  // apart: open it, read it, move it to the OTHER home, read it again.
+  //
+  // "The other home" rather than "home-b", so calling probe() twice is two
+  // real moves. The first draft appended to home-b unconditionally, and a
+  // second call then reported fromHome == toHome == "home-b" - a move that
+  // moved nothing, reading exactly like a move that worked.
+  movable.open();
+  const beforeMove = look(movable.disclosure);
+  const fromHome = movable.container.parentElement.id;
+  el(fromHome === "home-a" ? "home-b" : "home-a").append(movable.container);
+  const afterMove = look(movable.disclosure);
+  const toHome = movable.container.parentElement.id;
+  if (fromHome === toHome) throw new Error("arm 3 did not move anything");
+
+  return {
+    declared: Object.fromEntries([...declared].map(([n, d]) => [n, look(d)])),
+    ownState: { ...open },
+    // The component's own five fields, off a live instance: no state among
+    // them, and no `mark` either.
+    fields: Object.keys(declared.get(1)).sort(),
+    fragment: fragment.readWhileDetached,
+    move: { fromHome, toHome, beforeMove, afterMove },
+    refusals: refusals(),
+  };
+}
+
+window.probe = probe;
+window.accordions = { declared, fragment, movable };
+
+// Open all three so the page LOOKS like the thing it is evidence for, then
+// write the probe into the page - a spike whose result only exists in a
+// console is a spike nobody re-runs.
+for (const [level, d] of declared) {
+  open[level] = true;
+  d.apply(true);
+}
+const out = probe();
+el("probe").innerHTML = "<b>probe()</b>" + JSON.stringify(out, null, 2);
+console.log(out);
+</script>
+</body>
+</html>

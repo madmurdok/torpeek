@@ -502,9 +502,10 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 		}
 	}
 
-	// 3. The list builds every row and hands the file's detail exactly four
-	// row elements - the ones that are that file's title line since TOR-182 -
-	// and nothing else about a file.
+	// 3. The list builds every row and hands the file's detail exactly five
+	// row elements - the ones that are that file's title line since TOR-182,
+	// plus the <label> that IS the row since TOR-222 - and nothing else about
+	// a file.
 	for _, forbidden := range []string{
 		"meta-toggle", "meta-body", `"specs"`, `"tracks"`, "file-regen", "file-compare",
 		"reach-strip", "avail-swarm", `"grid"`, "detailFrame", "frameFigure", "loadFileDetail",
@@ -514,19 +515,38 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 				"what the row opens onto is the element it mounts there", forbidden)
 		}
 	}
-	// 3, the other way: the file's detail writes exactly the four row
+	// 3, the other way: the file's detail writes exactly the five row
 	// elements it was handed, and nothing else on the row.
-	handed := map[string]bool{"item": true, "rowToggle": true, "name": true, "summary": true}
+	//
+	// THE FIFTH IS TOR-222'S AND ITS REASONING IS RE-MADE RATHER THAN WAIVED,
+	// which is what this arm asked for when it failed on the change. fileRow
+	// is the <label class="picker-file">, and it crosses the boundary for the
+	// same reason the other four do: it is part of the row that the FILE'S
+	// DETAIL is the writer of. The level-2 disclosure's open state is painted
+	// on that label (filelist.css's .picker-file[data-expanded="true"]), and
+	// the one function that may change whether a file's block is on screen is
+	// setFileExpanded, in file-detail.js. So the element the state is written
+	// on has to be reachable from the writer.
+	//
+	// The alternative was to leave the attribute on the <li>, which the detail
+	// already holds, and reach the label from it in CSS - which is exactly
+	// what TOR-222 removed: a rule that names a parent to find the child it
+	// dresses. Handing over one more element of the row this detail already
+	// owns four elements of is the smaller coupling of the two, and it is the
+	// same kind as the four.
+	handed := map[string]bool{
+		"item": true, "fileRow": true, "rowToggle": true, "name": true, "summary": true,
+	}
 	for _, m := range regexp.MustCompile(`this\.(\w+) = row\.(\w+);`).FindAllStringSubmatch(file, -1) {
 		if !handed[m[1]] {
-			t.Errorf("file-detail.js takes row.%s as this.%s - four row elements cross this "+
-				"boundary (the <li>, the disclosure, the name and the summary, because the row IS "+
-				"the file's title line since TOR-182) and a fifth needs the reasoning re-made, "+
-				"not just the assignment added", m[2], m[1])
+			t.Errorf("file-detail.js takes row.%s as this.%s - five row elements cross this "+
+				"boundary (the <li>, the row's <label>, the disclosure, the name and the "+
+				"summary, because the row IS the file's title line since TOR-182) and a sixth "+
+				"needs the reasoning re-made, not just the assignment added", m[2], m[1])
 		}
 	}
-	if n := len(regexp.MustCompile(`this\.\w+ = row\.\w+;`).FindAllString(file, -1)); n != 4 {
-		t.Errorf("file-detail.js takes %d row elements, want 4 - if one genuinely went, the "+
+	if n := len(regexp.MustCompile(`this\.\w+ = row\.\w+;`).FindAllString(file, -1)); n != 5 {
+		t.Errorf("file-detail.js takes %d row elements, want 5 - if one genuinely went, the "+
 			"boundary paragraph in its own header should go with it", n)
 	}
 	for _, forbidden := range []string{
@@ -535,7 +555,7 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 	} {
 		if strings.Contains(file, forbidden) {
 			t.Errorf("file-detail.js names %q, which is the ROW's. A file's detail is handed the "+
-				"four elements of its row it must keep current and reaches for nothing else - "+
+				"five elements of its row it must keep current and reaches for nothing else - "+
 				"otherwise two elements write one row", forbidden)
 		}
 	}

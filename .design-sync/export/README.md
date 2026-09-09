@@ -37,23 +37,34 @@ part company.
 
 ### Accordion is the one component that is not an element
 
-Every other entry here wraps a custom element. The accordion cannot be one,
-and the reason is structural rather than stylistic: a custom element has to BE
-somewhere in the tree, and at each of the three levels the only place to put a
-wrapper is between a grid container and its items.
+Every other entry here wraps a custom element. The accordion is a WRAPPER but
+not an element, and the reason it is not one has changed - the two structural
+reasons this section used to give were retired in TOR-221 and TOR-222 and are
+recorded as retired rather than deleted, because a reader who does not know
+what was here cannot know why this entry is shaped differently:
 
-- `.run-row-group` carries `grid-template-columns: subgrid`, which only works
-  on a **direct** grid item of `.run-grid`. An element around it breaks the
-  column alignment TOR-214 measured to 0.00px - so the wrapper TOR-212 waited
-  for is precisely the thing the component must not become.
-- At the file level the toggle is inside the row's `<label>` and the region is
-  that row's sibling inside the `<li>`. There is no box that holds both and
-  only both.
+- ~~`.run-row-group` carries `grid-template-columns: subgrid`, which only
+  works on a direct grid item of `.run-grid`, so an element around it breaks
+  the column alignment TOR-214 measured.~~ **Gone.** TOR-221 removed `subgrid`
+  and `display: contents` from every served stylesheet: each row is its own
+  grid over one shared track list (`--run-tracks`, on `:root`). Measured with
+  the control that makes it a measurement - with an element inserted between
+  the container and the rows, per-row grids held every cell to **0.0000px** of
+  its header across 24 rows, where the shared grid drifted **922.3906px**.
+- ~~At the file level the toggle is inside the row's `<label>` and the region
+  is that row's sibling inside the `<li>`. There is no box that holds both and
+  only both.~~ **Simply wrong.** `li.picker-item` holds both, and always did.
+  TOR-222 expected to have to rearrange markup at that level and found nothing
+  to rearrange.
+- **What is left**: the box is a `<li>` in a list, a `<section>` in a panel and
+  a row-pair wrapper in a grid - three elements the page needs for their own
+  reasons, which the component ADOPTS and checks. Making it an element would
+  mean the page could no longer choose the box, and choosing the box is the
+  whole of "usable where we want".
 
-So it ships as a plain class over elements the page already has. Its `.jsx`
-draws level 3 in full and the `.d.ts` exports the class itself for the other
-two, where the toggle and the region belong to a row the component does not
-own.
+So it ships as a plain class over a box the page provides. Since TOR-222 its
+`.jsx` draws **all three levels** and takes a `level` prop; the `.d.ts` still
+documents the class itself for markup a design builds on its own.
 
 It is also the only entry whose module exports **one** name, which is the
 export rule at its cleanest: the class, and nothing else.
