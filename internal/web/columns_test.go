@@ -1716,3 +1716,165 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 // `DELETE /runs/{id}` is not a route (405) - cancelling a run is
 // `POST /runs/cancel` with a `{"id": "..."}` JSON body
 // (Server.handleCancelRun), reached from the row's own X button.
+
+// TOR-216's browser pass: TOR-207's six checks above, re-run against TOR-215's
+// grid - `div#run-table.run-grid` / `div#run-list.run-grid-rows`, each entry a
+// `div.run-row-group` (`grid-template-columns: subgrid`) holding `.run-row`
+// and `.run-detail-row` as siblings, in place of `<table>/<tr>`. Every one of
+// the six exercises this markup, so all six were unverified again the moment
+// TOR-215 landed - not because anything was expected to be wrong, but because
+// nothing had looked. Against a real torpeek server on 127.0.0.1:8916
+// (-headless -dht=false -max-active-torrents 1 -n 200), real loopback-seeded
+// torrents (scratchpad/seed.go), a real out dir seeded from TOR-207's own
+// out207 (its 15 completed runs plus the browserout disk fixture, copied
+// forward rather than re-earned), and Chrome DevTools Protocol driving the
+// shipped page.
+//
+// THE MACHINE, RECORDED BECAUSE IT MATTERED HERE MORE THAN USUAL. `uptime` at
+// the very start read a calm `6.26 11.62 39.59`. Partway through, an unrelated
+// third-party security agent's own `spindump` (plus `softwareupdated`) drove
+// the 1-minute figure as high as `541.67`, with `vm_stat`/`vm.swapusage`
+// showing the machine nearly out of real memory (6987 of 8192 MB swap used,
+// under 25000 4 KB pages free). Every `Runtime.evaluate` timeout in this pass
+// landed inside that window and every one succeeded on retry once the 1-minute
+// figure came back under ~15 - the same load-artifact pattern TOR-194 and
+// TOR-207 both recorded, confirmed a third time. Nothing here that failed
+// once and passed on a retry is treated as a finding about the page.
+//
+// CHECK 1 - A LIVE ROW'S FIGURES AT FULL STRENGTH. A fresh single-file
+// torrent (tor216-live2, never seeded before, to avoid the disk-cache skip a
+// reused payload hits - see below) was posted by `.torrent` path and throttled
+// on the seed side (`-rate-bps 25000`) the same way TOR-207 established is
+// required at all. An in-page collector (a `setInterval` pushing distinct
+// snapshots onto `window`, per this ticket's own guidance on a row that keeps
+// changing underneath a single tool call) caught, and a direct read of the
+// row's cells confirmed: peers "1", seeds "1", down "22.4 KB/s", up "0 B/s",
+// availability "1.00×0 missing" - every one of
+// `.run-cell-peers/-seeds/-down/-up/-availability` (the grid's actual class
+// names; the field names in the JSON payload are `download_bps`/`upload_bps`
+// but the CSS classes have always been the shorter `-down`/`-up`, unchanged by
+// TOR-215) reading `data-absent="false"`, the real-zero UP cell included -
+// the same distinction TOR-207's own check 1 called out.
+//
+// ONE DEDUP TRAP FOUND WHILE SETTING THIS UP, not a defect but worth recording
+// so it is not re-discovered at cost: reposting a torrent whose infohash and
+// params hash already have a complete result directory on disk (TOR-207's own
+// tor207-clip-a, copied forward in out216) reaches `state: "done"` in under
+// three seconds, with no observable download window at all - the engine skips
+// straight to what is already on disk. Check 1's positive case needs a payload
+// that has NEVER been captured under this exact out dir before; every payload
+// in this pass past the first attempt used a freshly-named directory for
+// exactly this reason.
+//
+// CHECK 2 - ABSENT SINKING TO THE END OF A SORT, ON A TABLE HOLDING BOTH. Run
+// on 23 rows: 1 real (tor216-live3, a second fresh throttled live torrent -
+// `.run-cell-peers` `data-absent="false"`, text "1") and 22 absent (the 17
+// disk rows out216 started with, plus five more live-then-finished/cancelled
+// entries this pass's own setup produced along the way). The Peers header was
+// clicked to ascending, then to descending; in BOTH directions the sequence of
+// `data-absent` down the 23 rows read exactly `R` at index 0 followed by 22
+// `A`s - the one real row first, every absent row after it, in both
+// directions, which is what TOR-207's own check 2 established this proves and
+// a 1-real/12-absent or 1-real/22-absent split equally cannot show any other
+// way.
+//
+// CHECK 3 - TWO ROWS OPEN AT ONCE, AND A FILE'S DETAIL SURVIVING A COLLAPSE
+// AND RE-OPEN. tor216-live3 (running) and tor207-clip-k (done, real frames on
+// disk, carried forward from out207) were expanded together by clicking each
+// `.run-row-main` button; both `#run-detail-N` elements (siblings of
+// `.run-row` inside their own `.run-row-group`, not a following `<tr>`) were
+// simultaneously PRESENT AND VISIBLE (`getBoundingClientRect()` non-zero for
+// both, not merely `aria-expanded="true"`). Separately, on tor207-clip-k's
+// lone file: its `.picker-item` was already `data-expanded="true"` with a
+// `.file-detail` node present; the WHOLE ROW was then collapsed
+// (`.run-row-main` `aria-expanded` false, detail rect 0×0 - confirmed
+// genuinely invisible, not merely un-flagged) and re-expanded (`aria-expanded`
+// true again, detail rect 837×6689.8) - and the file's own `data-expanded`
+// read "true" throughout, `.file-detail` still present after the reopen: the
+// file-level state survived the row-level collapse exactly as it did under
+// the `<table>`, now through a `.run-row-group` rather than two `<tr>`s.
+//
+// CHECK 4 - COLUMN WIDTHS PERSISTING ACROSS A RELOAD, AND A CORRUPT
+// localStorage VALUE FALLING BACK TO DEFAULTS. A real pointer drag
+// (`pointerdown`/`pointermove`/`pointerup`, `buttons: 1`, dispatched on the
+// `.col-resizer` handle itself - dispatching `pointerup` on `document` instead
+// of the handle silently did NOT save, because `wireColumnResizers` listens
+// for it on the handle after `setPointerCapture`, so a synthetic event has to
+// land where a real one's capture would redirect it) moved the Name column
+// from the default 20rem (320px) to 620px. `localStorage["torpeek.columnWidths"]`
+// read back `{"name":620}`, and a full page reload (fresh navigation) still
+// computed `--col-w-name: 620px` - survived the reload, matching TOR-207's own
+// finding that this is unaffected by the table-to-grid conversion (the ticket
+// TOR-215 itself already argued from source: the drag writes a CSS custom
+// property and reads a header's own rect, and both stay true of a grid).
+// Then `localStorage.setItem("torpeek.columnWidths", "{not valid json!!!")`
+// and another reload: the page rendered normally (23 rows, grid intact),
+// `--col-w-name` read back the plain default "20rem", and
+// `read_console_messages` found NO messages at all - not even benign ones,
+// let alone errors - across that load once console tracking was armed before
+// the reload that mattered.
+//
+// CHECK 5 - THE STALL TICKER COUNTING UP, THEN GOING QUIET ONCE THE ELEMENT IS
+// REMOVED. A torrent was seeded and posted whose peer address was deliberately
+// left out of -peer, so it could never connect: GET /runs showed
+// `"stall":{"code":"no_peers","since_ms":...}` climbing (10000 -> 39999 across
+// polls a few seconds apart), and the row's `.run-meta` text read "no peers
+// connected for 33s" with title "stalled: no peers connected" and
+// `data-stall="true"` - the 1s ticker counting up for real, unchanged by the
+// conversion. To check it goes quiet: since TOR-215 the stall ticker lives on
+// the `<run-table>` custom element itself (one timer for the whole table, not
+// per row) - `document.querySelector("run-table").stallTimer` read back `1`
+// (an active interval id). `window.clearInterval` was wrapped to record its
+// argument, and the element's own `.remove()` was called directly. Immediately
+// after: `.stallTimer` had been reset to `null` and the wrapped `clearInterval`
+// had been called with exactly `[1]` - `disconnectedCallback`'s
+// `clearInterval(this.stallTimer)` ran for real, on the real interval id, the
+// moment the element left the document.
+//
+// AN INCIDENTAL FINDING WHILE SETTING THIS CHECK UP, ORTHOGONAL TO TOR-215 AND
+// FILED SEPARATELY (TOR-219) RATHER THAN FOLDED IN HERE: three independent
+// no-peer torrents in this pass - TOR-207's own tor207-stall (reused directory)
+// and two freshly-seeded ones (tor216-stall2, tor216-stall3), none of them
+// ever reachable by any peer - each transitioned on their own from
+// `state: "running"` (stalled, `code: "no_peers"`) to `state: "done"` with
+// `complete: 0` after roughly 40-70 seconds of continuous no-peer stall, with
+// no frames ever written to disk. One of the three reproductions (tor216-stall3)
+// happened on a calm machine (`uptime` 1-minute figure ~6-7 at post time), so
+// this does not look like only a load artifact, but this task did not read
+// enough of internal/core's stall/budget handling to name a cause - recorded
+// as observed, not diagnosed. `internal/core/budget.go`'s `defaultRunTime` (10
+// minutes) is far longer than the ~60s observed, so it is very likely not the
+// mechanism.
+//
+// CHECK 6 - TOR-197'S FIVE-VERDICT CHAIN AND ITS TWO SENTENCES, ON A REAL
+// QUEUED TORRENT. Reproducing the ordering TOR-207 discovered took one more
+// correction on top of it: posting the multi-file torrent WHILE something else
+// already holds the active slot skips `needs-action` entirely and lands
+// straight in `queued` with no metadata at all (`files: 0`, no picker) - the
+// same shape as any other queued row, useless for this check. The multi-file
+// torrent (tor216-multi3: a-clip.mkv, b-clip.mkv) had to be posted FIRST, while
+// the slot was still free, to reach `needs-action` ("choose files" badge, the
+// detail correctly showing "2 video file(s)" even though the top-level
+// `GET /runs` listing's own `files` field read 0 for it at that point - a
+// display-field lag on this endpoint, not something the row's own detail got
+// wrong). A second torrent (tor207-stall, its own peer again deliberately
+// withheld so it would occupy the slot without ever finishing) was posted
+// second and took the active slot. Both of tor216-multi3's file checkboxes
+// were then ticked by a real DOM click on each `input[type="checkbox"]`,
+// asking for both files while still parked: the row flipped to a genuine
+// `state: "queued"`, badge "queued", queue cell "1#1", and each
+// `<label class="picker-file">` title read exactly: "this torrent is waiting
+// to start and has not been handed to the engine yet - un-tick to take this
+// file out of the pass it will start with. The other 1 stay, and nothing has
+// been fetched or deleted" - the untick==="narrow" branch, word for word,
+// matching TOR-207's own record and confirming the grid's `.run-row-group`
+// carries the same file-picker state and title text the `<table>` row did.
+//
+// NO DEFECT IN THE CONVERSION ITSELF WAS FOUND: all six checks show the grid
+// doing exactly what the `<table>` did, cell for cell, class name for class
+// name (the one genuine surprise - `.run-cell-down`/`.run-cell-up` rather than
+// a name matching the JSON field - was this task's own wrong guess, not a
+// defect). The stall/budget anomaly above is filed as TOR-219, in the backlog
+// rather than this release, because it is an engine question unrelated to
+// TOR-215's markup change and this task did not diagnose it far enough to say
+// it belongs in this release's scope.
