@@ -38,8 +38,11 @@
 // the sixteen parts mount() finds exist before it has built them.
 //
 // WHAT IT IS HANDED, and it is the one thing that crosses the boundary in the
-// other direction: four elements of the row above it (its <li>, its
-// disclosure, its name and its summary span). Since TOR-182 THE ROW IS THIS
+// other direction: five elements of the row above it (its <li>, the <label>
+// that is the row proper, its disclosure, its name and its summary span). The
+// <label> is TOR-222's addition and it is the level-2 disclosure's SUMMARY -
+// the element the open rail is painted on, which until that ticket was reached
+// through its parent by a CSS combinator instead. Since TOR-182 THE ROW IS THIS
 // FILE'S TITLE LINE - the `<h2 class="file-title">` that used to hold a
 // toggle, the name and the summary is gone, because the row already carries a
 // disclosure, the name (as a base name with the whole path on its title, which
@@ -49,6 +52,10 @@
 // reached for.
 // ---------------------------------------------------------------------------
 
+// The disclosure (TOR-212). Two of the page's three levels are this file's -
+// a video file's own block, and the Metadata block inside it - and both write
+// through the same component the torrent's line one level up uses.
+import { Accordion } from "./accordion.js";
 import {
   ABSENT,
   availabilityCellTitle,
@@ -390,14 +397,27 @@ class FileDetail extends HTMLElement {
 
     this.body.innerHTML = BODY;
 
-    // The four row elements this detail is handed rather than builds (see this
-    // module's header): the row's <li>, its disclosure, its name and its
-    // summary span.
+    // The five row elements this detail is handed rather than builds (see this
+    // module's header): the row's <li>, the <label> that is the row proper,
+    // its disclosure, its name and its summary span.
+    //
+    // fileRow is the <label class="picker-file"> and it is named rather than
+    // reached for through this.item, because it is level 2's disclosure
+    // SUMMARY (TOR-222) - the element that carries data-expanded and wears the
+    // open rail. `summary` was already taken by the .picker-summary span, so
+    // the name here is the markup's rather than the component's.
     this.item = row.item;
+    this.fileRow = row.row;
     this.rowToggle = row.open;
     this.name = row.name;
     this.summary = row.summary;
 
+    // The Metadata section and its header, both parts of level 3's disclosure
+    // (TOR-222): the <section> is its container and the <h3> is its summary.
+    // Named here with everything else rather than queried inline at the
+    // accordion, so a BODY template that lost either fails by name.
+    this.meta = this.querySelector(".meta");
+    this.metaTitle = this.querySelector(".meta-title");
     this.metaToggle = this.querySelector(".meta-toggle");
     this.metaBody = this.querySelector(".meta-body");
     this.specs = this.querySelector(".specs");
@@ -420,9 +440,12 @@ class FileDetail extends HTMLElement {
     // here once is both louder and cheaper.
     for (const [name, node] of Object.entries({
       item: this.item,
+      fileRow: this.fileRow,
       rowToggle: this.rowToggle,
       name: this.name,
       summary: this.summary,
+      meta: this.meta,
+      metaTitle: this.metaTitle,
       metaToggle: this.metaToggle,
       metaBody: this.metaBody,
       specs: this.specs,
@@ -441,6 +464,57 @@ class FileDetail extends HTMLElement {
     })) {
       if (!node) throw new Error("file-detail: no " + name + " inside the element");
     }
+
+    // THE TWO INNER LEVELS OF THE PAGE'S THREE DISCLOSURES (TOR-212), built
+    // here because this is the moment both their toggles and both their
+    // regions exist: the row's own triangle was handed over above, and BODY's
+    // Metadata header was written into the slot a few lines earlier.
+    //
+    // BOTH ARE WRAPPERS AROUND A BOX THE MARKUP ALREADY HAD (TOR-222), and
+    // that is this ticket's finding at these two levels rather than at the
+    // outer one: nothing had to be rearranged.
+    //
+    //   level 2  container li.picker-item   summary label.picker-file
+    //   level 3  container section.meta     summary h3.meta-title
+    //
+    // The <li> holds the row and the slot; the <section> holds its header and
+    // its body. accordion.js checks both boxes hold all three of their parts,
+    // so "the toggle is inside the row's <label> and the region is that row's
+    // sibling" - which docs/front-end.md gave as a reason no box existed - is
+    // exactly what a box containing both looks like.
+    //
+    // Level 2 dresses the row's <label>, NOT its <li>: an open file is a state
+    // of the ROW, the same way an open torrent is a state of its line one
+    // level up, and the rail was always painted on .picker-file. Until TOR-222
+    // the attribute sat on the <li> and filelist.css reached the label through
+    // it (`.picker-item[data-expanded="true"] > .picker-file`) - a rule that
+    // has to name a parent to find a child, which is the coupling the ticket
+    // is about. Its mark IS the toggle, because .picker-open is a
+    // triangle-sized button rather than a label with a triangle in it.
+    //
+    // Level 3 dresses NOTHING, and that is the level's own definition rather
+    // than an omission: this rail would already be inside the file's rail,
+    // which is inside the torrent's accented ground, and three nested grounds
+    // read as chrome (filelist.css says so where the file's own rail is
+    // quieter than the torrent's for the same reason). The LEVEL decides that
+    // now rather than the caller - level 3's rail is null in accordion.js's
+    // own table, so apply() writes no data-expanded here however this is
+    // called.
+    this.fileAccordion = new Accordion({
+      level: 2,
+      container: this.item,
+      summary: this.fileRow,
+      toggle: this.rowToggle,
+      region: this.body,
+    });
+    this.metaAccordion = new Accordion({
+      level: 3,
+      container: this.meta,
+      summary: this.metaTitle,
+      toggle: this.metaToggle,
+      region: this.metaBody,
+      mark: this.querySelector(".meta-toggle-icon"),
+    });
 
     // The row's own item carries the open/closed state, so filelist.css can
     // dress the whole row - not just the slot under it - the way .run-row
@@ -560,12 +634,23 @@ class FileDetail extends HTMLElement {
     }
 
     fentry.expanded = expanded;
-    // On the row's own <li>, not on the slot: an open file is a state of the
-    // row, the same way .run-row[data-expanded="true"] is a state of the
-    // torrent's row rather than of its detail.
-    this.item.dataset.expanded = String(expanded);
-    this.rowToggle.setAttribute("aria-expanded", String(expanded));
-    this.body.hidden = !expanded;
+    // THE DISCLOSURE, at level 2 of three (TOR-212), and one call rather than
+    // the three attribute writes that used to stand here and again in
+    // setMetaExpanded below and again in run-table.js's setRunExpanded.
+    //
+    // What did NOT move is the sibling sweep above it: "one file's detail at a
+    // time" is a decision about a SET of disclosures, the level above made the
+    // opposite decision for the three written reasons in this method's own
+    // heading, and a component that closed siblings would impose one of those
+    // answers on all three levels.
+    //
+    // The row's <label> is what carries data-expanded, not the <li> and not
+    // the slot: an open file is a state of the ROW, the same way
+    // .run-row[data-expanded="true"] is a state of the torrent's row rather
+    // than of its detail. That is the `summary` the accordion was given at
+    // mount - and since TOR-222 it is the element the rail rule keys off
+    // directly, with no parent named to reach it.
+    this.fileAccordion.apply(expanded);
     // THE SUMMARY STAYS, and that is a change of behaviour TOR-182 owes a
     // reason for. It used to be hidden while the file was expanded, because
     // "the collapsed-only summary line and the specs panel say the same thing
@@ -590,8 +675,13 @@ class FileDetail extends HTMLElement {
   // follows.
   setMetaExpanded(expanded) {
     this.fentry.metaExpanded = expanded;
-    this.metaToggle.setAttribute("aria-expanded", String(expanded));
-    this.metaBody.hidden = !expanded;
+    // The innermost of the page's three disclosures (TOR-212), through the
+    // same component as the two outside it - and the one level that dresses
+    // nothing, which is what level 3 MEANS here rather than something it
+    // happens to lack: there is no rail and no ground at this depth, because
+    // both would be inside the file's rail, which is inside the torrent's
+    // ground. accordion.js's level table is where that is decided.
+    this.metaAccordion.apply(expanded);
   }
 
   // updateFileSummary keeps a row worth choosing by without opening it: the
@@ -1267,14 +1357,13 @@ class FileDetail extends HTMLElement {
 // before it creates the first one.
 customElements.define("file-detail", FileDetail);
 
-export {
-  FileDetail,
-  BODY,
-  MAX_BLOCKS,
-  REACH_FLOOR,
-  SHIFT_REASON,
-  FAILURE_REASON,
-  cellTitle,
-  detailFrame,
-  setServices,
-};
+// THE SURFACE IS THE CLASS PLUS setServices (TOR-209's rule, applied by
+// TOR-208), and this module is where it saved the most: seven names went.
+// BODY, MAX_BLOCKS, REACH_FLOOR, SHIFT_REASON, FAILURE_REASON, cellTitle and
+// detailFrame were imported by NOBODY - checked across the whole repository -
+// and every Go test that names one of them (perfiledetail_test.go's BODY,
+// eventstate_test.go's detailFrame) lifts it out of this module's TEXT, which
+// needs no export. setServices stays because app.js imports it by name and it
+// is point 7 of the element pattern. See frame-panel.js's own export block for
+// the full reasoning, and for why an extra name here is not free any more.
+export { FileDetail, setServices };

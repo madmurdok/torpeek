@@ -94,6 +94,81 @@
 // picture half again the size of the window as on one ten times its size.
 const PAN_STEP = 64;
 
+// ---------------------------------------------------------------------------
+// "NOT YET" IS NOT "NEVER" (TOR-205). Full reasoning here; compare-dialog.js
+// and run-table.js carry the same mechanism and point back rather than
+// repeat it.
+//
+// THE BUG. TOR-192 established the pattern point 3 of docs/front-end.md
+// records: find every part with this.querySelector in connectedCallback,
+// throw by name on the first one missing. That is right about a wrapper
+// deleted from index.html - a wiring error, and a page that shipped one
+// deserves to fail loudly and immediately. It is wrong about a consumer
+// whose HTML STREAMS: TOR-204's own probe connected this element after
+// .lightbox existed but before #lightbox-img did, hit the throw, and never
+// ran connectedCallback again - the element stayed dead for the life of the
+// page with nothing on screen saying so. A subtree still arriving is not a
+// wiring error, it is a MOMENT IN TIME, and the fix is to tell the two
+// apart rather than to trade the throw away.
+//
+// THE MECHANISM. wire() below finds its parts the same way connectedCallback
+// used to. If any are missing it no longer throws - it bails QUIETLY and
+// calls awaitParts(), which creates a MutationObserver on this element's own
+// childList (and subtree, since a missing part can be nested under a part
+// that did arrive) and re-runs wire() on every batch. The observer is
+// created ONLY on that first miss and is disconnected the instant wiring
+// succeeds - so on torpeek's OWN page, where index.html is fully parsed
+// before app.js's deferred `type="module"` script ever calls
+// customElements.define, every upgrade here happens against a complete
+// subtree and wire() finds everything on the first try: the observer is
+// never created at all. Its cost - one short-lived MutationObserver per
+// element instance - is paid only by a consumer that connects this element
+// early.
+//
+// WHAT "NEVER" MEANS, AND WHY IT IS A CLOCK RATHER THAN A COUNT OF
+// MUTATIONS OR document.readyState. An observer alone cannot distinguish
+// "still arriving" from "never coming" - a subtree that stops changing
+// fires no mutation this element is watching for, so a bail with nothing
+// bounding it would not correct TOR-192's guard, it would delete it: a
+// genuinely missing part (the exact typo the throw existed to catch) would
+// now fail silently forever instead of loudly on the first connect.
+// document.readyState "complete" was the other candidate and is wrong for
+// this bug specifically: the whole scenario is a page that may already be
+// fully loaded, streaming ONE element's markup in on its own schedule
+// unrelated to the page's load event - readyState says nothing about
+// whether THIS element's stream has finished. So the deadline below,
+// SETTLE_TIMEOUT_MS, is measured from this element's own first connect, not
+// from the document's.
+//
+// WHAT THE DEADLINE COSTS, STATED RATHER THAN HIDDEN. It is a guess. Set it
+// too short and a legitimately slow stream (a large template over a bad
+// connection) throws while genuinely still arriving - "not yet" misread as
+// "never", which is a false failure on a page that was going to finish
+// wiring itself correctly. Set it too long and a truly missing part - the
+// case the throw exists for - takes that long to say so, instead of failing
+// on the very next line the way it used to; a person testing a page by hand
+// waits out the whole deadline before the console says anything. 10 seconds
+// is chosen generously against anything this project ships (its own page
+// parses whole in well under a second, and torpeek's own upgrade never
+// waits at all) while still being short enough that a person driving a page
+// by hand notices the console error before they have given up and moved on.
+// It is not measured against any specific third-party consumer's stream,
+// because none is known - a consumer with a slower one would need a larger
+// number, which is why this is one named constant and not a rule baked into
+// the mechanism.
+//
+// AND ONCE THE DEADLINE FIRES: partsNeverArrived() console.error()s the
+// still-missing part names BEFORE throwing, because the throw itself does
+// not behave the way the original one did. connectedCallback's throw ran
+// synchronously inside a DOM reaction and could in principle be seen by
+// whatever triggered the upgrade; a throw from a setTimeout callback reaches
+// no caller at all - it becomes an uncaught error the browser reports on its
+// own (visible in devtools, and to any global error handler or reporting
+// tool a host page has wired up). The console.error is what still names the
+// missing part in a build with no such handler watching.
+const SETTLE_TIMEOUT_MS = 10000;
+// ---------------------------------------------------------------------------
+
 // dx/dy are which way the PICTURE moves, not which way the eye travels:
 // ArrowRight means "look further right", which slides the picture left -
 // hence the subtraction in panBySteps rather than an addition.
@@ -144,9 +219,35 @@ class FramePanel extends HTMLElement {
       // moment ago would now be showing a gutter.
       if (this.dialog && this.dialog.open) this.layout();
     };
+
+    // wired is true once wire() has actually found every part and attached
+    // every listener - see wire()'s own comment for why this has to be
+    // checked rather than assumed the first time connectedCallback runs.
+    this.wired = false;
+    // The MutationObserver awaitParts() creates on a miss, and the deadline
+    // timer that goes with it - both null until there is something to wait
+    // for, and both cleared the moment wiring succeeds or the deadline fires.
+    this.partsObserver = null;
+    this.partsDeadline = null;
   }
 
   connectedCallback() {
+    this.wire();
+  }
+
+  // wire finds this element's parts and, if every one of them exists, wires
+  // it - exactly what connectedCallback used to do inline. What is different
+  // (TOR-205, see this module's own block above) is what happens when a part
+  // is missing: not a throw, a quiet bail into awaitParts() so this runs
+  // again once the subtree changes.
+  //
+  // Idempotent for the same reason run-detail.js's build() has to be:
+  // awaitParts()'s observer calls this again on every mutation batch until it
+  // succeeds, and once it has, this must do nothing on any further call
+  // (that same observer's own late-arriving callback included).
+  wire() {
+    if (this.wired) return;
+
     // Found inside THIS element rather than by document id, so the panel works
     // wherever it is placed and a second one would not steal the first one's
     // parts. The ids stay on the markup for the tests and the aria wiring.
@@ -157,20 +258,25 @@ class FramePanel extends HTMLElement {
     this.closeButton = this.querySelector(".lightbox-close");
     this.zoomReadout = this.querySelector(".lightbox-zoom");
 
-    // A missing part is a wiring error, not a state to degrade into: every one
-    // of the methods below dereferences these, so failing here names the part
-    // that is absent instead of throwing "cannot read property of null" from
-    // whichever handler happens to fire first.
-    for (const [name, node] of Object.entries({
+    const missing = Object.entries({
       dialog: this.dialog,
       view: this.view,
       img: this.img,
       caption: this.caption,
       closeButton: this.closeButton,
       zoomReadout: this.zoomReadout,
-    })) {
-      if (!node) throw new Error("frame-panel: no " + name + " inside the element");
+    }).filter(([, node]) => !node).map(([name]) => name);
+
+    // NOT YET, not never (TOR-205): the subtree this element is looking
+    // inside may simply not have finished arriving. Bail quietly and wait -
+    // awaitParts() is what decides how long "quietly" lasts.
+    if (missing.length) {
+      this.awaitParts(missing);
+      return;
     }
+
+    this.stopAwaitingParts();
+    this.wired = true;
 
     this.img.addEventListener("load", this.onImgLoad);
     this.dialog.addEventListener("close", this.onClose);
@@ -187,11 +293,71 @@ class FramePanel extends HTMLElement {
     window.addEventListener("resize", this.onResize);
   }
 
+  // awaitParts is "not yet", made concrete (TOR-205, full reasoning above
+  // this class). Called only from wire() when it has just found a part
+  // missing, and it does nothing on the second and later call while still
+  // waiting - the observer it already created will call wire() again on its
+  // own the moment something changes.
+  awaitParts(missing) {
+    if (this.partsObserver) return;
+    console.error("frame-panel: waiting for " + missing.join(", ") +
+      " to appear inside the element - connected before its subtree finished arriving");
+    this.partsObserver = new MutationObserver(() => this.wire());
+    this.partsObserver.observe(this, { childList: true, subtree: true });
+    this.partsDeadline = setTimeout(() => this.partsNeverArrived(), SETTLE_TIMEOUT_MS);
+  }
+
+  // stopAwaitingParts tears down whatever awaitParts set up. Called the
+  // instant wire() succeeds - so a consumer whose stream finishes normally
+  // never keeps an observer or a timer running - and from partsNeverArrived
+  // before it throws, so a thrown deadline cannot fire twice.
+  stopAwaitingParts() {
+    if (this.partsObserver) {
+      this.partsObserver.disconnect();
+      this.partsObserver = null;
+    }
+    if (this.partsDeadline != null) {
+      clearTimeout(this.partsDeadline);
+      this.partsDeadline = null;
+    }
+  }
+
+  // partsNeverArrived is TOR-192's guard, corrected rather than deleted: a
+  // part still missing SETTLE_TIMEOUT_MS after this element first connected
+  // is not "not yet", it is "never" - a genuinely missing part, the exact
+  // case the original throw existed for. One last wire() first, because the
+  // observer's own callback and this timer can both be queued for the same
+  // tick, and a wiring that in fact just succeeded must not be reported as a
+  // failure.
+  partsNeverArrived() {
+    this.partsDeadline = null;
+    this.wire();
+    if (this.wired) return;
+
+    const missing = Object.entries({
+      dialog: this.querySelector(".lightbox"),
+      view: this.querySelector(".lightbox-view"),
+      img: this.querySelector("#lightbox-img"),
+      caption: this.querySelector(".lightbox-caption"),
+      closeButton: this.querySelector(".lightbox-close"),
+      zoomReadout: this.querySelector(".lightbox-zoom"),
+    }).filter(([, node]) => !node).map(([name]) => name);
+    this.stopAwaitingParts();
+    const message = "frame-panel: no " + missing.join(", ") + " inside the element, " +
+      (SETTLE_TIMEOUT_MS / 1000) + "s after connecting - giving up rather than waiting forever";
+    console.error(message);
+    throw new Error(message);
+  }
+
   disconnectedCallback() {
     // The window listener is the one that matters - the rest go with the DOM
     // when it does, but a resize handler holding a reference to a removed
     // element keeps it alive and keeps measuring it.
     window.removeEventListener("resize", this.onResize);
+    // A panel removed from the page while still waiting for its subtree has
+    // nothing left to wire - and an observer left running on a detached
+    // element would keep firing for nothing.
+    this.stopAwaitingParts();
     if (!this.dialog) return;
     this.img.removeEventListener("load", this.onImgLoad);
     this.dialog.removeEventListener("close", this.onClose);
@@ -418,4 +584,18 @@ class FramePanel extends HTMLElement {
 // before the page's own <frame-panel> is upgraded.
 customElements.define("frame-panel", FramePanel);
 
-export { FramePanel, PAN_STEP, ARROWS };
+// THE SURFACE IS THE CLASS, AND NOTHING ELSE (TOR-209). PAN_STEP and ARROWS
+// used to be exported beside it and were imported by NOBODY - checked across
+// the whole repository: they are read only at panBySteps and the keydown
+// handler above, and app.js takes this module with a bare
+// `import "./frame-panel.js"` for the side effect on the line before this
+// comment's own subject. So this narrows a DEAD export, which is a thing this
+// module wants on its own terms; it is not the front end being reshaped to
+// suit a consumer, and .design-sync/NOTES.md's rule against that still holds.
+//
+// It has a consequence for the design export worth knowing before adding a
+// name here: Claude Design's checker indexes a component module's named
+// exports as COMPONENTS, so every extra name in this block becomes an entry a
+// design agent is offered and can do nothing with. PAN_STEP and ARROWS were
+// two such entries on the smallest element in the project.
+export { FramePanel };

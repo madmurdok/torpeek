@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,24 @@ type jsRunSnapshot struct {
 	Stall         string `json:"stall"`
 	Peers         int    `json:"peers"`
 	HasLive       bool   `json:"hasLive"`
+	// The four TOR-202 texts: what the real cell functions (state.js's
+	// peersCellText/seedsCellText/rateCellText) render for this row RIGHT
+	// NOW, as opposed to Peers/HasLive above, which read entry.live raw and
+	// are deliberately left alone so the pre-TOR-202 assertion at line ~985
+	// keeps meaning what it always meant. hasLive above is the same raw
+	// !!entry.live TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing
+	// and its neighbours already rely on; LiveReading is hasLive() as TOR-202
+	// left it - !!entry.live && !FINAL.has(entry.state) - the one a header's
+	// cell actually asks.
+	LiveReading  bool   `json:"liveReading"`
+	PeersText    string `json:"peersText"`
+	SeedsText    string `json:"seedsText"`
+	DownloadText string `json:"downloadText"`
+	UploadText   string `json:"uploadText"`
+	// The page's own flags for a row expecting an id it does not hold yet: a
+	// disk row being replayed (TOR-55) and a run the server re-armed (TOR-152).
+	Reopening bool `json:"reopening"`
+	Claiming  bool `json:"claiming"`
 	// The two halves of TOR-180's collision, reported as what they ARE rather
 	// than as what they hold: `files` has to stay a NUMBER (GET /runs' own
 	// per-row count) and `fileList` an array, whatever a message carrying both
@@ -192,6 +211,10 @@ function snapshot() {
       complete: e.complete, selected: e.selected, partial: e.partial,
       framesDone: e.framesDone, framesTotal: e.framesTotal,
       priority: e.priority, queuePosition: e.queuePosition, arrival: e.arrival,
+        // Neither flag is ever on the wire; both are the page's own record of a
+        // row waiting for an id, and both must come DOWN on the id swap
+        // (TOR-203), so a test cannot check the swap without seeing them.
+        reopening: !!e.reopening, claiming: !!e.claiming,
       picked: sorted(e.picked), deferred: sorted(e.deferred),
       fetching: sorted(e.fetching), unticked: sorted(e.unticked),
       tickable: e.tickable, passCount: e.passCount,
@@ -201,6 +224,19 @@ function snapshot() {
       stall: e.stall ? e.stall.code : "",
       peers: e.live ? e.live.peers : -1,
       hasLive: !!e.live,
+      // TOR-202: the real reader-side answers, run through the shipped
+      // functions rather than re-derived here - what a header cell would
+      // actually show this instant, live reading or none. downBps/upBps
+      // mirror run-table.js's own syncRow exactly (gated on hasLive(e), not
+      // on the raw e.live) - rateCellText takes a bps, not an entry, so the
+      // absence decision has to be made at the call site the same way the
+      // real renderer makes it, or this driver would be checking a call
+      // nothing on the page actually performs.
+      liveReading: S.hasLive(e),
+      peersText: S.peersCellText(e),
+      seedsText: S.seedsCellText(e),
+      downloadText: S.rateCellText(S.hasLive(e) ? e.live.download_bps : null),
+      uploadText: S.rateCellText(S.hasLive(e) ? e.live.upload_bps : null),
       filesType: typeof e.files,
       fileListArray: Array.isArray(e.fileList),
       fileEntries: Object.fromEntries([...e.fileEntries].map(([i, f]) => [String(i), {
@@ -229,6 +265,16 @@ for (const step of input.steps) {
   // un-ticking a finished file, which tickFile records here and nothing on
   // the wire ever carries.
   if (step.untick) S.state.runs.get(step.untick.run).unticked.add(step.untick.file);
+  // The other thing the wire never carries: a row WAITING for an id it does
+  // not have yet - a disk row being replayed (reopening, TOR-55) or a run the
+  // server re-armed (claiming, TOR-152). The page raises the flag itself when
+  // it posts, and the id arrives in a later run_state, so this step is the
+  // only way to script resolveIncomingRun's id-swap branch (TOR-203).
+  if (step.reopen) {
+    const waiting = S.state.runs.get(step.reopen.run);
+    if (step.reopen.claiming) waiting.claiming = true;
+    else waiting.reopening = true;
+  }
 }
 process.stdout.write(JSON.stringify({ runs: snapshot(), calls, logs, suspect }));
 `
@@ -282,6 +328,17 @@ func runApply(t *testing.T, steps []map[string]any) jsApplyResult {
 			"--- stdout ---\n%s\n--- stderr ---\n%s", err, stdout.String(), stderr.String())
 	}
 	return out
+}
+
+// runIDs names the keys the store ended up with, sorted, so a failure about a
+// row that is missing or duplicated prints where the rows actually went.
+func (r jsApplyResult) runIDs() []string {
+	ids := make([]string, 0, len(r.Runs))
+	for id := range r.Runs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func event(fields map[string]any) map[string]any { return map[string]any{"event": fields} }
@@ -1314,6 +1371,203 @@ process.stdout.write(JSON.stringify(out));
 		if !strings.Contains(js, hook+":") && !strings.Contains(js, "\n  "+hook+",") {
 			t.Errorf("app.js's setView call does not supply the %q hook", hook)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TRAP 5 (TOR-203): the id swap must not throw, and only RUNNING it can say so.
+//
+// claimReopenedRun used to end its swap branch with syncEntry(entry) - a name
+// state.js cannot see, since this module imports nothing and syncEntry lives in
+// app.js. Every id swap therefore raised a ReferenceError, and a quiet one: the
+// re-key happens BEFORE that call, so the swap itself survived and only the
+// caller's success path was lost. A reopen that had actually worked arrived on
+// the page as FAILED, reason "syncEntry is not defined".
+//
+// Every test in this file passed on that code, and no text guard could have
+// failed: the call reads exactly as a correct redraw does, and the sole thing
+// wrong with it is a name absent from one module's scope. Whether a name
+// resolves is a property of running the module, so this test runs it - through
+// apply(), by the one path that reaches the swap from a wire message
+// (resolveIncomingRun), which is also the path a real socket takes whenever the
+// reopen's own POST loses the race it is documented to race.
+//
+// It fails on the broken module by runApply's own node-error fatal, which
+// carries the ReferenceError in stderr. Verified by re-adding the call.
+func TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing(t *testing.T) {
+	const (
+		diskID = "disk-7c1f"
+		runID  = "run-91b2"
+		hash   = "0123456789abcdef0123456789abcdef01234567"
+	)
+
+	res := runApply(t, []map[string]any{
+		// The disk row, under the synthetic key the listing minted for it.
+		runStateFor(diskID, "done", map[string]any{"infohash": hash, "name": "Some.Pack"}),
+		// A local un-tick, which nothing on the wire carries and no fresh entry
+		// could be born holding. It is this test's proof of IDENTITY: if the
+		// set survives under the new key, the same object was re-keyed rather
+		// than a second row spawned for the same torrent.
+		{"untick": map[string]any{"run": diskID, "file": 2}},
+		// Somebody reopens it. The page raises the flag and posts; the server
+		// replays the whole run - publishing this very message - before it
+		// writes the POST's response, so this message can arrive first.
+		{"reopen": map[string]any{"run": diskID}},
+		{"mark": "the swap"},
+		runStateFor(runID, "running", map[string]any{"infohash": hash}),
+	})
+
+	if _, stale := res.Runs[diskID]; stale {
+		t.Errorf("the synthetic key %q is still in the store after the swap - the row was not re-keyed", diskID)
+	}
+	entry, ok := res.Runs[runID]
+	if !ok {
+		t.Fatalf("no row under the real id %q after the swap; the store holds %v", runID, res.runIDs())
+	}
+	if len(res.Runs) != 1 {
+		t.Errorf("one torrent, %d rows: the reopen spawned a duplicate instead of folding into the row that asked for it", len(res.Runs))
+	}
+
+	// Identity, then the flags. The name and the un-tick both predate the swap.
+	if entry.Name != "Some.Pack" {
+		t.Errorf("the row under the real id has name %q, not the disk row's - this is a fresh entry, not the re-keyed one", entry.Name)
+	}
+	if got := entry.Unticked; len(got) != 1 || got[0] != 2 {
+		t.Errorf("the local un-tick did not survive the swap: %v - only a re-key of the same object keeps it", got)
+	}
+	if entry.Reopening || entry.Claiming {
+		t.Errorf("reopening=%v claiming=%v after the swap: the flags must come down, or this row goes on claiming every other run's id that shares its infohash",
+			entry.Reopening, entry.Claiming)
+	}
+	if entry.Disk {
+		t.Error("the row is still marked disk after a run_state claimed it")
+	}
+}
+
+// TestALiveReadingIsAbsentOnceARunReachesAFinalState is TOR-202's own
+// acceptance criteria 1-3 and 5, run through the real event layer rather than
+// matched as text: a live "progress" heartbeat is the only thing that ever
+// writes entry.live, and nothing on the wire tells this page to blank it back
+// to null when a run ends - run_state, the message that announces
+// done/failed/cancelled, carries no live figures at all (see applyRunState's
+// own doc, which lists exactly what it does and does not touch). So the last
+// reading a running torrent had would simply sit on the entry forever unless
+// the READER, not the writer, refuses to show it once the row is final.
+//
+// TWO CASES, DELIBERATELY BOTH PRESENT (criterion 3's own text: the guard
+// "must distinguish the two cases in point 2"):
+//
+//   - a RUNNING torrent that genuinely found nobody (peers=0, seeds=0, rates
+//     0) must still read "0" - that is a real reading, and the whole point of
+//     ABSENT IS NOT ZERO is that this looks different from having no client
+//     at all.
+//   - the SAME torrent, once it reaches done/failed/cancelled, must read
+//     absent - the reading is not stale, it no longer has a client to have
+//     read anything from.
+//   - a row that is NOT final and has NEVER had a client (queued, no progress
+//     event ever) must ALSO read absent - "not yet" and "over" are different
+//     situations that happen to render the same, and this is the third case.
+//
+// THE THIRD CASE IS NOT DECORATION, and it was added after the first two were
+// MEASURED not to rule out what this comment originally claimed they did. The
+// degenerate shape to exclude is hasLive() dropping the entry.live check and
+// answering !FINAL.has(entry.state) alone. Cases one and two both PASS under
+// it - the lonely row is `running` AND holds a live reading, so a fix that
+// only looks at the state still renders its real 0, and the finished row is
+// still final either way. Only a row that is non-final with entry.live null
+// separates them: the degenerate version calls it live and then reads
+// entry.live.peers off null. Verified by applying that shape and watching
+// this test fail on this case and only this case.
+func TestALiveReadingIsAbsentOnceARunReachesAFinalState(t *testing.T) {
+	progress := func(run string, peers, seeds int) map[string]any {
+		return event(map[string]any{
+			"type": "progress", "run": run, "file": 0,
+			"frames_done": 1, "frames_total": 1, "downloaded": 0,
+			"peers": peers, "seeds": seeds,
+			"download_bps": 0, "upload_bps": 0,
+		})
+	}
+
+	// Case 2: running, genuinely alone. A real zero reading, not absence.
+	lonely := runApply(t, []map[string]any{
+		runStateFor("r1", "running", nil),
+		progress("r1", 0, 0),
+	})
+	r1, ok := lonely.Runs["r1"]
+	if !ok {
+		t.Fatalf("no row for r1 after a run_state and a progress event; runs: %v", lonely.runIDs())
+	}
+	if !r1.LiveReading {
+		t.Error("a running torrent with a live reading of 0 peers/0 seeds reads as having no client at all - " +
+			"a real zero reading must not be treated as absent")
+	}
+	if r1.PeersText != "0" || r1.SeedsText != "0" || r1.DownloadText != "0 B/s" || r1.UploadText != "0 B/s" {
+		t.Errorf("a running torrent that genuinely found nobody must render 0, not absent: "+
+			"peers=%q seeds=%q download=%q upload=%q", r1.PeersText, r1.SeedsText, r1.DownloadText, r1.UploadText)
+	}
+
+	// Case 3: never had a client at all. Queued, so no progress event has
+	// ever been applied to it and entry.live is null - the "not yet" case,
+	// which must read absent for a different reason than the finished row
+	// below does, and which is the only one of the three that catches a
+	// hasLive() that stopped consulting entry.live (see this test's doc).
+	fresh := runApply(t, []map[string]any{runStateFor("r3", "queued", nil)})
+	r3, ok := fresh.Runs["r3"]
+	if !ok {
+		t.Fatalf("no row for r3 after a queued run_state; runs: %v", fresh.runIDs())
+	}
+	if r3.HasLive {
+		t.Fatalf("a queued row already holds an entry.live (peers=%d) - this case's premise is that nothing "+
+			"has written one yet, so it cannot be checking what it claims to", r3.Peers)
+	}
+	if r3.LiveReading {
+		t.Error("a queued row that has never had a client reads as having a live reading - hasLive() has " +
+			"stopped consulting entry.live and is answering from the state alone")
+	}
+	if r3.PeersText != "—" || r3.SeedsText != "—" || r3.DownloadText != "—" || r3.UploadText != "—" {
+		t.Errorf("a row with no client yet must render absent (—): peers=%q seeds=%q download=%q upload=%q",
+			r3.PeersText, r3.SeedsText, r3.DownloadText, r3.UploadText)
+	}
+
+	// Cases 1 and 5: the same sequence, but the run then reaches each of the
+	// three final states (done, failed, cancelled - runs.go's RunState.final,
+	// mirrored by state.js's own FINAL). Every one of them must go absent -
+	// this is the criterion that fails without the fix: entry.live still
+	// holds peers:5/seeds:3/rates:100 from the progress event below, and
+	// nothing on the wire clears it.
+	for _, final := range []string{"done", "failed", "cancelled"} {
+		t.Run(final, func(t *testing.T) {
+			got := runApply(t, []map[string]any{
+				runStateFor("r2", "running", nil),
+				progress("r2", 5, 3),
+				runStateFor("r2", final, nil),
+			})
+			r2, ok := got.Runs["r2"]
+			if !ok {
+				t.Fatalf("no row for r2 after reaching %q; runs: %v", final, got.runIDs())
+			}
+			if r2.State != final {
+				t.Fatalf("r2 state = %q, want %q - run_state did not land", r2.State, final)
+			}
+			// entry.live itself (the raw field) is still non-null here - that
+			// is exactly the bug's mechanism, and worth confirming rather than
+			// assuming, since a fix that instead CLEARED entry.live on
+			// run_state would make this assertion fail for the wrong reason.
+			if !r2.HasLive || r2.Peers != 5 {
+				t.Fatalf("entry.live was cleared by run_state (hasLive=%v peers=%d) - this test's premise (the "+
+					"stale reading survives on the entry) does not hold, so it cannot be checking what it claims to",
+					r2.HasLive, r2.Peers)
+			}
+			if r2.LiveReading {
+				t.Errorf("state %q: hasLive() still reads true off a stale live reading - a finished run has no "+
+					"client any more, live or not", final)
+			}
+			if r2.PeersText != "—" || r2.SeedsText != "—" || r2.DownloadText != "—" || r2.UploadText != "—" {
+				t.Errorf("state %q: a finished run's peers/seeds/rates must render absent (—), not the stale "+
+					"reading: peers=%q seeds=%q download=%q upload=%q",
+					final, r2.PeersText, r2.SeedsText, r2.DownloadText, r2.UploadText)
+			}
+		})
 	}
 }
 

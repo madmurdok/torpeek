@@ -151,22 +151,30 @@ file-detail[hidden] { display: none; }
    that app.js would have to keep in step.
 
    data-detail is written by fileBlock and by nothing else - it is set at the
-   one moment a detail actually exists behind the triangle. */
+   one moment a detail actually exists behind the triangle.
+
+   THE TRIANGLE ITSELF IS base.css's .disclosure-mark SINCE TOR-212 - the
+   fixed .7em box, the .6 opacity and both ::before glyphs, one rule for all
+   three of the page's disclosures instead of the three identical copies this
+   was one of. What stays here is what is this LEVEL's: stripping a shared
+   `select, button` chip back to a bare mark, the visibility gate below, and
+   the focus ring, whose offset differs from the metadata header's because one
+   sits in a list row and the other is a full-width header.
+
+   The class is added in file-list.js at row creation rather than by this
+   level's accordion, and that is not a shortcut: the box has to be reserved
+   on EVERY row - a non-video row's <span> included - from the first paint,
+   and the accordion does not exist until the file has something to say. */
 .picker-open {
-  flex: 0 0 auto;
-  width: .7em;
   padding: 0;
   border: none;
   background: none;
   font: inherit;
   color: inherit;
-  opacity: .6;
   visibility: hidden;
   cursor: pointer;
 }
 .picker-item[data-detail="true"] .picker-open { visibility: visible; }
-.picker-open::before { content: "▸"; }
-.picker-open[aria-expanded="true"]::before { content: "▾"; }
 .picker-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 /* WHAT ONE TICK WILL SPEND, on that file's own row (TOR-181).
@@ -372,11 +380,11 @@ file-detail[hidden] { display: none; }
    target, and the triangle says it opens.
 
    INDENTED BY A RULE, NOT BY PADDING, and the choice is about width. This is
-   the innermost of three levels inside a colspanned cell whose own width is
-   pinned to the pane (TOR-174), and the widest thing on the page - a frame
-   grid - is what lands here. So the nesting is said with a 1px line and
-   .6rem of room beside it rather than with the ~1.4rem a matching inset
-   would have cost the grid at every window size.
+   the innermost of three levels inside a cell that spans every column and
+   whose own width is pinned to the pane (TOR-174), and the widest thing on
+   the page - a frame grid - is what lands here. So the nesting is said with a
+   1px line and .6rem of room beside it rather than with the ~1.4rem a
+   matching inset would have cost the grid at every window size.
 
    No `display` of its own, deliberately: collapse is the `hidden` attribute
    alone, and a class rule declaring display would beat the UA's `[hidden]`
@@ -402,8 +410,24 @@ file-detail[hidden] { display: none; }
    panel under it. Quieter than the torrent's - no ground of its own - because
    this rail is already inside the accented one that frame draws, and two
    filled grounds nested would read as a third level of chrome nobody asked
-   for. */
-.picker-item[data-expanded="true"] > .picker-file {
+   for.
+
+   ON .picker-file ITSELF SINCE TOR-222, and that is the one CSS change that
+   ticket needed. It used to read `.picker-item[data-expanded="true"] >
+   .picker-file`: the attribute sat on the <li> and this rule named the parent
+   in order to reach the child that actually wears the rail. That is the same
+   coupling TOR-221 took out of the row's columns, one level down - a rule that
+   cannot be read without knowing what contains what - and it is now the two
+   dressing levels written the same way, `[data-expanded="true"]` on the
+   element being dressed. accordion.js writes the attribute on its SUMMARY at
+   every level that has a rail, which is .run-row at level 1 and this label at
+   level 2.
+
+   NOTHING ELSE SETS box-shadow ON .picker-file, checked rather than assumed
+   (the other four rules that reach it set cursor, colour and background), so
+   dropping the specificity from 0,3,0 to 0,2,0 changes no computed value -
+   measured at inset 2px 0px 0px rgb(34, 224, 232) before and after. */
+.picker-file[data-expanded="true"] {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
@@ -439,13 +463,10 @@ file-detail[hidden] { display: none; }
 .meta-toggle:hover { background: var(--hover); }
 .meta-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
-.meta-toggle-icon {
-  flex: 0 0 auto;
-  width: .7em;
-  opacity: .6;
-}
-.meta-toggle-icon::before { content: "▸"; }
-.meta-toggle[aria-expanded="true"] .meta-toggle-icon::before { content: "▾"; }
+/* .meta-toggle-icon carries no rule of its own since TOR-212: the innermost
+   of the page's three disclosures draws the same triangle as the two outside
+   it, and base.css's .disclosure-mark is now the one place that is written.
+   The class stays on the span as this level's own name. */
 
 .meta-body { padding: .3rem .35rem 0; }
 

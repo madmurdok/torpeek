@@ -1,0 +1,369 @@
+<!-- @dsCard group="Files" name="FileList" subtitle="Every file the torrent holds, what a tick spends, and what an un-tick would do" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>FileList</title>
+<!-- The design system's own entry sheet, so this card is drawn by the same
+     rules a rendered design gets. filelist.css draws this component;
+     intake.css carries the bare `select, button` and `button:disabled` rules
+     that Select all and Clear frames inherit. -->
+<link rel="stylesheet" href="../../../styles.css">
+<style>
+  body { margin: 0; padding: 1.2rem; background: var(--bg); }
+  /* The width the list has inside an open row, so the columns of price,
+     state and summary are measured against something real. */
+  .card-pane { max-width: 62rem; margin: 0 auto; }
+  /* Card furniture only - not part of the component. It labels which row
+     STATE each list below belongs to, because that is what decides which
+     un-tick verdicts can appear at all. */
+  .card-state { font-family: var(--mono); font-size: .66rem; letter-spacing: var(--track);
+                text-transform: uppercase; color: var(--ink-2); margin: 1.4rem 0 .2rem; }
+  .card-state:first-of-type { margin-top: 0; }
+</style>
+
+<!-- STATIC ON PURPOSE, AND WHY THERE ARE FOUR LISTS HERE RATHER THAN ONE.
+     A preview card renders WITHOUT scripts, and <file-list> writes its own
+     markup (`this.innerHTML = LIST` on connect, then renderFileList builds
+     every <li>), so everything below is what that build and updateFileCosts
+     would have written.
+
+     THE FIVE UN-TICK VERDICTS CANNOT COEXIST ON ONE LIST, and this is not a
+     presentational choice - it is what the three sets on the entry say:
+
+       entry.fetching    "only ever non-empty while the row is running"
+       entry.narrowable  "only ever non-empty while the row is queued or parked"
+       entry.deferred    a file ticked while the row was ALREADY fetching
+       the clear offer   gated on FINAL.has(entry.state)
+
+     A row cannot be running and queued at once, so "stop"/"drop" and "narrow"
+     are on different rows by construction, and "clear" is on a third. Select
+     all is parked-only for its own reason. One list would have had to fake a
+     state to show them together, which is exactly the sort of quiet lie this
+     project keeps finding - so the card shows one list per row state and says
+     which state each is.
+
+     WHAT IS NOT SHOWN, said rather than left out silently: the five verdicts'
+     own SENTENCES are the mechanism, and four of the six row states look
+     alike on screen - a ticked, live checkbox. The difference is the row's
+     `title`, which is TOR-184's legibility requirement and is carried here
+     verbatim, so it is a hover away in this very card. -->
+<div class="card-pane">
+
+<p class="card-state">Row: running &mdash; drop, stop, and the one an un-tick cannot reach</p>
+<file-list>
+<section class="picker" data-parked="false">
+  <p class="picker-head">
+    <!-- The suffix is TOR-184's on-screen half, said once for the ROW rather
+         than once per file: the scope of the stop is the run, and a season
+         pack would otherwise carry twenty copies of one sentence. -->
+    <span class="picker-title">5 file(s), 4 video — un-ticking a file it is fetching stops this torrent's fetch; frames already taken stay</span>
+    <button type="button" class="picker-all" hidden>Select all</button>
+    <span class="picker-armed" role="status"></span>
+  </p>
+  <ul class="picker-list">
+    <!-- data-tick="open": nobody has asked for this file, and the price is on
+         the row because since TOR-181 the TICK is the decision - there is no
+         button under the list to put a cost beside any more. "8 frames" is
+         per file, which is the whole of TOR-50's trap. -->
+    <li class="picker-item" data-video="true" data-tick="open">
+      <label class="picker-file" for="file-tick-2" title="tick to start this file's frames now — 8 frames for this one file, and the count is per file">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-3" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for sintel-2160p.mkv"></button>
+        <input type="checkbox" value="0" id="file-tick-2">
+        <span class="picker-name" title="Sintel/sintel-2160p.mkv">sintel-2160p.mkv</span>
+        <span class="picker-size">4.2 GB</span>
+        <span class="picker-cost">8 frames</span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-3" hidden></div></file-detail>
+    </li>
+    <!-- VERDICT "drop": ticked while this row was already fetching, so the
+         engine could not be handed it mid-plan. Nothing has been asked of the
+         swarm for it, so un-ticking stops that one file and nothing else - the
+         only per-file stop that honestly exists. "in the next pass" is the one
+         exception a reader cannot see, so it is the only case with words on
+         it: every other ticked box says "in this run" by being ticked. -->
+    <li class="picker-item" data-video="true" data-tick="asked">
+      <label class="picker-file" for="file-tick-4" title="ticked while this torrent was already fetching - the engine works from a plan it was handed, so this file starts the moment that pass ends, on this same row. Un-tick to drop it before it starts: nothing has been asked of the swarm for it, so that stops this file alone and costs nothing">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-5" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for sintel-1080p.mkv"></button>
+        <input type="checkbox" value="1" id="file-tick-4" checked>
+        <span class="picker-name" title="Sintel/sintel-1080p.mkv">sintel-1080p.mkv</span>
+        <span class="picker-size">1.1 GB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state">in the next pass</span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-5" hidden></div></file-detail>
+    </li>
+    <!-- VERDICT "stop", AND THE ONE DESTRUCTIVE-BY-SCOPE PRESS ON THIS ROW.
+         The engine is fetching this file now, and core.Engine has no per-file
+         stop to offer - one context for the whole run, one budget sized before
+         it started - so un-ticking stops THE RUN. The sentence exists before
+         the press rather than after it, and it says the three things a person
+         cannot see: that the box acts at once, that it reaches the whole run,
+         and that nothing on disk is lost. -->
+    <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+      <label class="picker-file" for="file-tick-6" title="this file is being fetched now — un-ticking it STOPS THIS TORRENT'S FETCH. The engine works from the plan it was handed, so one file of it cannot be stopped on its own. Nothing is deleted: the frames already written stay on disk, and a later run reuses them">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-7" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for sintel-720p.mkv"></button>
+        <input type="checkbox" value="2" id="file-tick-6" checked>
+        <span class="picker-name" title="Sintel/sintel-720p.mkv">sintel-720p.mkv</span>
+        <span class="picker-size">512.0 MB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary">1280×720 · 3 of 8 frames</span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-7" hidden></div></file-detail>
+    </li>
+    <!-- VERDICT "" - the one nothing can reach, and the only DISABLED ticked
+         box on the page. An earlier pass on this row captured this file while
+         the pass in flight is fetching something else: there is nothing to
+         stop, and nothing to clear yet because the row has not settled. Said
+         in full, because a dead box beside the live ones above it would
+         otherwise look arbitrary. -->
+    <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+      <label class="picker-file" for="file-tick-8" title="this row has asked for this file and nothing is fetching it now - an earlier pass took it, so stopping this run would stop the wrong file, and its frames can be cleared once the row has finished">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-9" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for sintel-480p.mkv"></button>
+        <input type="checkbox" value="3" id="file-tick-8" checked disabled>
+        <span class="picker-name" title="Sintel/sintel-480p.mkv">sintel-480p.mkv</span>
+        <span class="picker-size">256.0 MB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary">854×480 · 8 frames</span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-9" hidden></div></file-detail>
+    </li>
+    <!-- NOT A VIDEO, and it says so with three carriers of which only one is a
+         colour: the checkbox is ABSENT, an em dash sits where it would have
+         been (this page's own mark for a reading that is not there), and the
+         row's title gives the reason in words. The wording names BOTH reasons
+         a file can be missing from the video list, because the page cannot
+         tell them apart and must not guess. -->
+    <li class="picker-item" data-video="false">
+      <span class="picker-file" title="torpeek takes no frames from this file — either its extension is not one it opens, or it is a sample or trailer beside a much larger video">
+        <span class="picker-open" aria-hidden="true"></span>
+        <span class="picker-mark" aria-hidden="true">—</span>
+        <span class="picker-name" title="Sintel/poster.jpg">poster.jpg</span>
+        <span class="picker-size">256.0 KB</span>
+      </span>
+    </li>
+  </ul>
+</section>
+</file-list>
+
+<p class="card-state">Row: queued &mdash; narrow, the verdict that only exists before the engine is handed the pass</p>
+<file-list>
+<section class="picker" data-parked="false">
+  <p class="picker-head">
+    <!-- No suffix: nothing is being fetched on a queued row, so the stop
+         sentence would be a false alarm. -->
+    <span class="picker-title">3 file(s), 3 video</span>
+    <button type="button" class="picker-all" hidden>Select all</button>
+    <span class="picker-armed" role="status"></span>
+  </p>
+  <ul class="picker-list">
+    <!-- VERDICT "narrow": the pass has been chosen and the engine has not been
+         handed it, so the file simply comes out. The sentence has to say which
+         of two things the press will be, because the person cannot see the
+         difference - with another box still ticked the torrent goes on
+         waiting; with this one the last, the row goes back to asking which
+         files to take, which is where it was before any box was pressed. Both
+         are said, in that order, so the one that happens is the one that was
+         read. -->
+    <li class="picker-item" data-video="true" data-tick="asked">
+      <label class="picker-file" for="file-tick-10" title="this torrent is waiting to start and has not been handed to the engine yet - un-tick to take this file out of the pass it will start with. The other 1 stay, and nothing has been fetched or deleted">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-11" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for bbb-1080p.mkv"></button>
+        <input type="checkbox" value="0" id="file-tick-10" checked>
+        <span class="picker-name" title="Big.Buck.Bunny/bbb-1080p.mkv">bbb-1080p.mkv</span>
+        <span class="picker-size">1.1 GB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-11" hidden></div></file-detail>
+    </li>
+    <li class="picker-item" data-video="true" data-tick="asked">
+      <label class="picker-file" for="file-tick-12" title="this torrent is waiting to start and has not been handed to the engine yet - un-tick to take this file out of the pass it will start with. The other 1 stay, and nothing has been fetched or deleted">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-13" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for bbb-720p.mkv"></button>
+        <input type="checkbox" value="1" id="file-tick-12" checked>
+        <span class="picker-name" title="Big.Buck.Bunny/bbb-720p.mkv">bbb-720p.mkv</span>
+        <span class="picker-size">512.0 MB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-13" hidden></div></file-detail>
+    </li>
+    <li class="picker-item" data-video="true" data-tick="open">
+      <label class="picker-file" for="file-tick-14" title="tick to start this file's frames now — 8 frames for this one file, and the count is per file">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-15" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for bbb-480p.mkv"></button>
+        <input type="checkbox" value="2" id="file-tick-14">
+        <span class="picker-name" title="Big.Buck.Bunny/bbb-480p.mkv">bbb-480p.mkv</span>
+        <span class="picker-size">256.0 MB</span>
+        <span class="picker-cost">8 frames</span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-15" hidden></div></file-detail>
+    </li>
+  </ul>
+</section>
+</file-list>
+
+<p class="card-state">Row: needs-action (parked) &mdash; the warn frame, and Select all ARMED</p>
+<file-list>
+<!-- data-parked="true" is the only thing that earns .picker's --warn border:
+     it says "this is blocking, nothing happens until you act", which is true
+     of a torrent waiting to be picked from and a false alarm on a run already
+     going. Nothing is pre-ticked here on purpose - the count is per file, so
+     pre-ticking six variants would put the most expensive possible run one
+     careless click away. -->
+<section class="picker" data-parked="true">
+  <p class="picker-head">
+    <span class="picker-title">2 file(s), 2 video — tick a file to start it</span>
+    <!-- SELECT ALL IS THE MOST EXPENSIVE CLICK ON THE PAGE, and this is its
+         SECOND state: the first press ARMS it and states what it is about to
+         cost, the second press starts them. Three carriers say it is armed and
+         only one of them is a colour - the label changes, a sentence appears
+         beside it, and the button wears --warn. There is no dialog: this page
+         has no confirmation dialogs anywhere, an unstyleable modal cannot
+         state a figure in the page's own type, and a blocking dialog cannot be
+         seen in a screenshot of what the page said. -->
+    <button type="button" class="picker-all" data-armed="true" title="this starts 2 file(s) × 8 = 16 frames — press again to confirm, Esc to cancel">Start all 2 — 16 frames</button>
+    <span class="picker-armed" role="status">this starts 2 file(s) × 8 = 16 frames — press again to confirm, Esc to cancel</span>
+  </p>
+  <ul class="picker-list">
+    <li class="picker-item" data-video="true" data-tick="open">
+      <label class="picker-file" for="file-tick-16" title="tick to start this file's frames now — 8 frames for this one file, and the count is per file">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-17" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for cosmos-2160p.mkv"></button>
+        <input type="checkbox" value="0" id="file-tick-16">
+        <span class="picker-name" title="Cosmos.Laundromat/cosmos-2160p.mkv">cosmos-2160p.mkv</span>
+        <span class="picker-size">4.2 GB</span>
+        <span class="picker-cost">8 frames</span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-17" hidden></div></file-detail>
+    </li>
+    <li class="picker-item" data-video="true" data-tick="open">
+      <label class="picker-file" for="file-tick-18" title="tick to start this file's frames now — 8 frames for this one file, and the count is per file">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-19" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for cosmos-1080p.mkv"></button>
+        <input type="checkbox" value="1" id="file-tick-18">
+        <span class="picker-name" title="Cosmos.Laundromat/cosmos-1080p.mkv">cosmos-1080p.mkv</span>
+        <span class="picker-size">1.1 GB</span>
+        <span class="picker-cost">8 frames</span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-19" hidden></div></file-detail>
+    </li>
+  </ul>
+</section>
+</file-list>
+
+<p class="card-state">Row: done &mdash; clear, the offer it reveals, and a box the server has closed</p>
+<file-list>
+<section class="picker" data-parked="false">
+  <p class="picker-head">
+    <span class="picker-title">4 file(s), 3 video</span>
+    <button type="button" class="picker-all" hidden>Select all</button>
+    <span class="picker-armed" role="status"></span>
+  </p>
+  <ul class="picker-list">
+    <!-- VERDICT "clear", not yet taken up. Three things are true at once and
+         none of them is "was it selected": the file was asked for, the row has
+         SETTLED, and it HAS FRAMES ON DISK. Un-ticking changes nothing by
+         itself - it only puts a button on the row, and ticking the box again
+         takes the button away. -->
+    <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+      <label class="picker-file" for="file-tick-20" title="this row captured this file - un-tick it to be offered a clear, which deletes its frames from disk; un-ticking by itself changes nothing">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-21" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for ed-1080p.mkv"></button>
+        <input type="checkbox" value="0" id="file-tick-20" checked>
+        <span class="picker-name" title="Elephants.Dream/ed-1080p.mkv">ed-1080p.mkv</span>
+        <span class="picker-size">1.1 GB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary">1920×1080 · 8 frames</span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-21" hidden></div></file-detail>
+    </li>
+    <!-- THE OFFER TAKEN UP: the box is un-ticked and Clear frames is on the
+         row. THE FIGURE IS IN THE BUTTON, the way Select all's total is - this
+         is the most destructive press on the row, and a control labelled
+         "Clear" alone would not say how much. It is read from the same count
+         the summary beside it shows, so the two cannot disagree.
+         The note beside it is a clear that only PARTLY happened (TOR-78's
+         shape at a file's size): the record says the file is not part of this
+         result any more and something of it is still on disk. It is reported
+         beside the FILE rather than in the page's error line, because a season
+         pack has twenty-five rows and a sentence at the top of the page would
+         not say which file's. A clear that partly failed leaves frames, so it
+         leaves the button too, with a second press worth making. -->
+    <li class="picker-item" data-video="true" data-tick="asked" data-detail="true" data-expanded="false">
+      <label class="picker-file" for="file-tick-22" title="this row captured this file - un-tick it to be offered a clear, which deletes its frames from disk; un-ticking by itself changes nothing">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-23" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for ed-720p.mkv"></button>
+        <input type="checkbox" value="1" id="file-tick-22">
+        <span class="picker-name" title="Elephants.Dream/ed-720p.mkv">ed-720p.mkv</span>
+        <span class="picker-size">512.0 MB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary">1280×720 · 5 of 8 frames</span>
+        <button type="button" class="picker-clear" title="delete this file's frames, its contact sheet and its manifest from disk, and drop it from what this result counts as complete — the file stays listed as asked for, so a top-up can take it again">Clear 5 frames</button>
+      </label>
+      <p class="picker-note">the frames and the manifest were removed; the contact sheet could not be: permission denied</p>
+      <file-detail><div class="file-detail" id="file-detail-23" hidden></div></file-detail>
+    </li>
+    <!-- data-tick="closed": the server has answered that this row cannot be
+         asked for another file, and the box carries THE SERVER'S OWN SENTENCE
+         rather than this page's guess at it - run_state carries the words
+         refuseTick would have replied with, so a disabled box says exactly
+         what the POST would have said. -->
+    <li class="picker-item" data-video="true" data-tick="closed">
+      <label class="picker-file" for="file-tick-24" title="run 9c1f4a2e is done, so there is no run left for a tick to grow - one more file now is a new run with a new traffic ceiling, which is the intake line's job, or Regenerate's for a file already taken">
+        <button type="button" class="picker-open" aria-expanded="false" aria-controls="file-detail-25" title="this file's frames, metadata and buttons" aria-label="Frames and metadata for ed-480p.mkv"></button>
+        <input type="checkbox" value="2" id="file-tick-24" disabled>
+        <span class="picker-name" title="Elephants.Dream/ed-480p.mkv">ed-480p.mkv</span>
+        <span class="picker-size">256.0 MB</span>
+        <span class="picker-cost"></span>
+        <span class="picker-state"></span>
+        <span class="picker-summary"></span>
+        <button type="button" class="picker-clear" hidden></button>
+      </label>
+      <p class="picker-note" hidden></p>
+      <file-detail><div class="file-detail" id="file-detail-25" hidden></div></file-detail>
+    </li>
+    <li class="picker-item" data-video="false">
+      <span class="picker-file" title="torpeek takes no frames from this file — either its extension is not one it opens, or it is a sample or trailer beside a much larger video">
+        <span class="picker-open" aria-hidden="true"></span>
+        <span class="picker-mark" aria-hidden="true">—</span>
+        <span class="picker-name" title="Elephants.Dream/elephants-dream.nfo">elephants-dream.nfo</span>
+        <span class="picker-size">3.0 KB</span>
+      </span>
+    </li>
+  </ul>
+</section>
+</file-list>
+
+</div>
+
+<!-- No script. The ticks, Select all's arming, the four routed un-tick acts
+     and the clear belong to <file-list> in _ds_bundle.js and are exercised
+     where a design actually runs, not in a thumbnail. -->

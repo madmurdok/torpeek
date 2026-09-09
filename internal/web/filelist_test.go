@@ -403,8 +403,17 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	// EVERY MODULE THAT DRAWS THE DETAIL, which since TOR-195 is five rather
 	// than two - and widening the scan to all of them is the point: an element
 	// hidden in a module nobody scanned is exactly this trap, unguarded.
+	//
+	// SIX SINCE TOR-212, and the sixth is the reason the table below gained a
+	// name that stands for three selectors: all three of the page's
+	// disclosures now take their region off screen through ONE component
+	// (accordion.js's apply, `this.region.hidden = !expanded`), so the three
+	// receivers this scan used to match one selector each - detailRowEl, body
+	// and metaBody - are gone and `region` is what it sees instead. Leaving
+	// accordion.js out would have dropped all three regions out of the scan
+	// silently, which is this guard's own failure mode rather than a new one.
 	js := strings.Join([]string{servedScript(t), runTableJS(t), runDetailJS(t),
-		fileListJS(t), fileDetailJS(t)}, "\n")
+		fileListJS(t), fileDetailJS(t), accordionJS(t)}, "\n")
 	css := stylesheet(t)
 
 	// The detail's own elements the front end takes off screen, as the
@@ -429,41 +438,53 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 	// the one thing a rename would silently break. An empty string is an
 	// element whose class carries no rule at all in app.css, which is the
 	// one honest way to be exempt: nothing can outrank the UA's [hidden].
-	selector := map[string]string{
-		"pickerEl":    ".picker",
-		"pickerAll":   ".picker-all",
-		"pickerArmed": ".picker-armed",
-		"detailRowEl": ".run-detail-row",
+	//
+	// ONE NAME MAY STAND FOR SEVERAL SELECTORS since TOR-212: `region` is
+	// every element the shared disclosure hides, and each of the three has to
+	// be checked, because the trap is per RULE - one of them declaring
+	// `display` would be beaten by nothing else on the list.
+	selector := map[string][]string{
+		"pickerEl":    {".picker"},
+		"pickerAll":   {".picker-all"},
+		"pickerArmed": {".picker-armed"},
+		// The three disclosure regions, hidden by accordion.js and nothing
+		// else: a torrent's detail row, a video file's own slot, and the
+		// Metadata block inside that. .file-detail is the one of the three
+		// that has ever needed its own [hidden] rule, and it still has one.
+		"region": {".run-detail-row", ".file-detail", ".meta-body"},
 		// The table's own empty-state paragraph, which came into this scan
 		// with TOR-195 only because the receiver widened to `this` - it was
 		// always hidden the same way, through a part the element found inside
 		// itself, and nothing was looking at it.
-		"emptyNote":      "#run-list-empty",
-		"detailError":    ".run-detail-error",
-		"torrentSummary": ".torrent-summary",
-		"torrentActions": ".torrent-actions",
-		"torrentSave":    ".torrent-save",
-		"torrentSend":    ".torrent-send",
-		"againEl":        ".run-again",
-		"againGo":        ".run-again-go",
-		"againRetry":     ".run-again-retry",
-		"rowCancel":      ".run-cancel",
-		"rowRaise":       ".run-priority-up",
-		"rowLower":       ".run-priority-down",
-		// Per file, and all three are inside the list's own rows since
-		// TOR-182: the detail slot the row opens onto, the metadata one
-		// level in, the contact-sheet link and the progress line.
-		"body":     ".file-detail",
-		"metaBody": ".meta-body",
-		"links":    ".file-links",
-		"progress": ".file-progress",
+		"emptyNote":      {"#run-list-empty"},
+		"detailError":    {".run-detail-error"},
+		"torrentSummary": {".torrent-summary"},
+		"torrentActions": {".torrent-actions"},
+		"torrentSave":    {".torrent-save"},
+		"torrentSend":    {".torrent-send"},
+		"againEl":        {".run-again"},
+		"againGo":        {".run-again-go"},
+		"againRetry":     {".run-again-retry"},
+		"rowCancel":      {".run-cancel"},
+		"rowRaise":       {".run-priority-up"},
+		"rowLower":       {".run-priority-down"},
+		// Per file, and both are inside the list's own rows since TOR-182:
+		// the contact-sheet link and the progress line. `body` (the detail
+		// slot a row opens onto) and `metaBody` (the metadata one level in)
+		// used to be two more entries here and are NOT missing - they are
+		// `region` above, hidden through the one component all three
+		// disclosures share since TOR-212. They were deleted rather than left
+		// as unreachable rows: a name in this table that nothing matches any
+		// more looks like coverage and is not.
+		"links":    {".file-links"},
+		"progress": {".file-progress"},
 		// TOR-183, on a file's own row and in its detail: the clear this
 		// ticket adds, the sentence beside it that reports a clear which only
 		// partly happened, and the reach strip a clear takes off screen
 		// because there are no frames left for it to be about.
-		"clear": ".picker-clear",
-		"note":  ".picker-note",
-		"reach": ".reach",
+		"clear": {".picker-clear"},
+		"note":  {".picker-note"},
+		"reach": {".reach"},
 	}
 
 	seen := map[string]bool{}
@@ -474,33 +495,44 @@ func TestEverythingHiddenFromJSCanActuallyBeHidden(t *testing.T) {
 		}
 		seen[name] = true
 
-		sel, ok := selector[name]
+		sels, ok := selector[name]
 		if !ok {
 			t.Errorf("the front end hides %s and this test does not know which class that "+
 				"is - add it to the table rather than leaving the display/[hidden] trap "+
 				"unguarded for it", name)
 			continue
 		}
-
-		declares := false
-		for _, body := range ruleBodiesNaming(css, sel) {
-			if strings.Contains(body, "display:") {
-				declares = true
-			}
-		}
-		if !declares {
+		if len(sels) == 0 {
+			t.Errorf("%s is in the table with no selector at all, so nothing is checked "+
+				"for it", name)
 			continue
 		}
-		got := cssRule(t, css, sel+"[hidden] {")
-		if !strings.Contains(got, "display: none") {
-			t.Errorf("%s declares display but %s[hidden] is %q, want display: none - "+
-				"without it the class rule beats the UA's and app.js hiding it does "+
-				"nothing", sel, sel, got)
+
+		for _, sel := range sels {
+			declares := false
+			for _, body := range ruleBodiesNaming(css, sel) {
+				if strings.Contains(body, "display:") {
+					declares = true
+				}
+			}
+			if !declares {
+				continue
+			}
+			got := cssRule(t, css, sel+"[hidden] {")
+			if !strings.Contains(got, "display: none") {
+				t.Errorf("%s declares display but %s[hidden] is %q, want display: none - "+
+					"without it the class rule beats the UA's and app.js hiding it does "+
+					"nothing", sel, sel, got)
+			}
 		}
 	}
 	// The scan found the elements it was widened for, rather than quietly
 	// matching nothing after a rename.
-	for _, want := range []string{"links", "torrentActions", "body"} {
+	// `region` replaced `body` here with TOR-212 for a reason worth stating:
+	// the element this list was widened for is .file-detail, and it is still
+	// covered - through the one receiver that hides all three regions now. If
+	// that name stops matching, all three drop out of the scan at once.
+	for _, want := range []string{"links", "torrentActions", "region"} {
 		if !seen[want] {
 			t.Errorf("the front end no longer hides %q. If it was renamed, rename it in the "+
 				"table above too - this guard was widened to cover exactly this element, "+

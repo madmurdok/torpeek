@@ -328,11 +328,27 @@ func TestOnlyOneFileDetailIsOpenAtOnce(t *testing.T) {
 func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 	js := servedScript(t)
 
-	// The table element's, since TOR-194 (see the sibling test above).
+	// The table element's, since TOR-194 (see the sibling test above) - and
+	// since TOR-212 the hiding itself is one level further down: the three DOM
+	// writes that are a disclosure moved into accordion.js, which run-table.js
+	// and file-detail.js both apply through.
+	//
+	// THE ANCHOR FOLLOWED THE WRITE, which it has to: this test's whole claim
+	// is that collapsing a torrent hides ONE element and touches nothing
+	// inside it, and if the hiding is now in a shared component then the
+	// component's own write is the thing to anchor on. Anchoring on the old
+	// literal and deleting the check would have turned a real property into a
+	// green test.
 	run := jsMethod(t, runTableJS(t), "setRunExpanded")
-	if !strings.Contains(run, "entry.detailRowEl.hidden = !expanded") {
-		t.Fatal("setRunExpanded no longer collapses by hiding the detail's own row - " +
-			"this test is anchored on that being the only thing it does to the content")
+	if !strings.Contains(run, "entry.rowAccordion.apply(expanded);") {
+		t.Fatal("setRunExpanded no longer applies the row's own disclosure - this test is " +
+			"anchored on the collapse being one call that hides one element")
+	}
+	shared := jsMethod(t, accordionJS(t), "apply")
+	if !strings.Contains(shared, "this.region.hidden = !expanded;") {
+		t.Fatal("accordion.js's apply no longer collapses by hiding the region it was " +
+			"given - the row's detail row is that region at level 1, and this test is " +
+			"anchored on hiding it being the only thing a collapse does to the content")
 	}
 
 	// EVERYTHING IT WRITES, enumerated rather than spot-checked, because the
@@ -341,15 +357,22 @@ func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 	// check for a particular forbidden call would miss the next way of
 	// writing the same mistake; a check on every left-hand side cannot.
 	//
+	// BOTH BODIES, SINCE TOR-212, for the reason the anchor moved: two of the
+	// three writes are the component's now, so scanning setRunExpanded alone
+	// would report one assignment where there are three and check the two
+	// that matter not at all. The floor below stays at three because that is
+	// still how many writes an open costs - it just takes two functions to
+	// hold them.
+	//
 	// Anywhere on the line, not only at its start - a write folded into a
 	// one-line `for (...) x.y = false;` is exactly the shape a mutation run
 	// found this check blind to. Comments first, because several of them name
 	// fields in prose. The trailing [^=>] is what keeps ===, !== and => out.
-	body := regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(run, "")
+	body := regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(run+"\n"+shared, "")
 	writes := regexp.MustCompile(`([A-Za-z_][\w.]*)\s*=([^=>])`).FindAllStringSubmatch(body, -1)
 	if len(writes) < 3 {
-		t.Fatalf("only %d assignments were found in setRunExpanded; the scan is broken, "+
-			"not the function", len(writes))
+		t.Fatalf("only %d assignments were found in setRunExpanded and the disclosure it "+
+			"applies; the scan is broken, not the functions", len(writes))
 	}
 	for _, w := range writes {
 		if strings.Contains(w[1], "fentry") || strings.Contains(w[1], "file") {
@@ -360,11 +383,25 @@ func TestCollapsingATorrentLeavesItsOpenFileOpen(t *testing.T) {
 				"grid", w[1])
 		}
 	}
-	// And nothing it CALLS may do it either.
+	// And nothing it CALLS may do it either - the shared disclosure included,
+	// which is the one new way this could go wrong: a component that closed
+	// its siblings would impose the FILE level's "one at a time" decision
+	// (TOR-182) on the run level, where the opposite was decided for three
+	// written reasons.
 	for _, forbidden := range []string{"setFileExpanded(", "fileEntries", "toggleFileDetail("} {
 		if strings.Contains(run, forbidden) {
 			t.Errorf("setRunExpanded calls or reads %q, so closing a torrent reaches "+
 				"inside it", forbidden)
+		}
+		// Comments stripped, because accordion.js's own header NAMES all three
+		// call sites in prose to say what it consolidated - and a Contains
+		// check that reads prose as code is the exact failure this project's
+		// text guards have already paid for twice.
+		if strings.Contains(liveJS(t, accordionJS(t)), forbidden) {
+			t.Errorf("accordion.js calls or reads %q. It serves all three of the page's "+
+				"disclosures, so a sibling sweep in it would close a torrent's siblings "+
+				"too - and closing one to open another is what destroys work in progress "+
+				"(setRunExpanded's own heading)", forbidden)
 		}
 	}
 

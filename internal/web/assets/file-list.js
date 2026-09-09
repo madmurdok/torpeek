@@ -48,8 +48,11 @@
 //     accordion that closes every sibling, and reading the other result sets
 //     off disk the first time - is the detail's (its toggle()).
 //
-// AND FOUR ROW ELEMENTS CROSS IT, deliberately: a file's detail is handed its
-// row's <li>, its disclosure, its name and its summary span at mount, because
+// AND FIVE ROW ELEMENTS CROSS IT, deliberately: a file's detail is handed its
+// row's <li>, the <label> that is the row proper, its disclosure, its name and
+// its summary span at mount - the <label> since TOR-222, because it is the
+// element the level-2 disclosure dresses and the detail is what applies that
+// state. Because
 // since TOR-182 THE ROW IS THE FILE'S TITLE LINE (see file-detail.js's own
 // heading) - the resolution and frame count it keeps current are a COLUMN of
 // this list, not a line inside the slot. They are handed over once, in one
@@ -522,6 +525,16 @@ class FileList extends HTMLElement {
       // which element happens to come first in the row.
       const open = document.createElement(video ? "button" : "span");
       open.className = "picker-open";
+      // .disclosure-mark HERE AND NOT FROM THE ACCORDION (TOR-212), which is
+      // the one place the three levels genuinely differ in when the mark can
+      // be put on. That rule carries the triangle's fixed .7em box, and this
+      // level's box has to be RESERVED ON EVERY ROW - including a row with
+      // nothing to open and a non-video row that is a <span> and never gets a
+      // disclosure at all - or the twenty-five names below it stop lining up
+      // as a column (see .picker-open's own rule). The accordion adds the
+      // class too, idempotently, but not until mount, which is far too late
+      // for a column that has to be straight from the first paint.
+      open.classList.add("disclosure-mark");
       if (video) {
         open.type = "button";
         open.setAttribute("aria-expanded", "false");
@@ -590,7 +603,7 @@ class FileList extends HTMLElement {
         // resolution and frame count, kept current by updateFileSummary -
         // moved here with the rest of the block, because the title line it sat
         // on IS this row now. It is written by the file's own detail, which is
-        // handed this span at mount: one of the four row elements that cross
+        // handed this span at mount: one of the five row elements that cross
         // the boundary (see this module's header).
         //
         // Last rather than beside the name, so it takes the place the price
@@ -1463,4 +1476,12 @@ class FileList extends HTMLElement {
 // defined before it creates the first one.
 customElements.define("file-list", FileList);
 
-export { FileList, LIST, WHY_NOT_VIDEO, framesLabel, setServices };
+// THE SURFACE IS THE CLASS PLUS setServices (TOR-209's rule, applied by
+// TOR-208). LIST, WHY_NOT_VIDEO and framesLabel were imported by nobody -
+// checked across the whole repository - and the Go tests that name them
+// (filelist_test.go's WHY_NOT_VIDEO check, tick_test.go's framesLabel one,
+// detailtree_test.go's LIST) all read this module's TEXT, which needs no
+// export. setServices stays because app.js imports it by name and it is point
+// 7 of the element pattern. See frame-panel.js's own export block for the full
+// reasoning, and for why an extra name here is not free any more.
+export { FileList, setServices };

@@ -157,17 +157,21 @@ func extractJSFunction(t *testing.T, js, name string) string {
 	return m
 }
 
-// extractJSConst pulls one top-level `const NAME = { ... };` declaration's
-// exact source - state, in practice, since compareEntries reads state.sort
-// and this test has to set it the same way the real page does (a click
-// handler assigning state.sort, not a parameter compareEntries takes).
+// extractJSConst pulls one top-level single-line `const NAME = ...;`
+// declaration's exact source. Two shapes are extracted: an object literal
+// (state, in practice, since compareEntries reads state.sort and this test
+// has to set it the same way the real page does - a click handler assigning
+// state.sort, not a parameter compareEntries takes) and a `new Set([...])`
+// call (FINAL, TOR-202 - hasLive() reads it now, so a harness that lifts
+// hasLive out of state.js by itself has a free variable unless this comes
+// with it).
 func extractJSConst(t *testing.T, js, name string) string {
 	t.Helper()
-	re := regexp.MustCompile(`const ` + regexp.QuoteMeta(name) + ` = \{[^\n]*\};`)
+	re := regexp.MustCompile(`const ` + regexp.QuoteMeta(name) + ` = (\{[^\n]*\}|new Set\([^\n]*\));`)
 	m := re.FindString(js)
 	if m == "" {
-		t.Fatalf("the module handed to this test has no const %s = {...}; to extract - it has to stay one "+
-			"physical line for this to lift it", name)
+		t.Fatalf("the module handed to this test has no const %s = {...}; or const %s = new Set([...]); to "+
+			"extract - it has to stay one physical line for this to lift it", name, name)
 	}
 	return m
 }
@@ -408,11 +412,19 @@ type jsSortCase struct {
 // into one flat script, with no imports and no module wrapper, so what it
 // proves is that each of these declarations is self-contained on its own
 // text - the property TOR-148 bought and this ticket had to not break.
+//
+// FINAL is pulled in alongside state as of TOR-202: hasLive() reads it
+// (!!entry.live && !FINAL.has(entry.state)) so a finished run's stale live
+// reading sinks the same way a never-had-a-client row's does, and a harness
+// that lifted hasLive without it would hand node a ReferenceError instead of
+// running the real function.
 func compareEntriesHarness(t *testing.T, js string) string {
 	t.Helper()
 
 	var b strings.Builder
 	b.WriteString(extractJSConst(t, js, "state"))
+	b.WriteString("\n")
+	b.WriteString(extractJSConst(t, js, "FINAL"))
 	b.WriteString("\n")
 	for _, name := range []string{
 		"hasLive", "availabilityReading", "arrivalOrdinal", "badgeLabel", "displayName", "shortId",
@@ -781,30 +793,46 @@ func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
 	}
 }
 
-// TestExactlyOneThPerColumnIsEverBuilt guards TOR-157's own precondition
-// before its own tests get to it: the detail row's colspan (this.columns,
-// read off "#run-table thead th" in connectedCallback) is only ever correct
-// if nothing past buildLiveColumnHeaders() creates another <th> - a resize
-// handle that turned out to be a header cell of its own, say, rather than a
-// plain <span> living inside one, would inflate the count this.columns reads
-// without TestLiveColumnsAreWiredIntoBothHeadersAndSorting or anything else
-// here noticing, since both still agree on nine sortable columns either way.
-func TestExactlyOneThPerColumnIsEverBuilt(t *testing.T) {
+// TestExactlyOneHeaderCellPerColumnIsEverBuilt guards TOR-157's own
+// precondition before its own tests get to it, and TOR-215 made the stakes
+// higher rather than lower. It used to be about a count: the detail row's
+// colspan was read off "#run-table thead th", so a stray extra <th> - a
+// resize handle that turned out to be a header cell of its own, say, rather
+// than a plain <span> living inside one - inflated that number silently.
+// There is no count any more (the detail spans 1 / -1), but a stray extra
+// header cell is now a stray GRID ITEM in the header's own row: it takes a
+// track, and every column after it renders one column to the left of its own
+// data. TestLiveColumnsAreWiredIntoBothHeadersAndSorting would not notice
+// either way, since both halves still agree on nine sortable columns.
+//
+// The class is what the check is anchored on rather than the tag, because the
+// tag is a plain div now and there are dozens of those: exactly one line in
+// run-table.js may put a cell in the header band, and it is
+// buildLiveColumnHeaders'.
+func TestExactlyOneHeaderCellPerColumnIsEverBuilt(t *testing.T) {
 	js := runTableJS(t)
 
-	if n := strings.Count(js, `document.createElement("th")`); n != 1 {
-		t.Errorf(`run-table.js calls document.createElement("th") %d times, want exactly 1 (inside `+
-			"buildLiveColumnHeaders) - a second call would add a column the detail row's colspan "+
-			"was never told about", n)
+	if n := strings.Count(js, `className = "run-grid-head`); n != 1 {
+		t.Errorf(`run-table.js assigns a "run-grid-head" class %d times, want exactly 1 (inside `+
+			"buildLiveColumnHeaders) - a second one would put an extra item in the grid's header "+
+			"row, taking a track and shifting every column after it off its own data", n)
 	}
-	// And nothing OUTSIDE the element may build one either, which is new with
-	// TOR-194: the header row is the table's own part now, so a <th> minted
+	// And nothing OUTSIDE the element may build one either, which is TOR-194's
+	// half: the header band is the table's own part, so a header cell minted
 	// anywhere else would be a column that reached neither LIVE_COLUMNS, nor
-	// sorting, nor the width tokens, nor this.columns.
-	if strings.Contains(appJS(t), `document.createElement("th")`) {
-		t.Error(`app.js builds a <th> of its own - since TOR-194 the header row belongs to the table ` +
-			"element, and a column added from outside it would be invisible to every mechanism that " +
-			"reads the header row")
+	// sorting, nor the width tokens, nor the grid's track list.
+	if strings.Contains(appJS(t), "run-grid-head") {
+		t.Error(`app.js builds a header cell of its own - since TOR-194 the header band belongs to ` +
+			"the table element, and a column added from outside it would be invisible to every " +
+			"mechanism that reads the headers")
+	}
+	// The <table> is gone and must not come back a piece at a time: a <th> or
+	// a <td> built here would be a cell no grid track sizes (TOR-215).
+	for _, gone := range []string{`createElement("th")`, `createElement("td")`, `createElement("tr")`} {
+		if strings.Contains(js, gone) {
+			t.Errorf("run-table.js still calls %s - the run table is a CSS grid, and a table cell "+
+				"inside it belongs to no track at all", gone)
+		}
 	}
 }
 
@@ -818,14 +846,30 @@ func TestExactlyOneThPerColumnIsEverBuilt(t *testing.T) {
 func TestColumnWidthsKeyOffElSortHeaders(t *testing.T) {
 	js := runTableJS(t)
 
-	if !strings.Contains(js, `Array.from(this.sortHeaders, (th) => th.dataset.sort)`) {
+	if !strings.Contains(js, `Array.from(this.sortHeaders, (head) => head.dataset.sort)`) {
 		t.Error("run-table.js's resizableColumnKeys() does not derive its column list from this.sortHeaders - " +
 			"a hand-written list here could silently drift from the headers buildLiveColumnHeaders() actually built")
 	}
-	if !strings.Contains(js, `th.style.width = "var(--col-w-" + key + ")";`) {
-		t.Error(`run-table.js does not set each sortable header's own width from its --col-w-* token - without this ` +
-			`table-layout: fixed would have nothing but the CSS default to size that column with, and a stored or ` +
-			`dragged width would never reach the page`)
+	// AND NOTHING SETS A WIDTH ON A HEADER ANY MORE (TOR-215). Under
+	// table-layout: fixed the column's width WAS an inline width on its own
+	// header, set in wireColumnResizers as
+	// `head.style.width = "var(--col-w-" + key + ")"`. A grid track reads the
+	// token itself (TestColumnWidthTokensMatchThePanelWidthFamily checks that
+	// end), so the line said nothing - and, a grid item being content-box
+	// where a table cell's width included its padding, it made every header
+	// 9.6px wider than its own track (TOR-214 measured 329.6px in a 320px
+	// track). Putting a width back on a header is the specific mistake this
+	// guards against.
+	//
+	// Read through liveJS, which strips comments: the deleted line is quoted
+	// verbatim in wireColumnResizers' own note (that is how a reader learns
+	// what went and why), and a guard that could not tell prose from code
+	// would fail on the explanation instead of on the mistake.
+	if strings.Contains(liveJS(t, js), "style.width") {
+		t.Error("run-table.js sets an inline width on a header again - the column's width is its GRID " +
+			"TRACK's since TOR-215 (--run-tracks reads the same --col-w-* token, and since TOR-221 " +
+			"every row's grid reads that one list), and an " +
+			"inline width on a content-box grid item overflows that track by its own padding")
 	}
 }
 
@@ -924,7 +968,7 @@ func TestColumnDragNeverTriggersSort(t *testing.T) {
 	}
 	// The other half of what made this loop the right subject: the handles go
 	// inside the very headers wireSorting made into sort controls.
-	if !strings.Contains(block, "for (const th of this.sortHeaders) {") {
+	if !strings.Contains(block, "for (const head of this.sortHeaders) {") {
 		t.Fatal("run-table.js's wireColumnResizers no longer walks this.sortHeaders - the handles would not " +
 			"be sitting inside a sort control at all, which is the collision this test exists for")
 	}
@@ -1065,25 +1109,280 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 		}
 	}
 
-	// table-layout: fixed is what makes a header's own width authoritative
-	// for the whole column regardless of a row's content - without it, a
-	// dragged column could be overridden right back open by a long name or
-	// status line, the same shrink problem .run-cell-name's old max-width: 0
-	// trick existed to solve for exactly one column.
-	if !regexp.MustCompile(`\.run-table\s*\{[^}]*table-layout:\s*fixed`).MatchString(css) {
-		t.Error("app.css's .run-table rule does not set table-layout: fixed - a column's width would still be " +
-			"whatever its content wants regardless of what run-table.js sets --col-w-* to")
+	// THE TRACK LIST IS WHERE A COLUMN'S WIDTH COMES FROM SINCE TOR-215, and
+	// SINCE TOR-221 IT IS ONE VALUE - --run-tracks. It is checked whole - every
+	// track, in order - rather than by looking for each token somewhere in it.
+	// The list is the one place the nine draggable columns, their order and the
+	// tenth flexible one all have to agree, and the shape of a track matters as
+	// much as its presence (below).
+	//
+	// ONE VALUE rather than one rule is TOR-221's whole claim: alignment stops
+	// being a dependency on a PARENT (a row had to be a direct grid item of
+	// .run-grid carrying grid-template-columns: subgrid) and becomes one on
+	// this token, which every grid that lays a run's columns out reads.
+	// TestNoRowDependsOnItsContainerToFindItsColumns is the other half - that
+	// nothing has quietly gone back to depending on the parent instead.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+	if n := strings.Count(live, "--run-tracks:"); n != 1 {
+		t.Fatalf("the served stylesheet declares --run-tracks %d times, want exactly 1 - two "+
+			"declarations are two track lists that can drift apart, which is the one way per-row "+
+			"grids can come to misalign at all", n)
+	}
+	decl := regexp.MustCompile(`(?s)--run-tracks:([^;]*);`).FindStringSubmatch(live)
+	if decl == nil {
+		t.Fatal("the served stylesheet declares no --run-tracks - since TOR-221 that token IS the ten " +
+			"columns, so without it .run-grid-head-row and .run-row would each lay out a single auto " +
+			"track and no --col-w-* token would reach the page at all")
+	}
+	// AND IT IS ON :root, not on a container. On a container it would reach a
+	// row only by INHERITANCE, which looks like it works and is the same
+	// coupling wearing inheritance's clothes: a row moved out of that box
+	// silently loses every column, because an unresolvable var() makes the
+	// whole declaration invalid at computed-value time and grid-template-columns
+	// falls back to none.
+	if rootRule := regexp.MustCompile(`(?s):root \{.*?\n\}`).FindString(live); !strings.Contains(rootRule, "--run-tracks:") {
+		t.Error("--run-tracks is declared outside the :root token rule - on a container it reaches a " +
+			"row only by inheritance, so a row put anywhere else loses all ten columns; on :root it " +
+			"reaches a row wherever the row is (TOR-221)")
+	}
+	// ", " -> "," first, so minmax(3.8rem, 1fr) is one field rather than two.
+	tracks := strings.Fields(strings.ReplaceAll(decl[1], ", ", ","))
+
+	// A BARE LENGTH PER SORTABLE TRACK, and nothing softer - which is why the
+	// want list below is written out in full instead of being built from the
+	// key list above. This is the exact counterpart of the table-layout: fixed
+	// it replaced, and TOR-214 measured that a grid does NOT give it for free:
+	// for a column dragged to 44px holding a string 828.17px wide,
+	// table-layout: auto rendered 822.43px and minmax(min-content, 44px)
+	// rendered 822.43px too - only a bare 44px track rendered 44px. Wrapping
+	// the tokens as minmax(token, 1fr) so the slack would spread was tried as
+	// well: all ten tracks resolved to 851.74px and dragging went inert. So a
+	// track named here in any other shape is a regression a "contains the
+	// token" check would have passed.
+	//
+	// The tenth is the actions column: no data-sort, no --col-w-* token of its
+	// own (see resizableColumnKeys()), and the ONE flexible track - which is
+	// both where the pane's slack goes and why it keeps a 3.8rem floor.
+	want := []string{
+		"var(--col-w-name)",
+		"var(--col-w-when)",
+		"var(--col-w-status)",
+		"var(--col-w-peers)",
+		"var(--col-w-seeds)",
+		"var(--col-w-download_bps)",
+		"var(--col-w-upload_bps)",
+		"var(--col-w-availability)",
+		"var(--col-w-priority)",
+		"minmax(3.8rem,1fr)",
+	}
+	if len(tracks) != len(want) {
+		t.Fatalf("--run-tracks declares %d column tracks, want %d - the header band's cells are that "+
+			"grid's own items and a row's cells are its own, so a track too few or too many shifts "+
+			"every column after it off its own data, in both at once: %q", len(tracks), len(want), tracks)
+	}
+	for i, w := range want {
+		if tracks[i] != w {
+			t.Errorf("--run-tracks track %d is %q, want %q - a column has to be a BARE length read "+
+				"from its own token (TOR-214 measured minmax/min-content/auto all letting content win at "+
+				"822.43px where a bare 44px track gave 44px), and the tenth has to stay minmax(3.8rem, 1fr) "+
+				"or the rows stop filling the pane the way the <table>'s width: 100%% did",
+				i+1, tracks[i], w)
+		}
 	}
 
-	// The actions column has no data-sort and so no --col-w-* token of its
-	// own (see resizableColumnKeys()) - table-layout: fixed still needs an
-	// explicit width somewhere on its header, or that column (and the ones
-	// with an explicit width) would fight over the fixed grid's leftover
-	// space in a way nothing here chose on purpose.
-	if !regexp.MustCompile(`\.run-table\s+thead\s+th\.run-actions-header\s*\{[^}]*width:\s*3\.8rem`).MatchString(css) {
-		t.Error("app.css's .run-actions-header rule does not set an explicit width - table-layout: fixed reads " +
-			"column widths off the header row alone, and this header has no --col-w-* token to fall back to")
+	// AND BOTH GRIDS READ IT, by var() and not by a copy of the list. Two
+	// copies would resolve identically on the day they were written and drift
+	// on the day one of them is edited, which is a misalignment nobody sees
+	// for a year - the exact failure TOR-221's own measurement was aimed at.
+	for _, sel := range []string{".run-grid-head-row", ".run-row"} {
+		rule := regexp.MustCompile(`(?s)\` + sel + `\s*\{.*?\n\}`).FindString(live)
+		if rule == "" {
+			t.Fatalf("app.css has no %s rule - since TOR-221 the ten columns are laid out per row, and "+
+				"that rule IS one of the two grids that does it", sel)
+		}
+		if !strings.Contains(rule, "grid-template-columns: var(--run-tracks);") {
+			t.Errorf("%s does not lay out `grid-template-columns: var(--run-tracks)` - a second copy of "+
+				"the track list aligns on the day it is written and drifts on the day one copy is "+
+				"edited, and a cell an eighth of a pixel out of its column is the failure nobody "+
+				"notices (TOR-221)", sel)
+		}
+		if !strings.Contains(rule, "display: grid;") {
+			t.Errorf("%s does not declare display: grid - grid-template-columns on a non-grid box is "+
+				"inert, so every cell in it would stack in one column", sel)
+		}
 	}
+
+	// AND THE ROWS OUTGROW THE PANE RATHER THAN THE PAGE. width: max-content
+	// with min-width: 100% is the pair, and it stays on .run-grid - the one
+	// job that box still has since TOR-221 took the grid off it: at rest
+	// min-width wins and it fills the pane, every row stretching to it and
+	// resolving the same 1fr from the same width; the moment a drag makes the
+	// tracks sum wider, max-content wins and .run-table-wrap's own overflow-x
+	// scrolls. Measured on the running page: 1168px at rest against a 1168px
+	// pane, 1303.19px after a drag to the 640px ceiling, with the wrap
+	// scrolling at 1303/1168 and documentElement.scrollWidth still equal to
+	// its clientWidth.
+	grid := regexp.MustCompile(`(?s)\.run-grid \{.*?\n\}`).FindString(live)
+	if grid == "" {
+		t.Fatal("app.css has no .run-grid rule at all - it is no longer a grid (TOR-221) but it is " +
+			"still the box whose width: max-content/min-width: 100% decides whether the wrap " +
+			"scrolls or the page does")
+	}
+	for _, w := range []string{"width: max-content;", "min-width: 100%;"} {
+		if !strings.Contains(grid, w) {
+			t.Errorf("app.css's .run-grid rule does not set %q - one of the two halves of \"fills the "+
+				"pane at rest, outgrows it on a wide drag\" is missing, and a dragged column would "+
+				"either be clamped by the pane or push the whole page sideways", w)
+		}
+	}
+}
+
+// rowParts are the three elements a run is built from (run-table.js's newRow):
+// the wrapper, the torrent's own line and the detail's row. TOR-221's claim is
+// about exactly these - that none of them needs to be anywhere in particular
+// to look right.
+var rowParts = []string{".run-row-group", ".run-row", ".run-detail-row"}
+
+// TestNoRowDependsOnItsContainerToFindItsColumns is TOR-221's fifth criterion,
+// and it is deliberately not the check that criterion could be read as asking
+// for. "`subgrid` appears nowhere in the served stylesheets" is one grep and it
+// is weak: subgrid is one of at least four ways to write "this row's layout
+// comes from its parent", and a reintroduction would almost certainly arrive as
+// one of the others - most likely by someone restoring the shared grid because
+// two rules with the same track list looked like duplication.
+//
+// So each arm below names a DIFFERENT way to make a row depend on its
+// container, and the wrong implementations they catch are:
+//
+//	subgrid on a row part          the original coupling, back by its own name
+//	display: contents anywhere     the same coupling one level up - a container
+//	                               with no box makes its children items of the
+//	                               GRANDPARENT's grid, which is how #run-list
+//	                               used to work and why it needed that rule
+//	display: grid on .run-grid     the shared grid restored, which makes every
+//	                               row a grid ITEM again (and, with the row's
+//	                               own tracks still in place, a nested grid
+//	                               inside one column - measured at 922.3906px
+//	                               out in TOR-221's control arm)
+//	grid-column/-row/-area on a
+//	  row part                     properties that only mean anything to a
+//	                               grid item, so declaring one asserts a parent
+//	a row part as the key selector
+//	  under any combinator         `.run-grid > .run-row-group { ... }` says in
+//	                               the selector what subgrid used to say in the
+//	                               value: this only works in that box
+//
+// What it cannot catch is a track list copied instead of read
+// (TestColumnWidthTokensMatchThePanelWidthFamily's own var(--run-tracks) arm
+// covers that) and anything about what a browser actually renders - the
+// 0.0000px across 22 rows is in docs/front-end.md with the control that makes
+// it a measurement.
+func TestNoRowDependsOnItsContainerToFindItsColumns(t *testing.T) {
+	css := stylesheet(t)
+	// Comments stripped, and that matters more here than in most of these
+	// tests: table.css, tokens.css and accordion.js all EXPLAIN the subgrid
+	// that was removed, by name, because a reader who does not know what was
+	// there cannot know why the token exists. A guard that could not tell
+	// prose from code would fail on the explanation instead of on the mistake.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(css, "")
+
+	if strings.Contains(live, "subgrid") {
+		t.Error("`subgrid` is back in the served stylesheet. It only resolves on a DIRECT grid item " +
+			"of the grid it borrows from, so whatever carries it cannot have anything inserted " +
+			"above it - which is the coupling TOR-221 removed and the first reason front-end.md " +
+			"used to give for the accordion not being an element")
+	}
+	if strings.Contains(live, "display: contents") {
+		t.Error("`display: contents` is back in the served stylesheet. It is the same dependency one " +
+			"level up: a box that is not there makes its children items of the GRANDPARENT's grid, " +
+			"so a row would again only lay out correctly at one exact depth. #run-list carried it " +
+			"until TOR-221 and needs nothing now")
+	}
+
+	// .run-grid must not be a grid. If it is, every row is a grid item again -
+	// and worse than before, because the row still carries its own tracks, so
+	// it lays its ten columns out inside whatever single column it landed in.
+	if grid := regexp.MustCompile(`(?s)\.run-grid \{.*?\n\}`).FindString(live); grid != "" {
+		for _, banned := range []string{"display: grid", "display: inline-grid", "grid-template-columns"} {
+			if strings.Contains(grid, banned) {
+				t.Errorf(".run-grid declares %q again - the shared grid is what made a row a fragment "+
+					"of its container rather than a whole thing (TOR-221). The rows carry their own "+
+					"tracks now, so a row would lay its ten columns out inside one column of this one",
+					banned)
+			}
+		}
+	}
+
+	// Rule by rule: a row part may not be given a grid ITEM's properties, and
+	// may not be reached through a combinator as the thing a rule is about.
+	for _, rule := range splitRules(live) {
+		for _, sel := range strings.Split(rule.selector, ",") {
+			sel = strings.TrimSpace(sel)
+			if sel == "" {
+				continue
+			}
+			key := keyCompound(sel)
+			part := ""
+			for _, p := range rowParts {
+				if strings.Contains(key, p) {
+					part = p
+				}
+			}
+			if part == "" {
+				continue
+			}
+			for _, prop := range []string{"grid-column", "grid-row", "grid-area"} {
+				if regexp.MustCompile(`(^|[;{\s])` + prop + `\s*:`).MatchString(rule.body) {
+					t.Errorf("%q declares %s. That property only means anything to a grid ITEM, so it "+
+						"is an assertion about this element's PARENT - exactly what TOR-221 took out. "+
+						"A row part spans its container because it is a block, not because it was "+
+						"placed on somebody else's lines", sel, prop)
+				}
+			}
+			if key != sel {
+				t.Errorf("%q reaches %s through a combinator. A rule written that way says in the "+
+					"selector what subgrid used to say in the value - this element only lays out "+
+					"correctly inside that box - so the accordion could not be wrapped around it "+
+					"again (TOR-221). Style the part by its own class", sel, part)
+			}
+		}
+	}
+}
+
+// styleRule is one declaration block with the selector list it belongs to.
+type styleRule struct {
+	selector string
+	body     string
+}
+
+// splitRules cuts comment-stripped CSS into rules. Flat by design: this
+// stylesheet has no @media and no nesting (theme_test.go's own guard is what
+// keeps the first true), so a rule is everything between one "}" and the next.
+func splitRules(css string) []styleRule {
+	var out []styleRule
+	for _, chunk := range strings.Split(css, "}") {
+		i := strings.Index(chunk, "{")
+		if i < 0 {
+			continue
+		}
+		out = append(out, styleRule{selector: strings.TrimSpace(chunk[:i]), body: chunk[i+1:]})
+	}
+	return out
+}
+
+// keyCompound returns the last compound of one selector - the element the rule
+// is ABOUT, as opposed to the ancestors it is qualified by. Equal to the whole
+// selector exactly when there is no combinator, which is the shape TOR-221
+// wants for a row part.
+func keyCompound(sel string) string {
+	sel = strings.TrimSpace(sel)
+	last := 0
+	for i, r := range sel {
+		if r == ' ' || r == '>' || r == '+' || r == '~' {
+			last = i + 1
+		}
+	}
+	return strings.TrimSpace(sel[last:])
 }
 
 // WHAT THESE TESTS DO NOT COVER, in one place - the summary the top of this
@@ -1317,3 +1616,644 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 //     `<script type="module" src="app.js"></script>` there. The line was
 //     applied for this pass only, and reverted afterwards with a
 //     byte-for-byte comparison against a pre-pass snapshot.
+
+// ---------------------------------------------------------------------------
+// TOR-203's browser pass: THE ID SWAP, BY CLICK, five times.
+//
+// This is the gap TOR-191's pass named and could not close. That pass triggered
+// the reopen with POST /runs/reopen instead of a click, so resolveIncomingRun
+// found no entry expecting the new id and ensureRun opened a SECOND row beside
+// the disk one - correct for how it was driven, and the exact reason it never
+// executed claimReopenedRun's swap branch. The swap is where the defect lived,
+// so it survived that pass untouched.
+//
+// Driven this time by clicking the disk row, which is what raises `reopening`.
+// torpeek was served headless on 8837 with -dht=false over an out dir holding
+// the browser fixture's result sets. A reopen replays off disk (Server.ReopenRun
+// goes through s.replayer), so no swarm and no seeder are involved in it.
+//
+// FIVE DISK ROWS REOPENED BY CLICK, and every one arrived as `done`:
+// data-state went disk -> replaying -> done, the detail rendered inside the
+// row with its frame grid, the row took a queue ordinal, and ONE row existed
+// per reopen - the new id folded into the row that asked for it rather than
+// spawning a duplicate. On the broken module each of these was `failed` with
+// "syncEntry is not defined" as its reason, because the ReferenceError in the
+// swap branch sent app.js's own handler into its catch.
+//
+// THE TOP-UP, on a finished run: the log recorded "topping up: 6 point(s), up
+// to 150.0 MB more traffic", the row went done -> running and redrew AT ONCE -
+// which is the redraw this ticket moved out to the caller - and NO error line
+// appeared, neither the row's own nor the page's, read at 2.5s and again at 9s.
+// That page-level line is precisely where the old failure printed itself.
+//
+// Two failures on the way there were the FIXTURE's, not the page's, and are
+// recorded because each names a real constraint on this kind of check:
+//   - `unknown profile "fastest", want "min-time" or "min-traffic"`. A plan
+//     written by hand carried the label off the page's dropdown instead of the
+//     internal profile name. The intake's "fastest" is not a stored value.
+//   - `privacy_unresolvable: magnet has no trackers and DHT is disabled`. With
+//     -dht=false the privacy routing refuses a trackerless magnet, which is why
+//     the TOR-194 recipe's magnets carry a dead loopback tracker. Adding one to
+//     the fixture's source is what let the topped-up run reach `running`.
+// Both arrived AFTER the POST had succeeded, as named server errors on the run,
+// and neither is a ReferenceError - which is what made them separable from the
+// thing under test rather than fatal to the pass.
+//
+// A top-up whose set has no recorded plan offers nothing at all: topUpFor
+// refuses with "this run was recorded before torpeek kept the capture plan",
+// and the Top up control stays hidden. The stock fixture is such a set, so the
+// half-captured set above (plan.count 12 against 6 frames on disk) had to be
+// built before this half of the criterion could be exercised at all.
+//
+// NOT COVERED, deliberately: the swap branch reached from topUpRun rather than
+// from the reopen. It needs a row that is still `entry.disk` when Top up is
+// pressed, since that is what makes the page send no id and the server mint a
+// new one - and clicking a disk row reopens it, so the detail is never open
+// with the flag still up. Every other caller re-arms with the id it already
+// has (Server.again), which is claimReopenedRun's second branch and never held
+// the missing name. The swap itself is covered by execution instead:
+// TestARunStateClaimingAReopeningRowSwapsItsIdWithoutThrowing
+// (eventstate_test.go) runs it through apply() and fails on the broken module.
+
+// TOR-205's browser pass: A SUBTREE CONNECTED BEFORE IT FINISHES ARRIVING,
+// STREAMED IN BY HAND, AND A GENUINELY MISSING PART THAT NEVER DOES.
+//
+// settle_test.go's own header explains why this is a browser pass and not
+// another text guard: wire()/awaitParts()/partsNeverArrived() are not
+// DOM-free the way state.js and events.js are (eventstate_test.go's whole
+// premise), so running them for real needs an actual DOM, which plain node
+// does not have and this repository ships no jsdom for. Criterion 1 asks for
+// exactly that - "tested by BUILDING the element and its subtree in an order
+// that connects it early, not only by reading the code" - so this is where
+// that happens.
+//
+// torpeek was served headless on 127.0.0.1:8973 with -dht=false over an out
+// dir holding the browser fixture's stock result set (no swarm needed - see
+// this ticket's own instructions: the bug is about connection order, not
+// about anything a torrent does). Every check below ran as real JavaScript
+// in the loaded page's own console, against the SHIPPED, REGISTERED classes
+// (customElements.define already ran via app.js's normal bootstrap) - not a
+// copy, not a mock DOM.
+//
+// FIRST, THE COST CLAIM ITSELF, CHECKED RATHER THAN ASSUMED: on torpeek's own
+// page, `document.querySelector("frame-panel").partsObserver` and the same
+// for `compare-dialog` and `run-table` were all `null` - the observer this
+// ticket adds was never created at all, because index.html is fully parsed
+// before app.js's deferred module ever calls customElements.define. Every
+// one of the three was already `.wired === true` at that point.
+//
+// THE THREE ELEMENTS THAT CAN ACTUALLY STREAM (run-table, frame-panel,
+// compare-dialog - see settle_test.go's header for why the other three
+// cannot), each driven the same way: `document.createElement(tag)`, appended
+// to the page EMPTY (connecting it with no subtree at all - the exact TOR-205
+// scenario), then its markup appended back in over two steps with
+// `await Promise.resolve()` between them so the MutationObserver's callback
+// gets a chance to run without any real clock time passing.
+//
+//   frame-panel: connected empty -> not wired, an observer created
+//     (partsObserver truthy). .lightbox appended alone (TOR-204's own probe's
+//     exact shape - the wrapper exists, #lightbox-img does not yet) -> still
+//     not wired, 1.3ms in. The rest of the subtree (.lightbox-view,
+//     #lightbox-img, .lightbox-caption, .lightbox-close, .lightbox-zoom)
+//     appended together -> WIRED, at 2ms total - four orders of magnitude
+//     under the 10s deadline - with partsObserver and partsDeadline both back
+//     to null. Called .open("/x.jpg", "test caption") on it afterward:
+//     dialog.open became true and the caption read "test caption" - not just
+//     "wired" but actually working.
+//   compare-dialog: same shape, #compare-close held back as the one part
+//     still missing after everything else arrived (1.8ms in, not wired) ->
+//     WIRED at 2.2ms once it arrived. Proved the listener itself works, not
+//     only that the field exists: showModal()'d the dialog, clicked
+//     closeButton, and dialog.open read false afterward.
+//   run-table: connected empty -> waiting. .run-table-wrap containing
+//     table#run-table (thead/tr/th.run-actions-header, tbody#run-list)
+//     appended, #run-list-empty held back -> still not wired at 1.3ms.
+//     #run-list-empty appended -> WIRED at 3ms, with buildLiveColumnHeaders
+//     having actually run: this.columns read 7 (the one actions header plus
+//     the six live columns), this.sortHeaders.length read 6, and
+//     this.columnWidths was a real object - the element did not just flip a
+//     flag, it ran the rest of what connectedCallback always did.
+//
+// THE OTHER HALF OF CRITERION 2 - "NEVER", NOT "NOT YET" - for the same three,
+// each connected with EVERY part except one, which was never added:
+//
+//   frame-panel, missing #lightbox-img/.lightbox-view/.lightbox-caption/
+//     .lightbox-close/.lightbox-zoom entirely (dialog only): console read
+//     "frame-panel: no view, img, caption, closeButton, zoomReadout inside
+//     the element, 10s after connecting - giving up rather than waiting
+//     forever" - caught by a window "error" listener, i.e. a real uncaught
+//     error, not a swallowed one. This case doubled as an accidental but
+//     genuine demonstration of the deadline racing real wall-clock time
+//     across two separate tool calls: the element was created in one call and
+//     checked again after enough real latency between calls had passed for
+//     the 10s deadline to already be gone - which is exactly the scenario the
+//     mechanism has to survive, not only a tight in-page loop.
+//   compare-dialog, missing only #compare-close: connected, then the page
+//     was left running a real setTimeout(11000) inside one script call.
+//     Date.now() before and after read 13432ms elapsed (real wall clock, not
+//     simulated) - the console read exactly "compare-dialog: no closeButton
+//     inside the element, 10s after connecting - giving up rather than
+//     waiting forever" once, naming the ONE part actually missing rather than
+//     every part queried.
+//   run-table, missing only #run-list-empty: same recipe, 16957ms real
+//     elapsed, console read "run-table: no emptyNote inside the element, 10s
+//     after connecting - giving up rather than waiting forever".
+//
+// In every one of the three "never" cases, `.wired` stayed `false` and
+// `.partsObserver` read back `null` afterward - the failed deadline still
+// tears down its own observer, so a genuinely dead element does not go on
+// polling the page forever either.
+//
+// THE OTHER THREE ELEMENTS - run-detail, file-list, file-detail - build their
+// own markup synchronously (settle_test.go's header has the full reasoning
+// for why that means no settle mechanism was needed), so "shown able to
+// fail" for them is TOR-192's original guard, unchanged, forced with a
+// legitimate technique rather than by editing shipped source: one instance's
+// own `querySelector` was shadowed (an own-property function on the
+// instance, which JavaScript resolves before the prototype's) so ONE
+// specific selector returned `null`, `build()` was called, the throw was
+// read, and the shadow was removed before creating a second, ordinary
+// instance to confirm normal construction still works:
+//
+//   run-detail: querySelector(".run-detail-cancel") shadowed to null ->
+//     build() threw "run-detail: no detailCancel inside the element". A
+//     fresh instance built clean: detailEl existed, no error.
+//   file-list: querySelector(".picker-armed") shadowed to null -> build()
+//     threw "file-list: no pickerArmed inside the element". A fresh instance
+//     built clean: pickerEl existed, no error.
+//   file-detail: querySelector shadowed to return null unconditionally (its
+//     FIRST stage, build(), looks up only the one .file-detail slot) ->
+//     build() threw "file-detail: no body inside the element" - the one
+//     explicitly two-staged guard detailtree_test.go's own
+//     TestEachDetailElementFindsItsPartsAndFailsLoudly names. A fresh
+//     instance built clean: body existed, no error.
+//
+// Cleanup: every synthetic element created above was removed from the
+// document before the pass ended, and the page's own six singletons were
+// re-checked as the very last step - one of each tag, every one still
+// `.wired === true` - so nothing this pass did left the real page any
+// different from how it started. The server (pid captured from the
+// foreground process, not a `go run` wrapper) was killed and
+// `lsof -nP -iTCP:8973 -sTCP:LISTEN` confirmed the port free afterward.
+
+// TOR-207's browser pass: the six checks 1.4.0's release notes named as
+// outstanding, closed against a real torpeek server on 127.0.0.1:8827
+// (-headless -dht=false -max-active-torrents 1), real loopback-seeded
+// torrents (scratchpad/seed.go, the TestZZHarness194 harness's replacement -
+// that harness lived in a worktree removed after TOR-194 and was never
+// tracked in this repository), and Chrome DevTools Protocol driving the
+// shipped page. Machine load at the start of the pass was `uptime`'s
+// `4.58 22.72 21.58` on 8 cores (the 1-minute figure - the one that matters
+// for what the tooling is about to do - was calm; the 15-minute figure was
+// inherited from earlier sibling agents' work and fell across the session).
+// One CDP `Runtime.evaluate` call timed out at 45s against load ~8.9; a
+// retry immediately after succeeded, matching TOR-194's own note that this
+// is a load artifact and not a driving-agent one.
+//
+// CHECK 1 - A LIVE ROW'S FIGURES AT FULL STRENGTH, the positive case TOR-194
+// left unverified. It could not be reached by polling an ordinary loopback
+// run: a 200KB-2MB clip transfers over loopback in well under a second, far
+// faster than any HTTP round trip this session could poll with, so peers and
+// download_bps read back 0 for a run's entire observable "running" window in
+// every unthrottled attempt - the download is over before the first poll
+// after it starts, and the remaining ~15-30s of "running" is ffmpeg frame
+// extraction with the swarm already idle. seed.go gained a `-rate-bps` flag
+// (an anacrolix `cfg.UploadRateLimiter`, capping the SEED side's upload) to
+// hold a transfer open long enough to read: at -rate-bps 40000 over a
+// 1.98MB clip, GET /runs returned
+// `"live":{"peers":1,"seeds":1,"download_bps":39323.92,"upload_bps":0,...}`,
+// and the page's own DOM showed PEERS 1, SEEDS 1, DOWN ramping 19.2 KB/s ->
+// 37.2 KB/s -> 41.6 KB/s as the poll caught it, UP 0 B/s, AVAIL 1.00x/0
+// missing - every one of `run-cell-peers/-seeds/-down/-up/-availability` on
+// that row read `data-absent="false"`, including the genuinely-zero UP cell,
+// which is the case criterion 1 is actually about: a real zero is not the
+// same reading as an absent dash, and hasLive() does not conflate them.
+//
+// CHECK 2 - ABSENT SINKING TO THE END OF A SORT, ON A TABLE HOLDING BOTH. The
+// attempt TOR-194 counted was rejected for running on one row, which cannot
+// show an order. This one ran on 13: 1 running row with real Peers (the
+// check 1 row above) and 12 absent rows (1 queued, 11 done/on-disk). Peers
+// was clicked to ascending, then to descending; in BOTH directions the one
+// real row (`absent="false"`, text "1") sat at index 0 and all 12 absent
+// rows (`absent="true"`, text "-") filled 1-12 - proving the rule is
+// "absent always sinks to the end" rather than "small values sort first",
+// which a single real row sorting trivially first could not have shown
+// either way.
+//
+// CHECK 3 - TWO ROWS OPEN AT ONCE, AND A FILE'S DETAIL SURVIVING A COLLAPSE
+// AND RE-OPEN. tor207-filler2 (running) and tor207-multi (queued) were
+// expanded together and both stayed rendered open at once - ordinary
+// <run-detail> accordion behaviour, but never asserted in a browser before
+// now. Separately, on a finished row with real frames on disk
+// (tor207-clip-k), its lone file's own picker-open sub-detail was opened
+// (`.picker-item.dataset.expanded` read "true", a `.file-detail` node
+// present), the WHOLE TORRENT ROW was collapsed
+// (`.run-row-main`'s `aria-expanded` false), then re-expanded
+// (`aria-expanded` true again) - and the file's own `dataset.expanded` read
+// "true" throughout, with `.file-detail` still present after the reopen:
+// the file-level state survived the row-level collapse rather than
+// resetting.
+//
+// CHECK 4 - COLUMN WIDTHS PERSISTING ACROSS A RELOAD, AND A CORRUPT
+// localStorage VALUE FALLING BACK TO DEFAULTS. The Name column's resize
+// handle was dragged with real `PointerEvent`s (pointerdown/pointermove
+// with `buttons: 1`/pointerup on the `.col-resizer`, the same events
+// wireColumnResizers listens for and the reason a plain synthetic
+// MouseEvent drag did nothing first) from the default 20rem to 456.734375px.
+// `localStorage["torpeek.columnWidths"]` read back
+// `{"name":456.734375}` and a full page reload (fresh navigation, not a
+// soft refresh) still computed `--col-w-name: 456.734375px` - the width
+// survived the reload, matching what a screenshot showed as a visibly wider
+// Name column. Then `localStorage.setItem("torpeek.columnWidths",
+// "{not valid json!!!")` and another reload: the page rendered normally
+// (18 rows, table intact), `--col-w-name` read back the plain default
+// "20rem", and `read_console_messages` found no errors or exceptions across
+// that load - loadColumnWidths' try/catch does exactly what its own comment
+// says, falling back to "as if nothing was ever stored" rather than
+// breaking.
+//
+// CHECK 5 - THE STALL TICKER COUNTING UP, THEN GOING QUIET ONCE THE ELEMENT
+// IS REMOVED. A torrent was posted whose seed's own peer address was
+// deliberately left out of -peer, so it could never connect: GET /runs
+// showed `"stall":{"code":"no_peers","since_ms":5000}` and climbing, and the
+// row's `.run-meta` text read "no peers connected for 15s", then "...25s",
+// then "...50s" as real time passed - the 1s ticker (run-table.js's single
+// `stallTimer`) counting up for real. To check it goes quiet: the live
+// `<run-table>` element's own `.stallTimer` read back `1` (an active
+// interval id), `window.clearInterval` was wrapped to record its argument,
+// and `el.remove()` was called directly. Immediately after: `el.stallTimer`
+// had been reset to `null` and the wrapped `clearInterval` had been called
+// with exactly `[1]` - disconnectedCallback's `clearInterval(this.stallTimer)`
+// ran for real, on the real interval id, the moment the element left the
+// document, rather than leaving a dangling 1s timer touching removed nodes.
+//
+// CHECK 6 - TOR-197'S FIVE-VERDICT CHAIN AND ITS TWO SENTENCES, ON A REAL
+// QUEUED TORRENT - the one check TOR-197 itself only ever text-checked.
+// Getting a queued row that still has an on-screen file picker took an
+// ordering discovery worth recording: a QUEUED entry carries no metadata at
+// all (files:0, no file list, just a "QUEUED" badge and Cancel - confirmed
+// against file-list.js's own syncFileList comment, "a queued one, whose
+// metadata has not been fetched"), so a multi-file torrent must be POSTed
+// FIRST, while the one active slot is still free, to reach `needs-action`
+// ("CHOOSE FILES", files known, picker rendered) - then a SECOND, throttled
+// torrent posted after it takes the slot instead, since a needs-action row
+// consumes no slot of its own. That left a genuine two-video-file torrent
+// (tor207-multi: a-clip.mkv, b-clip.mkv) sitting at `state: "queued"`,
+// `"QUEUED"` badge, queue position #1, with a real running row ahead of it.
+// Both boxes were ticked (asking for both files while still queued), and
+// the resulting `<label class="picker-file">` title on EACH file read
+// exactly: "this torrent is waiting to start and has not been handed to
+// the engine yet - un-tick to take this file out of the pass it will start
+// with. The other 1 stay, and nothing has been fetched or deleted" - the
+// untick==="narrow", `entry.narrowable.size > 1` branch of
+// updateFileCosts, word for word, including the two-sentence shape
+// (what pressing it does, then what happens if it is the one taken) the
+// ticket's own comment calls out as the whole of its legibility
+// requirement. Before ticking, both boxes showed the `!asked -> ""` case
+// (unchecked, a plain frame-count estimate, no verdict title) - so this one
+// pass crossed both ends of the chain's first two links on a torrent that
+// was never anything but genuinely queued.
+//
+// No defect was found: all six checks show the shipped code doing exactly
+// what its own comments say it does. The one thing worth flagging for
+// whoever next drives torpeek's web UI from a script rather than the page:
+// `DELETE /runs/{id}` is not a route (405) - cancelling a run is
+// `POST /runs/cancel` with a `{"id": "..."}` JSON body
+// (Server.handleCancelRun), reached from the row's own X button.
+
+// TOR-216's browser pass: TOR-207's six checks above, re-run against TOR-215's
+// grid - `div#run-table.run-grid` / `div#run-list.run-grid-rows`, each entry a
+// `div.run-row-group` (`grid-template-columns: subgrid`) holding `.run-row`
+// and `.run-detail-row` as siblings, in place of `<table>/<tr>`. Every one of
+// the six exercises this markup, so all six were unverified again the moment
+// TOR-215 landed - not because anything was expected to be wrong, but because
+// nothing had looked. Against a real torpeek server on 127.0.0.1:8916
+// (-headless -dht=false -max-active-torrents 1 -n 200), real loopback-seeded
+// torrents (scratchpad/seed.go), a real out dir seeded from TOR-207's own
+// out207 (its 15 completed runs plus the browserout disk fixture, copied
+// forward rather than re-earned), and Chrome DevTools Protocol driving the
+// shipped page.
+//
+// THE MACHINE, RECORDED BECAUSE IT MATTERED HERE MORE THAN USUAL. `uptime` at
+// the very start read a calm `6.26 11.62 39.59`. Partway through, an unrelated
+// third-party security agent's own `spindump` (plus `softwareupdated`) drove
+// the 1-minute figure as high as `541.67`, with `vm_stat`/`vm.swapusage`
+// showing the machine nearly out of real memory (6987 of 8192 MB swap used,
+// under 25000 4 KB pages free). Every `Runtime.evaluate` timeout in this pass
+// landed inside that window and every one succeeded on retry once the 1-minute
+// figure came back under ~15 - the same load-artifact pattern TOR-194 and
+// TOR-207 both recorded, confirmed a third time. Nothing here that failed
+// once and passed on a retry is treated as a finding about the page.
+//
+// CHECK 1 - A LIVE ROW'S FIGURES AT FULL STRENGTH. A fresh single-file
+// torrent (tor216-live2, never seeded before, to avoid the disk-cache skip a
+// reused payload hits - see below) was posted by `.torrent` path and throttled
+// on the seed side (`-rate-bps 25000`) the same way TOR-207 established is
+// required at all. An in-page collector (a `setInterval` pushing distinct
+// snapshots onto `window`, per this ticket's own guidance on a row that keeps
+// changing underneath a single tool call) caught, and a direct read of the
+// row's cells confirmed: peers "1", seeds "1", down "22.4 KB/s", up "0 B/s",
+// availability "1.00×0 missing" - every one of
+// `.run-cell-peers/-seeds/-down/-up/-availability` (the grid's actual class
+// names; the field names in the JSON payload are `download_bps`/`upload_bps`
+// but the CSS classes have always been the shorter `-down`/`-up`, unchanged by
+// TOR-215) reading `data-absent="false"`, the real-zero UP cell included -
+// the same distinction TOR-207's own check 1 called out.
+//
+// ONE DEDUP TRAP FOUND WHILE SETTING THIS UP, not a defect but worth recording
+// so it is not re-discovered at cost: reposting a torrent whose infohash and
+// params hash already have a complete result directory on disk (TOR-207's own
+// tor207-clip-a, copied forward in out216) reaches `state: "done"` in under
+// three seconds, with no observable download window at all - the engine skips
+// straight to what is already on disk. Check 1's positive case needs a payload
+// that has NEVER been captured under this exact out dir before; every payload
+// in this pass past the first attempt used a freshly-named directory for
+// exactly this reason.
+//
+// CHECK 2 - ABSENT SINKING TO THE END OF A SORT, ON A TABLE HOLDING BOTH. Run
+// on 23 rows: 1 real (tor216-live3, a second fresh throttled live torrent -
+// `.run-cell-peers` `data-absent="false"`, text "1") and 22 absent (the 17
+// disk rows out216 started with, plus five more live-then-finished/cancelled
+// entries this pass's own setup produced along the way). The Peers header was
+// clicked to ascending, then to descending; in BOTH directions the sequence of
+// `data-absent` down the 23 rows read exactly `R` at index 0 followed by 22
+// `A`s - the one real row first, every absent row after it, in both
+// directions, which is what TOR-207's own check 2 established this proves and
+// a 1-real/12-absent or 1-real/22-absent split equally cannot show any other
+// way.
+//
+// CHECK 3 - TWO ROWS OPEN AT ONCE, AND A FILE'S DETAIL SURVIVING A COLLAPSE
+// AND RE-OPEN. tor216-live3 (running) and tor207-clip-k (done, real frames on
+// disk, carried forward from out207) were expanded together by clicking each
+// `.run-row-main` button; both `#run-detail-N` elements (siblings of
+// `.run-row` inside their own `.run-row-group`, not a following `<tr>`) were
+// simultaneously PRESENT AND VISIBLE (`getBoundingClientRect()` non-zero for
+// both, not merely `aria-expanded="true"`). Separately, on tor207-clip-k's
+// lone file: its `.picker-item` was already `data-expanded="true"` with a
+// `.file-detail` node present; the WHOLE ROW was then collapsed
+// (`.run-row-main` `aria-expanded` false, detail rect 0×0 - confirmed
+// genuinely invisible, not merely un-flagged) and re-expanded (`aria-expanded`
+// true again, detail rect 837×6689.8) - and the file's own `data-expanded`
+// read "true" throughout, `.file-detail` still present after the reopen: the
+// file-level state survived the row-level collapse exactly as it did under
+// the `<table>`, now through a `.run-row-group` rather than two `<tr>`s.
+//
+// CHECK 4 - COLUMN WIDTHS PERSISTING ACROSS A RELOAD, AND A CORRUPT
+// localStorage VALUE FALLING BACK TO DEFAULTS. A real pointer drag
+// (`pointerdown`/`pointermove`/`pointerup`, `buttons: 1`, dispatched on the
+// `.col-resizer` handle itself - dispatching `pointerup` on `document` instead
+// of the handle silently did NOT save, because `wireColumnResizers` listens
+// for it on the handle after `setPointerCapture`, so a synthetic event has to
+// land where a real one's capture would redirect it) moved the Name column
+// from the default 20rem (320px) to 620px. `localStorage["torpeek.columnWidths"]`
+// read back `{"name":620}`, and a full page reload (fresh navigation) still
+// computed `--col-w-name: 620px` - survived the reload, matching TOR-207's own
+// finding that this is unaffected by the table-to-grid conversion (the ticket
+// TOR-215 itself already argued from source: the drag writes a CSS custom
+// property and reads a header's own rect, and both stay true of a grid).
+// Then `localStorage.setItem("torpeek.columnWidths", "{not valid json!!!")`
+// and another reload: the page rendered normally (23 rows, grid intact),
+// `--col-w-name` read back the plain default "20rem", and
+// `read_console_messages` found NO messages at all - not even benign ones,
+// let alone errors - across that load once console tracking was armed before
+// the reload that mattered.
+//
+// CHECK 5 - THE STALL TICKER COUNTING UP, THEN GOING QUIET ONCE THE ELEMENT IS
+// REMOVED. A torrent was seeded and posted whose peer address was deliberately
+// left out of -peer, so it could never connect: GET /runs showed
+// `"stall":{"code":"no_peers","since_ms":...}` climbing (10000 -> 39999 across
+// polls a few seconds apart), and the row's `.run-meta` text read "no peers
+// connected for 33s" with title "stalled: no peers connected" and
+// `data-stall="true"` - the 1s ticker counting up for real, unchanged by the
+// conversion. To check it goes quiet: since TOR-215 the stall ticker lives on
+// the `<run-table>` custom element itself (one timer for the whole table, not
+// per row) - `document.querySelector("run-table").stallTimer` read back `1`
+// (an active interval id). `window.clearInterval` was wrapped to record its
+// argument, and the element's own `.remove()` was called directly. Immediately
+// after: `.stallTimer` had been reset to `null` and the wrapped `clearInterval`
+// had been called with exactly `[1]` - `disconnectedCallback`'s
+// `clearInterval(this.stallTimer)` ran for real, on the real interval id, the
+// moment the element left the document.
+//
+// AN INCIDENTAL FINDING WHILE SETTING THIS CHECK UP, ORTHOGONAL TO TOR-215 AND
+// FILED SEPARATELY (TOR-219) RATHER THAN FOLDED IN HERE: three independent
+// no-peer torrents in this pass - TOR-207's own tor207-stall (reused directory)
+// and two freshly-seeded ones (tor216-stall2, tor216-stall3), none of them
+// ever reachable by any peer - each transitioned on their own from
+// `state: "running"` (stalled, `code: "no_peers"`) to `state: "done"` with
+// `complete: 0` after roughly 40-70 seconds of continuous no-peer stall, with
+// no frames ever written to disk. One of the three reproductions (tor216-stall3)
+// happened on a calm machine (`uptime` 1-minute figure ~6-7 at post time), so
+// this does not look like only a load artifact, but this task did not read
+// enough of internal/core's stall/budget handling to name a cause - recorded
+// as observed, not diagnosed. `internal/core/budget.go`'s `defaultRunTime` (10
+// minutes) is far longer than the ~60s observed, so it is very likely not the
+// mechanism.
+//
+// CHECK 6 - TOR-197'S FIVE-VERDICT CHAIN AND ITS TWO SENTENCES, ON A REAL
+// QUEUED TORRENT. Reproducing the ordering TOR-207 discovered took one more
+// correction on top of it: posting the multi-file torrent WHILE something else
+// already holds the active slot skips `needs-action` entirely and lands
+// straight in `queued` with no metadata at all (`files: 0`, no picker) - the
+// same shape as any other queued row, useless for this check. The multi-file
+// torrent (tor216-multi3: a-clip.mkv, b-clip.mkv) had to be posted FIRST, while
+// the slot was still free, to reach `needs-action` ("choose files" badge, the
+// detail correctly showing "2 video file(s)" even though the top-level
+// `GET /runs` listing's own `files` field read 0 for it at that point - a
+// display-field lag on this endpoint, not something the row's own detail got
+// wrong). A second torrent (tor207-stall, its own peer again deliberately
+// withheld so it would occupy the slot without ever finishing) was posted
+// second and took the active slot. Both of tor216-multi3's file checkboxes
+// were then ticked by a real DOM click on each `input[type="checkbox"]`,
+// asking for both files while still parked: the row flipped to a genuine
+// `state: "queued"`, badge "queued", queue cell "1#1", and each
+// `<label class="picker-file">` title read exactly: "this torrent is waiting
+// to start and has not been handed to the engine yet - un-tick to take this
+// file out of the pass it will start with. The other 1 stay, and nothing has
+// been fetched or deleted" - the untick==="narrow" branch, word for word,
+// matching TOR-207's own record and confirming the grid's `.run-row-group`
+// carries the same file-picker state and title text the `<table>` row did.
+//
+// NO DEFECT IN THE CONVERSION ITSELF WAS FOUND: all six checks show the grid
+// doing exactly what the `<table>` did, cell for cell, class name for class
+// name (the one genuine surprise - `.run-cell-down`/`.run-cell-up` rather than
+// a name matching the JSON field - was this task's own wrong guess, not a
+// defect). The stall/budget anomaly above is filed as TOR-219, in the backlog
+// rather than this release, because it is an engine question unrelated to
+// TOR-215's markup change and this task did not diagnose it far enough to say
+// it belongs in this release's scope.
+
+// TOR-221 CHANGED THE MARKUP UNDER THE RECORD ABOVE, so what that record still
+// stands for is worth being exact about rather than leaving to a reader to
+// guess from the ticket numbers.
+//
+// What moved: `#run-table` is no longer a grid, `#run-list` lost
+// `.run-grid-rows` and its `display: contents`, the header cells now sit
+// inside a `.run-grid-head-row` band, and `.run-row-group` /
+// `.run-detail-row` are plain blocks where they were subgrids. So every
+// selector the six checks name still exists and still means the same thing -
+// `.run-row`, `.run-row-main`, `.run-cell-*`, `.picker-item`, `.file-detail`,
+// `#run-detail-N` are untouched - and the one sentence in check 3 that reads
+// as a claim about the wrapper's LAYOUT ("through a `.run-row-group` rather
+// than two `<tr>`s") is now true of a block rather than of a subgrid.
+//
+// What TOR-221's own browser pass re-exercised, against 22 disk rows: the
+// column drag in both directions with its clamps and its localStorage
+// round-trip (check 4's mechanism), a sort click with `aria-sort` moving
+// across all nine headers (check 2's mechanism), three rows open at once with
+// their details measured on screen (check 3's first half), and the alignment
+// and slack numbers TOR-221 exists for. What it did NOT re-run is anything
+// needing a live throttled torrent - checks 1, 5 and 6, and check 2's
+// real-vs-absent split - because those exercise the data path and TOR-221
+// touches no JS that reads or writes a cell's data: the whole of its JS diff
+// is three part lookups and one insertion point. That is a reason, not a
+// claim that they are covered.
+//
+// THE NOTE ABOVE IS SUPERSEDED BY TOR-223, BELOW, which re-ran all six.
+
+// TOR-223's browser pass: TOR-207's six checks, a THIRD time, against
+// TOR-221's per-row grids (each `.run-row` its own grid over one shared
+// `--run-tracks` value, `subgrid` and `display: contents` gone from every
+// served stylesheet, the sticky moved to a new `.run-grid-head-row` band)
+// and TOR-222's accordion-as-wrapper (`.run-row-group`, `li.picker-item` and
+// `section.meta` adopted as the box at all three levels; `data-expanded`
+// moved from the file's container to its summary, `label.picker-file`).
+// Against a real torpeek server on 127.0.0.1:8930 (`-headless -dht=false
+// -max-active-torrents 1 -n 200`), real loopback-seeded torrents
+// (scratchpad/seed.go), an out dir seeded by copying TOR-216's own out216
+// forward (22 disk-row directories, never reposted as live torrents, so none
+// of the dedup trap below applies to them), and Chrome DevTools Protocol
+// driving the shipped page.
+//
+// THE MACHINE. `uptime`'s 1-minute figure ranged 3.49-10.90 across the whole
+// pass - calm throughout, unlike TOR-194/TOR-207/TOR-216's sessions. Despite
+// that, `javascript_tool` (CDP `Runtime.evaluate`) hit repeated 45s timeouts
+// on trivial expressions mid-pass, at a moment `uptime` read 4.91-8.77 - well
+// under the ~15 threshold TOR-216's own correction names as reliable. A
+// lighter read (`get_page_text`) answered correctly through the same window,
+// confirming the PAGE was fine and it was specifically the script-eval
+// bridge that was stuck; what cleared it was closing the tab and opening a
+// fresh one plus a full navigate, not waiting longer. Recorded in
+// RECIPE-194.md's own new correction section rather than re-derived here.
+// Nothing below that failed once and passed on a retry or a fresh tab is
+// treated as a finding about the page.
+//
+// CHECK 1 - A LIVE ROW'S FIGURES AT FULL STRENGTH. First attempt (tor223-
+// live1, `-rate-bps 40000` over a fresh 1.59MB clip, TOR-207's own figures)
+// was POSTed, then lost to the setup itself: by the time a tab was created,
+// navigated and queried - maybe 60-70s of unrelated tool calls later - `GET
+// /runs` already read `state: "done"` and the row's cells were back to
+// `data-absent="true"`. Re-run as tor223-live2, a second fresh payload never
+// seeded before, at `-rate-bps 20000` over a 1.98MB clip, read in the very
+// next tool call after navigating to a page already POSTed to: peers "1",
+// seeds "1", down "19.2 KB/s", up "0 B/s", availability "1.00×0 missing" -
+// every one of `.run-cell-peers/-seeds/-down/-up/-availability` reading
+// `data-absent="false"`, the real-zero UP cell included, matching TOR-207's
+// and TOR-216's own distinction exactly.
+//
+// CHECK 2 - ABSENT SINKING TO THE END OF A SORT, ON A TABLE HOLDING BOTH. Run
+// on 27 rows: 1 real (tor223-live3, a third fresh payload, `-rate-bps 8000`
+// over a 669KB clip for an ~84s window, `.run-cell-peers` `data-absent=
+// "false"`, text "1") and 26 absent (TOR-216's 22 disk rows carried forward
+// plus tor223-live1/-live2/-multi, all finished by this point in the pass).
+// The Peers header was clicked to ascending, then to descending; in BOTH
+// directions the 27-row sequence read exactly `R:1` at index 0 followed by
+// 26 `A`s - the one real row first, every absent row after it, both
+// directions, on more rows than TOR-207's 13 or TOR-216's 23.
+//
+// CHECK 3 - TWO ROWS OPEN AT ONCE, AND A FILE'S DETAIL SURVIVING A COLLAPSE
+// AND RE-OPEN. tor223-live2 (running) and tor223-multi (queued, see check 6)
+// were expanded together; both details' `getBoundingClientRect()` read
+// non-zero at once - live2 1168x6073.43, multi 1168x224.95 - with
+// `aria-expanded="true"` on both `.run-row-main` buttons simultaneously, not
+// merely asserted. Separately, on tor207-clip-k (a done row with real frames
+// on disk, carried forward from out207/out216): its file was opened via
+// `label.picker-file` - **read from the SUMMARY, not the container, per
+// TOR-222**: `.picker-item`'s own `dataset.expanded` is `undefined` now, the
+// label's is `"true"`, a spelling TOR-207's and TOR-216's own records used
+// that no longer works and is corrected in RECIPE-194.md. With the file open
+// (`.file-detail` present, not `[hidden]`, rect height 5829.96px), the WHOLE
+// TORRENT ROW was collapsed - the run-detail's own rect read exactly 0x0,
+// confirmed genuinely invisible rather than merely un-flagged - then
+// re-expanded: run-detail rect 1168x769.8, the file's own label still
+// `data-expanded="true"`, `.file-detail` still present and unhidden (height
+// 561.05px, a different number from before the round-trip, which is
+// expected - content reflows once the row itself has been rebuilt - but the
+// OPEN state itself is what survived, matching TOR-207's and TOR-216's own
+// finding through the new wrapper).
+//
+// CHECK 4 - COLUMN WIDTHS ACROSS A RELOAD, THE CORRUPT-localStorage
+// FALLBACK, AND THE ALIGNMENT DEVIATION - NUMBERS, SIDE BY SIDE WITH
+// TOR-221's OWN. A real pointer drag (`pointerdown`/three `pointermove`s
+// with `buttons: 1`/`pointerup`, all dispatched on the `.col-resizer` handle
+// itself, never `document` - TOR-216's own trap, reconfirmed still live)
+// moved the Name column from the default 320px (20rem) to 520px.
+// `localStorage["torpeek.columnWidths"]` read back `{"name":520}`, and a
+// full page reload (fresh `navigate`, not a soft refresh) still computed
+// `--col-w-name: 520px` and rendered the header at 520px - survived the
+// reload. Then `localStorage.setItem("torpeek.columnWidths", "{not valid
+// json!!!")` and another reload: 27 rows rendered normally, `--col-w-name`
+// read back the plain default `"20rem"` (320px), and `read_console_messages`
+// (armed before the reload that mattered) found ZERO messages of any kind
+// across that load, not even benign ones.
+//
+// The alignment deviation - `Math.abs(cell.getBoundingClientRect().left -
+// header.getBoundingClientRect().left)`, no rounding, maximum over all 10
+// columns x 27 rows (270 cells) - was re-measured at each of TOR-221's own
+// five states, on the real running page:
+//
+//	state                          TOR-221 (22 rows, 220 cells)   TOR-223 (27 rows, 270 cells)
+//	at rest                        0.0000px                       0.0000px
+//	mid-drag                       0.0000px                       0.0000px
+//	after the drag (640px ceiling) 0.0000px                       0.0000px
+//	three rows' details open       0.0000px                       0.0000px
+//	after a sort click             0.0000px                       0.0000px
+//
+// Every state, both tasks, exactly 0.0000px: TOR-221's own claim that one
+// grid per row holds the same figure the shared grid gave is confirmed again
+// here, on more rows, after TOR-222 changed what sits inside each row.
+//
+// CHECK 5 - THE STALL TICKER COUNTING UP, THEN GOING QUIET ONCE THE ELEMENT
+// IS REMOVED. tor223-stall was seeded and POSTed with its own peer address
+// deliberately left out of every `-peer` list this pass used: `GET /runs`
+// showed `"stall":{"code":"no_peers","since_ms":4999}` and climbing, and the
+// row's `.run-meta` text read "no peers connected for 19s", then "...40s"
+// after an 8s real wait - `data-stall="true"` throughout, the 1s ticker
+// counting up for real, unchanged by either task. To check it goes quiet:
+// `document.querySelector("run-table").stallTimer` read back `1` (an active
+// interval id); `window.clearInterval` was wrapped to record its argument;
+// `table.remove()` was called directly. Immediately after: `.stallTimer` had
+// been reset to `null` and the wrapped `clearInterval` had been called with
+// exactly `[1]` - `disconnectedCallback`'s `clearInterval(this.stallTimer)`
+// ran for real, on the real interval id, the moment the element left the
+// document.
+//
+// CHECK 6 - TOR-197'S FIVE-VERDICT CHAIN AND ITS TWO SENTENCES, ON A REAL
+// QUEUED TORRENT. tor223-multi (a-clip.mkv 653.6KB, b-clip.mkv 1.5MB) was
+// POSTed FIRST, while the one active slot was still free, reaching
+// `needs-action` ("CHOOSE FILES" badge, both files listed, neither ticked).
+// Before ticking, each `label.picker-file` carried the `!asked -> ""` case:
+// title "tick to start this file's frames now - 200 frames for this one
+// file, and the count is per file", no verdict. tor223-live2 was POSTed
+// SECOND and took the active slot (running). Both of tor223-multi's
+// checkboxes were then ticked by a real click on each
+// `input[type="checkbox"]`, asking for both files while still parked: the
+// row flipped to a genuine `state: "queued"`, badge "queued", queue cell "1
+// #1", and each `label.picker-file` title read exactly: "this torrent is
+// waiting to start and has not been handed to the engine yet - un-tick to
+// take this file out of the pass it will start with. The other 1 stay, and
+// nothing has been fetched or deleted" - the untick==="narrow" branch, word
+// for word, matching TOR-207's and TOR-216's own records and confirming the
+// title text and the ordering trap both survive the accordion becoming a
+// wrapper.
+//
+// NO DEFECT WAS FOUND in either TOR-221's or TOR-222's changes: all six
+// checks show the shipped code doing exactly what its own comments say,
+// through the per-row grids and the wrapper accordion alike. What TOR-223
+// did have to correct going in - not a defect, a stale assumption in this
+// file's and RECIPE-194.md's own prior records - is that `data-expanded`
+// moved from `.picker-item` to `label.picker-file` (TOR-222's own change,
+// documented in its section of docs/front-end.md); a script still reading
+// the container's `dataset.expanded` gets `undefined` silently rather than
+// failing loudly. RECIPE-194.md carries the correction. No new defect was
+// filed.

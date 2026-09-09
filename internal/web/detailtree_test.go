@@ -286,11 +286,12 @@ func TestEachDetailElementRefusesAnIncompleteServiceSet(t *testing.T) {
 // TestTheDetailElementsSurviveTheTablesResort is THE trap this ticket paid
 // for, and the one a text check can still state precisely.
 //
-// run-table.js's syncRow ENDS WITH A RE-SORT, and reorderRuns moves both of a
-// run's <tr>s with `this.list.append(...)` - which for a node already in the
-// table is a REMOVE followed by an INSERT. So every element inside the detail
-// row is disconnected and reconnected on every redraw of every row: dozens of
-// times a second on a live run.
+// run-table.js's syncRow ENDS WITH A RE-SORT, and reorderRuns moves a run's
+// whole row group with `this.list.append(...)` - which for a node already in
+// the grid is a REMOVE followed by an INSERT. Since TOR-215 that is ONE
+// element per entry rather than two adjacent <tr>s, and the detail is inside
+// it, so every element inside the detail is still disconnected and reconnected
+// on every redraw of every row: dozens of times a second on a live run.
 //
 // Two things follow, and both are asserted here because either alone is a
 // silent catastrophe. The markup must be built ONCE, or the second
@@ -304,8 +305,8 @@ func TestTheDetailElementsSurviveTheTablesResort(t *testing.T) {
 	// ever stops moving the rows, the reasoning below has to be re-made rather
 	// than left standing.
 	table := liveJS(t, runTableJS(t))
-	if !strings.Contains(table, "this.list.append(entry.rowEl, entry.detailRowEl);") {
-		t.Fatal("run-table.js's reorderRuns no longer moves both rows with append. That move is " +
+	if !strings.Contains(table, "this.list.append(entry.rowGroupEl);") {
+		t.Fatal("run-table.js's reorderRuns no longer moves the row group with append. That move is " +
 			"what disconnects and reconnects every element in the detail, and it is the whole " +
 			"reason the three elements below build once and tear down nothing")
 	}
@@ -382,6 +383,11 @@ func TestNoInstanceFieldShadowsAMethod(t *testing.T) {
 		{"run-table.js", runTableJS(t)},
 		{"frame-panel.js", framePanelJS(t)},
 		{"compare-dialog.js", compareDialogJS(t)},
+		// TOR-212's shared disclosure. Not a custom element - see its own
+		// header for why one cannot go where any of the three disclosures
+		// is - but a class with fields assigned in a constructor, which is
+		// exactly the shape this mistake takes.
+		{"accordion.js", accordionJS(t)},
 	} {
 		live := liveJS(t, mod.src)
 
@@ -496,9 +502,10 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 		}
 	}
 
-	// 3. The list builds every row and hands the file's detail exactly four
-	// row elements - the ones that are that file's title line since TOR-182 -
-	// and nothing else about a file.
+	// 3. The list builds every row and hands the file's detail exactly five
+	// row elements - the ones that are that file's title line since TOR-182,
+	// plus the <label> that IS the row since TOR-222 - and nothing else about
+	// a file.
 	for _, forbidden := range []string{
 		"meta-toggle", "meta-body", `"specs"`, `"tracks"`, "file-regen", "file-compare",
 		"reach-strip", "avail-swarm", `"grid"`, "detailFrame", "frameFigure", "loadFileDetail",
@@ -508,19 +515,38 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 				"what the row opens onto is the element it mounts there", forbidden)
 		}
 	}
-	// 3, the other way: the file's detail writes exactly the four row
+	// 3, the other way: the file's detail writes exactly the five row
 	// elements it was handed, and nothing else on the row.
-	handed := map[string]bool{"item": true, "rowToggle": true, "name": true, "summary": true}
+	//
+	// THE FIFTH IS TOR-222'S AND ITS REASONING IS RE-MADE RATHER THAN WAIVED,
+	// which is what this arm asked for when it failed on the change. fileRow
+	// is the <label class="picker-file">, and it crosses the boundary for the
+	// same reason the other four do: it is part of the row that the FILE'S
+	// DETAIL is the writer of. The level-2 disclosure's open state is painted
+	// on that label (filelist.css's .picker-file[data-expanded="true"]), and
+	// the one function that may change whether a file's block is on screen is
+	// setFileExpanded, in file-detail.js. So the element the state is written
+	// on has to be reachable from the writer.
+	//
+	// The alternative was to leave the attribute on the <li>, which the detail
+	// already holds, and reach the label from it in CSS - which is exactly
+	// what TOR-222 removed: a rule that names a parent to find the child it
+	// dresses. Handing over one more element of the row this detail already
+	// owns four elements of is the smaller coupling of the two, and it is the
+	// same kind as the four.
+	handed := map[string]bool{
+		"item": true, "fileRow": true, "rowToggle": true, "name": true, "summary": true,
+	}
 	for _, m := range regexp.MustCompile(`this\.(\w+) = row\.(\w+);`).FindAllStringSubmatch(file, -1) {
 		if !handed[m[1]] {
-			t.Errorf("file-detail.js takes row.%s as this.%s - four row elements cross this "+
-				"boundary (the <li>, the disclosure, the name and the summary, because the row IS "+
-				"the file's title line since TOR-182) and a fifth needs the reasoning re-made, "+
-				"not just the assignment added", m[2], m[1])
+			t.Errorf("file-detail.js takes row.%s as this.%s - five row elements cross this "+
+				"boundary (the <li>, the row's <label>, the disclosure, the name and the "+
+				"summary, because the row IS the file's title line since TOR-182) and a sixth "+
+				"needs the reasoning re-made, not just the assignment added", m[2], m[1])
 		}
 	}
-	if n := len(regexp.MustCompile(`this\.\w+ = row\.\w+;`).FindAllString(file, -1)); n != 4 {
-		t.Errorf("file-detail.js takes %d row elements, want 4 - if one genuinely went, the "+
+	if n := len(regexp.MustCompile(`this\.\w+ = row\.\w+;`).FindAllString(file, -1)); n != 5 {
+		t.Errorf("file-detail.js takes %d row elements, want 5 - if one genuinely went, the "+
 			"boundary paragraph in its own header should go with it", n)
 	}
 	for _, forbidden := range []string{
@@ -529,7 +555,7 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 	} {
 		if strings.Contains(file, forbidden) {
 			t.Errorf("file-detail.js names %q, which is the ROW's. A file's detail is handed the "+
-				"four elements of its row it must keep current and reaches for nothing else - "+
+				"five elements of its row it must keep current and reaches for nothing else - "+
 				"otherwise two elements write one row", forbidden)
 		}
 	}
@@ -545,10 +571,30 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 		t.Error("file-list.js does not name the file detail's region on the row's disclosure - " +
 			"same rule, one level down")
 	}
-	if !strings.Contains(file, `this.rowToggle.setAttribute("aria-expanded", String(expanded));`) {
-		t.Error("file-detail.js does not write the row disclosure's aria-expanded - it travels " +
-			"with the expanded state, which is this element's, and the id travels with the " +
-			"region, which is the list's to name")
+	// THROUGH THE SHARED DISCLOSURE SINCE TOR-212, and the claim is unchanged:
+	// aria-expanded travels with the EXPANDED state, which is this element's,
+	// and the id travels with the region, which is the list's to name. What
+	// changed is that this element no longer writes the attribute by hand - it
+	// hands its own toggle to an Accordion at mount and applies through it. So
+	// the check is in two halves, and both are needed: this element's
+	// accordion has to be built over the ROW's disclosure (not over some
+	// element of its own), and setFileExpanded has to be what applies to it.
+	if !strings.Contains(file, "toggle: this.rowToggle,") {
+		t.Error("file-detail.js's level-2 accordion is not built over the row's own " +
+			"disclosure - aria-expanded travels with the expanded state, which is this " +
+			"element's, so the button the accordion writes has to be the row's")
+	}
+	if !strings.Contains(jsMethod(t, file, "setFileExpanded"), "this.fileAccordion.apply(expanded);") {
+		t.Error("setFileExpanded does not apply through this element's own accordion, so " +
+			"nothing writes the row disclosure's aria-expanded when a file opens")
+	}
+	// And the component it applies through is what writes the attribute at
+	// all three levels. Without this the two checks above are satisfied by an
+	// apply() that writes nothing.
+	if !strings.Contains(jsMethod(t, accordionJS(t), "apply"),
+		`this.toggle.setAttribute("aria-expanded", String(expanded));`) {
+		t.Error("accordion.js's apply does not write aria-expanded - every disclosure on " +
+			"the page goes through it, so all three would stop saying whether they are open")
 	}
 }
 

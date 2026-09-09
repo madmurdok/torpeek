@@ -1,0 +1,52 @@
+/* torpeek ui - the entry stylesheet.
+ *
+ * Rendered designs receive ONLY this file's transitive @import closure, so
+ * everything a component needs has to be reachable from here.
+ *
+ * The order is not arbitrary and it is not this file's invention: it is the
+ * order index.html links these files in, and at equal specificity the later
+ * FILE wins. torpeek has four rule pairs that depend on it (each kept inside
+ * one file so no link order can un-decide them), and
+ * TestTheConcatenationOrderIsThePagesOwn in the repo holds the test helper's
+ * idea of that order to what index.html actually says. Reordering these
+ * @imports is a design change, not a formatting one.
+ *
+ * WHY THIS IS NOW THE WHOLE LIST, and not the three the panel needed
+ * (TOR-208). Six elements ship, and the stylesheet split is by AREA - it does
+ * not map onto the element split, in three places worth naming here because a
+ * shorter list would silently break one of them:
+ *
+ *   1. intake.css is not the intake's. It carries `select, button`,
+ *      `input[type="number"]`, `button:hover:not(:disabled)`,
+ *      `button:disabled` and `select:focus-visible` as BARE ELEMENT rules, so
+ *      every control in every one of the six elements is drawn by it: the run
+ *      detail's Cancel/Top up/Retry, the file list's Select all and Clear
+ *      frames, a file's Regenerate/Compare and its frame-count input, and
+ *      both of the compare dialog's set pickers. Omitting it because no
+ *      element is "in" the intake would leave every button in the export
+ *      unstyled, and it has to come BEFORE the area files, which override it
+ *      per control.
+ *   2. framepanel.css is not only the panel's. .grid, .thumb*, .reach*, and
+ *      the .avail-swarm chip live there and are built by <file-detail>.
+ *   3. detail.css holds `.run-detail-cell` - a rule about a cell <run-table>
+ *      builds. It read `.run-table .run-detail-cell` when this comment was
+ *      written, because `.run-table td` further up set the shared cell padding
+ *      and a bare class would have lost to it; TOR-215 dropped both when the
+ *      table became a grid, so the ancestor is gone.
+ *   4. base.css is not only the page shell (TOR-212). `.disclosure-mark` -
+ *      the triangle every one of the page's three disclosures draws, one rule
+ *      for all three - lives there, so an export that shipped table.css and
+ *      filelist.css without it would draw accordions with no marks on them.
+ *
+ * So the export ships the closure and says which element needs what in each
+ * component's own .prompt.md, rather than pretending one stylesheet belongs
+ * to one component.
+ */
+@import url("tokens.css");   /* the design system: palette, type scale, spacing */
+@import url("base.css");     /* @font-face for both faces, and the page ground */
+@import url("intake.css");   /* and with it every bare button/select/number rule */
+@import url("table.css");
+@import url("detail.css");
+@import url("filelist.css");
+@import url("framepanel.css");
+@import url("compare.css");

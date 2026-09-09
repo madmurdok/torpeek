@@ -635,6 +635,10 @@ class RunDetail extends HTMLElement {
       log(entry, "topping up: " + (entry.topup && entry.topup.remaining) + " point(s), up to " +
           bytesLabel((entry.topup && entry.topup.offer_bytes) || 0) + " more traffic");
       claimReopenedRun(entry, info.id);
+      // TOR-203: the redraw belongs to the caller, and this one used to be done
+      // for it by a call state.js could not make. Without it a re-armed run
+      // keeps its old row until the socket's next message.
+      redraw(entry);
     } catch (err) {
       entry.claiming = false;
       showError(String(err.message || err));
@@ -661,6 +665,10 @@ class RunDetail extends HTMLElement {
       const info = await post("runs/retry", { id: entry.id });
       log(entry, "retrying");
       claimReopenedRun(entry, info.id);
+      // TOR-203: the redraw belongs to the caller, and this one used to be done
+      // for it by a call state.js could not make. Without it a re-armed run
+      // keeps its old row until the socket's next message.
+      redraw(entry);
     } catch (err) {
       entry.claiming = false;
       showError(String(err.message || err));
@@ -745,4 +753,11 @@ class RunDetail extends HTMLElement {
 // before its own newRunEntry creates the first one.
 customElements.define("run-detail", RunDetail);
 
-export { RunDetail, DETAIL, LIMIT_LEVER, LIMIT_NOTE, setServices };
+// THE SURFACE IS THE CLASS PLUS setServices (TOR-209's rule, applied by
+// TOR-208). DETAIL, LIMIT_LEVER and LIMIT_NOTE were imported by nobody -
+// checked across the whole repository - and detailtree_test.go reads DETAIL
+// out of this module's TEXT (jsConst), which needs no export. setServices
+// stays because app.js imports it by name and it is point 7 of the element
+// pattern. See frame-panel.js's own export block for the full reasoning, and
+// for why an extra name here is not free any more.
+export { RunDetail, setServices };

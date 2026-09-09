@@ -473,6 +473,13 @@ func TestServesEmbeddedFrontend(t *testing.T) {
 		{"/file-list.js", `customElements.define("file-list"`},
 		{"/file-detail.js", `customElements.define("file-detail"`},
 		{"/frame-panel.js", `customElements.define("frame-panel"`},
+		// TOR-212's shared disclosure, needled on the ONE thing it exports.
+		// It registers no element (accordion.js's own header says why a
+		// custom element cannot go where any of the three disclosures is), so
+		// there is no customElements.define to look for - and it is imported
+		// by two modules that are themselves reached through an import, so a
+		// 404 here silently costs every accordion on the page.
+		{"/accordion.js", "export class Accordion {"},
 		{"/compare-dialog.js", `customElements.define("compare-dialog"`},
 		{"/tokens.css", ":root"},
 		{"/base.css", "@font-face"},
@@ -1947,9 +1954,15 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// can, and unlike an exact total it does not fail because somebody added
 	// a legitimate import.
 	//
-	// state.js and frame-panel.js are the leaves: they import nothing, by
-	// design, and demanding a specifier from them would be demanding a
-	// dependency they are better without.
+	// state.js, frame-panel.js and accordion.js are the leaves: they import
+	// nothing, by design, and demanding a specifier from them would be
+	// demanding a dependency they are better without.
+	//
+	// accordion.js (TOR-212) is the newest and the most deliberate of the
+	// three. It is the three DOM writes that ARE a disclosure and nothing
+	// else - not the open state, which lives on the entry, and not what
+	// opening MEANS at any level, which stayed at the three call sites. A
+	// dependency here would mean one of those had leaked in.
 	// The two lists below stay hand-written, because which modules are LEAVES
 	// is a real decision rather than a fact to derive - a leaf imports nothing
 	// on purpose, and deriving that from the source would make the test agree
@@ -1961,7 +1974,7 @@ func TestThePageLoadsItsScriptAsAModuleAndEveryImportIsServed(t *testing.T) {
 	// was simply never checked.
 	importers := []string{"app.js", "events.js", "run-table.js", "compare-dialog.js",
 		"run-detail.js", "file-list.js", "file-detail.js"}
-	leaves := []string{"state.js", "frame-panel.js"}
+	leaves := []string{"state.js", "frame-panel.js", "accordion.js"}
 	classified := map[string]bool{}
 	for _, n := range append(append([]string{}, importers...), leaves...) {
 		classified[n] = true

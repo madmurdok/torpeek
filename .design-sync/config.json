@@ -1,0 +1,5 @@
+{
+  "projectId": "2928d405-e1c4-421b-b944-1fa3e53e1676",
+  "shape": "off-script",
+  "note": "See NOTES.md. /design-sync's converter cannot run in this repo and shape is neither 'storybook' nor 'package'."
+}

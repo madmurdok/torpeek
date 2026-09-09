@@ -11,12 +11,14 @@
    not beside the intake's controls, which is only where the source file's
    own rule order happened to leave it. */
 
-/* THE EXPANDED ROW (TOR-138). One detail per torrent, in its own <tr> under
-   the torrent's line, and the row's `hidden` attribute is the whole of
-   collapse - NOTHING here sets `display` on .run-detail-row, so the UA's own
-   [hidden] rule is never beaten by a class selector at equal specificity.
-   That trap has cost this file twice (see .drop-overlay[hidden] below, and
-   the corner-bracket gate this block replaced).
+/* THE EXPANDED ROW (TOR-138). One detail per torrent, directly under the
+   torrent's line and inside the same wrapper element since TOR-215
+   (.run-row-group - table.css carries that structure and why it exists), and
+   the detail row's `hidden` attribute is the whole of collapse - NOTHING here
+   or in table.css sets `display` on .run-detail-row, so the UA's own [hidden]
+   rule is never beaten by a class selector at equal specificity. That trap
+   has cost this file twice (see .drop-overlay[hidden] below, and the
+   corner-bracket gate this block replaced).
 
    There is no empty state left to write a rule for. The old pane always
    existed and said "Select a torrent above" when nothing was chosen, which
@@ -26,15 +28,16 @@
    all three are gone. The one genuinely empty state, no torrents at all, is
    #run-list-empty above and always was.
 
-   `.run-table` is carried in the selector below on purpose: `.run-table td`
-   further up sets the shared cell padding and is (0,1,1), so a bare
-   `.run-detail-cell` at (0,1,0) would lose to it and the padding here would
-   silently not apply - the same equal-specificity trap the [hidden] note
-   above is about, in its other form. */
-.run-table .run-detail-cell {
+   ONE CLASS IS NOW ENOUGH IN THE SELECTOR, and that is a real change rather
+   than a tidy-up. It used to read `.run-table .run-detail-cell` because
+   `.run-table td` further up set the shared cell padding at (0,1,1) and a
+   bare `.run-detail-cell` at (0,1,0) would have lost to it silently. TOR-215
+   replaced that shared rule with `.run-grid-head, .run-cell` - and the detail
+   cell wears NEITHER class, so nothing sets a padding on it to lose to. */
+.run-detail-cell {
   /* No cell padding of its own: .run-detail below owns the inset, so the
-     detail's own width is the table's, which is what keeps the frame grid the
-     same width it had in the old full-width pane. */
+     detail's own width is the whole grid's, which is what keeps the frame
+     grid the same width it had in the old full-width pane. */
   padding: 0;
   /* One rung up from the page, and the accent rail continued from the open
      row above it, so the pair reads as one block. */
@@ -52,7 +55,7 @@
    IT MATTERS MORE HERE THAN THERE, because .run-detail below is `position:
    sticky` with `width: var(--run-detail-w, 100%)`. A sticky element is
    constrained to its CONTAINING BLOCK and sizes against it, so the wrapper has
-   to be a plain block spanning the whole colspanned cell for both of those to
+   to be a plain block spanning the whole .run-detail-cell for both of those to
    resolve to what they did before: the cell has padding: 0, and this rule adds
    no box of its own, so the wrapper's content box IS the cell's. The scrolling
    ancestor sticky resolves against (.run-table-wrap) is unchanged by an extra
@@ -60,7 +63,7 @@
 
    No [hidden] companion, unlike filelist.css's two: nothing ever hides this
    wrapper. Collapse at this level is the `hidden` attribute on the
-   .run-detail-row <tr> above it, which is a different element entirely. */
+   .run-detail-row above it, which is a different element entirely. */
 run-detail { display: block; }
 
 /* Corner brackets instead of a closed border - a border costing four short
@@ -75,16 +78,17 @@ run-detail { display: block; }
    edge would either be clipped or add a scrollbar. */
 .run-detail {
   min-width: 0;
-  /* TOR-174: sticky, not relative. .run-detail sits in a colspanned <td>
-     that is, by construction, as wide as the TABLE (every column's summed
-     width) rather than as wide as the PANE (.run-table-wrap's own visible
-     width) - table-layout: fixed (TOR-157) is exactly what lets those two
-     diverge, the moment a drag or a narrow window makes the columns sum to
-     more than the pane shows. `left: 0` pins this element's left edge to
-     the pane's own left edge as .run-table-wrap scrolls sideways under it -
-     the same primitive .run-table thead th already uses on top (vertical
-     axis) and .run-detail-header-actions already uses on right, both
-     resolving against this same scrolling ancestor.
+  /* TOR-174: sticky, not relative. .run-detail sits in a cell that spans
+     every column (grid-column: 1 / -1 since TOR-215), so it is by
+     construction as wide as the whole GRID (every track's summed width)
+     rather than as wide as the PANE (.run-table-wrap's own visible width) -
+     the bare track lengths that replaced table-layout: fixed are exactly what
+     lets those two diverge, the moment a drag or a narrow window makes the
+     columns sum to more than the pane shows. `left: 0` pins this element's
+     left edge to the pane's own left edge as .run-table-wrap scrolls
+     sideways under it - the same primitive .run-grid-head-row already uses on
+     top (vertical axis) and .run-detail-header-actions already uses on right,
+     both resolving against this same scrolling ancestor.
      VERIFIED LIVE, NOT ASSUMED: sticky inside table structures is exactly
      the kind of thing the spec says one way and a browser does another (the
      ticket's own warning). Checked in a real Chrome, on a real replayed run,
@@ -94,22 +98,25 @@ run-detail { display: block; }
      not travel with the table underneath it. It holds.
      THE TRAP: sticky constrains OFFSET, never SIZE. Without the `width`
      below, this element would still be exactly as wide as its containing
-     block (the <td>, i.e. the table), and everything past the pane's own
-     right edge - the top-up figure among it - would just be dragged along
-     for the ride instead of left behind at scroll 0. `width` and
-     `box-sizing: border-box` are therefore not decoration; delete them and
-     the fix silently reverts to "sticky but still table-wide". app.js's
-     syncRunDetailWidth() is what keeps --run-detail-w current - see its own
-     comment for the three places that call it. The 100% fallback is what
-     this element is before that first runs (there is no visible row before
-     a row is expanded, and expansion is exactly when it does run, but the
-     fallback keeps a detached/test DOM sane too). */
+     block (the spanning cell, i.e. the whole grid), and everything past the
+     pane's own right edge - the top-up figure among it - would just be
+     dragged along for the ride instead of left behind at scroll 0. `width`
+     and `box-sizing: border-box` are therefore not decoration; delete them
+     and the fix silently reverts to "sticky but still table-wide". It is
+     also what keeps a detail from feeding its own content's max-content
+     width into the grid's one flexible track - see .run-table-wrap's comment
+     in table.css. run-table.js's syncRunDetailWidth() is what keeps
+     --run-detail-w current - see its own comment for the three places that
+     call it. The 100% fallback is what this element is before that first
+     runs (there is no visible row before a row is expanded, and expansion is
+     exactly when it does run, but the fallback keeps a detached/test DOM sane
+     too). */
   position: sticky;
   left: 0;
   width: var(--run-detail-w, 100%);
   box-sizing: border-box;
   padding: .9rem 1rem 1.2rem;
-  /* Back to the page's own body size. The detail is inside .run-table now,
+  /* Back to the page's own body size. The detail is inside .run-grid now,
      and the table's .82rem is meant for the one-line torrent rows, not for a
      panel of prose, specs and captions that used to render at body size in a
      pane of its own. */
@@ -158,7 +165,7 @@ run-detail { display: block; }
    sits. Save sits to its left, and position: sticky (below) is what keeps
    the whole group from pinning itself to the ROW's right edge when that
    is wider than what .run-table-wrap's overflow-x: auto (TOR-157) is
-   currently showing - the same primitive .run-table thead th already uses,
+   currently showing - the same primitive .run-grid-head-row already uses,
    on the vertical axis, to stay in view rather than travel with content
    the viewport has scrolled past. */
 .run-detail-header-actions {
