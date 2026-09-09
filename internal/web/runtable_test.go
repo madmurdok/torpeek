@@ -181,11 +181,11 @@ func TestTheRunTableIsAnElementWrappingThePagesOwnMarkup(t *testing.T) {
 	}
 	wrapped := markup[open:shut]
 	for _, part := range []string{
-		`<table id="run-table"`,
-		`<tbody id="run-list">`,
+		`<div id="run-table" class="run-grid">`,
+		`<div id="run-list" class="run-grid-rows">`,
 		`<p id="run-list-empty"`,
 		`<div class="run-table-wrap">`,
-		`th scope="col" class="run-actions-header"`,
+		`class="run-grid-head run-actions-header"`,
 		`data-sort="name"`,
 	} {
 		if !strings.Contains(wrapped, part) {
@@ -215,7 +215,7 @@ func TestTheRunTableIsAnElementWrappingThePagesOwnMarkup(t *testing.T) {
 			"the part-finding moved there (TOR-205)")
 	}
 	wired := jsMethod(t, js, "wire")
-	for _, part := range []string{"table", "headRow", "actionsHeader", "list", "emptyNote", "wrap"} {
+	for _, part := range []string{"grid", "actionsHeader", "list", "emptyNote", "wrap"} {
 		if !strings.Contains(wired, part+": this."+part+",") {
 			t.Errorf("wire() does not check %q for absence - every method below dereferences it, so a "+
 				"missing part has to name itself here rather than surface as \"cannot read property of "+
@@ -302,8 +302,9 @@ func TestTheRunTableRefusesAnIncompleteServiceSet(t *testing.T) {
 
 // TestTheTableOwnsTheRowAndTheDetailIsNotItsBusiness is the boundary this
 // ticket was asked to state, as a test rather than as a paragraph - and it is
-// the seam TOR-195 has to be able to trust: the table builds both <tr>s and
-// hands back the colspanned cell, and what goes INTO that cell is nothing to
+// the seam TOR-195 has to be able to trust: the table builds the whole row
+// group (TOR-215: the wrapper, the row line and the detail's row inside it)
+// and hands back the spanning cell, and what goes INTO that cell is nothing to
 // do with it.
 //
 // Checked in both directions, because either one alone leaves the seam able to
@@ -313,22 +314,41 @@ func TestTheTableOwnsTheRowAndTheDetailIsNotItsBusiness(t *testing.T) {
 	js := liveJS(t, runTableJS(t))
 	page := liveJS(t, appJS(t))
 
-	// THE ROW IS THE TABLE'S, both of them. The detail's <tr> is a row, its
-	// cell's colSpan is a fact about the header count, and hiding it is what
+	// THE ROW IS THE TABLE'S, all three elements of it. The detail's row is a
+	// row, how far it spans is a fact about the grid, and hiding it is what
 	// this level's accordion does.
+	//
+	// THE WRAPPER IS WHAT TOR-215 ADDED HERE, and it is checked in the same
+	// breath because it is the seam's new shape: the row line and the detail
+	// go into ONE element, which is what a <table> forbade and what TOR-212
+	// needs. `group.append(row, detailRow)` is the whole claim - lose it and
+	// the two are siblings of the grid again with nothing owning both.
 	newRow := jsMethod(t, js, "newRow")
 	for _, want := range []string{
+		`group.className = "run-row-group";`,
 		`detailRow.className = "run-detail-row";`,
 		"detailRow.hidden = true;",
 		`detailCell.className = "run-detail-cell";`,
-		"detailCell.colSpan = this.columns;",
-		"this.list.append(row, detailRow);",
+		"group.append(row, detailRow);",
+		"this.list.append(group);",
+		"rowGroupEl: group,",
 		"detailCell,",
 	} {
 		if !strings.Contains(newRow, want) {
-			t.Errorf("run-table.js's newRow does not contain %q - the detail's own row, its colspan and "+
+			t.Errorf("run-table.js's newRow does not contain %q - the wrapper, the detail's own row and "+
 				"the cell handed back are the table's half of TOR-194's boundary, and TOR-195 mounts "+
 				"into exactly that cell", want)
+		}
+	}
+	// AND NO COUNT COMES BACK (TOR-215). The detail used to be given a
+	// colSpan read off the header row, which is the kind of number that goes
+	// wrong silently - it spans `1 / -1` in table.css now, and -1 is the last
+	// line of whatever the grid has. A colSpan reappearing here would mean
+	// somebody put the <table> back.
+	for _, gone := range []string{"colSpan", "this.columns"} {
+		if strings.Contains(js, gone) {
+			t.Errorf("run-table.js still mentions %q - the detail spans every column from the "+
+				"stylesheet now (grid-column: 1 / -1), so there is no column count to keep", gone)
 		}
 	}
 

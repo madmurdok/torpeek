@@ -793,30 +793,46 @@ func TestTheQueueCanBeReorderedFromTheRow(t *testing.T) {
 	}
 }
 
-// TestExactlyOneThPerColumnIsEverBuilt guards TOR-157's own precondition
-// before its own tests get to it: the detail row's colspan (this.columns,
-// read off "#run-table thead th" in connectedCallback) is only ever correct
-// if nothing past buildLiveColumnHeaders() creates another <th> - a resize
-// handle that turned out to be a header cell of its own, say, rather than a
-// plain <span> living inside one, would inflate the count this.columns reads
-// without TestLiveColumnsAreWiredIntoBothHeadersAndSorting or anything else
-// here noticing, since both still agree on nine sortable columns either way.
-func TestExactlyOneThPerColumnIsEverBuilt(t *testing.T) {
+// TestExactlyOneHeaderCellPerColumnIsEverBuilt guards TOR-157's own
+// precondition before its own tests get to it, and TOR-215 made the stakes
+// higher rather than lower. It used to be about a count: the detail row's
+// colspan was read off "#run-table thead th", so a stray extra <th> - a
+// resize handle that turned out to be a header cell of its own, say, rather
+// than a plain <span> living inside one - inflated that number silently.
+// There is no count any more (the detail spans 1 / -1), but a stray extra
+// header cell is now a stray GRID ITEM in the header's own row: it takes a
+// track, and every column after it renders one column to the left of its own
+// data. TestLiveColumnsAreWiredIntoBothHeadersAndSorting would not notice
+// either way, since both halves still agree on nine sortable columns.
+//
+// The class is what the check is anchored on rather than the tag, because the
+// tag is a plain div now and there are dozens of those: exactly one line in
+// run-table.js may put a cell in the header band, and it is
+// buildLiveColumnHeaders'.
+func TestExactlyOneHeaderCellPerColumnIsEverBuilt(t *testing.T) {
 	js := runTableJS(t)
 
-	if n := strings.Count(js, `document.createElement("th")`); n != 1 {
-		t.Errorf(`run-table.js calls document.createElement("th") %d times, want exactly 1 (inside `+
-			"buildLiveColumnHeaders) - a second call would add a column the detail row's colspan "+
-			"was never told about", n)
+	if n := strings.Count(js, `className = "run-grid-head`); n != 1 {
+		t.Errorf(`run-table.js assigns a "run-grid-head" class %d times, want exactly 1 (inside `+
+			"buildLiveColumnHeaders) - a second one would put an extra item in the grid's header "+
+			"row, taking a track and shifting every column after it off its own data", n)
 	}
-	// And nothing OUTSIDE the element may build one either, which is new with
-	// TOR-194: the header row is the table's own part now, so a <th> minted
+	// And nothing OUTSIDE the element may build one either, which is TOR-194's
+	// half: the header band is the table's own part, so a header cell minted
 	// anywhere else would be a column that reached neither LIVE_COLUMNS, nor
-	// sorting, nor the width tokens, nor this.columns.
-	if strings.Contains(appJS(t), `document.createElement("th")`) {
-		t.Error(`app.js builds a <th> of its own - since TOR-194 the header row belongs to the table ` +
-			"element, and a column added from outside it would be invisible to every mechanism that " +
-			"reads the header row")
+	// sorting, nor the width tokens, nor the grid's track list.
+	if strings.Contains(appJS(t), "run-grid-head") {
+		t.Error(`app.js builds a header cell of its own - since TOR-194 the header band belongs to ` +
+			"the table element, and a column added from outside it would be invisible to every " +
+			"mechanism that reads the headers")
+	}
+	// The <table> is gone and must not come back a piece at a time: a <th> or
+	// a <td> built here would be a cell no grid track sizes (TOR-215).
+	for _, gone := range []string{`createElement("th")`, `createElement("td")`, `createElement("tr")`} {
+		if strings.Contains(js, gone) {
+			t.Errorf("run-table.js still calls %s - the run table is a CSS grid, and a table cell "+
+				"inside it belongs to no track at all", gone)
+		}
 	}
 }
 
@@ -830,14 +846,29 @@ func TestExactlyOneThPerColumnIsEverBuilt(t *testing.T) {
 func TestColumnWidthsKeyOffElSortHeaders(t *testing.T) {
 	js := runTableJS(t)
 
-	if !strings.Contains(js, `Array.from(this.sortHeaders, (th) => th.dataset.sort)`) {
+	if !strings.Contains(js, `Array.from(this.sortHeaders, (head) => head.dataset.sort)`) {
 		t.Error("run-table.js's resizableColumnKeys() does not derive its column list from this.sortHeaders - " +
 			"a hand-written list here could silently drift from the headers buildLiveColumnHeaders() actually built")
 	}
-	if !strings.Contains(js, `th.style.width = "var(--col-w-" + key + ")";`) {
-		t.Error(`run-table.js does not set each sortable header's own width from its --col-w-* token - without this ` +
-			`table-layout: fixed would have nothing but the CSS default to size that column with, and a stored or ` +
-			`dragged width would never reach the page`)
+	// AND NOTHING SETS A WIDTH ON A HEADER ANY MORE (TOR-215). Under
+	// table-layout: fixed the column's width WAS an inline width on its own
+	// header, set in wireColumnResizers as
+	// `head.style.width = "var(--col-w-" + key + ")"`. A grid track reads the
+	// token itself (TestColumnWidthTokensMatchThePanelWidthFamily checks that
+	// end), so the line said nothing - and, a grid item being content-box
+	// where a table cell's width included its padding, it made every header
+	// 9.6px wider than its own track (TOR-214 measured 329.6px in a 320px
+	// track). Putting a width back on a header is the specific mistake this
+	// guards against.
+	//
+	// Read through liveJS, which strips comments: the deleted line is quoted
+	// verbatim in wireColumnResizers' own note (that is how a reader learns
+	// what went and why), and a guard that could not tell prose from code
+	// would fail on the explanation instead of on the mistake.
+	if strings.Contains(liveJS(t, js), "style.width") {
+		t.Error("run-table.js sets an inline width on a header again - the column's width is its GRID " +
+			"TRACK's since TOR-215 (table.css's .run-grid reads the same --col-w-* token), and an " +
+			"inline width on a content-box grid item overflows that track by its own padding")
 	}
 }
 
@@ -936,7 +967,7 @@ func TestColumnDragNeverTriggersSort(t *testing.T) {
 	}
 	// The other half of what made this loop the right subject: the handles go
 	// inside the very headers wireSorting made into sort controls.
-	if !strings.Contains(block, "for (const th of this.sortHeaders) {") {
+	if !strings.Contains(block, "for (const head of this.sortHeaders) {") {
 		t.Fatal("run-table.js's wireColumnResizers no longer walks this.sortHeaders - the handles would not " +
 			"be sitting inside a sort control at all, which is the collision this test exists for")
 	}
@@ -1077,24 +1108,76 @@ func TestColumnWidthTokensMatchThePanelWidthFamily(t *testing.T) {
 		}
 	}
 
-	// table-layout: fixed is what makes a header's own width authoritative
-	// for the whole column regardless of a row's content - without it, a
-	// dragged column could be overridden right back open by a long name or
-	// status line, the same shrink problem .run-cell-name's old max-width: 0
-	// trick existed to solve for exactly one column.
-	if !regexp.MustCompile(`\.run-table\s*\{[^}]*table-layout:\s*fixed`).MatchString(css) {
-		t.Error("app.css's .run-table rule does not set table-layout: fixed - a column's width would still be " +
-			"whatever its content wants regardless of what run-table.js sets --col-w-* to")
+	// THE TRACK LIST IS WHERE A COLUMN'S WIDTH COMES FROM SINCE TOR-215, and
+	// it is checked whole - every track, in order - rather than by looking for
+	// each token somewhere in it. The list is the one place the nine draggable
+	// columns, their order and the tenth flexible one all have to agree, and
+	// the shape of a track matters as much as its presence (below).
+	grid := regexp.MustCompile(`\.run-grid\s*\{[^}]*\}`).FindString(css)
+	if grid == "" {
+		t.Fatal("app.css has no .run-grid rule at all - the run table is a CSS grid since TOR-215, and " +
+			"without this rule there are no columns for the tokens above to size")
+	}
+	decl := regexp.MustCompile(`grid-template-columns:([^;]*);`).FindStringSubmatch(grid)
+	if decl == nil {
+		t.Fatal("app.css's .run-grid rule declares no grid-template-columns - every column would be " +
+			"one auto track wide and no --col-w-* token would reach the page")
+	}
+	// ", " -> "," first, so minmax(3.8rem, 1fr) is one field rather than two.
+	tracks := strings.Fields(strings.ReplaceAll(decl[1], ", ", ","))
+
+	// A BARE LENGTH PER SORTABLE TRACK, and nothing softer - which is why the
+	// want list below is written out in full instead of being built from the
+	// key list above. This is the exact counterpart of the table-layout: fixed
+	// it replaced, and TOR-214 measured that a grid does NOT give it for free:
+	// for a column dragged to 44px holding a string 828.17px wide,
+	// table-layout: auto rendered 822.43px and minmax(min-content, 44px)
+	// rendered 822.43px too - only a bare 44px track rendered 44px. Wrapping
+	// the tokens as minmax(token, 1fr) so the slack would spread was tried as
+	// well: all ten tracks resolved to 851.74px and dragging went inert. So a
+	// track named here in any other shape is a regression a "contains the
+	// token" check would have passed.
+	//
+	// The tenth is the actions column: no data-sort, no --col-w-* token of its
+	// own (see resizableColumnKeys()), and the ONE flexible track - which is
+	// both where the pane's slack goes and why it keeps a 3.8rem floor.
+	want := []string{
+		"var(--col-w-name)",
+		"var(--col-w-when)",
+		"var(--col-w-status)",
+		"var(--col-w-peers)",
+		"var(--col-w-seeds)",
+		"var(--col-w-download_bps)",
+		"var(--col-w-upload_bps)",
+		"var(--col-w-availability)",
+		"var(--col-w-priority)",
+		"minmax(3.8rem,1fr)",
+	}
+	if len(tracks) != len(want) {
+		t.Fatalf("app.css's .run-grid declares %d column tracks, want %d - the header cells are the grid's "+
+			"own first items, so a track too few or too many shifts every column after it off its own "+
+			"data: %q", len(tracks), len(want), tracks)
+	}
+	for i, w := range want {
+		if tracks[i] != w {
+			t.Errorf("app.css's .run-grid track %d is %q, want %q - a column has to be a BARE length read "+
+				"from its own token (TOR-214 measured minmax/min-content/auto all letting content win at "+
+				"822.43px where a bare 44px track gave 44px), and the tenth has to stay minmax(3.8rem, 1fr) "+
+				"or the grid stops filling the pane the way the <table>'s width: 100%% did",
+				i+1, tracks[i], w)
+		}
 	}
 
-	// The actions column has no data-sort and so no --col-w-* token of its
-	// own (see resizableColumnKeys()) - table-layout: fixed still needs an
-	// explicit width somewhere on its header, or that column (and the ones
-	// with an explicit width) would fight over the fixed grid's leftover
-	// space in a way nothing here chose on purpose.
-	if !regexp.MustCompile(`\.run-table\s+thead\s+th\.run-actions-header\s*\{[^}]*width:\s*3\.8rem`).MatchString(css) {
-		t.Error("app.css's .run-actions-header rule does not set an explicit width - table-layout: fixed reads " +
-			"column widths off the header row alone, and this header has no --col-w-* token to fall back to")
+	// AND THE GRID OUTGROWS THE PANE RATHER THAN THE PAGE. width: max-content
+	// with min-width: 100% is the pair: at rest min-width wins and the grid
+	// fills the pane, and the moment a drag makes the tracks sum wider,
+	// max-content wins and .run-table-wrap's own overflow-x scrolls.
+	for _, w := range []string{"width: max-content;", "min-width: 100%;"} {
+		if !strings.Contains(grid, w) {
+			t.Errorf("app.css's .run-grid rule does not set %q - one of the two halves of \"fills the "+
+				"pane at rest, outgrows it on a wide drag\" is missing, and a dragged column would "+
+				"either be clamped by the pane or push the whole page sideways", w)
+		}
 	}
 }
 

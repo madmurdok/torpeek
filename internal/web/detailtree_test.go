@@ -286,11 +286,12 @@ func TestEachDetailElementRefusesAnIncompleteServiceSet(t *testing.T) {
 // TestTheDetailElementsSurviveTheTablesResort is THE trap this ticket paid
 // for, and the one a text check can still state precisely.
 //
-// run-table.js's syncRow ENDS WITH A RE-SORT, and reorderRuns moves both of a
-// run's <tr>s with `this.list.append(...)` - which for a node already in the
-// table is a REMOVE followed by an INSERT. So every element inside the detail
-// row is disconnected and reconnected on every redraw of every row: dozens of
-// times a second on a live run.
+// run-table.js's syncRow ENDS WITH A RE-SORT, and reorderRuns moves a run's
+// whole row group with `this.list.append(...)` - which for a node already in
+// the grid is a REMOVE followed by an INSERT. Since TOR-215 that is ONE
+// element per entry rather than two adjacent <tr>s, and the detail is inside
+// it, so every element inside the detail is still disconnected and reconnected
+// on every redraw of every row: dozens of times a second on a live run.
 //
 // Two things follow, and both are asserted here because either alone is a
 // silent catastrophe. The markup must be built ONCE, or the second
@@ -304,8 +305,8 @@ func TestTheDetailElementsSurviveTheTablesResort(t *testing.T) {
 	// ever stops moving the rows, the reasoning below has to be re-made rather
 	// than left standing.
 	table := liveJS(t, runTableJS(t))
-	if !strings.Contains(table, "this.list.append(entry.rowEl, entry.detailRowEl);") {
-		t.Fatal("run-table.js's reorderRuns no longer moves both rows with append. That move is " +
+	if !strings.Contains(table, "this.list.append(entry.rowGroupEl);") {
+		t.Fatal("run-table.js's reorderRuns no longer moves the row group with append. That move is " +
 			"what disconnects and reconnects every element in the detail, and it is the whole " +
 			"reason the three elements below build once and tear down nothing")
 	}

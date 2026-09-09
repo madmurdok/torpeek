@@ -5,10 +5,11 @@ import (
 	"testing"
 )
 
-// TOR-174: a colspanned .run-detail is, by construction, as wide as the
-// TABLE (every column's summed width) rather than as wide as the PANE
-// (.run-table-wrap's own visible width) - table-layout: fixed (TOR-157) is
-// what lets those two diverge, and at a pane narrower than the table the
+// TOR-174: .run-detail sits in a cell that spans every column, so it is by
+// construction as wide as the TABLE (every column's summed width) rather than
+// as wide as the PANE (.run-table-wrap's own visible width) - the bare grid
+// track lengths TOR-215 put in place of TOR-157's table-layout: fixed are
+// what let those two diverge, and at a pane narrower than the table the
 // surplus used to sit behind the table's own horizontal scroll, taking the
 // top-up offer and its figure with it (measured: 122 elements past the
 // pane's right edge at a 592px pane, the top-up block among them).
@@ -17,8 +18,8 @@ import (
 // ticket, which is exactly why this checks both rather than just "sticky is
 // present": position: sticky pins the OFFSET, never the SIZE, so a sticky
 // .run-detail with no width tied to the pane is still exactly as wide as
-// its containing <td> - sticky alone was the trap the ticket's own report
-// named and nearly cost an hour. This is the CSS half; TestSyncRunDetail
+// the spanning cell it sits in - sticky alone was the trap the ticket's own
+// report named and nearly cost an hour. This is the CSS half; TestSyncRunDetail
 // WidthIsWiredToEveryPlaceThePaneCanChange (below) is the JS half that
 // keeps --run-detail-w current.
 //
