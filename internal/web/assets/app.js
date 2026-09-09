@@ -142,11 +142,12 @@ const el = {
   // asked for, and nothing here needs to know it contains a
   // <dialog id="compare">.
   compareDialog: document.querySelector("compare-dialog"),
-  // ONE entry where there were four (TOR-194): the tbody, the empty-state
+  // ONE entry where there were four (TOR-194): the row list, the empty-state
   // paragraph, the nine sortable headers and the scroll wrap all belong to the
   // table now, which finds them inside itself. Queried by TAG for the same
   // reason the two above are - the element IS what is being asked for, and
-  // nothing here needs to know it contains a <table id="run-table">.
+  // nothing here needs to know it contains a grid of ten tracks (TOR-215;
+  // until then, a <table id="run-table">).
   //
   // Nothing in this file writes a row cell any more. What it asks the table
   // for is three things (newRow, bindRow, syncRow) plus the accordion's own

@@ -1,7 +1,19 @@
-/* THE TORRENT TABLE (TOR-190).
-   Split out of app.css: the sortable table itself (TOR-62), its sticky
-   header and draggable columns (TOR-157), the nine live columns (TOR-139),
-   and each row's own status badge and actions.
+/* THE TORRENT TABLE (TOR-190), which since TOR-215 is a CSS GRID rather than
+   a <table>. Split out of app.css: the sortable list itself (TOR-62), its
+   sticky header and draggable columns (TOR-157), the nine live columns
+   (TOR-139), and each row's own status badge and actions.
+
+   WHY IT IS NO LONGER A <table>, in one line, because every rule below is
+   shaped by it: a row and its detail had to be able to live inside ONE
+   element, and the HTML table parser forbids exactly that - an unknown
+   element written between <tbody> and <tr> is hoisted out in front of the
+   whole table, empty, which TOR-214 measured rather than assumed. Everything
+   else the <table> was kept for is layout, and a grid does all of it; the ten
+   tracks, the six behaviours and a measured number for each are in
+   docs/front-end.md ("The answer to that question: yes, move to a grid").
+   The names in this file still say "table" (.run-table-wrap, --col-w-*,
+   run-table.js) because they name the THING - the torrent table - not the
+   HTML element it is built from.
 
    .run-progress lands here, not in framepanel.css, even though its own
    banner comment below ("in the panel row") reads like it could belong to
@@ -19,7 +31,9 @@
    collapses through it exactly as it did when the section was a direct child
    of .main. display: contents would also work and is not used - a wrapper
    with no box of its own is one more thing to reason about at every later
-   layout change, and a plain block that changes nothing is cheaper to trust. */
+   layout change, and a plain block that changes nothing is cheaper to trust.
+   (.run-grid-rows below IS a display: contents wrapper, for the one reason
+   that outweighs this: a box there would break the grid's tracks.) */
 run-table { display: block; }
 
 /* TOR-137: the torrent table's new home, between the pinned intake above and
@@ -37,8 +51,8 @@ run-table { display: block; }
 
 /* The torrent list: a sortable table (TOR-62) rather than a stack of cards,
    so a library of any size costs one line per torrent instead of three. The
-   wrap is what scrolls - the table itself just grows - and the header row
-   stays put (position: sticky) so the sort controls are never scrolled away.
+   wrap is what scrolls - the grid itself just grows - and the header cells
+   stay put (position: sticky) so the sort controls are never scrolled away.
 
    TOR-137 first bounded this to 22rem so it would scroll inside a fixed box.
    That is removed deliberately, and TOR-138 is why: the table now grows rows
@@ -49,18 +63,37 @@ run-table { display: block; }
 
    overflow-x stays. It is the horizontal escape hatch for a narrow viewport,
    and it is also the reason the detail's own content must keep its
-   min-content width small - though TOR-157's table-layout: fixed changed
-   WHY: a colspanned cell is excluded from the fixed algorithm's column-width
-   pass entirely, so a wide detail can no longer widen the table or resize
-   any other row's columns the way it could under automatic layout (the
-   RUN_TABLE_COLUMNS colspan just gets whatever the nine columns currently
-   sum to, draggable borders included). What is still true, and still the
-   reason for it: that cell's fixed width can be narrower than its content
-   wants, and without a min-content kept small, the content would overflow
-   its own box rather than wrap - visible spillage instead of a reflow.
-   Everything inside .run-detail either wraps, ellipsises or has a min-width
-   of a pixel per block, so the measured min-content of a detail row stays
-   under whatever the columns currently sum to. */
+   min-content width small - though the mechanism changed twice, and TOR-215's
+   is the one in force: a detail spans the grid's ten tracks with
+   grid-column: 1 / -1, and nine of those ten are BARE LENGTHS (see .run-grid)
+   whose size no item's content can raise. So a wide detail still cannot widen
+   the table or resize any other row's columns - the same guarantee TOR-157's
+   table-layout: fixed gave by excluding a colspanned cell from the column
+   pass, now given by the track list itself.
+
+   THE TENTH TRACK IS NOT COVERED BY THAT, and the difference was measured
+   rather than reasoned about (TOR-215, four arms at a 700px pane): the
+   actions track is flexible, so under the grid's `width: max-content` an OPEN
+   detail contributes to it. What reaches it is .run-detail's own explicit
+   `width: var(--run-detail-w)` (detail.css) and never its content's
+   max-content, which is what that width is for. With the token in step with
+   the pane the grid measured 983.19px with the detail open and 983.19px with
+   it closed - identical. With the token left stale at 1168px while the pane
+   was 700px, the grid measured 1168px and the actions track 245.61px instead
+   of the 60.8px its 3.8rem floor gives. So a stale token widens ONE empty
+   column until syncRunDetailWidth's next run (run-table.js names the three
+   causes and the gap between them); it can never widen a sortable one.
+   Backlogged as TOR-217 rather than fixed here, because the fix is the
+   ResizeObserver that syncRunDetailWidth's own comment declines to add in
+   review.
+
+   What is still true, and still the reason for all of it: the detail's box
+   can be narrower than its content wants, and
+   without a min-content kept small, the content would overflow its own box
+   rather than wrap - visible spillage instead of a reflow. Everything inside
+   .run-detail either wraps, ellipsises or has a min-width of a pixel per
+   block, so the measured min-content of a detail stays under whatever the
+   columns currently sum to. */
 .run-table-wrap { overflow-x: auto; }
 /* TOR-158: was opacity: .6 on the inherited full-strength --ink, dimming a
    sentence a person needs to read (it is the only thing on the page telling
@@ -69,27 +102,139 @@ run-table { display: block; }
    known, measured strength. */
 .run-list-empty { font-size: .82rem; color: var(--ink-2); margin: 0; }
 
-/* table-layout: fixed (TOR-157) is what makes a column's width absolute
-   rather than a hint the browser can override from content: with the
-   default automatic layout a column cannot shrink below its own content's
-   width (a magnet's whole name, unbreakable), which is exactly what
-   dragging a border narrower has to be able to do. Fixed layout reads every
-   column's width off its <th> alone (app.js sets each one from the
-   --col-w-* tokens above) and holds every row to it regardless of what a
-   cell contains - the same guarantee .run-name's own overflow: hidden;
-   text-overflow: ellipsis (below) then turns into "…" instead of a shoved
-   layout. width: 100% still matters under fixed layout: the used width is
-   the GREATER of it and the columns' own summed widths, so it fills the
-   pane by default and, the moment a drag makes that sum wider than 100%, it
-   simply loses the comparison and the table grows past the pane instead -
-   which is what pushes .run-table-wrap's own overflow-x: auto rather than
-   the page. */
-.run-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .82rem; }
-.run-table th, .run-table td { padding: .4rem .3rem; text-align: left; vertical-align: middle; }
+/* THE TEN TRACKS (TOR-215), and every one of them is load-bearing.
 
-.run-table thead th {
+   A BARE LENGTH, never auto/min-content/max-content, on all nine sortable
+   columns. This is the exact counterpart of the table-layout: fixed it
+   replaces, and it is the one line of the conversion that must not be
+   loosened later: a track sized from a --col-w-* token holds every cell in
+   its column to that width no matter what the cell contains, which is what
+   lets a drag make a column NARROWER THAN ITS OWN CONTENT (a magnet's whole
+   name, unbreakable). TOR-214 measured all four ways of asking, same string,
+   same 44px: automatic table layout rendered 822.43px, a
+   minmax(min-content, 44px) track rendered 822.43px, fixed table layout
+   53.59px, and a bare 44px track 44px. So a grid track is NOT automatically
+   able to do this - it can because this list never asks the content.
+   .run-name's own overflow: hidden; text-overflow: ellipsis (below) is what
+   then turns the over-long name into "…" rather than a shoved layout.
+
+   THE TENTH TRACK IS THE ONLY FLEXIBLE ONE, and one is the right number. The
+   actions column carries no data-sort, so nothing ever drags its border and
+   it is the one track that can absorb the slack between the summed columns
+   (922.4px at the default tokens) and the pane. Wrapping every token as
+   minmax(var(--col-w-KEY), 1fr) so the slack SPREAD - which is what the
+   <table>'s own width: 100% used to do - was tried and is wrong: under
+   width: max-content every 1fr track resolved to 851.74px, all ten identical,
+   and dragging a token then changed nothing at all. Park it in one track.
+
+   width: max-content WITH min-width: 100% is how the grid keeps
+   .run-table-wrap's own overflow-x as the horizontal escape hatch rather
+   than the page's. At rest max-content is the summed tracks; if that is
+   narrower than the pane, min-width wins and the grid fills it (the slack
+   going to the tenth track - measured 245.6px at a 1440px window). The
+   moment a drag makes the sum wider than the pane, max-content wins, the
+   grid outgrows the wrap, and the wrap scrolls. That is this rule's answer to
+   "the used width is the GREATER of width: 100% and the summed columns",
+   which is what the <table> relied on. */
+.run-grid {
+  display: grid;
+  grid-template-columns:
+    var(--col-w-name)
+    var(--col-w-when)
+    var(--col-w-status)
+    var(--col-w-peers)
+    var(--col-w-seeds)
+    var(--col-w-download_bps)
+    var(--col-w-upload_bps)
+    var(--col-w-availability)
+    var(--col-w-priority)
+    minmax(3.8rem, 1fr);
+  width: max-content;
+  min-width: 100%;
+  font-size: .82rem;
+}
+
+/* #run-list, the element rows are appended to (run-table.js's this.list), and
+   the ONE place in this project where display: contents is right - see
+   run-table's own rule above for why it is otherwise avoided. A list with a
+   box of its own would be a single grid item, and every row inside it would
+   be laid out against that box rather than against the ten tracks; with no
+   box, a row is a direct grid item of .run-grid and its cells land in the
+   columns the header cells are in. Nothing is drawn here, so there is no box
+   to lose. */
+.run-grid-rows { display: contents; }
+
+/* THE WRAPPER, AND THE WHOLE REASON TOR-215 EXISTS. One element around a
+   torrent's row AND the detail it opens onto - which is what a <table> made
+   impossible, and what TOR-212 needs. It draws nothing today on purpose: the
+   row's hover ground, its accent rail and its bottom rule belong to the row
+   line (.run-row below) exactly as they did when the pair were two <tr>s, so
+   the conversion changes no pixel here.
+
+   subgrid, NOT display: contents, and the difference is the point: a
+   display: contents wrapper has no box, and a box is the one thing this
+   wrapper is FOR. With subgrid it is a real, paintable, measurable element
+   spanning all ten columns whose children still sit in the outer grid's own
+   tracks. */
+.run-row-group {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+}
+
+/* The torrent's own line: the ten cells, and nothing else. It is a second
+   subgrid rather than the wrapper itself because the row's click listener
+   lives on it (run-table.js's bindRow) and the detail must stay OUTSIDE that
+   listener - a click on a picker checkbox or a thumbnail inside the detail
+   must not collapse the thing being used. Two <tr>s gave that separation for
+   free; inside a wrapper it has to be an element.
+
+   align-items: center is the grid's vertical-align: middle. A table cell's
+   content is centred in the row box by default; a grid item is stretched, so
+   without this a one-line name would sit at the TOP of a row whose height
+   comes from the status cell's badge, meta line and progress bar. */
+.run-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+
+/* The detail spans every column, and no count is written down anywhere: -1
+   is the last line of whatever the grid has. This is the colspan="10" the
+   table wrote by hand from this.columns - a number that had to be recounted
+   every time a column was added (TOR-139 added six) and would have gone wrong
+   silently if it ever disagreed. It is not a number any more.
+
+   Deliberately no `display` here, and detail.css's own note says the same
+   from the other side: `hidden` is the whole of collapse, so the UA's
+   [hidden] { display: none } must never meet a class selector at equal
+   specificity. grid-column is not display. */
+.run-detail-row { grid-column: 1 / -1; }
+
+/* MEASURED, NOT READ (TOR-214). A table cell's width in the border-collapse
+   model already includes its padding, so --col-w-name: 20rem meant 320px
+   INCLUDING the .4rem/.3rem on every <th>/<td>. A grid item is content-box by
+   default and base.css has no global reset, so a header given
+   `width: var(--col-w-name)` measured 329.6px inside its own 320px track -
+   every column 9.6px wrong. The inline width that caused it is gone (the
+   track sizes the cell now, so run-table.js no longer sets one), which is why
+   nothing today is 9.6px out. This line stays so that nothing can be: the
+   moment any width, min-width or max-width lands on one of these boxes, its
+   padding has to count inside, the way the table's always did. */
+.run-grid-head, .run-cell, .run-detail-cell { box-sizing: border-box; }
+.run-grid-head, .run-cell { padding: .4rem .3rem; text-align: left; }
+
+.run-grid-head {
   position: sticky;
-  /* Sticky within the wrap, which since TOR-137's cap was removed has no
+  /* EACH HEADER CELL IS ITS OWN STICKY ITEM. There is no <thead> box to stick
+     any more and none is needed - ten items pinned at the same top: 0 read as
+     one header band, which TOR-214 proved with a control rather than by
+     eye: in a wrap given a height, scrolling it 250px left the name header at
+     offset 0 from the wrap's top while the first row moved to -223.7, and the
+     same header set to position: static moved to -250.
+
+     Sticky within the wrap, which since TOR-137's cap was removed has no
      height to scroll inside - so today the header travels with the page and
      tucks under the pinned intake rather than coming to rest below it.
      Measured rather than guessed, twice now: the intake was 130px tall when
@@ -110,11 +255,12 @@ run-table { display: block; }
      the table only actually needs that escape hatch at widths this pane was
      already tight at before that ticket. TOR-168 later widened the pane by
      removing the left panel: measured at a 1440px window, the nine columns
-     (1079px) now fit inside the pane (1168px) with no overflow at all - see
-     TOR-168's own ticket for the before/after numbers, and TOR-164 (not
-     TOR-166, which TOR-168's own text names by mistake - TOR-166 is the
-     unrelated top-up pricing ticket) for whatever of the overflow this
-     leaves at a narrower window. */
+     fit inside the pane (1168px) with no overflow at all - at the default
+     tokens they sum to 922.4px, and the slack goes to the tenth track (see
+     .run-grid). See TOR-168's own ticket for the before/after numbers, and
+     TOR-164 (not TOR-166, which TOR-168's own text names by mistake -
+     TOR-166 is the unrelated top-up pricing ticket) for whatever of the
+     overflow this leaves at a narrower window. */
   top: 0;
   z-index: 2;
   background: var(--s1);
@@ -125,35 +271,54 @@ run-table { display: block; }
   letter-spacing: var(--track);
   color: var(--ink-2);
   white-space: nowrap;
-  /* TOR-157: a dragged column can go as narrow as COLUMN_MIN_WIDTH (app.js),
-     narrower than a label like "Availability" - clipped rather than left to
-     overflow into the next header, the same reason .run-name gets an
-     ellipsis instead of a shoved layout. */
+  /* TOR-157: a dragged column can go as narrow as COLUMN_MIN_WIDTH
+     (run-table.js), narrower than a label like "Availability" - clipped
+     rather than left to overflow into the next header, the same reason
+     .run-name gets an ellipsis instead of a shoved layout. The "…" itself is
+     on .run-th-label below, which is where the text is; this clips whatever
+     escapes it, the drag handle included. */
   overflow: hidden;
-  text-overflow: ellipsis;
   border-bottom: 1px solid var(--rule);
   cursor: pointer;
   user-select: none;
+  /* A COLUMN of one or two lines, centred (TOR-215). The <th> got this for
+     free from `vertical-align: middle`: its label sat in the middle of a
+     header band whose height comes from the tallest header, which is the
+     two-line availability one. A grid item is stretched instead, so without
+     these three the eight one-line labels would sit at the top of the band
+     and only the availability label would look aligned. flex-direction:
+     column is what keeps .run-th-label and .run-th-unit stacked, as they were
+     when both were plain blocks in a cell. */
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 }
-/* Fixed (TOR-157): the actions column carries no data-sort and its border
-   never drags, so unlike every other header it keeps a plain, un-tokened
-   width here instead of a --col-w-* var - table-layout: fixed still needs
-   it stated on the header cell itself, since a <td>'s own width (see
-   .run-cell-actions) is no longer read for column sizing. */
-.run-table thead th.run-actions-header { cursor: default; width: 3.8rem; }
-.run-table thead th:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.run-table thead th[aria-sort]::after { display: inline-block; width: .9em; text-align: center; }
-.run-table thead th[aria-sort="ascending"]::after { content: "▲"; }
-.run-table thead th[aria-sort="descending"]::after { content: "▼"; }
+/* TOR-215: the actions column's 3.8rem is the tenth track's own minimum now
+   (see .run-grid) rather than a width stated here. It is the one column that
+   carries no data-sort, so nothing drags its border - which is exactly why it
+   is the track the pane's slack is parked in, and why it must NOT be given a
+   width of its own: that would take the slack somewhere and leave the grid
+   narrower than the pane. All that is left here is that its header is not a
+   sort control. */
+.run-grid-head.run-actions-header { cursor: default; }
+.run-grid-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The sort mark hangs off the LABEL, not off the header cell: the cell is a
+   flex column (above), so a ::after of its own would be a third flex item on
+   a line below the label instead of sitting after the text. Inside the label
+   it stays where it has always been, and is clipped by the same ellipsis when
+   the column is dragged too narrow to hold both. */
+.run-grid-head[aria-sort] .run-th-label::after { display: inline-block; width: .9em; text-align: center; }
+.run-grid-head[aria-sort="ascending"] .run-th-label::after { content: "▲"; }
+.run-grid-head[aria-sort="descending"] .run-th-label::after { content: "▼"; }
 
-/* TOR-157: the drag handle sitting inside every sortable header (app.js
-   appends one .col-resizer span per <th data-sort>, after buildLiveColumnHeaders
-   has built all nine). position: sticky on .run-table thead th above already
-   gives each header its own containing block, so this needs nothing extra to
-   anchor to its header rather than the table. Transparent at rest,
-   --accent-dim on hover/focus/drag - deliberately narrow, since a column
-   border sits inside a clickable sort control and must not read as large a
-   target as that. */
+/* TOR-157: the drag handle sitting inside every sortable header
+   (run-table.js appends one .col-resizer span per header with a data-sort,
+   after buildLiveColumnHeaders has built all nine). position: sticky on
+   .run-grid-head above already gives each header its own containing block, so
+   this needs nothing extra to anchor to its header rather than to the grid.
+   Transparent at rest, --accent-dim on hover/focus/drag - deliberately
+   narrow, since a column border sits inside a clickable sort control and must
+   not read as large a target as that. */
 .col-resizer {
   position: absolute;
   top: 0;
@@ -189,14 +354,16 @@ run-table { display: block; }
 /* A name is cut off, not shredded. Before TOR-157 this cell needed its own
    `max-width: 0` / `width: 100%` trick to shrink below its content at all -
    an automatic-layout table cell is sized by its content otherwise, and a
-   long name would push the other columns out rather than truncate. Now that
-   .run-table is table-layout: fixed, the column's width comes solely from
-   its <th> (--col-w-name, draggable) and every cell in it is held there
-   regardless of content, so the trick is gone; .run-name's own
-   overflow: hidden; text-overflow: ellipsis (below) is what still turns an
-   over-long name into "…" rather than nothing at all. min-width: 0 stays -
-   without it a flex child's default min-width: auto would keep .run-row-main
-   from shrinking past its own content, defeating the ellipsis one level in. */
+   long name would push the other columns out rather than truncate. TOR-157's
+   table-layout: fixed removed the need for the trick and TOR-215's grid keeps
+   it removed for the same reason stated the other way round: the name
+   column's width is its TRACK's, a bare length read from --col-w-name (see
+   .run-grid), and a grid item never widens a track sized by a length. So
+   .run-name's own overflow: hidden; text-overflow: ellipsis (below) is what
+   still turns an over-long name into "…" rather than nothing at all.
+   min-width: 0 stays - without it a flex child's default min-width: auto
+   would keep .run-row-main from shrinking past its own content, defeating the
+   ellipsis one level in. */
 .run-cell-name { min-width: 0; }
 .run-row-main {
   display: flex;
@@ -261,11 +428,12 @@ run-table { display: block; }
    why TOR-121 exists: before TOR-157 an unshrinkable cell here would have
    taken its width from .run-cell-name's own `max-width: 0` trick, which gave
    the somewhere it stole from a name. TOR-157's table-layout: fixed removed
-   that trick - no column can grow for content any more - so today an
-   unshrinkable, over-long line here would simply overflow its own fixed
-   column instead. The label is short (metaLabel in app.js), so there is
-   nothing to constrain there; an error message is the one long thing that
-   still lands here, and it is allowed to wrap rather than risk that. */
+   that trick - no column can grow for content any more - and TOR-215's bare
+   tracks keep it removed, so today an unshrinkable, over-long line here would
+   simply overflow its own column instead. The label is short (metaLabel in
+   app.js), so there is nothing to constrain there; an error message is the
+   one long thing that still lands here, and it is allowed to wrap rather than
+   risk that. */
 .run-cell-status .run-meta { max-width: 11rem; }
 
 /* THE SIX LIVE COLUMNS (TOR-139): peers, seeds, both rates, availability and
@@ -278,16 +446,20 @@ run-table { display: block; }
    is the one thing that makes a column of numbers scannable at a glance -
    left-aligned, "8" and "142" line up on nothing.
 
-   The `.run-table td` in the selector is not decoration: `.run-table th,
-   .run-table td` above already sets text-align left at two classes' worth of
-   specificity, and a bare `.run-cell-metric` rule (one class) would lose to
-   it silently, leaving every figure here flush left with nothing to say why.
+   ORDER IS WHAT MAKES THIS WIN, and it is the whole of why this rule must
+   stay BELOW `.run-grid-head, .run-cell` near the top of the file. That rule
+   sets text-align: left, and since TOR-215 dropped the `.run-table td` in
+   both selectors the two are at exactly equal specificity (one class each) -
+   so the later one wins and nothing else decides it. Under the <table> the
+   same job was done by specificity instead (`.run-table td.run-cell-metric`
+   at two classes beating `.run-table td` at one); moving this rule above the
+   shared one would now silently leave every figure flush left.
 
-   No `width` here since TOR-157: table-layout: fixed reads a column's width
-   off its <th> alone (see --col-w-peers etc. and .run-table's own comment),
-   so a td's own width is never consulted for layout - the figure just sits
-   wherever its column ends up. */
-.run-table td.run-cell-metric {
+   No `width` here, and none since TOR-157: a column's width is its track's
+   (see --col-w-peers etc. and .run-grid's own comment), so a cell's own width
+   is never consulted for layout - the figure just sits wherever its column
+   ends up. */
+.run-cell-metric {
   white-space: nowrap;
   text-align: right;
   font-family: var(--mono);
@@ -305,7 +477,7 @@ run-table { display: block; }
    state kept --ink-2, the same two tokens, swapped, both already clearing
    AA everywhere. The em dash's own shape still carries the rest of the
    signal: it cannot be mistaken for a digit regardless of colour. */
-.run-table td.run-cell-metric[data-absent="true"] { color: var(--ink-2); }
+.run-cell-metric[data-absent="true"] { color: var(--ink-2); }
 
 /* Two lines, the same shape .run-cell-status gives a badge and its .run-meta
    underneath: the copies-per-piece figure on top, and how many pieces no
@@ -346,20 +518,28 @@ run-table { display: block; }
   text-overflow: ellipsis;
 }
 
-/* Header cells for the same six columns. Left-aligned like every other
-   header in this table (unlike their own data cells) - .run-table thead th's
-   own rule already sizes and cases the label, so nothing here needs to
-   repeat it, and (TOR-157) nothing here sets a width either any more: each
-   header's width comes from app.js's own inline `style.width =
-   "var(--col-w-KEY)"`, set once per <th data-sort> so table-layout: fixed
-   has something authoritative to read column by column instead of one class
-   shared by four differently-resizable headers (.run-cell-metric-header
-   used to be exactly that: peers, seeds, download_bps and upload_bps all
-   wore it, which would have made all four resize together). The unit line
-   (.run-th-unit) still gives the availability header its own second line so
-   its figure's unit is legible without a tooltip nobody opens, per that
-   ticket's acceptance criterion. */
-.run-th-label { display: block; }
+/* THE LABEL INSIDE EVERY HEADER, all ten of them since TOR-215 - the three
+   in index.html wrap their text in one now too, where they used to be bare
+   text in a <th>. Uniform because two things below need an element to hang
+   on: the "…" (the header cell itself is a flex column, so text-overflow
+   there would have nothing inline to truncate) and the ▲/▼ sort mark.
+
+   Left-aligned like every other header (unlike their own data cells) -
+   .run-grid-head's own rule already sizes and cases the label, so nothing
+   here needs to repeat it, and nothing here sets a width: a header's width is
+   its track's (see .run-grid), which is read straight from the same
+   --col-w-KEY token the drag writes. That is what keeps four differently-
+   resizable columns from resizing together, which is what would have happened
+   had the width lived on the shared .run-cell-metric-header class the six
+   live headers all wear. The unit line (.run-th-unit) gives the availability
+   header its own second line so its figure's unit is legible without a
+   tooltip nobody opens, per TOR-139's acceptance criterion. */
+.run-th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .run-th-unit {
   display: block;
   font-size: .55rem;
@@ -374,8 +554,12 @@ run-table { display: block; }
    carries the two buttons that move it up and down the queue, and they
    belong here rather than in the Queue cell because this is the column the
    row's VERBS live in - the figure columns stay figures. No `width` here
-   since TOR-157 (see .run-table thead th.run-actions-header, which is where
-   this column's fixed 3.8rem now actually lives under table-layout: fixed). */
+   since TOR-157, and since TOR-215 the 3.8rem lives in the tenth track
+   itself - minmax(3.8rem, 1fr) in .run-grid, where 3.8rem is the floor and
+   the 1fr is what makes this the column that absorbs the pane's slack. So
+   the track is usually far wider than 3.8rem (245.6px at a 1440px window)
+   and text-align: right is what keeps the buttons where they have always
+   been: hard against the right edge of the pane. */
 .run-cell-actions { text-align: right; white-space: nowrap; }
 .run-cancel,
 .run-priority {

@@ -372,11 +372,11 @@ file-detail[hidden] { display: none; }
    target, and the triangle says it opens.
 
    INDENTED BY A RULE, NOT BY PADDING, and the choice is about width. This is
-   the innermost of three levels inside a colspanned cell whose own width is
-   pinned to the pane (TOR-174), and the widest thing on the page - a frame
-   grid - is what lands here. So the nesting is said with a 1px line and
-   .6rem of room beside it rather than with the ~1.4rem a matching inset
-   would have cost the grid at every window size.
+   the innermost of three levels inside a cell that spans every column and
+   whose own width is pinned to the pane (TOR-174), and the widest thing on
+   the page - a frame grid - is what lands here. So the nesting is said with a
+   1px line and .6rem of room beside it rather than with the ~1.4rem a
+   matching inset would have cost the grid at every window size.
 
    No `display` of its own, deliberately: collapse is the `hidden` attribute
    alone, and a class rule declaring display would beat the UA's `[hidden]`

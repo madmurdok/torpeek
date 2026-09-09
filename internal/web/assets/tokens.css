@@ -65,17 +65,19 @@
 
   /* TOR-157: one token per
      resizable run-table column rather than one shared box, because each
-     column's border moves independently of the others. Read by the
-     matching <th>'s own inline style (app.js sets `width: var(--col-w-KEY)`
-     on each header once, at load) and overwritten in place by app.js when
-     that column's border is dragged - .run-table's table-layout: fixed is
-     what makes a header's width authoritative for the whole column
-     regardless of a row's own content. The actions column is deliberately
-     absent here: it carries no data-sort, so nothing drags its own border,
-     and it keeps the plain 3.8rem app.css always gave it (see
-     .run-actions-header). Defaults below match the widths this table
-     already rendered at before this ticket (see .run-cell-metric and its
-     siblings), so a page that has never stored anything looks unchanged. */
+     column's border moves independently of the others. Read by table.css's
+     .run-grid, which names all nine in its grid-template-columns, and
+     overwritten in place by run-table.js when
+     that column's border is dragged - a BARE LENGTH per track is what makes
+     the token authoritative for the whole column regardless of a row's own
+     content (TOR-215; before it, the same job was done by table-layout:
+     fixed reading an inline width off each <th>). The actions column is
+     deliberately absent here: it carries no data-sort, so nothing drags its
+     own border, and it is the one track that must stay flexible so the pane's
+     slack has somewhere to go - its 3.8rem is that track's minimum, stated in
+     .run-grid. Defaults below match the widths this table already rendered at
+     before TOR-157 (see .run-cell-metric and its siblings), so a page that
+     has never stored anything looks unchanged. */
   --col-w-name: 20rem;
   --col-w-when: 6.5rem;
   --col-w-status: 8.75rem;

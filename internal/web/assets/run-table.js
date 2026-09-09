@@ -9,23 +9,28 @@
 // the setServices shape this file also needs. Neither is repeated here.
 //
 // WHAT IT IS, in one line: everything that makes the nine-column table a
-// table. The six live columns (TOR-139), client-side sorting over what
-// state.runs already holds, the queue column and the one place its figure
-// comes from (TOR-140, TOR-156), the drag-a-border-and-remember-it column
-// widths (TOR-157), the accordion's own mechanism (TOR-138) and the detail's
-// width token (TOR-174).
+// table - which since TOR-215 is a CSS grid rather than a <table> element,
+// and the behaviour below did not have to change for it (table.css's own
+// banner says why, and docs/front-end.md carries the measurements). The row
+// building is div-per-cell now, wireColumnResizers is untouched, and the one
+// thing that got SMALLER is the column count: the detail spans `1 / -1`, so
+// there is nothing to count. The six live columns (TOR-139), client-side
+// sorting over what state.runs already holds, the queue column and the one
+// place its figure comes from (TOR-140, TOR-156), the
+// drag-a-border-and-remember-it column widths (TOR-157), the accordion's own
+// mechanism (TOR-138) and the detail's width token (TOR-174).
 //
 // ---------------------------------------------------------------------------
-// WHERE THE BOUNDARY IS, because a colspanned detail <tr> belongs to the table
+// WHERE THE BOUNDARY IS, because the detail's own row belongs to the table
 // structurally and to the detail logically, and the ticket asks for the line
 // to be drawn rather than left to be inferred.
 //
-// THE TABLE OWNS THE ROW. Both <tr>s per entry, the second one included: the
-// detail's row is a row, its cell's colSpan is a fact about the header count
-// (this.columns), and hiding it is what an accordion at this level DOES. So
-// newRow() builds the pair and hands back every element in them, detailCell
-// among them, and setRunExpanded() is the only function that may put one on
-// screen or take it off.
+// THE TABLE OWNS THE ROW. All three elements per entry (TOR-215: the wrapper,
+// the torrent's line and the detail's row inside it): the detail's row is a
+// row, how far it spans is a fact about the grid, and hiding it is what an
+// accordion at this level DOES. So newRow() builds the group and hands back
+// every element in it, detailCell among them, and setRunExpanded() is the
+// only function that may put one on screen or take it off.
 //
 // THE PAGE OWNS WHAT THE CELL IS FILLED WITH. Not one thing built into
 // detailCell is in this file - not the .run-detail div, not its header, not
@@ -220,9 +225,7 @@ class RunTable extends HTMLElement {
     // The interval's handle, so it can be stopped. null when it is not running,
     // which is the same null-until-started shape the drag state uses.
     this.stallTimer = null;
-    // Filled in by wire(): the parts, the header count the detail row spans,
-    // and the widths a drag has produced.
-    this.columns = 1;
+    // Filled in by wire(): the parts and the widths a drag has produced.
     this.columnWidths = {};
 
     // wired, partsObserver and partsDeadline are wire()'s own bookkeeping
@@ -249,9 +252,12 @@ class RunTable extends HTMLElement {
     // Found inside THIS element rather than by document id, so a second table
     // could not steal the first one's parts. The ids stay on the markup for
     // the Go tests, for #run-list-empty's own rule and for the aria wiring.
-    this.table = this.querySelector("#run-table");
-    this.headRow = this.querySelector("#run-table thead tr");
-    this.actionsHeader = this.querySelector("#run-table thead th.run-actions-header");
+    // this.grid IS the header's parent since TOR-215: the ten header cells
+    // are the grid's own first ten items, so there is no header ROW element
+    // left to find - a grid has rows, not <tr>s. buildLiveColumnHeaders
+    // inserts into it directly.
+    this.grid = this.querySelector("#run-table");
+    this.actionsHeader = this.querySelector("#run-table > .run-actions-header");
     this.list = this.querySelector("#run-list");
     this.emptyNote = this.querySelector("#run-list-empty");
     // No id on this one in index.html - it is the scroll wrapper, not a
@@ -260,14 +266,13 @@ class RunTable extends HTMLElement {
     this.wrap = this.querySelector(".run-table-wrap");
 
     // buildLiveColumnHeaders used to `return` on a missing header row, which
-    // meant a page that had lost its thead rendered a three-column table and
-    // said nothing. Every part below is still checked for absence - but a
+    // meant a page that had lost its headers rendered a three-column table
+    // and said nothing. Every part below is still checked for absence - but a
     // part missing here is no longer necessarily THAT bug (TOR-205): it may
     // be a subtree still arriving, so a miss bails quietly into awaitParts()
     // rather than throwing on the spot.
     const missing = Object.entries({
-      table: this.table,
-      headRow: this.headRow,
+      grid: this.grid,
       actionsHeader: this.actionsHeader,
       list: this.list,
       emptyNote: this.emptyNote,
@@ -287,16 +292,16 @@ class RunTable extends HTMLElement {
     // taken before the build would hold the three headers index.html ships
     // with and every column past them would be unsortable and unresizable.
     this.buildLiveColumnHeaders();
-    this.sortHeaders = this.querySelectorAll("#run-table thead [data-sort]");
-    // this.columns is how far a detail row has to span, read off the header
-    // rather than written as a literal - TOR-139 added six more columns to the
-    // three the page shipped with, via buildLiveColumnHeaders() just above,
-    // and a hard-coded count here would have gone wrong silently the moment it
-    // did: a short colspan leaves an empty cell at the end of the detail row
-    // and narrows the detail by a column. One line builds the headers and the
-    // next counts what it built, which is what keeps this correct without the
-    // two having to be kept in sync by hand.
-    this.columns = this.querySelectorAll("#run-table thead th").length || 1;
+    this.sortHeaders = this.querySelectorAll("#run-table > [data-sort]");
+    // NO COLUMN COUNT IS KEPT ANY MORE, and that is TOR-215's doing rather
+    // than an omission. Until the grid, this line read the header count off
+    // the DOM (`querySelectorAll("#run-table thead th").length`) so the detail
+    // row's colSpan could be set from it - a literal would have gone wrong
+    // silently the moment TOR-139 added six columns, leaving an empty cell at
+    // the end of the detail row and the detail a column narrow. A grid needs
+    // no count at all: .run-detail-row spans `1 / -1` (table.css), and -1 is
+    // the last line of whatever the grid has. The thing the count existed to
+    // keep correct is no longer a thing that can be wrong.
 
     this.wireSorting();
     // columnWidths holds only the entries a drag (or a valid stored value) has
@@ -348,9 +353,8 @@ class RunTable extends HTMLElement {
     if (this.wired) return;
 
     const missing = Object.entries({
-      table: this.querySelector("#run-table"),
-      headRow: this.querySelector("#run-table thead tr"),
-      actionsHeader: this.querySelector("#run-table thead th.run-actions-header"),
+      grid: this.querySelector("#run-table"),
+      actionsHeader: this.querySelector("#run-table > .run-actions-header"),
       list: this.querySelector("#run-list"),
       emptyNote: this.querySelector("#run-list-empty"),
       wrap: this.querySelector(".run-table-wrap"),
@@ -372,51 +376,62 @@ class RunTable extends HTMLElement {
     this.stopAwaitingParts();
   }
 
-  // buildLiveColumnHeaders inserts the six <th>s into the existing thead row,
-  // before the (headerless) actions column, so this.columns below and
-  // this.sortHeaders' own querySelectorAll both see them without index.html ever
-  // naming them by hand - this file owns every column past the three the page
-  // shipped with (name, added, status).
+  // buildLiveColumnHeaders inserts the six header cells straight into the
+  // grid, before the (headerless) actions column, so this.sortHeaders' own
+  // querySelectorAll sees them without index.html ever naming them by hand -
+  // this file owns every column past the three the page shipped with (name,
+  // added, status).
+  //
+  // A DIV PER HEADER SINCE TOR-215, not a <th>, and every attribute the <th>
+  // carried is carried here unchanged. Three of them do real work on any
+  // element: tabIndex and role="button" are what make sorting reachable
+  // without a mouse, and aria-sort is rewritten on every sort. `scope` does
+  // not - it has no meaning outside a table and no ARIA mapping of its own -
+  // and is set anyway, deliberately: TOR-213 recorded the attribute set this
+  // markup has, front-end.md says the screen-reader question is to be
+  // REOPENED rather than quietly discarded, and dropping the attribute here
+  // would be the first half of a redesign nobody has measured. index.html
+  // says the same next to the three headers it ships.
   buildLiveColumnHeaders() {
     const frag = document.createDocumentFragment();
     for (const col of LIVE_COLUMNS) {
-      const th = document.createElement("th");
-      th.scope = "col";
-      th.tabIndex = 0;
-      th.setAttribute("role", "button");
-      th.setAttribute("aria-sort", "none");
-      th.dataset.sort = col.key;
-      th.className = "run-cell-metric-header" +
+      const head = document.createElement("div");
+      head.setAttribute("scope", "col");
+      head.tabIndex = 0;
+      head.setAttribute("role", "button");
+      head.setAttribute("aria-sort", "none");
+      head.dataset.sort = col.key;
+      head.className = "run-grid-head run-cell-metric-header" +
         (col.key === "availability" ? " run-cell-availability-header" : "") +
         (col.key === "priority" ? " run-cell-queue-header" : "");
-      th.title = col.title;
+      head.title = col.title;
       const label = document.createElement("span");
       label.className = "run-th-label";
       label.textContent = col.label;
-      th.append(label);
+      head.append(label);
       if (col.unit) {
         const unit = document.createElement("span");
         unit.className = "run-th-unit";
         unit.textContent = col.unit;
-        th.append(unit);
+        head.append(unit);
       }
-      frag.append(th);
+      frag.append(head);
     }
-    this.headRow.insertBefore(frag, this.actionsHeader);
+    this.grid.insertBefore(frag, this.actionsHeader);
   }
 
   // wireSorting makes every header a sort control - a click, and Enter or
-  // space for anyone reaching it by keyboard, which is why each <th> carries
-  // tabindex and role=button (buildLiveColumnHeaders above, and index.html for
-  // the three it ships). One pass over this.sortHeaders, so a header that
-  // exists is sortable by construction.
+  // space for anyone reaching it by keyboard, which is why each header cell
+  // carries tabindex and role=button (buildLiveColumnHeaders above, and
+  // index.html for the three it ships). One pass over this.sortHeaders, so a
+  // header that exists is sortable by construction.
   wireSorting() {
-    for (const th of this.sortHeaders) {
-      th.addEventListener("click", () => this.setSort(th.dataset.sort));
-      th.addEventListener("keydown", (event) => {
+    for (const head of this.sortHeaders) {
+      head.addEventListener("click", () => this.setSort(head.dataset.sort));
+      head.addEventListener("keydown", (event) => {
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
-        this.setSort(th.dataset.sort);
+        this.setSort(head.dataset.sort);
       });
     }
   }
@@ -429,22 +444,24 @@ class RunTable extends HTMLElement {
   // sort - including under the default "when" sort, where a status change
   // never touches when, so re-running this never moves that row.
   //
-  // TWO rows per entry since TOR-138: the torrent's own line and, directly
-  // under it, the row its detail renders in. They move together, in that order,
-  // which is the whole of what keeps a detail attached to the torrent it
-  // belongs to under every sort - append() takes both at once, so there is no
-  // window in which a re-sort has moved one and not the other.
+  // ONE ELEMENT PER ENTRY TO MOVE, since TOR-215. TOR-138 gave an entry two
+  // adjacent <tr>s - its own line and the row its detail renders in - and
+  // this loop had to append both at once, in that order, because nothing
+  // owned the pair: a re-sort that moved one and not the other would have
+  // detached a detail from its torrent. Now rowGroupEl IS the pair, so the
+  // ordering is not something this function has to get right; there is no
+  // arrangement of one element that can separate them.
   reorderRuns() {
     const rows = Array.from(state.runs.values()).sort(compareEntries);
-    for (const entry of rows) this.list.append(entry.rowEl, entry.detailRowEl);
+    for (const entry of rows) this.list.append(entry.rowGroupEl);
   }
 
   updateSortIndicators() {
-    for (const th of this.sortHeaders) {
-      if (th.dataset.sort === state.sort.key) {
-        th.setAttribute("aria-sort", state.sort.dir === "asc" ? "ascending" : "descending");
+    for (const head of this.sortHeaders) {
+      if (head.dataset.sort === state.sort.key) {
+        head.setAttribute("aria-sort", state.sort.dir === "asc" ? "ascending" : "descending");
       } else {
-        th.setAttribute("aria-sort", "none");
+        head.setAttribute("aria-sort", "none");
       }
     }
   }
@@ -473,20 +490,36 @@ class RunTable extends HTMLElement {
   // hides what is already there, exactly as showing one of several detail panes
   // used to.
   //
-  // WHY A SECOND <tr> RATHER THAN SOMETHING INSIDE THE FIRST. A detail nested in
-  // a data cell would inherit that cell's own click target, and a click anywhere
-  // in the detail - a picker checkbox, a thumbnail - would bubble to the row's
-  // handler and collapse the thing being used. A sibling row cannot: the row's
-  // listener is on the row, and the detail is not in it. It also keeps the
-  // table's own column widths the only thing deciding the columns, and it stays
-  // valid markup, which a <div> between two <tr>s would not be.
+  // THREE ELEMENTS PER ENTRY SINCE TOR-215, and the middle one is the whole
+  // reason that ticket exists:
+  //
+  //   .run-row-group  the wrapper, spanning all ten columns as a subgrid
+  //     .run-row        the torrent's own line, ten cells, also a subgrid
+  //     .run-detail-row the detail, spanning 1 / -1
+  //
+  // A <table> could not have the wrapper. An unknown element written between
+  // <tbody> and <tr> is hoisted out in front of the whole table and left
+  // empty - TOR-214 measured it - so the row and its detail were two sibling
+  // <tr>s with nothing owning both, which is what blocked TOR-212.
+  //
+  // WHY THE DETAIL IS STILL NOT INSIDE .run-row. Exactly the reason it was
+  // not inside the first <tr>: a detail under the row's own click listener
+  // would collapse when anything in it is used - a picker checkbox, a
+  // thumbnail - because the click bubbles to the row's handler. The listener
+  // is on .run-row (bindRow), and the detail is its SIBLING inside the
+  // wrapper, so using a detail still cannot close it. Two sibling <tr>s gave
+  // that separation for free; inside one wrapper it has to be an element, and
+  // that is what .run-row is now.
 
   newRow() {
-    const row = document.createElement("tr");
+    const group = document.createElement("div");
+    group.className = "run-row-group";
+
+    const row = document.createElement("div");
     row.className = "run-row";
 
-    const nameCell = document.createElement("td");
-    nameCell.className = "run-cell-name";
+    const nameCell = document.createElement("div");
+    nameCell.className = "run-cell run-cell-name";
     const main = document.createElement("button");
     main.type = "button";
     main.className = "run-row-main";
@@ -505,11 +538,11 @@ class RunTable extends HTMLElement {
     // onto - the one attribute of this row that TOR-195's half decides.
     main.setAttribute("aria-expanded", "false");
 
-    const whenCell = document.createElement("td");
-    whenCell.className = "run-cell-when";
+    const whenCell = document.createElement("div");
+    whenCell.className = "run-cell run-cell-when";
 
-    const statusCell = document.createElement("td");
-    statusCell.className = "run-cell-status";
+    const statusCell = document.createElement("div");
+    statusCell.className = "run-cell run-cell-status";
     const badge = document.createElement("span");
     badge.className = "run-badge";
     const meta = document.createElement("span");
@@ -525,16 +558,16 @@ class RunTable extends HTMLElement {
     // headers above. peers/seeds/down/up are one text node each; availability
     // carries a second, muted line for "N unavailable" the same way the status
     // cell's own badge carries .run-meta under it.
-    const peersCell = document.createElement("td");
-    peersCell.className = "run-cell-metric run-cell-peers";
-    const seedsCell = document.createElement("td");
-    seedsCell.className = "run-cell-metric run-cell-seeds";
-    const downCell = document.createElement("td");
-    downCell.className = "run-cell-metric run-cell-down";
-    const upCell = document.createElement("td");
-    upCell.className = "run-cell-metric run-cell-up";
-    const availCell = document.createElement("td");
-    availCell.className = "run-cell-metric run-cell-availability";
+    const peersCell = document.createElement("div");
+    peersCell.className = "run-cell run-cell-metric run-cell-peers";
+    const seedsCell = document.createElement("div");
+    seedsCell.className = "run-cell run-cell-metric run-cell-seeds";
+    const downCell = document.createElement("div");
+    downCell.className = "run-cell run-cell-metric run-cell-down";
+    const upCell = document.createElement("div");
+    upCell.className = "run-cell run-cell-metric run-cell-up";
+    const availCell = document.createElement("div");
+    availCell.className = "run-cell run-cell-metric run-cell-availability";
     const availValue = document.createElement("span");
     availValue.className = "run-cell-availability-value";
     const availMeta = document.createElement("span");
@@ -548,16 +581,16 @@ class RunTable extends HTMLElement {
     // tabular-nums, right-aligned, figures meant to be compared straight down
     // a column", and putting controls in one would break that for every cell
     // in the row.
-    const queueCell = document.createElement("td");
-    queueCell.className = "run-cell-metric run-cell-queue";
+    const queueCell = document.createElement("div");
+    queueCell.className = "run-cell run-cell-metric run-cell-queue";
     const queueValue = document.createElement("span");
     queueValue.className = "run-cell-queue-value";
     const queueMeta = document.createElement("span");
     queueMeta.className = "run-meta run-cell-queue-meta";
     queueCell.append(queueValue, queueMeta);
 
-    const actionsCell = document.createElement("td");
-    actionsCell.className = "run-cell-actions";
+    const actionsCell = document.createElement("div");
+    actionsCell.className = "run-cell run-cell-actions";
     // The two verbs a WAITING torrent has, in the column the row's verbs
     // already live in: move it up the queue, move it down. Absent - not
     // disabled - for every row the queue has nothing to say about, the same
@@ -585,29 +618,34 @@ class RunTable extends HTMLElement {
 
     // The detail's own row, and the ONE thing collapse touches: its `hidden`
     // attribute, nothing else. Same rule the file and metadata accordions
-    // already follow - no rule in detail.css sets `display` on
-    // .run-detail-row, so the UA's own [hidden] rule is never beaten by a
-    // class selector at equal specificity. That trap has already cost this
-    // codebase twice (see .drop-overlay[hidden] in base.css, and the
-    // corner-bracket gate detail.css once carried), and the gate itself is
-    // gone now: there is no .detail-empty to gate on any more, because a
-    // torrent that is not open simply has no detail on screen.
-    const detailRow = document.createElement("tr");
+    // already follow - no rule in detail.css or table.css sets `display` on
+    // .run-detail-row (table.css gives it grid-column and nothing else), so
+    // the UA's own [hidden] rule is never beaten by a class selector at equal
+    // specificity. That trap has already cost this codebase twice (see
+    // .drop-overlay[hidden] in base.css, and the corner-bracket gate
+    // detail.css once carried), and the gate itself is gone now: there is no
+    // .detail-empty to gate on any more, because a torrent that is not open
+    // simply has no detail on screen.
+    //
+    // NO colSpan SINCE TOR-215: the detail spans every column because
+    // table.css says `grid-column: 1 / -1`, and -1 is the last line of
+    // whatever the grid has. There is no count to write, keep or get wrong.
+    const detailRow = document.createElement("div");
     detailRow.className = "run-detail-row";
     detailRow.hidden = true;
-    const detailCell = document.createElement("td");
+    const detailCell = document.createElement("div");
     detailCell.className = "run-detail-cell";
-    detailCell.colSpan = this.columns;
     detailRow.append(detailCell);
 
-    this.list.append(row, detailRow);
+    group.append(row, detailRow);
+    this.list.append(group);
     this.emptyNote.hidden = true;
 
     // WHAT THE PAGE IS HANDED BACK, and the boundary this ticket had to draw:
-    // every element of a row - the detail's own <tr> and the colspanned cell
-    // inside it INCLUDED - and not one thing built into that cell. The table
-    // owns the row; TOR-195 owns what the row opens onto, and detailCell is the
-    // seam between them (see this module's own header).
+    // every element of a row - the wrapper, the detail's own row and the
+    // spanning cell inside it INCLUDED - and not one thing built into that
+    // cell. The table owns the row; TOR-195 owns what the row opens onto, and
+    // detailCell is the seam between them (see this module's own header).
     //
     // Returned rather than kept in a map of the element's own, because an entry
     // IS the shared record: state.js's newRunState, this literal and app.js's
@@ -615,6 +653,7 @@ class RunTable extends HTMLElement {
     // scans all three), and a private map would have to be re-keyed every time
     // claimReopenedRun swaps a run's id.
     return {
+      rowGroupEl: group,
       rowEl: row, rowBadge: badge, rowName: name, rowMeta: meta, rowProgress: bar,
       rowWhen: whenCell, rowCancel: cancel, rowToggle: main,
       rowPeers: peersCell, rowSeeds: seedsCell, rowDown: downCell, rowUp: upCell,
@@ -645,10 +684,13 @@ class RunTable extends HTMLElement {
     // button stops its own click from bubbling here, so a cancel never also
     // opens the row it sits in.
     //
-    // The detail's row carries no listener at all, which is the reason it is a
-    // separate <tr>: everything inside a detail - a picker checkbox, a
-    // thumbnail, Compare - is outside this row, so using the detail cannot
-    // close it.
+    // The detail's row carries no listener at all, and the listener going on
+    // .run-row rather than on .run-row-group is what keeps that worth
+    // something: the detail is the row's SIBLING inside the wrapper, not its
+    // descendant, so everything inside a detail - a picker checkbox, a
+    // thumbnail, Compare - is outside this listener and using the detail
+    // cannot close it. Put this on the wrapper instead and every click in an
+    // open detail would collapse it (see newRow's own note).
     entry.rowEl.addEventListener("click", () => toggleRun(entry));
     entry.rowCancel.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -969,7 +1011,7 @@ class RunTable extends HTMLElement {
   }
 
   resizableColumnKeys() {
-    return Array.from(this.sortHeaders, (th) => th.dataset.sort);
+    return Array.from(this.sortHeaders, (head) => head.dataset.sort);
   }
 
   // A column that no longer exists - the table shipped fewer or differently-
@@ -1009,29 +1051,48 @@ class RunTable extends HTMLElement {
 
   // One custom property per column, on :root - the shape the left panel's own
   // width used before TOR-168 removed the panel, and the reason it is worth
-  // keeping: the header's own inline width, set once in wireColumnResizers as
-  // `var(--col-w-KEY)`, picks up every later drag without being touched again.
+  // keeping: nothing has to be told that a column moved. table.css's
+  // grid-template-columns names the same nine tokens, so writing one here
+  // re-sizes that track, and with it every cell in the column.
   applyColumnWidth(key, px) {
     document.documentElement.style.setProperty("--col-w-" + key, px + "px");
   }
 
-  // Every sortable header gets its width from the matching --col-w-* token
-  // (tokens.css declares the defaults; connectedCallback's own loop already
-  // overrode any that were stored) and a drag handle at its own right edge -
-  // the border between it and the next column. The actions header is
-  // deliberately excluded: it is not in this.sortHeaders (no data-sort), so
-  // its width stays the plain 3.8rem table.css gives .run-actions-header and
-  // it grows no handle of its own, since there is no column past it for a
-  // border to belong to.
+  // Every sortable header gets a drag handle at its own right edge - the
+  // border between it and the next column. Its WIDTH it gets from its track
+  // (table.css's .run-grid reads the matching --col-w-* token; tokens.css
+  // declares the defaults and wire()'s own loop has already overridden any
+  // that were stored), so nothing about the width is set here.
+  //
+  // TOR-215 DELETED ONE LINE FROM THIS LOOP, and what it was is worth knowing
+  // because the rest of the function is untouched:
+  //
+  //     th.style.width = "var(--col-w-" + key + ")";
+  //
+  // Under table-layout: fixed that inline width was what sized the column -
+  // fixed layout reads a column's width off its header cell alone. Under the
+  // grid the track sizes the column and the header just fills it, so the line
+  // said nothing; worse, a grid item is content-box where a table cell's
+  // width included its padding, so it made every header 9.6px wider than its
+  // own track until table.css's box-sizing caught it (TOR-214 measured
+  // 329.6px in a 320px track). The drag itself never touched the table: it
+  // writes --col-w-KEY on :root and reads getBoundingClientRect().width off
+  // the header, and both are still exactly true of a grid, which is why
+  // nothing below this comment had to change.
+  //
+  // The actions header is deliberately excluded: it is not in
+  // this.sortHeaders (no data-sort), so it grows no handle of its own, since
+  // there is no column past it for a border to belong to - and its track is
+  // the flexible one, the only track that must not be pinned to a width (see
+  // table.css's .run-grid).
   wireColumnResizers() {
-    for (const th of this.sortHeaders) {
-      const key = th.dataset.sort;
-      th.style.width = "var(--col-w-" + key + ")";
+    for (const head of this.sortHeaders) {
+      const key = head.dataset.sort;
 
       const handle = document.createElement("span");
       handle.className = "col-resizer";
       handle.setAttribute("aria-hidden", "true");
-      th.append(handle);
+      head.append(handle);
 
       // drag holds this handle's own in-progress drag - { startX, startWidth } -
       // or null when it isn't dragging. Keeping the start point and width in one
@@ -1045,9 +1106,9 @@ class RunTable extends HTMLElement {
       let drag = null;
 
       // stopPropagation on every one of the handle's own events, not just
-      // pointerdown: the handle sits inside a <th> that is itself a sort
-      // control (this.sortHeaders' own click listener, wired above), and without
-      // this a drag - or even a plain click that lands on the handle - would
+      // pointerdown: the handle sits inside a header cell that is itself a
+      // sort control (this.sortHeaders' own click listener, wired above), and
+      // without this a drag - or even a plain click that lands on the handle - would
       // bubble up and also reorder the table, the same trap TOR-140's ▲/▼
       // buttons stopPropagation against so a reorder did not also toggle the
       // accordion.
@@ -1055,7 +1116,7 @@ class RunTable extends HTMLElement {
         if (event.button !== undefined && event.button !== 0) return;
         event.stopPropagation();
         event.preventDefault();
-        drag = { startX: event.clientX, startWidth: th.getBoundingClientRect().width };
+        drag = { startX: event.clientX, startWidth: head.getBoundingClientRect().width };
         handle.classList.add("dragging");
         handle.setPointerCapture(event.pointerId);
       });
