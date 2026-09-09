@@ -104,6 +104,10 @@ import {
   waitingForMetadata,
   whenLabel,
 } from "./state.js";
+// The disclosure itself (TOR-212), one level up from every other one on the
+// page: the three DOM writes that open a row are its, and everything opening
+// a row MEANS - the width recheck and the top-up read below - stays here.
+import { Accordion } from "./accordion.js";
 
 // THE FOUR SERVICES THE PAGE INJECTS, in the shape events.js's setView and
 // compare-dialog.js's setServices already use, and for the same reason: each
@@ -525,7 +529,10 @@ class RunTable extends HTMLElement {
     main.className = "run-row-main";
     // The same disclosure triangle a video file's own row wears one level down
     // (.picker-open, since TOR-182), for the same reason: an accordion that
-    // gives no sign it opens is a table.
+    // gives no sign it opens is a table. Since TOR-212 it is literally the
+    // same object rather than a matching one: the class stays as this level's
+    // own name, and .disclosure-mark - added by the Accordion below - is the
+    // one rule that draws all three.
     const icon = document.createElement("span");
     icon.className = "run-toggle-icon";
     icon.setAttribute("aria-hidden", "true");
@@ -641,6 +648,27 @@ class RunTable extends HTMLElement {
     this.list.append(group);
     this.emptyNote.hidden = true;
 
+    // THE DISCLOSURE, at the outermost of the page's three levels (TOR-212).
+    // Built here, with the row, because every part it needs was just created -
+    // and it is what setRunExpanded writes THROUGH from now on, rather than
+    // repeating three attribute writes that also exist twice in
+    // file-detail.js.
+    //
+    // The mark is the icon span rather than the button, because at this level
+    // the triangle is a fixed-width box INSIDE the label so the name starts at
+    // the same x whichever way it points; at the file level the button is the
+    // mark. `dressed` is the row and not the wrapper: an open torrent is a
+    // state of its LINE (table.css's .run-row[data-expanded="true"] paints the
+    // ground and the 3px rail), and dressing the wrapper would paint the
+    // detail too.
+    const accordion = new Accordion({
+      level: 1,
+      toggle: main,
+      region: detailRow,
+      mark: icon,
+      dressed: row,
+    });
+
     // WHAT THE PAGE IS HANDED BACK, and the boundary this ticket had to draw:
     // every element of a row - the wrapper, the detail's own row and the
     // spanning cell inside it INCLUDED - and not one thing built into that
@@ -661,6 +689,12 @@ class RunTable extends HTMLElement {
       rowQueue: queueValue, rowQueueMeta: queueMeta, rowQueueCell: queueCell,
       rowRaise: raise, rowLower: lower,
       detailRowEl: detailRow,
+      // The row's disclosure (TOR-212), on the entry for the same reason every
+      // other row part is: the table re-sorts and MOVES rows on every redraw,
+      // and a private map keyed by id would have to be re-keyed every time
+      // claimReopenedRun swaps a run's. It holds no open state - entry.expanded
+      // is still the only record of that (accordion.js's own header).
+      rowAccordion: accordion,
       // The mount point, and the only reason the page is handed a cell at all.
       detailCell,
     };
@@ -1003,11 +1037,20 @@ class RunTable extends HTMLElement {
     // or was already asked this question, so calling it on every expansion
     // costs a comparison.
     if (expanded) detailShown(entry);
-    // The row's `hidden` attribute and nothing else - no rule in detail.css
-    // sets display on .run-detail-row, so the UA rule wins uncontested.
-    entry.detailRowEl.hidden = !expanded;
-    entry.rowEl.dataset.expanded = String(expanded);
-    entry.rowToggle.setAttribute("aria-expanded", String(expanded));
+    // AND THE DISCLOSURE ITSELF, which since TOR-212 is one call rather than
+    // the three attribute writes this method used to end with - the same three
+    // that also stood, twice, in file-detail.js. What is left above them is
+    // what opening a ROW means as opposed to what opening anything means, and
+    // that division is the whole reason the two side effects above did not
+    // travel into the component: TOR-152's guard exists because detailShown
+    // was once forgotten, and a generic disclosure is exactly where it would
+    // be forgotten again.
+    //
+    // Still nothing but the detail row's `hidden` attribute on screen - no
+    // rule in detail.css sets display on .run-detail-row, so the UA rule wins
+    // uncontested (accordion.js's apply says the same thing for all three
+    // levels at once).
+    entry.rowAccordion.apply(expanded);
   }
 
   resizableColumnKeys() {

@@ -1,0 +1,291 @@
+<!-- @dsCard group="Shared" name="Accordion" subtitle="The page's three nesting levels of disclosure, each shown closed and open" -->
+<!doctype html>
+<meta charset="utf-8">
+<title>Accordion</title>
+<!-- The design system's own entry sheet, so this card is drawn by the same
+     rules a rendered design gets. THIS COMPONENT NEEDS THREE AREA
+     STYLESHEETS, and it is the sharpest case of the split the export's README
+     describes: base.css draws the triangle (one rule for all three levels
+     since TOR-212), table.css dresses an open torrent's line, and filelist.css
+     dresses an open file's row and the Metadata block inside it. -->
+<link rel="stylesheet" href="../../../styles.css">
+<style>
+  body { margin: 0; padding: 1.2rem; background: var(--bg); }
+  .card-pane { max-width: 62rem; margin: 0 auto; }
+  /* Card furniture only - not part of the component. */
+  .card-state { font-family: var(--mono); font-size: .66rem; letter-spacing: var(--track);
+                text-transform: uppercase; color: var(--ink-2); margin: 1.6rem 0 .2rem; }
+  .card-note { font-size: .78rem; color: var(--ink-2); margin: .2rem 0 .6rem; max-width: 48rem; }
+</style>
+
+<!-- STATIC ON PURPOSE, AND THIS CARD HAS FIVE THINGS TO GET RIGHT.
+
+     1. A PREVIEW RUNS NO SCRIPTS, so every open state below is written into
+        the markup: aria-expanded="true" on the toggle, no `hidden` on the
+        region, data-expanded="true" on the row. In the product all three of
+        those are one call to Accordion's apply(), and nothing else on the page
+        may write them.
+
+     2. THE CLASS THE COMPONENT ADDS HAS TO BE HERE BY HAND.
+        `.disclosure-mark` is put on by the constructor (and, at level 2, by
+        file-list.js at row creation) - both of which are script. Without it
+        every triangle collapses to a 0px box with no glyph, which is measured
+        rather than guessed: removing the class from all six marks on the
+        running page took each one to `width: 0px`, `opacity: 1`,
+        `content: none`.
+
+     3. COLLAPSE IS THE `hidden` ATTRIBUTE AND NOTHING ELSE, at all three
+        levels. No rule anywhere sets `display` on .run-detail-row, .file-detail
+        or .meta-body - deliberately, so the UA's own `[hidden]` rule is never
+        beaten by a class selector at equal specificity. A card that styled a
+        closed pane any other way would be showing a state the product cannot
+        reach.
+
+     4. LEVEL 1 NEEDS THE GRID AROUND IT. .run-row-group and .run-row are both
+        `grid-template-columns: subgrid`, which only resolves against a real
+        grid ancestor - so the two panes below carry .run-grid and its
+        display: contents row list. Without them the row would lay out on
+        auto columns and the ten cells would be the wrong widths.
+
+     5. WHAT EACH PANE LEAVES OUT, and why that is not a lie. This card is
+        about the DISCLOSURE, not about the things it opens onto: the level-1
+        panes carry the ten row cells and an empty detail cell rather than a
+        whole run detail, and the level-2 panes carry the file's row and its
+        slot rather than a frame grid. RunTable, RunDetail, FileList and
+        FileDetail are the cards for those, each with its own sample. What is
+        reproduced verbatim here is every class and attribute the three
+        disclosures actually carry.
+
+     WHAT THE THREE LEVELS ACTUALLY DIFFER BY, measured in Chrome on the
+     running page (docs/front-end.md's TOR-212 section carries the table):
+
+       level 1  .run-row       accent ground rgb(9,58,64) + a 3px inset rail
+       level 2  .picker-item   a 2px inset rail, no ground
+       level 3  (nothing)      no rail, no ground - the toggle goes to .8rem
+                               type at .75 opacity instead
+
+     The MARK is identical at all three: .7em wide, opacity .6, "▸" closed and
+     "▾" open. It resolves to different pixel widths only because .7em is read
+     against each level's own font size (9.18 / 9.80 / 8.95px measured). -->
+
+<div class="card-pane">
+
+  <p class="card-state">Level 1 - a torrent's line - closed</p>
+  <p class="card-note">The triangle is reserved at a fixed width so the name
+    starts at the same x whichever way it points. No ground, no rail.</p>
+  <div class="run-table-wrap">
+    <div class="run-grid">
+      <div class="run-grid-rows">
+        <div class="run-row-group">
+          <div class="run-row">
+            <div class="run-cell run-cell-name">
+              <button type="button" class="run-row-main" aria-expanded="false"
+                      data-accordion-level="1" aria-controls="card-run-detail-closed">
+                <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
+                <span class="run-name">Sintel (three-point set)</span>
+              </button>
+            </div>
+            <div class="run-cell run-cell-when">Sep 8 21:41</div>
+            <div class="run-cell run-cell-status">
+              <span class="run-badge" data-state="done">done</span>
+              <span class="run-meta">3 file(s), 1 video</span>
+            </div>
+            <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-availability">
+              <span class="run-cell-availability-value">&ndash;</span>
+              <span class="run-meta run-cell-availability-meta"></span>
+            </div>
+            <div class="run-cell run-cell-metric run-cell-queue">
+              <span class="run-cell-queue-value">1</span>
+              <span class="run-meta run-cell-queue-meta"></span>
+            </div>
+            <div class="run-cell run-cell-actions"></div>
+          </div>
+          <div class="run-detail-row" id="card-run-detail-closed"
+               data-accordion-level="1" hidden>
+            <div class="run-detail-cell"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="card-state">Level 1 - a torrent's line - open</p>
+  <p class="card-note">The accent ground and a 3px inset rail, and the row's
+    bottom rule goes transparent rather than away so the row keeps the same
+    height open as closed. The detail is the row's SIBLING inside the wrapper,
+    never its child: the click listener is on the row, so using anything inside
+    an open detail cannot collapse it.</p>
+  <div class="run-table-wrap">
+    <div class="run-grid">
+      <div class="run-grid-rows">
+        <div class="run-row-group">
+          <div class="run-row" data-expanded="true">
+            <div class="run-cell run-cell-name">
+              <button type="button" class="run-row-main" aria-expanded="true"
+                      data-accordion-level="1" aria-controls="card-run-detail-open">
+                <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
+                <span class="run-name">Sintel (three-point set)</span>
+              </button>
+            </div>
+            <div class="run-cell run-cell-when">Sep 8 21:41</div>
+            <div class="run-cell run-cell-status">
+              <span class="run-badge" data-state="done">done</span>
+              <span class="run-meta">3 file(s), 1 video</span>
+            </div>
+            <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
+            <div class="run-cell run-cell-metric run-cell-availability">
+              <span class="run-cell-availability-value">&ndash;</span>
+              <span class="run-meta run-cell-availability-meta"></span>
+            </div>
+            <div class="run-cell run-cell-metric run-cell-queue">
+              <span class="run-cell-queue-value">1</span>
+              <span class="run-meta run-cell-queue-meta"></span>
+            </div>
+            <div class="run-cell run-cell-actions"></div>
+          </div>
+          <div class="run-detail-row" id="card-run-detail-open"
+               data-accordion-level="1">
+            <div class="run-detail-cell">
+              <div class="run-detail">
+                <p class="run-detail-header">
+                  <span class="run-badge" data-state="done">done</span>
+                  <span class="run-detail-title">Sintel (three-point set)</span>
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="card-state">Level 2 - a video file's block - closed</p>
+  <p class="card-note">Same triangle, one level in. data-detail on the
+    &lt;li&gt; is what brings it on screen - the box is reserved on every row
+    (visibility, not display) so the names line up whether or not a file has
+    anything to open yet.</p>
+  <section class="picker">
+    <ul class="picker-list">
+      <li class="picker-item" data-video="true" data-detail="true"
+          data-expanded="false">
+        <label class="picker-file" for="card-tick-closed">
+          <button type="button" class="picker-open disclosure-mark"
+                  aria-expanded="false" data-accordion-level="2"
+                  aria-controls="card-file-detail-closed"
+                  aria-label="Frames and metadata for Sintel.2010.720p.mkv"
+                  title="this file's frames, metadata and buttons"></button>
+          <input type="checkbox" id="card-tick-closed" value="0" checked disabled>
+          <span class="picker-name" title="Sintel/Sintel.2010.720p.mkv">Sintel.2010.720p.mkv</span>
+          <span class="picker-size">123.0 MB</span>
+          <span class="picker-cost"></span>
+          <span class="picker-state"></span>
+          <span class="picker-summary">1280&times;720 &middot; 6 frames</span>
+        </label>
+        <file-detail>
+          <div class="file-detail" id="card-file-detail-closed"
+               data-accordion-level="2" hidden></div>
+        </file-detail>
+      </li>
+      <li class="picker-item" data-video="false">
+        <span class="picker-file" title="not a video file - no frames can be taken from it">
+          <span class="picker-open disclosure-mark" aria-hidden="true"></span>
+          <span class="picker-mark" aria-hidden="true">&mdash;</span>
+          <span class="picker-name" title="Sintel/Sintel.en.srt">Sintel.en.srt</span>
+          <span class="picker-size">61.4 kB</span>
+        </span>
+      </li>
+    </ul>
+  </section>
+
+  <p class="card-state">Level 2 - a video file's block - open</p>
+  <p class="card-note">A 2px rail on the row line and NO ground of its own -
+    quieter than the torrent's, because this rail is already inside the
+    accented one that frame draws, and two filled grounds nested would read as
+    a third level of chrome. The slot itself takes a 1px --rule border down its
+    left and an indent.</p>
+  <section class="picker">
+    <ul class="picker-list">
+      <li class="picker-item" data-video="true" data-detail="true"
+          data-expanded="true">
+        <label class="picker-file" for="card-tick-open">
+          <button type="button" class="picker-open disclosure-mark"
+                  aria-expanded="true" data-accordion-level="2"
+                  aria-controls="card-file-detail-open"
+                  aria-label="Frames and metadata for Sintel.2010.720p.mkv"
+                  title="this file's frames, metadata and buttons"></button>
+          <input type="checkbox" id="card-tick-open" value="0" checked disabled>
+          <span class="picker-name" title="Sintel/Sintel.2010.720p.mkv">Sintel.2010.720p.mkv</span>
+          <span class="picker-size">123.0 MB</span>
+          <span class="picker-cost"></span>
+          <span class="picker-state"></span>
+          <span class="picker-summary">1280&times;720 &middot; 6 frames</span>
+        </label>
+        <file-detail>
+          <div class="file-detail" id="card-file-detail-open"
+               data-accordion-level="2">
+            <section class="meta">
+              <h3 class="meta-title">
+                <button type="button" class="meta-toggle" aria-expanded="false"
+                        data-accordion-level="3">
+                  <span class="meta-toggle-icon disclosure-mark" aria-hidden="true"></span>
+                  <span class="meta-toggle-label">Metadata</span>
+                </button>
+              </h3>
+              <div class="meta-body" data-accordion-level="3" hidden></div>
+            </section>
+            <p class="file-links"><a href="#">contact sheet</a></p>
+          </div>
+        </file-detail>
+      </li>
+    </ul>
+  </section>
+
+  <p class="card-state">Level 3 - the Metadata block - closed</p>
+  <p class="card-note">The innermost of the three, and it starts closed with no
+    auto-expand exception: the frames are what a file was opened for and this
+    is a detail on top of that. The toggle is the only one of the three with
+    chrome of its own - a .35rem radius and a --hover ground - and the only one
+    at .8rem type and .75 opacity.</p>
+  <section class="meta">
+    <h3 class="meta-title">
+      <button type="button" class="meta-toggle" aria-expanded="false"
+              data-accordion-level="3">
+        <span class="meta-toggle-icon disclosure-mark" aria-hidden="true"></span>
+        <span class="meta-toggle-label">Metadata</span>
+      </button>
+    </h3>
+    <div class="meta-body" data-accordion-level="3" hidden></div>
+  </section>
+
+  <p class="card-state">Level 3 - the Metadata block - open</p>
+  <p class="card-note">NOTHING is dressed. There is no rail and no ground at
+    this depth, and the component REFUSES a `dressed` element at level 3 rather
+    than ignoring one - ignoring it is how a level stops meaning anything.</p>
+  <section class="meta">
+    <h3 class="meta-title">
+      <button type="button" class="meta-toggle" aria-expanded="true"
+              data-accordion-level="3">
+        <span class="meta-toggle-icon disclosure-mark" aria-hidden="true"></span>
+        <span class="meta-toggle-label">Metadata</span>
+      </button>
+    </h3>
+    <div class="meta-body" data-accordion-level="3">
+      <dl class="specs">
+        <dt>Torrent files</dt><dd>1</dd>
+        <dt>Resolution</dt><dd>1280&times;720</dd>
+        <dt>Video</dt><dd>h264 &middot; High &middot; 24.00 fps &middot; 1.1 Mbps</dd>
+        <dt>Overall bitrate</dt><dd>unknown</dd>
+        <dt>Duration</dt><dd>888.0s</dd>
+      </dl>
+      <div class="tracks"></div>
+    </div>
+  </section>
+
+</div>

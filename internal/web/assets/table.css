@@ -381,19 +381,18 @@ run-table { display: block; }
   cursor: pointer;
 }
 
-/* The disclosure triangle, deliberately the same object as .picker-open one
-   level down (TOR-182 moved that mark onto the file's own row in the list,
-   from the .file-toggle-icon that used to sit on each file card's title
-   line): opening a torrent and opening one of its files are the same gesture,
-   so they should not be two different marks. A fixed width, so the name
-   starts at the same x whichever way the triangle points. */
-.run-toggle-icon {
-  flex: 0 0 auto;
-  width: .7em;
-  opacity: .6;
-}
-.run-toggle-icon::before { content: "▸"; }
-.run-row-main[aria-expanded="true"] .run-toggle-icon::before { content: "▾"; }
+/* The disclosure triangle is NOT DRAWN HERE ANY MORE (TOR-212). It was
+   deliberately the same object as .picker-open one level down (TOR-182 moved
+   that mark onto the file's own row in the list, from the .file-toggle-icon
+   that used to sit on each file card's title line) - opening a torrent and
+   opening one of its files are the same gesture, so they should not be two
+   different marks - and saying that in a comment beside a third copy of the
+   same five declarations was the argument for one rule rather than three.
+   .run-toggle-icon still names this level's mark in the markup and in the
+   prose; base.css's .disclosure-mark is what draws it, at all three levels,
+   and accordion.js is what puts the class on. Nothing about the appearance
+   changed: the width, the opacity and both triangles are that rule's,
+   verbatim. */
 
 .run-name {
   flex: 1 1 auto;

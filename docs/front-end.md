@@ -500,3 +500,252 @@ difference TOR-215 will meet cell by cell.
 
 Move. TOR-215 and TOR-216 proceed, and TOR-212 gets the wrapper element it
 needs, which is the only reason any of this was asked.
+
+## The accordion is its own component now (TOR-212)
+
+The section above ends by saying TOR-212 gets the wrapper it needs. This is
+what was done with it, and the first thing to record is that **the wrapper
+turned out not to be where the component goes.**
+
+### There were three disclosures, and now there is one component
+
+    setRunExpanded(entry, expanded)   run-table.js    a torrent's line -> its detail row
+    setFileExpanded(expanded)         file-detail.js  a video file's block
+    setMetaExpanded(expanded)         file-detail.js  the Metadata sub-block inside it
+
+All three did the **same three DOM writes** and nothing else, in three
+different orders:
+
+    toggle.setAttribute("aria-expanded", String(expanded))
+    region.hidden = !expanded
+    dressed.dataset.expanded = String(expanded)        (the outer two only)
+
+`accordion.js` is that triple, as `class Accordion`, and `apply(expanded)` is
+now the only place on the page any of those three attributes is written. It
+serves **all three** - the honest answer turned out to be three rather than
+two, because the third differs from the other two only by having nothing to
+dress, which is a value of the level parameter rather than a different shape.
+
+What stayed at the three call sites is what opening *means* at each of them:
+the run level's width recheck and top-up read (below), the file level's "one
+file's detail at a time" sibling sweep (TOR-182) and its first-open read off
+disk. A component that closed siblings would impose the file level's answer on
+the run level, where the opposite was decided for three written reasons.
+
+### It is NOT a custom element, and that is structural
+
+Every other component in this file is one. This one cannot be, and the reason
+is worth stating because it is the first place the element pattern does not
+reach:
+
+- `.run-row-group` carries `grid-template-columns: subgrid`, which only works
+  on a **direct** grid item of `.run-grid`. An element wrapped around it would
+  break the column alignment TOR-214 measured to 0.00px - so the wrapper this
+  ticket waited for is the thing the component must not become.
+- At the file level the toggle is inside the row's `<label>` and the region is
+  the row's sibling inside the `<li>`. There is no box that holds both and
+  only both.
+- And the run level's click listener **must stay on `.run-row`**. On
+  `.run-row-group` every click inside an open detail would collapse it, which
+  is the trap the two-`<tr>` arrangement existed to avoid and TOR-215 wrote
+  down when it built the wrapper.
+
+So the component owns no listener at all: three levels activate from three
+different elements with three different exceptions (the checkbox-target
+exclusion at the file level, `stopPropagation` on Cancel and the two priority
+buttons at the run level, none at the Metadata level), and a component that
+learned all three would be the page.
+
+### The nesting level: three values, read off the current CSS
+
+Measured in Chrome on the running page with all three open at once, at a
+1440x900 window. Nothing here was designed; every figure is what the existing
+rules already produced.
+
+| | level 1 - run | level 2 - file | level 3 - meta |
+|---|---|---|---|
+| `dressed` element | `.run-row` | `.picker-item` | **none** |
+| open ground | `rgb(9, 58, 64)` (`--accent-dim`) | none | none |
+| open rail | `inset 3px 0 0 rgb(34,224,232)` | `inset 2px 0 0`, same colour | none |
+| toggle type | 13.12px, opacity 1 | 14px, opacity 1 | 12.8px, opacity .75 |
+| toggle chrome | no ground, no radius | no ground, no radius | `.35rem` radius, `--hover` on hover |
+| region box | no padding, no border | `1px solid --rule` on the left, 16.8px margin-left + 9.6px padding-left | 4.8px 5.6px 0 padding, no border |
+| region height, open | 972.9px | 648.6px | 194.8px |
+
+**The depth is how loudly the open state is dressed**: the rail thins 3px ->
+2px -> none, and the one filled ground appears once, at the top. That is why
+`dressed` is *required* at levels 1 and 2 and *refused* at level 3 - the
+component checks the table above rather than describing it, and refusing is
+what keeps the level from quietly meaning nothing.
+
+**The MARK does not vary with the level at all**, which was the surprise. All
+three drew their triangle with the same declarations and the same two
+`::before` rules, three times over, in two files - and each copy's comment
+said it was deliberately the same object as its neighbour's. It is one rule
+now, `.disclosure-mark` in base.css, and the component is what puts the class
+on.
+
+Measured neutrality, in the page: exactly **six** elements carry
+`.disclosure-mark`, and they are exactly the same six that carry the three old
+level classes. Every one measures `flex: 0 0 auto`, `opacity: .6` and a width
+of **0.6995-0.6998em** - `.7em` with the browser's own sub-pixel rounding,
+which is why the pixel widths differ (9.18 / 9.80 / 8.95) while the rule does
+not: `.7em` resolves against each level's own font size. The two `<span
+class="picker-open">` on non-video rows keep their reserved 9.797px box at
+`visibility: hidden`, which is the column alignment the reservation exists
+for - and it is why that one class is added in `file-list.js` at row creation
+rather than by its accordion, which does not exist until the file has
+something to say.
+
+Shown able to fail: removing `.disclosure-mark` from all six collapses every
+one to `0px`, `opacity: 1`, `content: none`, and putting it back reproduces the
+before values byte-for-byte. So the numbers above come from that rule and from
+nowhere else.
+
+### Criterion 2: the open state is not in the component, demonstrated by the move
+
+`reorderRuns()` re-sorts on every redraw and MOVES a row's element. Driven
+three ways on the live page, on a row that was open with its first file open
+inside it:
+
+1. **A real sort.** Clicking the Name header twice took the row from index 1
+   to index 0 in `#run-list`. Still `aria-expanded="true"`,
+   `data-expanded="true"`, detail 778.1px.
+2. **The exact call `reorderRuns` makes**, `list.append(group)` on a node
+   already in the list. Unchanged.
+3. **A genuine detach and re-attach.** `group.remove()` put the whole subtree
+   out of the document - `isConnected` false on the group, on its
+   `<run-detail>` and on its `<file-detail>`, height 0, index -1 - and
+   `list.append(group)` brought it back at 778.1px with the run open AND the
+   file's own block still open (`aria-expanded="true"` on `.picker-open`).
+
+The Go side executes the same move under node against the shipped
+`run-table.js` (`TestTheDisclosureSurvivesTheMoveARe_sortMakes`), and also
+reads the five own properties off a **live** instance rather than off the
+source - `dressed, level, mark, region, toggle` and nothing else, so a field
+assigned conditionally cannot hide from it.
+
+**A measurement that failed, recorded so nobody repeats it.** A spy patched
+onto `customElements.get("file-detail").prototype.connectedCallback` counted
+**zero** callbacks - across the sort, the append and a genuine remove +
+re-attach. That is not evidence about the move: `customElements.define`
+**snapshots** the reaction callbacks into the definition, so patching the
+prototype afterwards is invisible to the reaction queue. The spy was checked
+against a case it should have caught, found not to fire, and discarded.
+`isConnected` is what the claim above rests on instead.
+
+### Criterion 3: the run level's two side effects, by test rather than by reading
+
+`setRunExpanded` still calls `syncRunDetailWidth` (TOR-174) and `detailShown`
+(TOR-152), and neither went into the component - `accordion.js` names neither,
+which a Go test enforces in both directions.
+
+**And one of the two was not guarded at all, which is not what the ticket
+assumed.** Four mutations, each run against the whole package:
+
+| mutation | the pre-existing suite | the new executed test |
+|---|---|---|
+| delete `this.syncRunDetailWidth()` from `setRunExpanded` | **fails** - `rundetailwidth_test.go` catches it | fails |
+| rename the property it writes to `--run-detail-width` | **PASSES** - that guard's check is `Contains(fn, "--run-detail-w")`, which the longer name satisfies | **fails**: 0 writes where 1, 2, 3 were expected |
+| gate the call as `if (expanded && entry.infohash) detailShown(entry)` | **PASSES** | **fails**: 0 calls where 1 was expected |
+| never call `detailShown` at all (`if (false) …`) | **PASSES - the whole package, green** | **fails**: 0 calls where 1 was expected |
+
+The last row is the finding. `runtable_test.go` checks that `detailShown` is
+declared in `SERVICES` and injected by `app.js` - a different claim, since a
+service can be wired perfectly and never called. So the call TOR-152's ticket
+describes as the one that "was once forgotten" was in fact **the least
+guarded thing in that file**, and consolidating three disclosures into one
+component is exactly the refactor that would have dropped it silently a second
+time.
+
+`TestTheDisclosureFiresTheRunLevelsSideEffects` runs the shipped `state.js`,
+`accordion.js` and `run-table.js` under node against a DOM small enough to sit
+in the test file, and observes both effects at their **far end** rather than by
+wrapping the methods: the width is the custom property on `:root`, so a
+`syncRunDetailWidth()` that runs and writes nothing fails; `detailShown` is the
+injected service itself, so the table has to reach the page's own seam and hand
+it the entry. Counts, in order: open 1 width / 1 shown, close 2 / 1, reopen
+3 / 2 - **either direction rechecks the width, only an opening reads the
+standing.**
+
+Confirmed again on the live page with the two effects counted at their real far
+ends (`CSSStyleDeclaration.prototype.setProperty` for the token,
+`RunDetail.prototype.refreshAgain` for what `detailShown` calls): two keyboard
+toggles of one row wrote the token twice more and called `refreshAgain` exactly
+**once**, on the opening.
+
+One detail worth keeping: counting the `GET runs/<id>/again` **request**
+instead measured 0, because `refreshAgain` returns early for a row that "is not
+settled, has no infohash, or was already asked this question". The call is the
+thing to count; the request is downstream of a documented no-op.
+
+### Criterion 5: keyboard, in full - and the screen-reader half is not attempted
+
+**Screen readers were scoped out** while TOR-213 was in flight, and TOR-214 and
+TOR-215 both recorded their versions of that criterion as *dropped* rather than
+passed. Nothing here reads the browser's accessibility tree as a substitute:
+that would be a different, easier measurement wearing the answer's clothes.
+
+Keyboard operability was **not** scoped out, and every figure below is a real
+key press delivered to the page, verified by `document.hasFocus()` and by a
+`focusin` trail - the first attempt's key presses reached nothing at all while
+the tool still reported "Pressed 1 key", so the trail is what makes this a
+measurement rather than a hope.
+
+Eighteen `Tab`s from `BODY`, with the ring each stop draws:
+
+| Tab | element | level | focus ring |
+|---|---|---|---|
+| 1-9 | the nine sortable `.run-grid-head` | - | `2px rgb(34,224,232)`, offset -2px |
+| 10, 11 | `button.run-row-main`, both rows | **1** | `rgb(153,200,255) auto 1px` - **the UA default** |
+| 12 | `button.picker-open` | **2** | `2px rgb(34,224,232)`, offset 1px |
+| 13 | the file's tick box | - | UA default |
+| 14 | `button.meta-toggle` | **3** | `2px rgb(34,224,232)`, offset -2px |
+| 15-18 | contact sheet, frame count, Regenerate, Compare | - | mixed |
+
+Activation, `Return` and `Space`, on each of the three:
+
+- **Level 3.** `Return` opened it (`aria-expanded` false -> true, glyph ▸ ->
+  ▾, `.meta-body` 0 -> 194.8px); `Space` closed it again.
+- **Level 2.** `Return` closed the file's block (0px, `data-expanded` false,
+  and the run's detail shrank 778.1 -> 313.1px); `Space` reopened it to
+  453.8px.
+- **Level 1.** `Return` closed the row (detail 0px) and `Space` reopened it to
+  778.1px - and the file inside stayed `aria-expanded="true"` through both,
+  which is `TestCollapsingATorrentLeavesItsOpenFileOpen`'s property, live.
+
+So all three levels are reachable and operable, and each is at least what it
+was: nothing about the tab order, the keys or the rings changed, because the
+toggles are the same three `<button>`s they always were.
+
+**One measured gap, pre-existing and NOT fixed here.** Level 1's toggle
+(`.run-row-main`) has no `:focus-visible` rule of its own, so it wears the UA's
+default ring where levels 2 and 3 wear the project's accent one. It is
+reachable and operable - a consistency gap, not an operability one - and giving
+it a ring would be adding an appearance that does not exist today, which
+criterion 4 asks not to do. Filed as **TOR-220** rather than decided here, with
+the one thing that makes it a decision rather than a one-liner: the row already
+carries a 3px accent rail when it is open, so the offset has to be chosen
+against an open row as well as a closed one.
+
+### What the design export got, and what it did not
+
+Authored under `.design-sync/export/components/shared/Accordion/`: the card,
+the bridge, the `.d.ts` and the `.prompt.md`, in the shape the other six
+follow. **Not uploaded, and the checker not read back** - TOR-208 established
+that the implementing agent has no DesignSync tool and that the manifest only
+refreshes when the project is reopened, so criterion 6 is authored and handed
+over rather than met.
+
+The card carries **six** panes: all three levels, closed and open, statically -
+a preview renders without scripts, so the open state has to be written into the
+markup. And the export keeps to one uppercase-initial named export, because the
+checker indexes those as components: `Accordion` and nothing else.
+
+One shape decision worth recording, because it is the first bridge here that
+refuses a prop: **the `.jsx` draws level 3 and takes no `level` prop.** At
+levels 1 and 2 the element carrying the rail is a run-grid row or a file-list
+`<li>` with a checkbox in it, so a `level` prop on a wrapper that draws neither
+would construct a disclosure over the wrong elements and dress the Metadata
+section as a torrent's line. The `.d.ts` exports the class for those two
+instead, and the card carries their markup in both states.

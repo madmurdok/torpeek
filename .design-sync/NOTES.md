@@ -710,3 +710,97 @@ folder: all six components still compile and are present.
 Export the class. Everything else in that block must be lowercase-initial, or
 it becomes a component. Shared modules can live anywhere - it will not save you
 from their uppercase exports.
+
+---
+
+# The seventh component is not an element (TOR-212)
+
+`components/shared/Accordion/` - card, bridge, `.d.ts`, `.prompt.md` - plus
+`modules/accordion.js`, which the bridge imports as `../../../modules/`
+exactly as the other six do.
+
+**AUTHORED, NOT UPLOADED, AND THE CHECKER NOT READ BACK.** The section above
+already established both halves of why: the implementing agent has no
+DesignSync tool in its toolset, and an upload does not refresh
+`_ds_manifest.json` - the project has to be reopened. So the acceptance
+criterion asking for the checker read back is handed over rather than met, and
+a null result read straight after an upload would mean "nothing was measured".
+
+## It is a class, not a custom element, and that is the new case here
+
+Every previous entry wrapped a `customElements.define`. This one cannot,
+and the reason is structural rather than stylistic:
+
+  - `.run-row-group` (the wrapper TOR-215 built, and the whole reason TOR-212
+    was unblocked) carries `grid-template-columns: subgrid`, which only
+    resolves on a **direct** grid item of `.run-grid`. An element wrapped
+    around it breaks the column alignment TOR-214 measured to 0.00px. So the
+    wrapper this ticket waited for is precisely the thing the component must
+    not become.
+  - At the file level the toggle sits inside the row's `<label>` and the region
+    is that row's sibling inside the `<li>`. No box holds both and only both.
+
+What follows for the export: the `.jsx` draws **level 3 in full** and the
+`.d.ts` exports the class itself (`AccordionElement`) for the other two, where
+the toggle and the region belong to a row the component does not own. That is a
+shape no previous bridge has, and it is worth watching what the checker makes
+of a `.jsx` whose default export is a plain function over refs rather than a
+custom-element wrapper.
+
+## Its export block is one name, which is the rule at its cleanest
+
+`accordion.js` injects nothing, so it has no `setServices` - it is the first
+module here that adds **one** entry to the index and no residue. Contrast the
+eleven the six elements cost: six classes and five setters.
+
+It also imports nothing (a leaf, like `state.js` and `frame-panel.js`), so
+nothing travels with it into `modules/`.
+
+## The card carries SIX panes, which is what "no scripts" costs here
+
+Three levels, closed and open, all static. Rendered in the scratchpad layout
+before hand-off - `python3 -m http.server` over a copy of `export/` with the
+eight stylesheets and `fonts/` beside it, so `../../../styles.css` resolves the
+way it will after upload - and measured rather than eyeballed:
+
+  - **eight** elements carry `.disclosure-mark`, and they are exactly the eight
+    that carry the three legacy level classes;
+  - each measures **0.6995-0.6998em** wide at `opacity: .6` with the right
+    glyph (▸ closed, ▾ open) - the same figures the running product gives;
+  - the rails come out right: `--accent-dim` ground + `inset 3px` at level 1,
+    `inset 2px` on `> .picker-file` at level 2, nothing at level 3;
+  - no duplicate ids across the six panes (the `id`/`aria-controls` pairs are
+    per-pane, and `#run-table` was deliberately NOT copied - the CSS keys off
+    `.run-grid`, and the id is only `run-table.js`'s `querySelector`).
+
+**Two card-critical facts, both new:**
+
+1. **`.disclosure-mark` has to be written into the card's markup by hand.** In
+    the product the constructor adds it (and `file-list.js` adds it at row
+    creation for level 2, because that level's box must be reserved from the
+    first paint). A card runs no scripts, so without the literal class every
+    triangle collapses to a 0px box with `content: none` - measured on the
+    running page by removing the class from all six marks.
+2. **Level 1 needs the grid ancestors.** `.run-row-group` and `.run-row` are
+    both `subgrid`; a pane that carried the row alone would lay it out on auto
+    columns and every cell would be the wrong width. The two level-1 panes
+    carry `.run-table-wrap > .run-grid > .run-grid-rows`.
+
+## Two stale claims in this export, corrected and left
+
+Found while writing the above, both about `detail.css`:
+
+  - `README.md` and `styles.css` both said detail.css holds
+    **`.run-table .run-detail-cell`**, "whose selector requires the table's own
+    class". TOR-215 dropped that ancestor when the table became a grid (the
+    `.run-table td` rule it was outranking went with it), so the selector is
+    bare and the cell needs no table around it. Corrected in both, because it
+    is a claim a design consumer would act on.
+  - `styles.css`'s list of "the split is by AREA" surprises gained a fourth:
+    **base.css is not only the page shell** - `.disclosure-mark` lives there,
+    so an export shipping table.css and filelist.css without it would draw
+    accordions with no marks.
+
+**`RunTable.html` and `RunDetail.html` were NOT touched.** They still show the
+old `<table>` markup and TOR-218 owns that; the card fixed here is only the
+prose those two cards' own correction will also need.
