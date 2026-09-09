@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TOR-214 - the run table as a CSS grid (throwaway spike)</title>
+
+<!-- THE REAL TOKENS, copied verbatim from internal/web/assets/tokens.css so
+     the column widths measured here are torpeek's own (--col-w-name: 20rem and
+     its eight siblings), not invented ones. Nothing in internal/web/assets is
+     touched by this spike. -->
+<link rel="stylesheet" href="tokens.css">
+
+<style>
+/* ---------------------------------------------------------------------------
+   The spike: the same ten columns the <table> has today (nine sortable plus
+   the unlabelled actions column), laid out as one CSS grid instead.
+
+   Everything below is written to answer six questions, each of which the
+   <table> answers today. It is deliberately NOT a port of table.css - only the
+   rules that carry the six behaviours are reproduced.
+   ------------------------------------------------------------------------ */
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans, system-ui, sans-serif);
+}
+
+/* A pinned intake, like the real page's, so the sticky header has something to
+   travel under and the page has something to scroll. */
+.intake {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--s1);
+  border-bottom: 1px solid var(--rule);
+  padding: 1rem;
+  font-size: .8rem;
+}
+/* The real pane's geometry, so the numbers here are comparable with the ones
+   table.css already records: .workspace's max-width: 76rem with .main's
+   1.5rem side padding gives a 1168px content box at a 1440px window, which is
+   the pane width TOR-168 measured the nine columns (1079px) fitting inside. */
+.pane {
+  max-width: 76rem;
+  margin: 0 auto;
+  box-sizing: border-box;
+  padding: 0 1.5rem 60rem;   /* tall, so the page really scrolls */
+}
+
+.runs-title {
+  font-size: .72rem; font-family: var(--mono); font-weight: 600;
+  color: var(--ink-2); text-transform: uppercase; letter-spacing: var(--track);
+  margin: 1rem 0 .5rem;
+}
+
+/* BEHAVIOUR 3, half one: the wrap is what scrolls sideways, exactly as
+   .run-table-wrap does today. */
+.run-table-wrap { overflow-x: auto; }
+
+/* BEHAVIOUR 3, half two, and the shape the ticket predicted: min-width: 100%
+   with width: max-content. At rest max-content is the summed track widths; if
+   that is narrower than the pane, min-width: 100% wins and the grid fills the
+   pane, with the slack going to the one flexible track (actions, below). The
+   moment a drag makes the sum wider than the pane, max-content wins and the
+   grid outgrows it - so .run-table-wrap's overflow-x scrolls and the page
+   does not. This is the grid's answer to the table's "used width is the
+   GREATER of width: 100% and the summed column widths" (table.css:72).
+
+   BEHAVIOUR 1 lives here too: every sortable track is a bare length read from
+   its --col-w-* token, NOT auto/min-content/max-content - so a track can be
+   narrower than the text sitting in it, which is precisely what
+   table-layout: fixed buys the <table>. */
+.run-grid {
+  display: grid;
+  grid-template-columns:
+    var(--col-w-name)
+    var(--col-w-when)
+    var(--col-w-status)
+    var(--col-w-peers)
+    var(--col-w-seeds)
+    var(--col-w-download_bps)
+    var(--col-w-upload_bps)
+    var(--col-w-availability)
+    var(--col-w-priority)
+    minmax(3.8rem, 1fr);   /* the actions column: the table's plain 3.8rem,
+                              plus the slack, so the grid fills the pane at
+                              rest the way width: 100% makes the table do */
+  width: max-content;
+  min-width: 100%;
+  font-size: .82rem;
+  align-items: stretch;
+}
+
+/* BEHAVIOUR 4: sticky header. In a grid each header cell is its own sticky
+   item; there is no <thead> box to stick, and none is needed. */
+.run-grid-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--s1);
+  font-family: var(--mono);
+  font-size: .66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--track);
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  user-select: none;
+  padding: .4rem .3rem;
+}
+.run-grid-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.run-grid-head[aria-sort]::after { display: inline-block; width: .9em; text-align: center; }
+.run-grid-head[aria-sort="ascending"]::after { content: "\25B2"; }
+.run-grid-head[aria-sort="descending"]::after { content: "\25BC"; }
+.run-grid-head.run-actions-header { cursor: default; }
+
+/* Unchanged from table.css, and it needs nothing: position: sticky above
+   already gives each header its own containing block. */
+.col-resizer {
+  position: absolute;
+  top: 0; right: 0; bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.col-resizer:hover, .col-resizer.dragging { background: var(--accent-dim); }
+
+/* BEHAVIOUR 6, THE POINT OF THE EXERCISE: a real element wrapping a row AND
+   its detail. The <table> parser forbids exactly this - an unknown element
+   between <tbody> and <tr> is hoisted out - so today the row and its detail
+   are two sibling <tr>s with nothing owning both.
+
+   subgrid, not display: contents. Both would keep the cells aligned to the
+   outer grid's ten tracks, but display: contents deletes the wrapper's box,
+   which is the one thing this wrapper is wanted for: the hover ground, the
+   open row's inset accent rail and the bottom rule all belong to the row as a
+   whole. With subgrid the wrapper is a real, paintable box spanning all ten
+   columns whose children still sit in the outer grid's tracks. */
+run-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  border-bottom: 1px solid var(--rule);
+}
+run-row:hover { background: var(--hover); }
+run-row[data-expanded="true"] {
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+  border-bottom-color: transparent;
+}
+
+/* ONE PORTING NOTE THAT IS NOT OPTIONAL, found by measuring rather than
+   reading: a table cell's `width` in the border-collapse model already
+   includes its padding, so --col-w-name: 20rem means 320px INCLUDING the
+   .4rem/.3rem padding on every <th>/<td>. A grid item is content-box by
+   default, so without this line a header given `width: var(--col-w-name)`
+   measures 329.6px and overflows its own 320px track. base.css has no global
+   box-sizing reset, so the conversion has to state it here. */
+.run-grid-head, .cell, .run-detail { box-sizing: border-box; }
+
+.cell { padding: .4rem .3rem; min-width: 0; overflow: hidden; }
+
+/* BEHAVIOUR 2: the name ellipsises rather than shoving the layout. Identical
+   to .run-name in table.css; min-width: 0 on the cell and the flex child is
+   what lets it shrink past its own content. */
+.run-row-main {
+  display: flex; align-items: baseline; gap: .3rem;
+  width: 100%; min-width: 0;
+  text-align: left; background: none; border: none; padding: 0; margin: 0;
+  font: inherit; color: inherit; cursor: pointer;
+}
+.run-toggle-icon { flex: 0 0 auto; width: .7em; opacity: .6; }
+.run-toggle-icon::before { content: "\25B8"; }
+.run-row-main[aria-expanded="true"] .run-toggle-icon::before { content: "\25BE"; }
+.run-name {
+  flex: 1 1 auto; min-width: 0; font-weight: 500;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.run-cell-when { white-space: nowrap; font-family: var(--mono); font-size: .72rem; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.run-cell-metric {
+  white-space: nowrap; text-align: right; font-family: var(--mono);
+  font-size: .72rem; color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.run-cell-actions { text-align: right; white-space: nowrap; }
+.run-badge {
+  display: inline-block; font-family: var(--mono); font-size: .64rem;
+  font-weight: 600; text-transform: uppercase; letter-spacing: var(--track);
+  padding: .12rem .45rem; background: var(--s3); color: var(--ink-2);
+}
+
+/* BEHAVIOUR 5: the detail spans every column. grid-column: 1 / -1 inside the
+   subgrid resolves against the wrapper's own ten inherited tracks, which are
+   the outer grid's ten - so this is the colspan="10" the table writes by
+   hand from this.columns, expressed once and never counted. */
+.run-detail {
+  grid-column: 1 / -1;
+  padding: .6rem .3rem .8rem;
+  border-top: 1px dashed var(--rule);
+  font-size: .78rem;
+  color: var(--ink-2);
+}
+.run-detail[hidden] { display: none; }
+.probe-out { font-family: var(--mono); font-size: .7rem; white-space: pre-wrap; padding: 1rem; }
+</style>
+</head>
+<body>
+
+<div class="intake">
+  <strong>TOR-214 spike</strong> - the run table as a CSS grid. Throwaway page; nothing here ships.
+</div>
+
+<div class="pane">
+  <h2 class="runs-title">Torrents</h2>
+  <div class="run-table-wrap">
+    <!-- role/aria deliberately NOT hand-built here: TOR-213's screen-reader
+         baseline was scoped out, so there is nothing to measure a hand-built
+         role="table" against and claiming one would be a false pass. What IS
+         reproduced is keyboard operability, which was not scoped out: every
+         sortable header below carries tabindex="0" and role="button", exactly
+         as the <th>s do today. -->
+    <div class="run-grid" id="grid"></div>
+  </div>
+  <pre class="probe-out" id="out"></pre>
+</div>
+
+<script type="module">
+// The nine sortable columns, in the order index.html + buildLiveColumnHeaders
+// produce them, plus the unlabelled tenth (actions).
+const COLUMNS = [
+  { key: "name", label: "Name" },
+  { key: "when", label: "Added" },
+  { key: "status", label: "Status" },
+  { key: "peers", label: "Peers" },
+  { key: "seeds", label: "Seeds" },
+  { key: "download_bps", label: "Down" },
+  { key: "upload_bps", label: "Up" },
+  { key: "availability", label: "Avail" },
+  { key: "priority", label: "Queue" },
+];
+
+// A magnet name with no space and no hyphen anywhere: there is not one soft
+// wrap opportunity in it, so its min-content width IS its full width. This is
+// the string that automatic table layout cannot shrink below, and therefore
+// the string behaviour 1 has to be proved against.
+const UNBREAKABLE =
+  "MAGNETDN_THE_ABSOLUTELY_UNBREAKABLE_TORRENT_NAME_WITH_NO_SPACE_AND_NO_HYPHEN_ANYWHERE_0123456789";
+
+const ROWS = [
+  { name: UNBREAKABLE, when: "2026-09-09 02:11", state: "running",
+    peers: 42, seeds: 8, down: "1.4M", up: "220k", avail: "2.31", queue: 1 },
+  { name: "A perfectly ordinary torrent name", when: "2026-09-08 21:40", state: "queued",
+    peers: 3, seeds: 1, down: "—", up: "—", avail: "0.84", queue: 2 },
+  { name: "short.one", when: "2026-09-08 19:02", state: "done",
+    peers: 0, seeds: 0, down: "—", up: "—", avail: "—", queue: 3 },
+];
+// Enough rows that the grid itself is taller than the viewport - a sticky
+// header only sticks WITHIN its containing block, so a three-row grid scrolls
+// out from under the viewport before the header has anything to stick to. The
+// first measurement of behaviour 4 was made on a short grid and read
+// headTop: -461.5, which is not a sticky failure but a grid that had already
+// left the screen.
+for (let i = 4; i <= 30; i += 1) {
+  ROWS.push({ name: "filler torrent number " + i, when: "2026-09-0" + (i % 9 + 1) + " 12:00",
+    state: "queued", peers: i, seeds: i % 5, down: "—", up: "—", avail: "1.0" + i, queue: i });
+}
+
+const grid = document.getElementById("grid");
+
+// ---- header -----------------------------------------------------------
+for (const col of COLUMNS) {
+  const th = document.createElement("div");
+  th.className = "run-grid-head";
+  th.dataset.sort = col.key;
+  // KEYBOARD OPERABILITY, which was NOT scoped out: same two attributes the
+  // <th>s carry today, so sorting stays reachable without a mouse.
+  th.tabIndex = 0;
+  th.setAttribute("role", "button");
+  th.setAttribute("aria-sort", col.key === "when" ? "descending" : "none");
+  th.textContent = col.label;
+  grid.append(th);
+}
+const actionsHead = document.createElement("div");
+actionsHead.className = "run-grid-head run-actions-header";
+actionsHead.setAttribute("aria-hidden", "true");
+grid.append(actionsHead);
+
+const sortHeaders = grid.querySelectorAll(".run-grid-head[data-sort]");
+
+// ---- rows, each inside a REAL wrapper element -------------------------
+class RunRow extends HTMLElement {}
+customElements.define("run-row", RunRow);
+
+let sortCount = 0;
+let lastSort = "when";
+
+ROWS.forEach((r, i) => {
+  const row = document.createElement("run-row");   // the wrapper a table forbids
+  row.dataset.expanded = "false";
+
+  const nameCell = document.createElement("div");
+  nameCell.className = "cell run-cell-name";
+  nameCell.innerHTML =
+    '<button class="run-row-main" aria-expanded="false">' +
+      '<span class="run-toggle-icon"></span>' +
+      '<span class="run-name"></span>' +
+    "</button>";
+  nameCell.querySelector(".run-name").textContent = r.name;
+  row.append(nameCell);
+
+  const add = (cls, text) => {
+    const d = document.createElement("div");
+    d.className = "cell " + cls;
+    d.textContent = text;
+    row.append(d);
+    return d;
+  };
+  add("run-cell-when", r.when);
+  const st = add("run-cell-status", "");
+  st.innerHTML = '<span class="run-badge"></span>';
+  st.querySelector(".run-badge").textContent = r.state;
+  add("run-cell-metric", r.peers);
+  add("run-cell-metric", r.seeds);
+  add("run-cell-metric", r.down);
+  add("run-cell-metric", r.up);
+  add("run-cell-metric", r.avail);
+  add("run-cell-metric", r.queue);
+  add("run-cell-actions", "✕");
+
+  const detail = document.createElement("div");
+  detail.className = "run-detail";
+  detail.hidden = i !== 0;   // the first row opens by default, so the spanning
+                             // detail is on screen without an interaction
+  detail.textContent =
+    "Detail for this run - the same element's child as the row above it. " +
+    "It spans all ten columns via grid-column: 1 / -1, with no count written " +
+    "down anywhere.";
+  row.append(detail);
+
+  nameCell.querySelector(".run-row-main").addEventListener("click", () => {
+    const open = detail.hidden;
+    detail.hidden = !open;
+    row.dataset.expanded = String(open);
+    nameCell.querySelector(".run-row-main").setAttribute("aria-expanded", String(open));
+  });
+
+  grid.append(row);
+});
+
+// ---- THE DRAG, COPIED VERBATIM from run-table.js -----------------------
+// This is criterion 3's experiment. Everything between the two markers is the
+// app's own code with only its `this.` receivers rebound to this page; not one
+// line of the pointer sequence, the clamp, or the token write is changed.
+// >>> begin run-table.js
+const COLUMN_MIN_WIDTH = 44;
+const COLUMN_MAX_WIDTH = 640;
+function clampColumnWidth(px) {
+  return Math.min(COLUMN_MAX_WIDTH, Math.max(COLUMN_MIN_WIDTH, px));
+}
+const columnWidths = {};
+function applyColumnWidth(key, px) {
+  document.documentElement.style.setProperty("--col-w-" + key, px + "px");
+}
+function wireColumnResizers() {
+  for (const th of sortHeaders) {
+    const key = th.dataset.sort;
+    // The app sets this so table-layout: fixed has an authoritative width on
+    // the header cell. Kept here EXACTLY as written to see whether it breaks
+    // anything under grid - it does not; it is simply no longer what sizes
+    // the column (grid-template-columns reads the same token instead).
+    th.style.width = "var(--col-w-" + key + ")";
+
+    const handle = document.createElement("span");
+    handle.className = "col-resizer";
+    handle.setAttribute("aria-hidden", "true");
+    th.append(handle);
+
+    let drag = null;
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== undefined && event.button !== 0) return;
+      event.stopPropagation();
+      event.preventDefault();
+      drag = { startX: event.clientX, startWidth: th.getBoundingClientRect().width };
+      handle.classList.add("dragging");
+      handle.setPointerCapture(event.pointerId);
+    });
+
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      if (!(event.buttons & 1)) { endColumnDrag(event); return; }
+      event.stopPropagation();
+      const width = clampColumnWidth(drag.startWidth + (event.clientX - drag.startX));
+      columnWidths[key] = width;
+      applyColumnWidth(key, width);
+    });
+
+    const endColumnDrag = (event) => {
+      if (!drag) return;
+      drag = null;
+      event.stopPropagation();
+      handle.classList.remove("dragging");
+      try { handle.releasePointerCapture(event.pointerId); } catch (err) {}
+      // saveColumnWidths / syncRunDetailWidth are the app's; nothing to save here.
+    };
+    handle.addEventListener("pointerup", endColumnDrag);
+    handle.addEventListener("pointercancel", endColumnDrag);
+    handle.addEventListener("lostpointercapture", endColumnDrag);
+    handle.addEventListener("click", (event) => event.stopPropagation());
+  }
+}
+// <<< end run-table.js
+wireColumnResizers();
+
+// ---- sorting, click and keyboard, as wireSorting does ------------------
+function setSort(key) {
+  sortCount += 1;
+  lastSort = key;
+  for (const th of sortHeaders) {
+    th.setAttribute("aria-sort", th.dataset.sort === key ? "ascending" : "none");
+  }
+}
+for (const th of sortHeaders) {
+  th.addEventListener("click", () => setSort(th.dataset.sort));
+  th.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    setSort(th.dataset.sort);
+  });
+}
+
+// ---- the probe ---------------------------------------------------------
+// Every number the report quotes comes from here. Each check reports what it
+// MEASURED, not a pass/verdict, and visibility is checked alongside presence -
+// an element that exists but has a zero-area box is not a demonstration.
+function visible(el) {
+  if (!el) return { present: false };
+  const r = el.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  return {
+    present: true,
+    w: +r.width.toFixed(2), h: +r.height.toFixed(2),
+    display: cs.display, visibility: cs.visibility, opacity: cs.opacity,
+    visible: r.width > 0 && r.height > 0 && cs.visibility !== "hidden" &&
+             cs.display !== "none" && +cs.opacity > 0,
+  };
+}
+
+// The unbreakable string's natural width: the same font and size, laid out
+// with no constraint at all. This is the number automatic layout could not go
+// below.
+function naturalWidth(text, sampleEl) {
+  const cs = getComputedStyle(sampleEl);
+  const probe = document.createElement("span");
+  probe.style.cssText =
+    "position:absolute;left:-9999px;top:0;white-space:pre;visibility:hidden;" +
+    "font:" + cs.font + ";letter-spacing:" + cs.letterSpacing;
+  probe.textContent = text;
+  document.body.append(probe);
+  const w = probe.getBoundingClientRect().width;
+  probe.remove();
+  return +w.toFixed(2);
+}
+
+window.probe = () => {
+  const nameHead = grid.querySelector('[data-sort="name"]');
+  const firstRow = grid.querySelector("run-row");
+  const nameCell = firstRow.querySelector(".run-cell-name");
+  const nameSpan = firstRow.querySelector(".run-name");
+  const detail = firstRow.querySelector(".run-detail");
+  const wrap = document.querySelector(".run-table-wrap");
+  // parseFloat, not Number: the computed value is "320px 104px ..." and
+  // Number("320px") is NaN, which JSON.stringify then reports as null - a
+  // whole set of measurements that looked like it had gone missing.
+  const tracks = getComputedStyle(grid).gridTemplateColumns.split(" ").map(parseFloat);
+
+  return {
+    viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
+    tokens: {
+      name: getComputedStyle(document.documentElement).getPropertyValue("--col-w-name").trim(),
+    },
+    tracks: { count: tracks.length, px: tracks.map((n) => +n.toFixed(2)),
+              sum: +tracks.reduce((a, b) => a + b, 0).toFixed(2) },
+    b1_narrower_than_content: {
+      nameTrackPx: +tracks[0].toFixed(2),
+      nameCellPx: +nameCell.getBoundingClientRect().width.toFixed(2),
+      stringNaturalPx: naturalWidth(nameSpan.textContent, nameSpan),
+      stringScrollPx: nameSpan.scrollWidth,
+      stringClientPx: nameSpan.clientWidth,
+      textHasNoWrapOpportunity: !/[\s-]/.test(nameSpan.textContent),
+    },
+    b2_ellipsis: {
+      textOverflow: getComputedStyle(nameSpan).textOverflow,
+      overflow: getComputedStyle(nameSpan).overflow,
+      whiteSpace: getComputedStyle(nameSpan).whiteSpace,
+      overflowing: nameSpan.scrollWidth > nameSpan.clientWidth,
+      cellStaysInTrack: nameCell.getBoundingClientRect().width <= tracks[0] + 0.5,
+      rowHeightPx: +firstRow.getBoundingClientRect().height.toFixed(2),
+    },
+    b3_fill_and_outgrow: {
+      wrapClientW: wrap.clientWidth,
+      gridOffsetW: grid.offsetWidth,
+      gridScrollW: grid.scrollWidth,
+      wrapScrollW: wrap.scrollWidth,
+      wrapScrollsX: wrap.scrollWidth > wrap.clientWidth,
+      pageScrollsX: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      cssWidth: getComputedStyle(grid).width,
+    },
+    b4_sticky: {
+      position: getComputedStyle(nameHead).position,
+      top: getComputedStyle(nameHead).top,
+      headTopPx: +nameHead.getBoundingClientRect().top.toFixed(2),
+      firstRowTopPx: +firstRow.getBoundingClientRect().top.toFixed(2),
+      pageScrollY: window.scrollY,
+      headVisible: visible(nameHead),
+    },
+    b5_detail_span: {
+      style: getComputedStyle(detail).gridColumnStart + " / " + getComputedStyle(detail).gridColumnEnd,
+      detailW: +detail.getBoundingClientRect().width.toFixed(2),
+      rowW: +firstRow.getBoundingClientRect().width.toFixed(2),
+      trackSum: +tracks.reduce((a, b) => a + b, 0).toFixed(2),
+      spansEveryColumn:
+        Math.abs(detail.getBoundingClientRect().width - firstRow.getBoundingClientRect().width) < 1,
+      vis: visible(detail),
+    },
+    b6_wrapper: {
+      tagName: firstRow.tagName,
+      isCustomElement: firstRow instanceof customElements.get("run-row"),
+      parentTag: firstRow.parentElement.tagName + "." + firstRow.parentElement.className,
+      childTags: [...firstRow.children].map((c) => c.tagName + "." + (c.className || "")),
+      wrapsRowAndDetail: firstRow.contains(nameCell) && firstRow.contains(detail),
+      display: getComputedStyle(firstRow).display,
+      gridTemplateColumns: getComputedStyle(firstRow).gridTemplateColumns,
+      // the alignment proof: every cell's left edge against the header's
+      cellLefts: [...firstRow.querySelectorAll(".cell")].map((c) => +c.getBoundingClientRect().left.toFixed(2)),
+      headLefts: [...grid.querySelectorAll(".run-grid-head")].map((h) => +h.getBoundingClientRect().left.toFixed(2)),
+      wrapperBox: visible(firstRow),
+    },
+    keyboard: {
+      headerTabIndexes: [...sortHeaders].map((h) => h.tabIndex),
+      headerRoles: [...sortHeaders].map((h) => h.getAttribute("role")),
+      activeElement: document.activeElement ?
+        document.activeElement.tagName + "[" + (document.activeElement.dataset.sort || "") + "]" : null,
+      sortCount, lastSort,
+      ariaSorts: [...sortHeaders].map((h) => h.dataset.sort + "=" + h.getAttribute("aria-sort")),
+      // the pre-existing gap TOR-213 found, reproduced rather than fixed:
+      resizerTabIndex: grid.querySelector(".col-resizer").tabIndex,
+      resizerAriaHidden: grid.querySelector(".col-resizer").getAttribute("aria-hidden"),
+    },
+  };
+};
+window.probeText = () => JSON.stringify(window.probe(), null, 1);
+document.getElementById("out").textContent = "probe ready - call window.probe()";
+</script>
+</body>
+</html>
