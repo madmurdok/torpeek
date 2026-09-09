@@ -1346,6 +1346,19 @@ func TestEveryPositionDecidedPairStaysInOneFile(t *testing.T) {
 	}
 }
 
+// accordionJS returns the embedded accordion.js source. TOR-212 pulled the
+// three DOM writes that ARE a disclosure - aria-expanded, the region's
+// `hidden` and the row's data-expanded - out of run-table.js and
+// file-detail.js, where they stood three times over, into one class.
+func accordionJS(t *testing.T) string {
+	t.Helper()
+	b, err := embedded.ReadFile("assets/accordion.js")
+	if err != nil {
+		t.Fatalf("reading the embedded accordion.js: %v", err)
+	}
+	return string(b)
+}
+
 // compareDialogJS returns the embedded compare-dialog.js source. TOR-193 moved
 // the flipbook's behaviour out of app.js into its own custom element.
 func compareDialogJS(t *testing.T) string {

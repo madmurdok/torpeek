@@ -145,6 +145,49 @@ h3 {
   letter-spacing: var(--track);
 }
 
+/* THE DISCLOSURE TRIANGLE, once (TOR-212), and it is in the page shell rather
+   than in an area file because it is the one thing all THREE of the page's
+   disclosures draw identically. Until this rule they were three copies of the
+   same five declarations, in two files:
+
+     .run-toggle-icon   table.css      a torrent's line       (level 1)
+     .picker-open       filelist.css   a video file's row     (level 2)
+     .meta-toggle-icon  filelist.css   the Metadata block     (level 3)
+
+   Each copy's own comment said it was deliberately the same object as its
+   neighbour's - "opening a torrent and opening one of its files are the same
+   gesture, so they should not be two different marks" - which is the argument
+   for one rule, written three times next to three rules. So the mark does NOT
+   vary with the nesting level, and what does is how loudly the OPEN state is
+   dressed: an accent ground and a 3px rail at level 1, a 2px rail and no
+   ground at level 2, nothing at all at level 3 (accordion.js's header carries
+   that table, and docs/front-end.md the measurements).
+
+   A FIXED WIDTH is the point of it: the label starts at the same x whichever
+   way the triangle points, so a column of names does not shuffle sideways
+   when one of them opens. And that box is why level 2 adds this class in
+   file-list.js rather than leaving it to its accordion - the box has to be
+   reserved on every row from the first paint, and that level's accordion does
+   not exist until the file has something to say.
+
+   NO :focus-visible HERE. Two of the three toggles have one in their own area
+   file and they differ (offset 1px on a file's row, -2px inside the metadata
+   header, because one sits in a list row and the other is a full-width
+   header), and the third has none - see docs/front-end.md's TOR-212 section,
+   which records that as a measured gap rather than fixing it on spec. */
+.disclosure-mark {
+  flex: 0 0 auto;
+  width: .7em;
+  opacity: .6;
+}
+.disclosure-mark::before { content: "▸"; }
+/* Two forms because the mark is the toggle itself at one level and a span
+   inside it at the other two - .picker-open IS a triangle-sized button, while
+   .run-row-main and .meta-toggle are labels with a triangle in them. The
+   attribute is always on the control, never on the mark's own span. */
+.disclosure-mark[aria-expanded="true"]::before,
+[aria-expanded="true"] > .disclosure-mark::before { content: "▾"; }
+
 /* The whole page: one column that starts with the pinned intake - which
    since TOR-168 also carries the page's title and its live connection
    indicator, the left panel's two occupants before that ticket removed the

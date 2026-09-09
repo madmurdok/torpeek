@@ -28,8 +28,15 @@
  *      per control.
  *   2. framepanel.css is not only the panel's. .grid, .thumb*, .reach*, and
  *      the .avail-swarm chip live there and are built by <file-detail>.
- *   3. detail.css holds `.run-table .run-detail-cell` - a rule about a cell
- *      <run-table> builds, whose selector requires the table's own class.
+ *   3. detail.css holds `.run-detail-cell` - a rule about a cell <run-table>
+ *      builds. It read `.run-table .run-detail-cell` when this comment was
+ *      written, because `.run-table td` further up set the shared cell padding
+ *      and a bare class would have lost to it; TOR-215 dropped both when the
+ *      table became a grid, so the ancestor is gone.
+ *   4. base.css is not only the page shell (TOR-212). `.disclosure-mark` -
+ *      the triangle every one of the page's three disclosures draws, one rule
+ *      for all three - lives there, so an export that shipped table.css and
+ *      filelist.css without it would draw accordions with no marks on them.
  *
  * So the export ships the closure and says which element needs what in each
  * component's own .prompt.md, rather than pretending one stylesheet belongs

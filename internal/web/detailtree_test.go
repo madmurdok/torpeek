@@ -383,6 +383,11 @@ func TestNoInstanceFieldShadowsAMethod(t *testing.T) {
 		{"run-table.js", runTableJS(t)},
 		{"frame-panel.js", framePanelJS(t)},
 		{"compare-dialog.js", compareDialogJS(t)},
+		// TOR-212's shared disclosure. Not a custom element - see its own
+		// header for why one cannot go where any of the three disclosures
+		// is - but a class with fields assigned in a constructor, which is
+		// exactly the shape this mistake takes.
+		{"accordion.js", accordionJS(t)},
 	} {
 		live := liveJS(t, mod.src)
 
@@ -546,10 +551,30 @@ func TestTheThreeBoundariesHoldInBothDirections(t *testing.T) {
 		t.Error("file-list.js does not name the file detail's region on the row's disclosure - " +
 			"same rule, one level down")
 	}
-	if !strings.Contains(file, `this.rowToggle.setAttribute("aria-expanded", String(expanded));`) {
-		t.Error("file-detail.js does not write the row disclosure's aria-expanded - it travels " +
-			"with the expanded state, which is this element's, and the id travels with the " +
-			"region, which is the list's to name")
+	// THROUGH THE SHARED DISCLOSURE SINCE TOR-212, and the claim is unchanged:
+	// aria-expanded travels with the EXPANDED state, which is this element's,
+	// and the id travels with the region, which is the list's to name. What
+	// changed is that this element no longer writes the attribute by hand - it
+	// hands its own toggle to an Accordion at mount and applies through it. So
+	// the check is in two halves, and both are needed: this element's
+	// accordion has to be built over the ROW's disclosure (not over some
+	// element of its own), and setFileExpanded has to be what applies to it.
+	if !strings.Contains(file, "toggle: this.rowToggle,") {
+		t.Error("file-detail.js's level-2 accordion is not built over the row's own " +
+			"disclosure - aria-expanded travels with the expanded state, which is this " +
+			"element's, so the button the accordion writes has to be the row's")
+	}
+	if !strings.Contains(jsMethod(t, file, "setFileExpanded"), "this.fileAccordion.apply(expanded);") {
+		t.Error("setFileExpanded does not apply through this element's own accordion, so " +
+			"nothing writes the row disclosure's aria-expanded when a file opens")
+	}
+	// And the component it applies through is what writes the attribute at
+	// all three levels. Without this the two checks above are satisfied by an
+	// apply() that writes nothing.
+	if !strings.Contains(jsMethod(t, accordionJS(t), "apply"),
+		`this.toggle.setAttribute("aria-expanded", String(expanded));`) {
+		t.Error("accordion.js's apply does not write aria-expanded - every disclosure on " +
+			"the page goes through it, so all three would stop saying whether they are open")
 	}
 }
 

@@ -49,6 +49,10 @@
 // reached for.
 // ---------------------------------------------------------------------------
 
+// The disclosure (TOR-212). Two of the page's three levels are this file's -
+// a video file's own block, and the Metadata block inside it - and both write
+// through the same component the torrent's line one level up uses.
+import { Accordion } from "./accordion.js";
 import {
   ABSENT,
   availabilityCellTitle,
@@ -442,6 +446,36 @@ class FileDetail extends HTMLElement {
       if (!node) throw new Error("file-detail: no " + name + " inside the element");
     }
 
+    // THE TWO INNER LEVELS OF THE PAGE'S THREE DISCLOSURES (TOR-212), built
+    // here because this is the moment both their toggles and both their
+    // regions exist: the row's own triangle was handed over above, and BODY's
+    // Metadata header was written into the slot a few lines earlier.
+    //
+    // Level 2 dresses the row's <li> - an open file is a state of the ROW, the
+    // same way an open torrent is a state of its line one level up - and its
+    // mark IS the toggle, because .picker-open is a triangle-sized button
+    // rather than a label with a triangle in it.
+    //
+    // Level 3 dresses NOTHING, and that is the level's own definition rather
+    // than an omission: this rail would already be inside the file's rail,
+    // which is inside the torrent's accented ground, and three nested grounds
+    // read as chrome (filelist.css says so where the file's own rail is
+    // quieter than the torrent's for the same reason). accordion.js REFUSES a
+    // dressed element at this level, so the difference is checked rather than
+    // remembered.
+    this.fileAccordion = new Accordion({
+      level: 2,
+      toggle: this.rowToggle,
+      region: this.body,
+      dressed: this.item,
+    });
+    this.metaAccordion = new Accordion({
+      level: 3,
+      toggle: this.metaToggle,
+      region: this.metaBody,
+      mark: this.querySelector(".meta-toggle-icon"),
+    });
+
     // The row's own item carries the open/closed state, so filelist.css can
     // dress the whole row - not just the slot under it - the way .run-row
     // [data-expanded="true"] already dresses an open torrent one level up.
@@ -560,12 +594,21 @@ class FileDetail extends HTMLElement {
     }
 
     fentry.expanded = expanded;
-    // On the row's own <li>, not on the slot: an open file is a state of the
-    // row, the same way .run-row[data-expanded="true"] is a state of the
-    // torrent's row rather than of its detail.
-    this.item.dataset.expanded = String(expanded);
-    this.rowToggle.setAttribute("aria-expanded", String(expanded));
-    this.body.hidden = !expanded;
+    // THE DISCLOSURE, at level 2 of three (TOR-212), and one call rather than
+    // the three attribute writes that used to stand here and again in
+    // setMetaExpanded below and again in run-table.js's setRunExpanded.
+    //
+    // What did NOT move is the sibling sweep above it: "one file's detail at a
+    // time" is a decision about a SET of disclosures, the level above made the
+    // opposite decision for the three written reasons in this method's own
+    // heading, and a component that closed siblings would impose one of those
+    // answers on all three levels.
+    //
+    // The row's <li> is what carries data-expanded, not the slot: an open file
+    // is a state of the ROW, the same way .run-row[data-expanded="true"] is a
+    // state of the torrent's row rather than of its detail. That is the
+    // `dressed` element the accordion was given at mount.
+    this.fileAccordion.apply(expanded);
     // THE SUMMARY STAYS, and that is a change of behaviour TOR-182 owes a
     // reason for. It used to be hidden while the file was expanded, because
     // "the collapsed-only summary line and the specs panel say the same thing
@@ -590,8 +633,12 @@ class FileDetail extends HTMLElement {
   // follows.
   setMetaExpanded(expanded) {
     this.fentry.metaExpanded = expanded;
-    this.metaToggle.setAttribute("aria-expanded", String(expanded));
-    this.metaBody.hidden = !expanded;
+    // The innermost of the page's three disclosures (TOR-212), through the
+    // same component as the two outside it - with no `dressed` element,
+    // which is what level 3 MEANS here rather than something it happens to
+    // lack: there is no rail and no ground at this depth, because both would
+    // be inside the file's rail, which is inside the torrent's ground.
+    this.metaAccordion.apply(expanded);
   }
 
   // updateFileSummary keeps a row worth choosing by without opening it: the

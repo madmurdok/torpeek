@@ -522,6 +522,16 @@ class FileList extends HTMLElement {
       // which element happens to come first in the row.
       const open = document.createElement(video ? "button" : "span");
       open.className = "picker-open";
+      // .disclosure-mark HERE AND NOT FROM THE ACCORDION (TOR-212), which is
+      // the one place the three levels genuinely differ in when the mark can
+      // be put on. That rule carries the triangle's fixed .7em box, and this
+      // level's box has to be RESERVED ON EVERY ROW - including a row with
+      // nothing to open and a non-video row that is a <span> and never gets a
+      // disclosure at all - or the twenty-five names below it stop lining up
+      // as a column (see .picker-open's own rule). The accordion adds the
+      // class too, idempotently, but not until mount, which is far too late
+      // for a column that has to be straight from the first paint.
+      open.classList.add("disclosure-mark");
       if (video) {
         open.type = "button";
         open.setAttribute("aria-expanded", "false");
