@@ -673,25 +673,33 @@ class RunTable extends HTMLElement {
     this.list.append(group);
     this.emptyNote.hidden = true;
 
-    // THE DISCLOSURE, at the outermost of the page's three levels (TOR-212).
-    // Built here, with the row, because every part it needs was just created -
-    // and it is what setRunExpanded writes THROUGH from now on, rather than
-    // repeating three attribute writes that also exist twice in
-    // file-detail.js.
+    // THE DISCLOSURE, at the outermost of the page's three levels (TOR-212,
+    // a wrapper since TOR-222). Built here, with the row, because every part
+    // it needs was just created - and it is what setRunExpanded writes THROUGH
+    // from now on, rather than repeating three attribute writes that also
+    // exist twice in file-detail.js.
+    //
+    // THE CONTAINER IS THE GROUP, which is this level's whole part in TOR-222:
+    // .run-row-group was already the box that holds the line and the detail
+    // and nothing else, so the disclosure adopts it rather than a new element
+    // being invented for it. The constructor CHECKS that it holds all three
+    // parts, which is why this call comes after group.append above rather than
+    // before it.
     //
     // The mark is the icon span rather than the button, because at this level
     // the triangle is a fixed-width box INSIDE the label so the name starts at
     // the same x whichever way it points; at the file level the button is the
-    // mark. `dressed` is the row and not the wrapper: an open torrent is a
+    // mark. The SUMMARY is the row and not the group: an open torrent is a
     // state of its LINE (table.css's .run-row[data-expanded="true"] paints the
-    // ground and the 3px rail), and dressing the wrapper would paint the
-    // detail too.
+    // ground and the 3px rail), and dressing the box would paint the detail
+    // too.
     const accordion = new Accordion({
       level: 1,
+      container: group,
+      summary: row,
       toggle: main,
       region: detailRow,
       mark: icon,
-      dressed: row,
     });
 
     // WHAT THE PAGE IS HANDED BACK, and the boundary this ticket had to draw:

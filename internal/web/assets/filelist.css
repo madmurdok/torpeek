@@ -410,8 +410,24 @@ file-detail[hidden] { display: none; }
    panel under it. Quieter than the torrent's - no ground of its own - because
    this rail is already inside the accented one that frame draws, and two
    filled grounds nested would read as a third level of chrome nobody asked
-   for. */
-.picker-item[data-expanded="true"] > .picker-file {
+   for.
+
+   ON .picker-file ITSELF SINCE TOR-222, and that is the one CSS change that
+   ticket needed. It used to read `.picker-item[data-expanded="true"] >
+   .picker-file`: the attribute sat on the <li> and this rule named the parent
+   in order to reach the child that actually wears the rail. That is the same
+   coupling TOR-221 took out of the row's columns, one level down - a rule that
+   cannot be read without knowing what contains what - and it is now the two
+   dressing levels written the same way, `[data-expanded="true"]` on the
+   element being dressed. accordion.js writes the attribute on its SUMMARY at
+   every level that has a rail, which is .run-row at level 1 and this label at
+   level 2.
+
+   NOTHING ELSE SETS box-shadow ON .picker-file, checked rather than assumed
+   (the other four rules that reach it set cursor, colour and background), so
+   dropping the specificity from 0,3,0 to 0,2,0 changes no computed value -
+   measured at inset 2px 0px 0px rgb(34, 224, 232) before and after. */
+.picker-file[data-expanded="true"] {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 

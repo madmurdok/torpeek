@@ -554,13 +554,22 @@ reach:
   section below ("One grid per row") carries the numbers. **So the run level
   could have an element today**; what keeps this a plain class is the third
   reason below, which was never about layout.
-- At the file level the toggle is inside the row's `<label>` and the region is
-  the row's sibling inside the `<li>`. There is no box that holds both and
-  only both.
+- ~~At the file level the toggle is inside the row's `<label>` and the region
+  is the row's sibling inside the `<li>`. There is no box that holds both and
+  only both.~~ **THIS REASON WAS WRONG, not stale. TOR-222 checked the
+  markup**: `li.picker-item` holds both, and did when this was written. The
+  `and only both` clause is what made it look true - the `<li>` also holds a
+  `.picker-note` sibling - and a disclosure's box holding one more thing is
+  what a box normally does.
 - And the run level's click listener **must stay on `.run-row`**. On
   `.run-row-group` every click inside an open detail would collapse it, which
   is the trap the two-`<tr>` arrangement existed to avoid and TOR-215 wrote
-  down when it built the wrapper.
+  down when it built the wrapper. **That is still true and it is NOT a reason
+  the box cannot exist** - TOR-222's own section draws the distinction: it
+  blocks the box from LISTENING, and this component owned no listener to begin
+  with. The one reason left is that the box is a `<li>`, a `<section>` and a
+  row-pair wrapper the page needs for its own reasons, which the component
+  adopts.
 
 ### And the honest consequence: this task did not need the grid
 
@@ -775,6 +784,11 @@ criterion 4 asks not to do. Filed as **TOR-220** rather than decided here, with
 the one thing that makes it a decision rather than a one-liner: the row already
 carries a 3px accent rail when it is open, so the offset has to be chosen
 against an open row as well as a closed one.
+
+**Everything below this line about the export's shape was superseded by
+TOR-222**, which gave the bridge a `level` prop and the card a seventh pane -
+see that section. It is left as written because the refusal it records is the
+thing TOR-222 had to answer.
 
 ### What the design export got, and what it did not
 
@@ -1041,15 +1055,17 @@ What none of it catches is what a browser actually renders. That is what the
   the shared grid did not - one fewer, in fact, since `subgrid` is gone
   (Chrome 117+, Firefox 71+, Safari 16+ was TOR-215's one non-degradable
   dependency, and it is not a dependency any more).
-- The accordion **could** be a custom element at the run level now and is not
-  made one here. TOR-221 removes the layout obstacle; the listener reason
+- ~~The accordion **could** be a custom element at the run level now and is
+  not made one here. TOR-221 removes the layout obstacle; the listener reason
   (above) is the one that keeps it a class, and changing that is its own
-  ticket.
+  ticket.~~ **That ticket is TOR-222, below.** It made the accordion a wrapper
+  at all three levels and found the listener reason does not bear on whether
+  the box exists - only on whether the box listens.
 - Checks 1, 5 and 6 of TOR-216's browser pass, which need live throttled
   torrents, were not re-run. `columns_test.go`'s own note at the end of that
   record says exactly which of the six were re-exercised here and why the rest
   were not.
-- **TOR-212's design export still asserts the constraint this ticket
+- ~~**TOR-212's design export still asserts the constraint this ticket
   removed.** `.design-sync/export/components/shared/Accordion/`'s card says
   "LEVEL 1 NEEDS THE GRID AROUND IT" and carries the dead `.run-grid-rows`
   class, and four sibling files repeat the subgrid claim. The card still
@@ -1058,8 +1074,468 @@ What none of it catches is what a browser actually renders. That is what the
   and dead markup rather than a broken preview. Filed as **TOR-224** rather
   than edited here, because the export is uploaded as a set and its checker
   cannot be read back from this side (TOR-208's finding), so a partial edit by
-  a ticket not looking at the design side is worse than one deliberate pass.
+  a ticket not looking at the design side is worse than one deliberate pass.~~
+  **Mostly done in TOR-222**, which had to rewrite that export anyway for its
+  own criterion 6 - see that section for exactly which of TOR-224's criteria
+  are met and which one is superseded.
 - The machine was heavily loaded throughout (`uptime` 1-minute figures between
   2.78 and 7.67, 5-minute as high as 36.38), which is why no timing is
   reported anywhere above. Nothing measured here depends on wall-clock speed:
   every figure is a geometry read.
+
+## The accordion wraps its content now, and the box was already there (TOR-222)
+
+The section above ends by listing what TOR-221 does not close, and the first
+item is that the accordion **could** be an element at the run level and was not
+made one. This is the ticket that went back to it, and the finding is smaller
+and better than the ticket expected.
+
+**The objection, in the owner's own terms.** TOR-212 shipped a class handed
+four LOOSE ELEMENTS - a toggle, a region, a mark and a thing to dress -
+collected from three different ancestors. That is a set of attribute writes,
+not a component: there is no box, so nothing a design can compose and nothing a
+stylesheet can key off. The ticket's title asks for a wrapper "usable where we
+want", with the level a real parameter.
+
+### The box existed at all three levels already
+
+Checked in the markup rather than assumed, and it is the one thing worth
+reading this section for. The ticket's own file list includes `file-detail.js`
+and `index.html` on the expectation that the level-2 markup would have to be
+rearranged. **Nothing had to be rearranged.**
+
+    level  box                  holds
+    1      .run-row-group       .run-row          and .run-detail-row
+    2      li.picker-item       label.picker-file and <file-detail>
+    3      section.meta         h3.meta-title     and .meta-body
+
+So `container` is a real part now, required at every level, and the constructor
+**checks** that it holds the summary, the toggle and the region rather than
+trusting the caller. "It wraps its content" stops being a sentence in a comment
+and becomes a throw.
+
+**The TOR-212 section above gave "there is no box that holds both and only
+both" as one of its two surviving reasons the accordion could not be an
+element. That reason was wrong, not stale.** `li.picker-item` holds both, and
+did when the sentence was written. The `and only both` clause is what made it
+look true - the `<li>` also holds `.picker-note`, a sibling paragraph - and a
+disclosure's box holding one more thing is what a box normally does. `<details>`
+is the only element in HTML that holds exactly a summary and a region, and
+nothing about this component needed to be that.
+
+### The distinction the whole ticket turned on
+
+The other surviving reason was that the run level's click listener must stay on
+`.run-row`, because on a wrapper every click inside an open detail would
+collapse the row. **That is true, and it does not block the wrapper.** It
+blocks the wrapper from OWNING a listener; it never blocked the wrapper from
+existing, and TOR-212's own design had the component own no listener at all. So
+the two claims are:
+
+    the listener must not go on the box     TRUE, and unchanged by this ticket
+    therefore the box must not exist        does not follow
+
+Verified rather than taken on trust: `.run-row-group` has carried the listener
+nowhere since TOR-215 built it, `bindRow` puts the click on `entry.rowEl`, and
+after this ticket the box carries two data attributes and no listener. The
+component still adds none, at any level.
+
+**What is left as the reason it is not a custom element**, and it is one reason
+rather than three: the box is a `<li>` in a list, a `<section>` in a panel and
+a row-pair wrapper in a grid - three elements the page needs for their own
+reasons, which the component ADOPTS. Making it an element would mean the page
+could no longer choose the box, and choosing the box is the whole of "usable
+where we want".
+
+### The shape
+
+Six parts, five fields. `dressed` is gone as an argument and `summary` replaces
+it, which is the one real change to the markup contract:
+
+    level      1, 2 or 3
+    container  the box. Required everywhere, and checked
+    summary    the header the toggle lives in, and what the level's rail is
+               painted on. Required everywhere; dressed only where the level
+               has a rail
+    toggle     the control carrying aria-expanded, inside (or equal to) the
+               summary
+    region     the element the toggle opens
+    mark       the element wearing the triangle. NOT kept as a field
+
+**Why the summary and not the container carries `data-expanded`.** Because at
+both dressed levels the rail was always painted on the summary. Level 1 already
+dressed its summary (`.run-row`). Level 2 dressed the CONTAINER and filelist.css
+reached the label through it:
+
+    .picker-item[data-expanded="true"] > .picker-file    before
+    .picker-file[data-expanded="true"]                   after
+
+A rule that names a parent to reach the child it dresses is the same coupling
+TOR-221 took out of the row's columns, one level down, and it is the only CSS
+change this ticket needed. **Nothing else sets `box-shadow` on `.picker-file`**
+- checked rather than assumed; the other four rules that reach it set cursor,
+colour and background - so dropping the specificity from 0,3,0 to 0,2,0 changes
+no computed value. Measured in the running page before and after: `inset 2px
+0px 0px rgb(34, 224, 232)` both times, and `none` when closed both times.
+
+**`mark` stopped being a field.** The class is added to it once in the
+constructor and never read back, so a reference kept for nothing is exactly
+what `TestTheDisclosureHoldsNoOpenState`'s field scan exists to find. Five
+fields before, five after: `container, level, region, summary, toggle`.
+
+**The level is written once, on the box.** It used to go on the toggle AND the
+region - the same value in two places, neither of them the disclosure. The box
+carries `data-accordion-level` and `data-accordion` (the level's name), and
+anything holding a control finds its depth with one
+`closest("[data-accordion-level]")`. That is not hypothetical: the focus trail
+taken for the keyboard pass below reports each stop's level, because every
+control on the page now sits inside a box that says what depth it is at.
+
+### Criterion 1: shown working on a page with nothing to do with torpeek
+
+`docs/spikes/TOR-222-anywhere/` (runnable, `window.probe()`), because "usable
+where we want" is only proved by an unrelated use - inside the table the
+wrapper would be indistinguishable from what TOR-212 shipped.
+
+It is a FAQ about growing tomatoes. No run table, no file list, no `<li>` with
+a checkbox in it, and **not one line of torpeek's CSS**: serif type on
+paper-white, violet rails. And it imports the **shipped** module by relative
+path rather than carrying a copy, which is the opposite decision from TOR-214's
+and TOR-221's frozen `tokens.css` copies and is deliberate: those spikes
+measure a layout against values that must not move, while this one's whole
+claim is about the module that ships.
+`TestTheAnywhereSpikeUsesTheShippedModule` fails if it ever becomes a copy, if
+it links a torpeek stylesheet, or if its control arm goes.
+
+Four arms, and the fourth is what makes the other three a measurement:
+
+| arm | what it does | result |
+| --- | --- | --- |
+| 1 | three declared disclosures, levels 1/2/3, nested | rails 3px / 2px / none, marks 12.3125 / 11.1953 / 10.0781px |
+| 2 | a box built in a **DocumentFragment** and applied OPEN while `isConnected` was false | arrived open: aria `true`, region shown, summary dressed, box levelled, mark classed |
+| 3 | one box, two parents - opened, then relocated | unchanged across the move, and the move is a real one each call |
+| 4 | **control**: five wirings the component must refuse | all five refused, by name |
+
+The five refusals, verbatim from the page: a region somewhere else ("container
+does not hold its region"), the box being its own summary ("is also its
+summary"), a region inside the summary ("closes on every click within it"), a
+toggle outside the summary ("the rail would be painted on a header that does
+not hold the control"), and a fourth level. Any of them accepted reads as
+`ACCEPTED - the check is not there` rather than as silence.
+
+Arm 1's mark widths are the same finding as the app's, at different type sizes:
+`.7em` against each level's own font size, which is why they differ (the app
+measures 9.17969 / 9.79688 / 8.95312px) while the rule does not. And the mark
+is where the spike shows the division most clearly: the constructor adds
+`.disclosure-mark` and base.css draws the triangle, so on a page that does not
+load base.css the class arrives pointing at nothing until the page writes its
+own three lines for it. The class is a HOOK, not an appearance - measured, by
+leaving those lines out first and reading `markWidth: 0px`.
+
+### Criterion 2: what it reads from outside, and the guard
+
+**What it reads from outside is the six arguments and nothing else.** It asks
+the DOM exactly one question - `contains`, four times, in the constructor - and
+that is an assertion about the parts it was handed rather than a lookup. It
+never names `parentElement`, `parentNode`, `closest`, `querySelector`,
+`document`, `window`, `isConnected` or any sibling accessor.
+
+`TestNoDisclosureDependsOnItsContainer` is the guard, and it is TOR-221's
+`TestNoRowDependsOnItsContainerToFindItsColumns` pointed at the disclosure -
+same shape for the same reason: one grep for one spelling is weak, because a
+reintroduction arrives as whichever spelling looked natural. Six arms, each a
+different way in:
+
+    the open state qualified by an ancestor    the exact rule this ticket removed
+    the LEVEL qualified by an ancestor         the same mistake, newer attribute
+    the MARK reached through a container       its one legitimate ancestor is the
+                                              TOGGLE, which the component
+                                              guarantees; a class there is a box
+    a grid ITEM's property on any of the       grid-column/row/area,
+    NINE disclosure parts                      display: contents, subgrid
+    the component reaching out of its parts    the "just look the box up" version
+    a second writer of data-expanded or        derived over every served module
+    data-accordion
+
+Two of the arms count what they matched and fail if it is zero, because a sweep
+over a stylesheet that stopped spelling the thing it looks for reports nothing:
+two state rules today and three mark rules.
+`TestTheDisclosurePartsIncludeEveryRowPart` holds the nine-part list against
+TOR-221's own three, since level 1's box, summary and region ARE those three.
+
+**Executed, which is what actually proves the negative.** The Go driver builds
+three disclosures over plain nodes with **no parent at all** - the box is never
+appended - drives each both ways, then moves the box into a different element
+and drives it again; and it refuses eleven malformed wirings. That is the same
+set the browser spike takes, under node, against the shipped module.
+
+### Criterion 3: the state is still outside, and the move still proves it
+
+On the running page, on a row that was open with its file open inside it and
+Metadata open inside that. Anchored on the OPEN row rather than on document
+order, because the table re-sorts on a 1.5s poll and `querySelector(".run-row-
+main")` is a different row between two calls - the first attempt read the wrong
+row and reported it closed.
+
+1. **The exact call `reorderRuns` makes**, `list.append(group)` on a node
+   already in the list: unchanged, all three levels open at 973.2578125 /
+   648.5703125 / 194.796875px.
+2. **A genuine detach and re-attach.** `group.remove()` put the whole subtree
+   out of the document - `isConnected` **false** on the box, on its
+   `<run-detail>` and on its `<file-detail>`, index -1 - and `list.append(group)`
+   brought it back with all three levels still open, the same three heights,
+   `aria-expanded="true"` on all three toggles, `data-expanded="true"` on
+   `.run-row` and on `.picker-file`, and the box still carrying its level.
+3. **A real sort.** Two clicks on the Name header took `aria-sort` to
+   `descending` and the open row from index 1 to index 0, with all three levels
+   open and the three heights unchanged to the last decimal.
+
+The Go side executes the same move against the shipped `run-table.js`
+(`TestTheDisclosureSurvivesTheMoveARe_sortMakes`) and reads the five own
+properties off a **live** instance rather than off the source.
+
+### Criterion 4: the side effects, still fired and still able to fail
+
+`TestTheDisclosureFiresTheRunLevelsSideEffects` is unchanged in what it watches
+and still passes: the width at its far end (the `--run-detail-w` property on
+`:root`) and `detailShown` as the injected service itself. Counts, in order:
+open 1 width / 1 shown, close 2 / 1, reopen 3 / 2.
+
+**Shown able to fail, with TOR-212's own two mutations plus two of this
+ticket's** (the full run is below): never calling `detailShown` fails it, and
+renaming the property it writes to `--run-detail-width` fails it - the two that
+passed the entire pre-existing suite when TOR-212 measured them.
+
+Confirmed again live, with both effects counted at their real far ends
+(`CSSStyleDeclaration.prototype.setProperty` for the token,
+`RunDetail.prototype.refreshAgain` for what `detailShown` calls): closing a row
+wrote the token once and called `refreshAgain` **zero** times; reopening wrote
+it a second time and called `refreshAgain` **once**. Either direction rechecks
+the width, only an opening reads the standing.
+
+### Criterion 5: the level's values are the stylesheets', and pinned to them
+
+The finding TOR-212 recorded - the mark does not vary, the rail and the ground
+do - is preserved rather than re-invented, and it is no longer only prose. The
+level table carries `rail` and `ground`:
+
+    1  run   rail "3px"  ground true
+    2  file  rail "2px"  ground false
+    3  meta  rail null   ground false
+
+and `TestTheLevelsLooksAreTheStylesheetsOwn` **parses the rules that dress an
+open disclosure out of the served CSS and requires the table to match**. It
+derives rather than looks up: it finds every rule keyed on
+`[data-expanded="true"]` - exactly the set of levels that dress anything -
+sorts them by rail width, and uses the design's own statement (the depth is how
+loudly the state is dressed) to pair them with the table. Level 1 is tied to
+its class by EXECUTION, off the `className` of the element the shipped
+`newRow()` actually hands over as the summary.
+
+`rail` also does a job at runtime: `apply()` reads it to decide whether to
+dress the summary, so there is no second flag to keep in step. **Level 3
+dresses nothing because the LEVEL says so, not because the caller remembered
+not to pass a `dressed` element** - which is a strictly better place for that
+rule than the refusal TOR-212 had.
+
+Measured per level on the running page, all three open at 1440x900, and every
+figure is what the existing rules produce:
+
+| | level 1 - run | level 2 - file | level 3 - meta |
+|---|---|---|---|
+| box | `.run-row-group` | `li.picker-item` | `section.meta` |
+| summary (dressed) | `.run-row` | `label.picker-file` | `h3.meta-title`, undressed |
+| open ground | `rgb(9, 58, 64)` | none | none |
+| open rail | `rgb(34,224,232) 3px 0 0 inset` | same colour at 2px | `none` |
+| closed rail | `none` | `none` | `none` |
+| bottom border, open | transparent | unchanged | unchanged |
+| mark width / opacity | 9.17969px / .6 | 9.79688px / .6 | 8.95312px / .6 |
+| region height, open | 973.2578125px | 648.5703125px | 194.796875px |
+
+Exactly **six** elements carry `.disclosure-mark` on the page, unchanged.
+
+**Why the two rail rules are still two rules**, since collapsing them the way
+`.disclosure-mark` collapsed the mark is the obvious next move. The mark
+consolidated because its three copies were BYTE-IDENTICAL. These two are not:
+level 1 adds a filled ground and a transparent bottom border and level 2 adds
+neither, so one shared rule would need three per-level custom properties
+written from JS - more machinery than the two rules it replaced, and a scale
+invented rather than read. The ticket asks for the parameter to be derived from
+what exists; the table pins the two rules instead of merging them.
+
+**And the honest limit of the box**: no rule in any stylesheet keys off
+`data-accordion-level` today. The attribute is there for reading - by a test, a
+browser drive, a design consumer - and the rail and the ground are still the
+two rules they were, in the two area files they were in.
+
+### Criterion 6: one bridge with a level prop, authored and handed over
+
+`.design-sync/export/components/shared/Accordion/`. **Not uploaded, and the
+checker not read back** - TOR-208 established that the implementing agent has
+no DesignSync tool and that the manifest only refreshes when the project is
+reopened, so this is authored and handed over rather than met, exactly as it
+was for TOR-208 and TOR-212.
+
+The `.jsx` **takes a `level` and draws all three depths.** The refusal it
+replaces was argued from "at levels 1 and 2 the element carrying the rail is a
+run-grid ROW or a file-list `<li>` with a checkbox in it, neither of which is
+this component's to draw" - true of the header's CONTENTS and wrong about the
+disclosure. The box, the header and the region are the same three things at
+every level; only their tag and class vary, and those are a `SHAPES` table in
+the `.jsx` mirroring the class's own. The row's ten cells and the file's
+checkbox come in as a `summary` prop, and the header's click handler as
+`summaryProps` - which is where the outer two levels' listener belongs. The
+module's export block is still the class alone and `SHAPES` is not exported,
+because the checker indexes uppercase-initial named exports as components.
+
+The card carries **seven** panes: the three levels closed and open, plus the
+same open level-1 disclosure with `.run-table-wrap` and `.run-grid` removed.
+That last one is the decoupling rendered rather than asserted, and it is
+measurable off the card - which is how it was verified, by serving the export
+tree with the stylesheets and modules copied in beside it:
+
+| | wrapped in `.run-grid` | bare |
+|---|---|---|
+| resolved tracks | `320px 104px 140px 54.3984px x4 86.3984px 54.3984px 69.6094px` | **identical** |
+| ten cell offsets | 0, 320, 424, 564, 618.3984375, 672.796875, 727.1953125, 781.59375, 867.9921875, 922.390625 | **identical** |
+| row width | 992px | 992px |
+| row font size | 13.12px | **14px** |
+
+The one difference is worth stating rather than glossing: the row's TYPE comes
+from the wrap's `.82rem`, not from the row. So a disclosure needs no particular
+container to lay out, and inherits type from wherever it is put, like any
+element.
+
+The card's rails and marks read the same as the app's - `rgb(34,224,232)` at
+3px with the `rgb(9,58,64)` ground, 2px with none, and nothing; 9.17969 /
+9.79688 / 8.95312px - and every `[hidden]` region resolves to `display: none`,
+which is the trap the card exists partly to demonstrate.
+
+**What this retires of TOR-224**, which was filed against this export while
+TOR-221 was landing: its criteria 1, 2, 3, 5 and 6 are done here (note 4
+corrected and its clauses reversed, `run-grid-rows` gone from the whole export,
+`subgrid` surviving only in three struck-through historical notes that name the
+ticket that retired it, the card measured in a browser with the numbers above,
+and the upload stated). Its **criterion 4 is superseded rather than met**: it
+asks the five files to agree that "the three structural reasons are now two,
+and the surviving ones are the file level's missing box and the run level's
+click listener". Both of those are gone - the missing box was wrong and the
+listener never blocked the box - so the files now say ONE reason, the one above.
+That is a decision for whoever closes TOR-224, not one this ticket can make for
+it.
+
+### Criterion 7: keyboard, with real key events
+
+Every figure a real key press delivered to the page, with `document.hasFocus()`
+true throughout and a `focusin` trail recording each stop, because TOR-212's
+first attempt reached nothing at all while the tool reported success.
+
+**Eighteen `Tab`s from `BODY`, 36 key events**, and the trail now reports each
+stop's depth from the box it sits in:
+
+| Tab | element | level | focus ring |
+|---|---|---|---|
+| 1-9 | the nine sortable `.run-grid-head` | - | `2px rgb(34,224,232)`, offset -2px |
+| 10, 11 | `button.run-row-main`, both rows | **1** | `1px rgb(153,200,255)` - the UA default |
+| 12 | `button.picker-open` | **2** | `2px rgb(34,224,232)`, offset 1px |
+| 13 | the file's tick box | 2 | UA default |
+| 14 | `button.picker-clear` | 2 | `2px rgb(255,122,69)`, offset 1px |
+| 15 | `button.meta-toggle` | **3** | `2px rgb(34,224,232)`, offset -2px |
+| 16-18 | contact sheet, frame count, Regenerate | 2 | mixed |
+
+Level 3 sits at Tab 15 rather than TOR-212's 14 because this fixture's file has
+a Clear-frames button; nothing about the order changed.
+
+**Activation, `Return` and `Space`, at each level:**
+
+- **Level 3.** `Return` closed it (`aria-expanded` true -> false, glyph ▾ ->
+  ▸, `.meta-body` 194.796875 -> 0, and the two levels outside shrank to 778.46
+  / 453.77 while staying open); `Space` reopened it to 194.796875.
+- **Level 2.** `Return` closed the file's block (0px, `data-expanded="false"`,
+  **rail `none`** - the moved selector working in the closing direction too -
+  and the run's detail shrank 973.26 -> 313.49); `Space` reopened it, rail back
+  at `inset 2px 0px 0px rgb(34, 224, 232)`.
+- **Level 1.** `Return` closed the row (detail 0px, rail and ground both gone)
+  and `Space` reopened it to 973.2578125 with `rgb(34,224,232) 3px 0 0 inset`
+  over `rgb(9, 58, 64)` - and the file inside stayed `aria-expanded="true"`
+  through both, which is `TestCollapsingATorrentLeavesItsOpenFileOpen`'s
+  property, live.
+
+So all three levels are reachable and operable and each is at least what it
+was: the toggles are the same three `<button>`s. **Level 1's missing
+`:focus-visible` rule is still TOR-220's** and is not fixed here. The
+screen-reader half stays withdrawn - no baseline exists, TOR-213 scoped it out,
+and the accessibility tree is not a substitute.
+
+### The guard shown able to fail: 29 mutations, 29 caught
+
+One at a time into the real asset, each reverted, the whole `internal/web`
+package run against each, and the tree green afterwards. TOR-221's five-arm
+guard with twelve mutations is the standard this matches.
+
+| mutation | caught by |
+| --- | --- |
+| drop the region containment check | the level parameter's refusals |
+| drop every containment check | the refusals |
+| drop the region-inside-summary check | the refusals |
+| drop the toggle-in-summary check | the refusals |
+| look the box up with `closest()` | `TestNoDisclosureDependsOnItsContainer` |
+| find the region with `querySelector` | `TestNoDisclosureDependsOnItsContainer` |
+| dress the container instead of the summary | three tests |
+| write the level on the toggle too | the level parameter |
+| keep the mark as a field | the no-state field scan |
+| read the state back in `apply` | the no-state scan |
+| level 2's rail becomes 3px | `TestTheLevelsLooksAreTheStylesheetsOwn` |
+| level 3 grows a rail | the level looks, and the parameter |
+| level 2 claims a ground | the level looks |
+| level 1 loses its ground | the level looks |
+| restore `.picker-item[data-expanded] > .picker-file` | the container guard, and the level looks |
+| qualify the level-1 rail by `.run-grid` | the container guard, TOR-221's own guard, the level looks |
+| key a rule off the level through the box | the container guard, the level looks |
+| reach the mark through the row's `<li>` | the container guard |
+| put `grid-column` back on `.run-detail-row` | the container guard, TOR-221's guard |
+| the level-1 rail thickens to 4px | the level looks |
+| the level-2 rail rule goes away | the level looks |
+| the level-1 ground goes away | the level looks |
+| the level-1 box is the row itself | five tests |
+| the level-1 box holds only the row | six tests |
+| **never call `detailShown`** | the side-effects test |
+| **rename `--run-detail-w`** | the side-effects test |
+| the spike carries a copy of the class instead of importing it | `TestTheAnywhereSpikeUsesTheShippedModule` |
+| the spike's control arm goes away | the spike guard |
+| the spike links `tokens.css` | the spike guard |
+
+The last three are the criterion-1 evidence guarded against rot, and the spike
+guard demonstrated itself before it was even finished - which is the same kind
+of evidence, arrived at by accident: its stylesheet arm failed on the spike's
+own PROSE, naming `tokens.css` and `base.css` in a comment explaining that the
+page links neither. Comments are stripped now, the way `liveJS` strips them for
+the same reason everywhere else in this package.
+
+Twenty-six of the twenty-nine were run against the WHOLE `internal/web`
+package, one at a time, each reverted, tree green afterwards - which is what
+makes each "caught by" column a claim about the whole suite rather than about
+one test invoked on its own. The three spike mutations were run the same way
+against the test that owns them.
+
+### What this does not close
+
+- **The box buys nothing in CSS yet.** No rule keys off
+  `data-accordion-level`, deliberately (see criterion 5). The obvious next use
+  is `.picker-item[data-detail="true"]` - "this file has a disclosure", which
+  is a fact the accordion's own existence already states - but three rules key
+  off `data-detail` and two of them depend on a specificity ordering
+  `tick_test.go` asserts by byte offset, so it is a deliberate pass rather
+  than a rename. Not filed; recorded here.
+- **The level 2 and 3 boxes are verified in a browser, not under node.** The Go
+  driver executes level 1 through the shipped `run-table.js` and the other two
+  over plain nodes; running `file-detail.js` under node would need most of
+  `index.html`'s markup. The live page is where `li.picker-item` and
+  `section.meta` are read carrying their levels, and where the level-2 rail is
+  measured on `.picker-file`.
+- **The spike ran in Chrome only**, like TOR-214's and TOR-221's.
+- **The export is authored, not uploaded** (criterion 6 above), and TOR-224's
+  criterion 4 is superseded rather than met.
+- The machine was heavily loaded throughout (`uptime` 1-minute figures between
+  3.39 and 15.41, 5-minute as high as 19.59), which is why no timing is
+  reported anywhere above. Every figure here is a geometry read or a count.

@@ -1,4 +1,4 @@
-<!-- @dsCard group="Shared" name="Accordion" subtitle="The page's three nesting levels of disclosure, each shown closed and open" -->
+<!-- @dsCard group="Shared" name="Accordion" subtitle="The page's three nesting levels of disclosure, each closed and open, plus level 1 with no container at all" -->
 <!doctype html>
 <meta charset="utf-8">
 <title>Accordion</title>
@@ -22,9 +22,11 @@
 
      1. A PREVIEW RUNS NO SCRIPTS, so every open state below is written into
         the markup: aria-expanded="true" on the toggle, no `hidden` on the
-        region, data-expanded="true" on the row. In the product all three of
-        those are one call to Accordion's apply(), and nothing else on the page
-        may write them.
+        region, data-expanded="true" on the HEADER. In the product those three
+        are one call to Accordion's apply(), and nothing else on the page may
+        write them. The box's data-accordion-level and data-accordion are the
+        constructor's rather than apply()'s - they do not change with the
+        state - and are written in by hand here for the same reason.
 
      2. THE CLASS THE COMPONENT ADDS HAS TO BE HERE BY HAND.
         `.disclosure-mark` is put on by the constructor (and, at level 2, by
@@ -41,11 +43,24 @@
         closed pane any other way would be showing a state the product cannot
         reach.
 
-     4. LEVEL 1 NEEDS THE GRID AROUND IT. .run-row-group and .run-row are both
-        `grid-template-columns: subgrid`, which only resolves against a real
-        grid ancestor - so the two panes below carry .run-grid and its
-        display: contents row list. Without them the row would lay out on
-        auto columns and the ten cells would be the wrong widths.
+     4. LEVEL 1 NEEDS NO GRID AROUND IT, which is the reverse of what this
+        card said until TOR-222 and is worth stating in the corrected form
+        rather than just deleted. It used to be true: .run-row-group and
+        .run-row both carried `grid-template-columns: subgrid`, which resolves
+        only on a direct grid item, so the row had to sit inside .run-grid and
+        its `display: contents` row list. TOR-221 removed both - each row is
+        its own grid over one shared TRACK LIST (--run-tracks, on :root), and
+        the removal was measured with the control that makes it a measurement:
+        with an element inserted between the container and the rows, per-row
+        grids held every cell's left edge to 0.0000px of its own header's
+        across 24 rows, where the shared grid drifted 922.3906px.
+
+        So the two level-1 panes keep .run-table-wrap and .run-grid because
+        that is the real markup and the wrap is what draws the pane, and the
+        `display: contents` row list that used to sit between them is GONE
+        along with the class that carried it, which has no rule left. The last
+        pane on this card is the same box with nothing at all around it,
+        drawn to make the decoupling visible rather than asserted.
 
      5. WHAT EACH PANE LEAVES OUT, and why that is not a lie. This card is
         about the DISCLOSURE, not about the things it opens onto: the level-1
@@ -60,9 +75,23 @@
      running page (docs/front-end.md's TOR-212 section carries the table):
 
        level 1  .run-row       accent ground rgb(9,58,64) + a 3px inset rail
-       level 2  .picker-item   a 2px inset rail, no ground
+       level 2  .picker-file   a 2px inset rail, no ground
        level 3  (nothing)      no rail, no ground - the toggle goes to .8rem
                                type at .75 opacity instead
+
+     THE OPEN STATE IS ON THE HEADER AT BOTH DRESSED LEVELS since TOR-222, and
+     the level-2 panes below changed with it: data-expanded used to sit on the
+     <li> and filelist.css reached the label through it
+     (`.picker-item[data-expanded="true"] > .picker-file`). The attribute is on
+     .picker-file now and the rule has no combinator - the same shape level 1
+     always had. Measured before and after: inset 2px 0px 0px rgb(34,224,232)
+     either way.
+
+     AND THE LEVEL IS ON THE BOX, once. It used to be written on the toggle and
+     on the region separately; it is now on .run-row-group, li.picker-item and
+     section.meta, with data-accordion carrying the level's name beside it.
+     Anything holding a control finds its depth with one
+     closest("[data-accordion-level]").
 
      The MARK is identical at all three: .7em wide, opacity .6, "▸" closed and
      "▾" open. It resolves to different pixel widths only because .7em is read
@@ -75,39 +104,36 @@
     starts at the same x whichever way it points. No ground, no rail.</p>
   <div class="run-table-wrap">
     <div class="run-grid">
-      <div class="run-grid-rows">
-        <div class="run-row-group">
-          <div class="run-row">
-            <div class="run-cell run-cell-name">
-              <button type="button" class="run-row-main" aria-expanded="false"
-                      data-accordion-level="1" aria-controls="card-run-detail-closed">
-                <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
-                <span class="run-name">Sintel (three-point set)</span>
-              </button>
-            </div>
-            <div class="run-cell run-cell-when">Sep 8 21:41</div>
-            <div class="run-cell run-cell-status">
-              <span class="run-badge" data-state="done">done</span>
-              <span class="run-meta">3 file(s), 1 video</span>
-            </div>
-            <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-availability">
-              <span class="run-cell-availability-value">&ndash;</span>
-              <span class="run-meta run-cell-availability-meta"></span>
-            </div>
-            <div class="run-cell run-cell-metric run-cell-queue">
-              <span class="run-cell-queue-value">1</span>
-              <span class="run-meta run-cell-queue-meta"></span>
-            </div>
-            <div class="run-cell run-cell-actions"></div>
+      <div class="run-row-group" data-accordion-level="1" data-accordion="run">
+        <div class="run-row">
+          <div class="run-cell run-cell-name">
+            <button type="button" class="run-row-main" aria-expanded="false"
+                    aria-controls="card-run-detail-closed">
+              <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
+              <span class="run-name">Sintel (three-point set)</span>
+            </button>
           </div>
-          <div class="run-detail-row" id="card-run-detail-closed"
-               data-accordion-level="1" hidden>
-            <div class="run-detail-cell"></div>
+          <div class="run-cell run-cell-when">Sep 8 21:41</div>
+          <div class="run-cell run-cell-status">
+            <span class="run-badge" data-state="done">done</span>
+            <span class="run-meta">3 file(s), 1 video</span>
           </div>
+          <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-availability">
+            <span class="run-cell-availability-value">&ndash;</span>
+            <span class="run-meta run-cell-availability-meta"></span>
+          </div>
+          <div class="run-cell run-cell-metric run-cell-queue">
+            <span class="run-cell-queue-value">1</span>
+            <span class="run-meta run-cell-queue-meta"></span>
+          </div>
+          <div class="run-cell run-cell-actions"></div>
+        </div>
+        <div class="run-detail-row" id="card-run-detail-closed" hidden>
+          <div class="run-detail-cell"></div>
         </div>
       </div>
     </div>
@@ -121,44 +147,41 @@
     an open detail cannot collapse it.</p>
   <div class="run-table-wrap">
     <div class="run-grid">
-      <div class="run-grid-rows">
-        <div class="run-row-group">
-          <div class="run-row" data-expanded="true">
-            <div class="run-cell run-cell-name">
-              <button type="button" class="run-row-main" aria-expanded="true"
-                      data-accordion-level="1" aria-controls="card-run-detail-open">
-                <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
-                <span class="run-name">Sintel (three-point set)</span>
-              </button>
-            </div>
-            <div class="run-cell run-cell-when">Sep 8 21:41</div>
-            <div class="run-cell run-cell-status">
-              <span class="run-badge" data-state="done">done</span>
-              <span class="run-meta">3 file(s), 1 video</span>
-            </div>
-            <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
-            <div class="run-cell run-cell-metric run-cell-availability">
-              <span class="run-cell-availability-value">&ndash;</span>
-              <span class="run-meta run-cell-availability-meta"></span>
-            </div>
-            <div class="run-cell run-cell-metric run-cell-queue">
-              <span class="run-cell-queue-value">1</span>
-              <span class="run-meta run-cell-queue-meta"></span>
-            </div>
-            <div class="run-cell run-cell-actions"></div>
+      <div class="run-row-group" data-accordion-level="1" data-accordion="run">
+        <div class="run-row" data-expanded="true">
+          <div class="run-cell run-cell-name">
+            <button type="button" class="run-row-main" aria-expanded="true"
+                    aria-controls="card-run-detail-open">
+              <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
+              <span class="run-name">Sintel (three-point set)</span>
+            </button>
           </div>
-          <div class="run-detail-row" id="card-run-detail-open"
-               data-accordion-level="1">
-            <div class="run-detail-cell">
-              <div class="run-detail">
-                <p class="run-detail-header">
-                  <span class="run-badge" data-state="done">done</span>
-                  <span class="run-detail-title">Sintel (three-point set)</span>
-                </p>
-              </div>
+          <div class="run-cell run-cell-when">Sep 8 21:41</div>
+          <div class="run-cell run-cell-status">
+            <span class="run-badge" data-state="done">done</span>
+            <span class="run-meta">3 file(s), 1 video</span>
+          </div>
+          <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
+          <div class="run-cell run-cell-metric run-cell-availability">
+            <span class="run-cell-availability-value">&ndash;</span>
+            <span class="run-meta run-cell-availability-meta"></span>
+          </div>
+          <div class="run-cell run-cell-metric run-cell-queue">
+            <span class="run-cell-queue-value">1</span>
+            <span class="run-meta run-cell-queue-meta"></span>
+          </div>
+          <div class="run-cell run-cell-actions"></div>
+        </div>
+        <div class="run-detail-row" id="card-run-detail-open">
+          <div class="run-detail-cell">
+            <div class="run-detail">
+              <p class="run-detail-header">
+                <span class="run-badge" data-state="done">done</span>
+                <span class="run-detail-title">Sintel (three-point set)</span>
+              </p>
             </div>
           </div>
         </div>
@@ -167,17 +190,19 @@
   </div>
 
   <p class="card-state">Level 2 - a video file's block - closed</p>
-  <p class="card-note">Same triangle, one level in. data-detail on the
-    &lt;li&gt; is what brings it on screen - the box is reserved on every row
+  <p class="card-note">Same triangle, one level in. The &lt;li&gt; is this
+    level's BOX - it holds the row and the slot, and always did, which is why
+    TOR-222 needed no markup rearranged here. data-detail on it is what brings
+    the triangle on screen - the box is reserved on every row
     (visibility, not display) so the names line up whether or not a file has
     anything to open yet.</p>
   <section class="picker">
     <ul class="picker-list">
       <li class="picker-item" data-video="true" data-detail="true"
-          data-expanded="false">
-        <label class="picker-file" for="card-tick-closed">
+          data-accordion-level="2" data-accordion="file">
+        <label class="picker-file" for="card-tick-closed" data-expanded="false">
           <button type="button" class="picker-open disclosure-mark"
-                  aria-expanded="false" data-accordion-level="2"
+                  aria-expanded="false"
                   aria-controls="card-file-detail-closed"
                   aria-label="Frames and metadata for Sintel.2010.720p.mkv"
                   title="this file's frames, metadata and buttons"></button>
@@ -189,8 +214,7 @@
           <span class="picker-summary">1280&times;720 &middot; 6 frames</span>
         </label>
         <file-detail>
-          <div class="file-detail" id="card-file-detail-closed"
-               data-accordion-level="2" hidden></div>
+          <div class="file-detail" id="card-file-detail-closed" hidden></div>
         </file-detail>
       </li>
       <li class="picker-item" data-video="false">
@@ -209,14 +233,16 @@
     quieter than the torrent's, because this rail is already inside the
     accented one that frame draws, and two filled grounds nested would read as
     a third level of chrome. The slot itself takes a 1px --rule border down its
-    left and an indent.</p>
+    left and an indent. data-expanded is on the &lt;label&gt; that wears the
+    rail, not on the &lt;li&gt; around it (TOR-222) - the same shape level 1
+    has always had.</p>
   <section class="picker">
     <ul class="picker-list">
       <li class="picker-item" data-video="true" data-detail="true"
-          data-expanded="true">
-        <label class="picker-file" for="card-tick-open">
+          data-accordion-level="2" data-accordion="file">
+        <label class="picker-file" for="card-tick-open" data-expanded="true">
           <button type="button" class="picker-open disclosure-mark"
-                  aria-expanded="true" data-accordion-level="2"
+                  aria-expanded="true"
                   aria-controls="card-file-detail-open"
                   aria-label="Frames and metadata for Sintel.2010.720p.mkv"
                   title="this file's frames, metadata and buttons"></button>
@@ -228,17 +254,15 @@
           <span class="picker-summary">1280&times;720 &middot; 6 frames</span>
         </label>
         <file-detail>
-          <div class="file-detail" id="card-file-detail-open"
-               data-accordion-level="2">
-            <section class="meta">
+          <div class="file-detail" id="card-file-detail-open">
+            <section class="meta" data-accordion-level="3" data-accordion="meta">
               <h3 class="meta-title">
-                <button type="button" class="meta-toggle" aria-expanded="false"
-                        data-accordion-level="3">
+                <button type="button" class="meta-toggle" aria-expanded="false">
                   <span class="meta-toggle-icon disclosure-mark" aria-hidden="true"></span>
                   <span class="meta-toggle-label">Metadata</span>
                 </button>
               </h3>
-              <div class="meta-body" data-accordion-level="3" hidden></div>
+              <div class="meta-body" hidden></div>
             </section>
             <p class="file-links"><a href="#">contact sheet</a></p>
           </div>
@@ -253,30 +277,30 @@
     is a detail on top of that. The toggle is the only one of the three with
     chrome of its own - a .35rem radius and a --hover ground - and the only one
     at .8rem type and .75 opacity.</p>
-  <section class="meta">
+  <section class="meta" data-accordion-level="3" data-accordion="meta">
     <h3 class="meta-title">
-      <button type="button" class="meta-toggle" aria-expanded="false"
-              data-accordion-level="3">
+      <button type="button" class="meta-toggle" aria-expanded="false">
         <span class="meta-toggle-icon disclosure-mark" aria-hidden="true"></span>
         <span class="meta-toggle-label">Metadata</span>
       </button>
     </h3>
-    <div class="meta-body" data-accordion-level="3" hidden></div>
+    <div class="meta-body" hidden></div>
   </section>
 
   <p class="card-state">Level 3 - the Metadata block - open</p>
   <p class="card-note">NOTHING is dressed. There is no rail and no ground at
-    this depth, and the component REFUSES a `dressed` element at level 3 rather
-    than ignoring one - ignoring it is how a level stops meaning anything.</p>
-  <section class="meta">
+    this depth, and the LEVEL is what decides that rather than the caller: the
+    level's own row in accordion.js carries no rail, so apply() writes no
+    data-expanded here however it is called. There is nothing to pass and
+    nothing to forget.</p>
+  <section class="meta" data-accordion-level="3" data-accordion="meta">
     <h3 class="meta-title">
-      <button type="button" class="meta-toggle" aria-expanded="true"
-              data-accordion-level="3">
+      <button type="button" class="meta-toggle" aria-expanded="true">
         <span class="meta-toggle-icon disclosure-mark" aria-hidden="true"></span>
         <span class="meta-toggle-label">Metadata</span>
       </button>
     </h3>
-    <div class="meta-body" data-accordion-level="3">
+    <div class="meta-body">
       <dl class="specs">
         <dt>Torrent files</dt><dd>1</dd>
         <dt>Resolution</dt><dd>1280&times;720</dd>
@@ -287,5 +311,58 @@
       <div class="tracks"></div>
     </div>
   </section>
+
+  <p class="card-state">Level 1 again - the same box with nothing around it</p>
+  <p class="card-note">Not a seventh state: the same open level-1 disclosure as
+    two panes up, with .run-table-wrap and .run-grid removed. This pane is the
+    decoupling rendered rather than asserted, and it is measurable off this
+    card - the two rows resolve BYTE-IDENTICAL tracks
+    (<code>320px 104px 140px 54.3984px &times;4 86.3984px 54.3984px
+    69.6094px</code>) and identical cell offsets to the last decimal, because a
+    row reads --run-tracks from :root and is its own grid (TOR-221). What it
+    loses is the TABLE's, not the disclosure's: the wrap's ground, its
+    horizontal scroll, and its type size - the row here is 14px where the
+    wrapped one is 13.12px, since the .82rem comes from the wrap. So a
+    disclosure needs no particular container to lay out; it inherits type from
+    wherever it is put, like any element.</p>
+  <div class="run-row-group" data-accordion-level="1" data-accordion="run">
+    <div class="run-row" data-expanded="true">
+      <div class="run-cell run-cell-name">
+        <button type="button" class="run-row-main" aria-expanded="true"
+                aria-controls="card-run-detail-bare">
+          <span class="run-toggle-icon disclosure-mark" aria-hidden="true"></span>
+          <span class="run-name">Sintel (three-point set)</span>
+        </button>
+      </div>
+      <div class="run-cell run-cell-when">Sep 8 21:41</div>
+      <div class="run-cell run-cell-status">
+        <span class="run-badge" data-state="done">done</span>
+        <span class="run-meta">3 file(s), 1 video</span>
+      </div>
+      <div class="run-cell run-cell-metric run-cell-peers">&ndash;</div>
+      <div class="run-cell run-cell-metric run-cell-seeds">&ndash;</div>
+      <div class="run-cell run-cell-metric run-cell-down">&ndash;</div>
+      <div class="run-cell run-cell-metric run-cell-up">&ndash;</div>
+      <div class="run-cell run-cell-metric run-cell-availability">
+        <span class="run-cell-availability-value">&ndash;</span>
+        <span class="run-meta run-cell-availability-meta"></span>
+      </div>
+      <div class="run-cell run-cell-metric run-cell-queue">
+        <span class="run-cell-queue-value">1</span>
+        <span class="run-meta run-cell-queue-meta"></span>
+      </div>
+      <div class="run-cell run-cell-actions"></div>
+    </div>
+    <div class="run-detail-row" id="card-run-detail-bare">
+      <div class="run-detail-cell">
+        <div class="run-detail">
+          <p class="run-detail-header">
+            <span class="run-badge" data-state="done">done</span>
+            <span class="run-detail-title">Sintel (three-point set)</span>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
 
 </div>

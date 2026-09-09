@@ -781,10 +781,15 @@ way it will after upload - and measured rather than eyeballed:
     first paint). A card runs no scripts, so without the literal class every
     triangle collapses to a 0px box with `content: none` - measured on the
     running page by removing the class from all six marks.
-2. **Level 1 needs the grid ancestors.** `.run-row-group` and `.run-row` are
+2. ~~**Level 1 needs the grid ancestors.** `.run-row-group` and `.run-row` are
     both `subgrid`; a pane that carried the row alone would lay it out on auto
-    columns and every cell would be the wrong width. The two level-1 panes
-    carry `.run-table-wrap > .run-grid > .run-grid-rows`.
+    columns and every cell would be the wrong width.~~ **NO LONGER TRUE - see
+    the TOR-222 section at the end of this file.** TOR-221 removed `subgrid`
+    and `display: contents` from every served stylesheet, and TOR-222 measured
+    the consequence off the card itself: a level-1 pane with `.run-table-wrap`
+    and `.run-grid` removed resolves BYTE-IDENTICAL tracks and identical cell
+    offsets. The panes keep the wrap because it is the real markup and it draws
+    the pane's ground, not because the row needs it.
 
 ## Two stale claims in this export, corrected and left
 
@@ -804,3 +809,65 @@ Found while writing the above, both about `detail.css`:
 **`RunTable.html` and `RunDetail.html` were NOT touched.** They still show the
 old `<table>` markup and TOR-218 owns that; the card fixed here is only the
 prose those two cards' own correction will also need.
+
+---
+
+# The Accordion became a wrapper, and the card grew a pane (TOR-222)
+
+The owner's objection to what TOR-212 handed over was that the accordion was
+"a class applied to elements the page already arranged" rather than something
+a design can compose. TOR-222 answered it, and two of the three things this
+file said about that component are now wrong. Both are struck through above and
+below rather than deleted, because the shape of the export only makes sense
+against what it used to be.
+
+## What changed on the design side
+
+- **The bridge takes a `level` and draws all three depths.** It used to draw
+  level 3 and refuse the prop. The refusal's reason - "at levels 1 and 2 the
+  element carrying the rail is a run-grid ROW or a file-list `<li>` with a
+  checkbox in it" - was true of the HEADER'S CONTENTS and wrong about the
+  disclosure: the box, the header and the region are the same three things at
+  every level and only their tag and class vary. Those come from a `SHAPES`
+  table in the `.jsx`, and the row's ten cells or the file's checkbox come in
+  as a `summary` prop.
+- **`SHAPES` is not exported**, for the reason this file's own export rule
+  gives: the checker indexes a module's uppercase-initial named exports as
+  components. The folder still ships exactly one component name.
+- **The card has SEVEN panes.** Six are the three levels closed and open, as
+  before. The seventh is the same open level-1 disclosure with the wrap and the
+  grid removed - the decoupling rendered rather than asserted, and measurable
+  off the card (see the struck-through fact 2 above).
+- **`data-accordion-level` moved onto the BOX**, once, and off the toggle and
+  the region. `data-accordion` carries the level's name beside it. Any card
+  markup copied from before TOR-222 will have it in the old places.
+- **`data-expanded` moved from `li.picker-item` onto `label.picker-file`** at
+  level 2, and filelist.css's rail rule lost its combinator with it
+  (`.picker-file[data-expanded="true"]`). Same computed box-shadow either way -
+  `inset 2px 0px 0px rgb(34, 224, 232)`, measured before and after.
+
+## What did NOT change, and is the thing to keep
+
+The card still runs no scripts, so every open state is still written into the
+markup by hand, `.disclosure-mark` included (fact 1 above stands unchanged and
+was re-measured: 9.17969 / 9.79688 / 8.95312px at the three levels, the same
+figures TOR-212 recorded).
+
+## And it is authored, not uploaded
+
+Same as TOR-208 and TOR-212, and for the same reason: there is no DesignSync
+tool on the implementing side and the manifest only refreshes when the project
+is opened. So the five files under `components/shared/Accordion/` plus this
+file and `export/README.md` are handed over. Nothing here has been read back
+from a checker.
+
+## How the card was verified without an upload
+
+Worth writing down because it cost nothing and settles what a diff cannot: the
+export tree was copied to a scratch directory, the eight area stylesheets and
+`fonts/` copied in beside `styles.css`, the nine modules copied into
+`modules/`, and the whole thing served with `python3 -m http.server`. The card
+then renders exactly as a preview would - `styles.css`'s `@import` closure
+resolves, the fonts load, and the panes can be measured. That is how the seven
+panes, the two rails, the six-plus-three marks and the bare pane's tracks in
+this section were read.

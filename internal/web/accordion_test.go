@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -165,9 +167,15 @@ func TestTheDisclosureHoldsNoOpenState(t *testing.T) {
 	if len(fields) == 0 {
 		t.Fatal("accordion.js assigns no fields at all, so this scan verified nothing")
 	}
-	// The five parts it is handed. Anything else is a field somebody added,
-	// and the question to answer is whether it remembers something.
-	for _, allowed := range []string{"level", "toggle", "region", "mark", "dressed"} {
+	// The five parts it keeps. Anything else is a field somebody added, and
+	// the question to answer is whether it remembers something.
+	//
+	// `mark` is NOT among them and that is deliberate (TOR-222): the class is
+	// added to it once in the constructor and never read back, so a field for
+	// it would be a reference kept for nothing - which is the shape the scan
+	// below is looking for. `container` joined them in the same ticket,
+	// because a wrapper that does not keep its box cannot be said to wrap.
+	for _, allowed := range []string{"level", "container", "summary", "toggle", "region"} {
 		delete(fields, allowed)
 	}
 	for name := range fields {
@@ -327,6 +335,16 @@ function node(tag) {
     },
     setAttribute(name, value) { el.attrs[name] = String(value); },
     getAttribute(name) { return name in el.attrs ? el.attrs[name] : null; },
+    // The DOM's own containment, walking the same parent links append
+    // maintains - and TRANSITIVE, like Node.contains, because the accordion's
+    // box holds a subtree rather than two direct children (at level 2 the
+    // region is inside a <file-detail> inside the <li>). A shim that only
+    // compared direct parents would make every containment refusal below
+    // pass for the wrong reason.
+    contains(other) {
+      for (let n = other; n; n = n.parent) if (n === el) return true;
+      return false;
+    },
     // Relocating, exactly as the real append does: this is what reorderRuns
     // relies on ("appendChild on a node already in the table just relocates
     // it"), and a shim that duplicated instead would make the move test lie.
@@ -412,34 +430,125 @@ step("moved");
 // nothing in the constructor may reset or re-derive the open state.
 const rebuilt = new Accordion({
   level: 1,
+  container: entry.rowGroupEl,
+  summary: entry.rowEl,
   toggle: entry.rowToggle,
   region: entry.detailRowEl,
   mark: entry.rowToggle.children[0],
-  dressed: entry.rowEl,
 });
 step("reconstructed");
 
-// What the level parameter puts in the DOM, and what it refuses.
+// ---------------------------------------------------------------------------
+// A DISCLOSURE OVER NOTHING BUT PLAIN NODES (TOR-222), which is criterion 1's
+// and criterion 2's executed half in this harness: a box, a header, a button
+// in the header, a region beside it. No run table, no file list, no <li>, no
+// class from any stylesheet - and NO PARENT AT ALL, because the box is never
+// appended anywhere.
+const box = (level, tweak) => {
+  const container = node("div");
+  const summary = node("div");
+  const toggle = node("button");
+  const region = node("div");
+  summary.append(toggle);
+  container.append(summary, region);
+  const parts = { level, container, summary, toggle, region };
+  return tweak ? tweak(parts) : parts;
+};
+
+// One per level, applied both ways, and every write read back. What this
+// proves is the negative the ticket asks for: no code path needs a
+// particular parent, because there is no parent.
+const anywhere = {};
+for (const level of [1, 2, 3]) {
+  const parts = box(level);
+  const acc = new Accordion(parts);
+  const read = () => ({
+    aria: parts.toggle.getAttribute("aria-expanded"),
+    hidden: parts.region.hidden,
+    dressed: parts.summary.dataset.expanded === undefined
+      ? null : parts.summary.dataset.expanded,
+    boxLevel: parts.container.dataset.accordionLevel,
+    boxName: parts.container.dataset.accordion,
+    // The box carries the level and the parts inside it do NOT (TOR-222): one
+    // write, on the disclosure itself, rather than one on each of two
+    // elements inside it.
+    toggleLevel: parts.toggle.dataset.accordionLevel === undefined
+      ? null : parts.toggle.dataset.accordionLevel,
+    regionLevel: parts.region.dataset.accordionLevel === undefined
+      ? null : parts.region.dataset.accordionLevel,
+    marked: parts.toggle.classList.contains("disclosure-mark"),
+    detached: parts.container.parent === null,
+  });
+  acc.apply(true);
+  const opened = read();
+  acc.apply(false);
+  const closed = read();
+  // AND THE BOX MOVES. Put it inside something else entirely and apply
+  // again: a component that had learned anything about where it was would
+  // stop working here, and the run table moves a row's box on every redraw.
+  const elsewhere = node("main");
+  elsewhere.append(parts.container);
+  acc.apply(true);
+  anywhere[level] = { opened, closed, moved: read(), reparented: !read().detached };
+}
+
+// What the constructor refuses, and every one of these is a fact about the
+// component rather than defensive coding. The accepted cases are the three
+// plain disclosures above - without them every refusal here could be a
+// constructor that refuses everything.
 const refusals = {};
 const refuse = (name, build) => {
   try { build(); refusals[name] = ""; }
   catch (err) { refusals[name] = String(err.message); }
 };
-refuse("level0", () => new Accordion({ level: 0, toggle: node("button"), region: node("div") }));
-refuse("level4", () => new Accordion({ level: 4, toggle: node("button"), region: node("div") }));
-refuse("noRegion", () => new Accordion({ level: 3, toggle: node("button") }));
-refuse("runUndressed", () => new Accordion({ level: 1, toggle: node("button"), region: node("div") }));
-refuse("metaDressed", () => new Accordion({
-  level: 3, toggle: node("button"), region: node("div"), dressed: node("li"),
-}));
-refuse("metaPlain", () => new Accordion({ level: 3, toggle: node("button"), region: node("div") }));
+refuse("level0", () => new Accordion(box(0)));
+refuse("level4", () => new Accordion(box(4)));
+refuse("noRegion", () => new Accordion(box(3, (p) => ({ ...p, region: null }))));
+refuse("noContainer", () => new Accordion(box(3, (p) => ({ ...p, container: null }))));
+refuse("noSummary", () => new Accordion(box(3, (p) => ({ ...p, summary: null }))));
+// The box is the summary, so it wraps nothing but the region.
+refuse("containerIsSummary", () => new Accordion(box(2, (p) => ({ ...p, container: p.summary }))));
+// The box is the region, which is the same mistake pointing the other way.
+refuse("containerIsRegion", () => new Accordion(box(2, (p) => ({ ...p, container: p.region }))));
+// A region that is somewhere else on the page. Every attribute write still
+// lands, which is exactly why this has to be refused rather than noticed
+// later: it is the loose-elements component wearing a container argument.
+refuse("regionOutside", () => new Accordion(box(1, (p) => ({ ...p, region: node("div") }))));
+refuse("summaryOutside", () => new Accordion(box(1, (p) => ({ ...p, summary: node("div") }))));
+// A toggle in the box but not in the summary: the rail would be painted on a
+// header that does not hold the control.
+refuse("toggleOutsideSummary", () => new Accordion(box(1, (p) => {
+  const stray = node("button");
+  p.container.append(stray);
+  return { ...p, toggle: stray };
+})));
+// A region INSIDE the summary, which is the trap the listener note describes:
+// it would close on every click within it.
+refuse("regionInsideSummary", () => new Accordion(box(1, (p) => {
+  const inner = node("div");
+  p.summary.append(inner);
+  return { ...p, region: inner };
+})));
 
 process.stdout.write(JSON.stringify({
   steps,
   refusals,
+  anywhere,
   levels: {
-    toggle: entry.rowToggle.dataset.accordionLevel,
-    region: entry.detailRowEl.dataset.accordionLevel,
+    container: entry.rowGroupEl.dataset.accordionLevel,
+    name: entry.rowGroupEl.dataset.accordion,
+    toggle: entry.rowToggle.dataset.accordionLevel === undefined
+      ? "" : entry.rowToggle.dataset.accordionLevel,
+    region: entry.detailRowEl.dataset.accordionLevel === undefined
+      ? "" : entry.detailRowEl.dataset.accordionLevel,
+  },
+  // The run level's box really does hold all three of its parts, read off the
+  // shipped newRow() rather than off its comment.
+  wraps: {
+    summary: entry.rowGroupEl.contains(entry.rowEl),
+    toggle: entry.rowGroupEl.contains(entry.rowToggle),
+    region: entry.rowGroupEl.contains(entry.detailRowEl),
+    regionNotInSummary: entry.rowEl.contains(entry.detailRowEl),
   },
   markClassed: entry.rowToggle.children.some((c) => c.classList.contains("disclosure-mark")),
   // The five own properties, read off a live instance rather than off the
@@ -448,6 +557,10 @@ process.stdout.write(JSON.stringify({
   // Both rows exist, so the move above was a real reorder.
   rows: table.list.children.length,
   otherIsRow: other.rowGroupEl === table.list.children[0],
+  // The class of the element level 1 actually dresses, off the live row - so
+  // the stylesheet rule the level's rail is read from can be tied to the
+  // level by execution rather than by a text search for a class name.
+  summaryClass: entry.rowEl.className,
 }));
 `
 
@@ -462,17 +575,48 @@ type accordionStep struct {
 	Index         int    `json:"index"`
 }
 
+// accordionLook is one reading of a disclosure built over plain nodes: every
+// attribute the component may write, plus whether the box has a parent at all.
+type accordionLook struct {
+	Aria        string  `json:"aria"`
+	Hidden      bool    `json:"hidden"`
+	Dressed     *string `json:"dressed"`
+	BoxLevel    string  `json:"boxLevel"`
+	BoxName     string  `json:"boxName"`
+	ToggleLevel *string `json:"toggleLevel"`
+	RegionLevel *string `json:"regionLevel"`
+	Marked      bool    `json:"marked"`
+	Detached    bool    `json:"detached"`
+}
+
+type accordionAnywhere struct {
+	Opened     accordionLook `json:"opened"`
+	Closed     accordionLook `json:"closed"`
+	Moved      accordionLook `json:"moved"`
+	Reparented bool          `json:"reparented"`
+}
+
 type accordionResult struct {
-	Steps    []accordionStep   `json:"steps"`
-	Refusals map[string]string `json:"refusals"`
+	Steps    []accordionStep              `json:"steps"`
+	Refusals map[string]string            `json:"refusals"`
+	Anywhere map[string]accordionAnywhere `json:"anywhere"`
 	Levels   struct {
-		Toggle string `json:"toggle"`
-		Region string `json:"region"`
+		Container string `json:"container"`
+		Name      string `json:"name"`
+		Toggle    string `json:"toggle"`
+		Region    string `json:"region"`
 	} `json:"levels"`
-	MarkClassed bool     `json:"markClassed"`
-	OwnFields   []string `json:"ownFields"`
-	Rows        int      `json:"rows"`
-	OtherIsRow  bool     `json:"otherIsRow"`
+	Wraps struct {
+		Summary            bool `json:"summary"`
+		Toggle             bool `json:"toggle"`
+		Region             bool `json:"region"`
+		RegionNotInSummary bool `json:"regionNotInSummary"`
+	} `json:"wraps"`
+	MarkClassed  bool     `json:"markClassed"`
+	OwnFields    []string `json:"ownFields"`
+	Rows         int      `json:"rows"`
+	OtherIsRow   bool     `json:"otherIsRow"`
+	SummaryClass string   `json:"summaryClass"`
 }
 
 // runAccordionDriver copies the three shipped modules into a temp directory
@@ -661,7 +805,7 @@ func TestTheDisclosureSurvivesTheMoveARe_sortMakes(t *testing.T) {
 	// The instance holds the five parts it was handed and nothing else, read
 	// off a LIVE object rather than off the source - a field assigned
 	// conditionally, or on first use, is invisible to a text scan.
-	want := []string{"dressed", "level", "mark", "region", "toggle"}
+	want := []string{"container", "level", "region", "summary", "toggle"}
 	if strings.Join(got.OwnFields, ",") != strings.Join(want, ",") {
 		t.Errorf("a live disclosure's own fields are %v, want %v. Anything else is a "+
 			"place the open state could be remembered, and the table's re-sort is what "+
@@ -681,10 +825,19 @@ func TestTheDisclosureSurvivesTheMoveARe_sortMakes(t *testing.T) {
 func TestTheNestingLevelIsAParameterWithThreeValues(t *testing.T) {
 	got := runAccordionDriver(t)
 
-	if got.Levels.Toggle != "1" || got.Levels.Region != "1" {
-		t.Errorf("a run row's disclosure wrote data-accordion-level %q on its toggle and "+
-			"%q on its region, want \"1\" on both - the depth is written into the DOM so "+
-			"it can be read from the page rather than inferred",
+	// THE LEVEL IS WRITTEN ON THE BOX, ONCE (TOR-222). It used to be written
+	// on the toggle and on the region separately, which is the same value in
+	// two places and neither of them the disclosure - anything holding a
+	// control reaches the box with one closest("[data-accordion-level]").
+	if got.Levels.Container != "1" || got.Levels.Name != "run" {
+		t.Errorf("a run row's box carries data-accordion-level=%q data-accordion=%q, "+
+			"want \"1\"/\"run\" - the depth is written into the DOM so it can be read "+
+			"from the page rather than inferred", got.Levels.Container, got.Levels.Name)
+	}
+	if got.Levels.Toggle != "" || got.Levels.Region != "" {
+		t.Errorf("the level is still written on the toggle (%q) and/or the region (%q). "+
+			"Since TOR-222 the box carries it and the parts inside it do not: two copies "+
+			"of one value is what this ticket took out of the component's own writes",
 			got.Levels.Toggle, got.Levels.Region)
 	}
 	if !got.MarkClassed {
@@ -693,23 +846,79 @@ func TestTheNestingLevelIsAParameterWithThreeValues(t *testing.T) {
 			"component is what puts it on")
 	}
 
-	// THE REFUSALS ARE THE PARAMETER, and each one is a fact about the UI
-	// rather than defensive coding:
+	// WHAT THE LEVEL DECIDES, EXECUTED: whether the summary is dressed. It is
+	// the level's own table that decides now rather than the caller passing a
+	// `dressed` element, which is the difference between a parameter and an
+	// argument the caller could get wrong: levels 1 and 2 have a rail in the
+	// stylesheets and level 3 has none, so however level 3 is called it
+	// writes no data-expanded.
+	for _, want := range []struct {
+		level, open, closed string
+		dresses             bool
+	}{
+		{"1", "true", "false", true},
+		{"2", "true", "false", true},
+		{"3", "", "", false},
+	} {
+		a, ok := got.Anywhere[want.level]
+		if !ok {
+			t.Errorf("the driver built no plain disclosure at level %s", want.level)
+			continue
+		}
+		if want.dresses {
+			if a.Opened.Dressed == nil || *a.Opened.Dressed != want.open ||
+				a.Closed.Dressed == nil || *a.Closed.Dressed != want.closed {
+				t.Errorf("level %s dressed its summary %v open and %v closed, want %q/%q - "+
+					"the rail lives on the summary at every level that has one",
+					want.level, a.Opened.Dressed, a.Closed.Dressed, want.open, want.closed)
+			}
+		} else if a.Opened.Dressed != nil {
+			t.Errorf("level %s wrote data-expanded=%q on its summary. Level 3 dresses "+
+				"NOTHING - its rail would sit inside the file's rail inside the torrent's "+
+				"ground, and three nested grounds read as chrome - so the level's own "+
+				"table is what refuses it rather than the caller remembering to",
+				want.level, *a.Opened.Dressed)
+		}
+		// And the two writes every level makes, at every level.
+		if a.Opened.Aria != "true" || a.Opened.Hidden || a.Closed.Aria != "false" ||
+			!a.Closed.Hidden {
+			t.Errorf("level %s read aria=%q hidden=%v open and aria=%q hidden=%v closed; "+
+				"want true/false and false/true", want.level, a.Opened.Aria, a.Opened.Hidden,
+				a.Closed.Aria, a.Closed.Hidden)
+		}
+		if a.Opened.BoxLevel != want.level {
+			t.Errorf("level %s wrote data-accordion-level=%q on its box",
+				want.level, a.Opened.BoxLevel)
+		}
+	}
+
+	// THE REFUSALS ARE THE PARAMETER AND THE WRAPPING, and each one is a fact
+	// about the component rather than defensive coding:
 	//
 	//   - there are three levels, so 0 and 4 are not levels;
-	//   - levels 1 and 2 dress a ROW (the accent ground and rail live on
-	//     .run-row and .picker-item), so a disclosure there without one would
-	//     open silently;
-	//   - level 3 dresses NOTHING, because its rail would sit inside the
-	//     file's rail inside the torrent's ground, and three nested grounds
-	//     read as chrome. So a dressed element at level 3 is refused rather
-	//     than ignored - ignoring it is how a level stops meaning anything.
+	//   - a wrapper has to have a box, a header and a region, so a missing
+	//     one is a wiring error at a call site;
+	//   - the box has to be a THIRD element - one that is also the summary or
+	//     the region wraps nothing;
+	//   - the box has to actually HOLD its parts, because every attribute
+	//     write still lands if it does not, so the mistake is invisible;
+	//   - the toggle has to be in the summary, or the rail is painted on a
+	//     header that does not hold the control;
+	//   - and the region has to be OUTSIDE the summary, which is the one
+	//     structural rule that is load-bearing: a region inside the thing
+	//     that toggles it closes on every click within it.
 	for _, want := range []struct{ name, needle string }{
 		{"level0", "level must be 1"},
 		{"level4", "level must be 1"},
 		{"noRegion", "has no region"},
-		{"runUndressed", "needs a dressed element"},
-		{"metaDressed", "takes no dressed element"},
+		{"noContainer", "has no container"},
+		{"noSummary", "has no summary"},
+		{"containerIsSummary", "is also its summary"},
+		{"containerIsRegion", "is also its region"},
+		{"regionOutside", "does not hold its region"},
+		{"summaryOutside", "does not hold its summary"},
+		{"toggleOutsideSummary", "toggle is not in its summary"},
+		{"regionInsideSummary", "region is inside its summary"},
 	} {
 		msg, ok := got.Refusals[want.name]
 		if !ok {
@@ -721,10 +930,551 @@ func TestTheNestingLevelIsAParameterWithThreeValues(t *testing.T) {
 				want.name, msg, want.needle)
 		}
 	}
-	// And the one that must be ACCEPTED, or every refusal above could be the
-	// constructor refusing everything.
-	if msg := got.Refusals["metaPlain"]; msg != "" {
-		t.Errorf("a level-3 disclosure with no dressed element was refused with %q - that "+
-			"is the Metadata block, the innermost one the page actually has", msg)
+	// And the accepted cases are the `anywhere` block above - three levels
+	// built and driven - without which every refusal here could be a
+	// constructor that refuses everything.
+	if len(got.Anywhere) != 3 {
+		t.Errorf("the driver built %d plain disclosures, want 3 - without an accepted "+
+			"case the refusals above prove only that the constructor throws",
+			len(got.Anywhere))
+	}
+}
+
+// TestTheDisclosureWrapsItsContentAtTheRunLevel is criterion 1's executed half
+// inside the app, and it reads the SHIPPED newRow() rather than its comment:
+// .run-row-group holds the line, its toggle and the detail row, and the detail
+// row is not inside the line.
+//
+// That last one is the load-bearing half and it is why the wrapper is safe.
+// The region is the summary's SIBLING inside the box, never its descendant -
+// which is what lets the run level keep its click listener on .run-row while
+// an element sits around the pair. A region inside the summary would collapse
+// on every click in it, and that is the trap the two-<tr> arrangement existed
+// to avoid.
+//
+// The unrelated use - a box, a header and a region with none of torpeek's
+// markup or CSS anywhere near them - is `anywhere` in the test above, plus
+// docs/spikes/TOR-222-anywhere/ in a browser.
+func TestTheDisclosureWrapsItsContentAtTheRunLevel(t *testing.T) {
+	got := runAccordionDriver(t)
+
+	if !got.Wraps.Summary || !got.Wraps.Toggle || !got.Wraps.Region {
+		t.Errorf(".run-row-group holds its summary=%v toggle=%v region=%v; a box that does "+
+			"not contain all three is not the box, and the constructor's own check is "+
+			"what would have thrown before this test read anything",
+			got.Wraps.Summary, got.Wraps.Toggle, got.Wraps.Region)
+	}
+	if got.Wraps.RegionNotInSummary {
+		t.Error("the detail row is INSIDE .run-row. It has to be its sibling in the box: " +
+			"the row's click listener is what opens and closes a torrent, so a detail " +
+			"inside it would collapse on every click within it - a picker checkbox, a " +
+			"thumbnail, Compare. That is the trap the two-<tr> arrangement existed to " +
+			"avoid, and it is the reason the listener stays on .run-row rather than a " +
+			"reason the box cannot exist")
+	}
+
+	// AND THE SAME COMPONENT, MOVED. Criterion 2's own case, executed on the
+	// plain-node disclosures: the box is built with no parent at all, driven
+	// both ways, then put inside something else and driven again.
+	for _, level := range []string{"1", "2", "3"} {
+		a, ok := got.Anywhere[level]
+		if !ok {
+			continue
+		}
+		if !a.Opened.Detached {
+			t.Errorf("level %s's plain disclosure had a parent when it was driven, so it "+
+				"did not show that a box needs none", level)
+		}
+		if !a.Reparented {
+			t.Errorf("level %s's box was not actually moved, so the reading after the "+
+				"move proves nothing", level)
+		}
+		if a.Moved.Aria != "true" || a.Moved.Hidden {
+			t.Errorf("after being moved into a different parent, level %s read aria=%q "+
+				"hidden=%v; want true/false. No code path may need a particular parent",
+				level, a.Moved.Aria, a.Moved.Hidden)
+		}
+	}
+}
+
+// disclosureParts are the elements the page's three disclosures are built
+// from - the box, the summary and the region at each level (run-table.js's
+// newRow, file-list.js's renderFileList, file-detail.js's BODY). Every one of
+// them is an element the component either adopts or writes on, and none of
+// them may be styled in a way that only works inside one particular parent.
+//
+// The three row parts are TOR-221's own list, kept in step by
+// TestTheDisclosurePartsIncludeEveryRowPart below rather than by hope.
+var disclosureParts = []string{
+	".run-row-group", ".run-row", ".run-detail-row", // level 1
+	".picker-item", ".picker-file", ".file-detail", // level 2
+	".meta", ".meta-title", ".meta-body", // level 3
+}
+
+// disclosureState are the ways a rule can be ABOUT a disclosure's state or
+// depth rather than about the element's own appearance. Each is written by
+// accordion.js and by nothing else.
+var disclosureState = []string{`[data-expanded`, `[data-accordion`}
+
+// TestNoDisclosureDependsOnItsContainer is criterion 2's guard, and it is
+// TOR-221's TestNoRowDependsOnItsContainerToFindItsColumns pointed at the
+// disclosure instead of at the columns - same idea, same reason for the shape:
+// one grep for one spelling is weak, because a reintroduction arrives as
+// whichever spelling looked natural to whoever wrote it. So each arm names a
+// DIFFERENT way to write "this disclosure only works in that box":
+//
+//	the open state qualified      `.picker-item[data-expanded="true"] >
+//	by an ancestor                 .picker-file { ... }` - the exact rule this
+//	                               ticket removed. The attribute is written on
+//	                               the element being dressed, so a rule that
+//	                               names an ancestor to reach it is asserting a
+//	                               parent it does not need.
+//	the LEVEL qualified            the same mistake with the newer attribute:
+//	by an ancestor                 nothing keys off data-accordion-level today,
+//	                               and a first rule that did should key off the
+//	                               box itself.
+//	the MARK reached through       `.picker-item .disclosure-mark { ... }`. The
+//	a container                    mark's one legitimate ancestor is the TOGGLE
+//	                               (base.css draws the open triangle as
+//	                               `[aria-expanded="true"] > .disclosure-mark`),
+//	                               because the component guarantees that
+//	                               relationship - the mark is the toggle or
+//	                               inside it. A class or an id as the ancestor
+//	                               is a container.
+//	a grid ITEM's property on      `grid-column`, `grid-row`, `grid-area`,
+//	a disclosure part              `display: contents`, `subgrid` - properties
+//	                               that mean nothing except inside a particular
+//	                               parent, so declaring one asserts one.
+//	the component reaching out     accordion.js naming closest, parentElement,
+//	of its own parts               querySelector, document or window: the
+//	                               "just look the box up" version of the same
+//	                               coupling, in JS instead of CSS.
+//	a second writer of the         data-expanded or data-accordion written by
+//	state                          any other module - a hand-written level is a
+//	                               copy nothing keeps in step, and it would be
+//	                               written where the element happens to be.
+//
+// The EXECUTED half is elsewhere and is what actually proves the negative:
+// TestTheNestingLevelIsAParameterWithThreeValues builds three disclosures over
+// plain nodes with no parent at all, drives them, moves the box into a
+// different element and drives them again, and refuses eleven malformed
+// wirings. This file's arms are what stop the property being written back out
+// in CSS, where no driver would see it.
+func TestNoDisclosureDependsOnItsContainer(t *testing.T) {
+	// Comments stripped, for the reason TOR-221's own guard records: three
+	// files and this test's own subject EXPLAIN the removed selector by name,
+	// and a guard that could not tell prose from code would fail on the
+	// explanation instead of on the mistake.
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(stylesheet(t), "")
+
+	stateRules, markRules := 0, 0
+	for _, rule := range splitRules(live) {
+		for _, sel := range strings.Split(rule.selector, ",") {
+			sel = strings.TrimSpace(sel)
+			if sel == "" {
+				continue
+			}
+			key := keyCompound(sel)
+
+			// ARM 1 and 2: the open state and the level name no ancestor. The
+			// attribute is on the element the rule is about, always, so the
+			// selector needs nothing before it.
+			for _, attr := range disclosureState {
+				if !strings.Contains(sel, attr) {
+					continue
+				}
+				stateRules++
+				if key != sel {
+					t.Errorf("%q qualifies %s by an ancestor. accordion.js writes that "+
+						"attribute on the element the rule dresses - its summary, or its "+
+						"box for the level - so naming a container to reach it is an "+
+						"assertion about a parent the disclosure does not need. That is "+
+						"the rule TOR-222 removed: `.picker-item[data-expanded=\"true\"] > "+
+						".picker-file` became `.picker-file[data-expanded=\"true\"]`",
+						sel, attr)
+				}
+			}
+
+			// ARM 3: the mark's only legitimate ancestor is the toggle.
+			if strings.Contains(key, ".disclosure-mark") {
+				markRules++
+				if key != sel {
+					ancestor := strings.TrimSpace(strings.TrimSuffix(sel, key))
+					ancestor = strings.TrimRight(ancestor, " >+~")
+					if !strings.Contains(ancestor, "[aria-expanded") &&
+						!strings.Contains(ancestor, "[data-expanded") &&
+						!strings.Contains(ancestor, "[data-accordion") {
+						t.Errorf("%q reaches the disclosure mark through %q. The mark's one "+
+							"ancestor is the TOGGLE, and base.css says so as "+
+							"`[aria-expanded=\"true\"] > .disclosure-mark` - a relationship "+
+							"the component guarantees, because the mark is the toggle or "+
+							"inside it. A class or an id there is a container, and the mark "+
+							"is the one thing that does NOT vary with the level", sel, ancestor)
+					}
+				}
+			}
+
+			// ARM 4: a disclosure part may not be given a property that only
+			// means something to a child of one particular parent.
+			part := ""
+			for _, p := range disclosureParts {
+				if strings.Contains(key, p) {
+					part = p
+				}
+			}
+			if part == "" {
+				continue
+			}
+			for _, prop := range []string{"grid-column", "grid-row", "grid-area"} {
+				if regexp.MustCompile(`(^|[;{\s])` + prop + `\s*:`).MatchString(rule.body) {
+					t.Errorf("%q declares %s on the disclosure part %s. That property only "+
+						"means anything to a grid ITEM, so it is an assertion about this "+
+						"element's PARENT - and a disclosure that only lays out inside one "+
+						"container is the thing TOR-221 removed and TOR-222 depends on "+
+						"staying removed", sel, prop, part)
+				}
+			}
+			for _, value := range []string{"display: contents", "subgrid"} {
+				if strings.Contains(rule.body, value) {
+					t.Errorf("%q declares %q on the disclosure part %s. Both make this "+
+						"element's layout its parent's business: `display: contents` hands "+
+						"its children to the grandparent's grid, and `subgrid` resolves "+
+						"only on a direct grid item", sel, value, part)
+				}
+			}
+		}
+	}
+
+	// Both selector arms have to have matched something, or they swept a
+	// stylesheet that stopped spelling the thing they look for and reported
+	// nothing. Two state rules today (the two levels with a rail) and three
+	// mark rules (the class plus its two ::before forms).
+	if stateRules == 0 {
+		t.Error("no rule in the served stylesheet mentions data-expanded or " +
+			"data-accordion, so arms 1 and 2 checked nothing. Either the two rails are " +
+			"gone or they are spelled some way this guard cannot see")
+	}
+	if markRules == 0 {
+		t.Error("no rule keys off .disclosure-mark, so arm 3 checked nothing - that rule " +
+			"is the one thing all three levels draw identically")
+	}
+
+	// ARM 5: the component reaches for nothing. Every name here is a way to
+	// find an element it was not handed, and `contains` is deliberately NOT
+	// among them - it is the containment ASSERTION the constructor makes, the
+	// positive half of this arm, and its refusals are executed in
+	// TestTheNestingLevelIsAParameterWithThreeValues.
+	acc := liveJS(t, accordionJS(t))
+	for _, forbidden := range []string{
+		"parentElement", "parentNode", "closest(", "querySelector", "getElementById",
+		"getElementsBy", "matches(", "ownerDocument", "document.", "window.",
+		"isConnected", "getRootNode", "nextElementSibling", "previousElementSibling",
+		"firstElementChild", "lastElementChild", "appendChild", "insertBefore",
+		"replaceChildren",
+	} {
+		if strings.Contains(acc, forbidden) {
+			t.Errorf("accordion.js names %q. Every one of those finds an element the "+
+				"component was not handed, which is how a disclosure comes to depend on "+
+				"where it is: the box is an ARGUMENT and the parts are arguments, and the "+
+				"only thing the class asks the DOM is whether the box contains them",
+				forbidden)
+		}
+	}
+	// And the containment check is really there, in code rather than in the
+	// header: without it the box argument is decoration.
+	if !strings.Contains(acc, ".contains(") {
+		t.Error("accordion.js never calls contains(). The box argument is then a claim " +
+			"nobody checks - every attribute write still lands on a wrapper that wraps " +
+			"nothing, so the mistake is invisible. See the constructor's own note")
+	}
+
+	// ARM 6: one writer of the state and of the level, across every served
+	// module, derived rather than listed so a module added later cannot
+	// quietly become the second.
+	for _, name := range servedModules(t) {
+		if name == "accordion.js" {
+			continue
+		}
+		src, err := embedded.ReadFile("assets/" + name)
+		if err != nil {
+			t.Fatalf("reading the embedded %s: %v", name, err)
+		}
+		for _, forbidden := range []string{
+			"dataset.expanded", "dataset.accordion", `"data-expanded"`, `"data-accordion`,
+		} {
+			if strings.Contains(liveJS(t, string(src)), forbidden) {
+				t.Errorf("%s writes %s. accordion.js's apply and constructor are the only "+
+					"writers of a disclosure's open state and depth; a second one is a copy "+
+					"nothing keeps in step, and it would be written wherever the element "+
+					"happened to be rather than on the summary and the box", name, forbidden)
+			}
+		}
+	}
+}
+
+// TestTheDisclosurePartsIncludeEveryRowPart keeps this file's part list in
+// step with TOR-221's. The row's three elements ARE level 1's box, summary and
+// region, so a part added there and not here would be swept by one guard and
+// not the other - and the one that would miss it is the newer one.
+func TestTheDisclosurePartsIncludeEveryRowPart(t *testing.T) {
+	have := map[string]bool{}
+	for _, p := range disclosureParts {
+		have[p] = true
+	}
+	for _, p := range rowParts {
+		if !have[p] {
+			t.Errorf("%s is one of a run row's parts (columns_test.go's rowParts) but not "+
+				"one of the disclosure's. Level 1's box, summary and region are exactly "+
+				"those three elements", p)
+		}
+	}
+}
+
+// TestTheLevelsLooksAreTheStylesheetsOwn is criterion 5, and its point is that
+// the level table in accordion.js cannot drift into prose.
+//
+// TOR-212 read the three levels' appearance off the running page and wrote it
+// into a comment. A comment is not checkable, and the finding it carried is
+// the kind that rots first: what varies with the depth is the RAIL and the
+// GROUND, and both live in stylesheets a later ticket edits without opening
+// accordion.js. So the table has `rail` and `ground` fields now, and this test
+// parses the rules that actually dress a disclosure out of the served CSS and
+// requires the table to match them.
+//
+// WHAT IT DERIVES RATHER THAN LOOKS UP. It does not know which class belongs
+// to which level - it finds every rule keyed on `[data-expanded="true"]`,
+// which is exactly the set of levels that dress anything, and then uses the
+// one fact the design states: the depth is how LOUDLY the state is dressed, so
+// the rails thin monotonically outside-in and the one filled ground is the
+// outermost. Level 1 is then tied to its class by execution (the driver reads
+// the className off a live row) rather than by a text search.
+//
+// The MEASURED values, in Chrome on the running page and unchanged by TOR-222:
+// level 1 rgb(9,58,64) ground with `inset 3px 0 0 rgb(34,224,232)`; level 2 the
+// same colour rail at 2px and no ground; level 3 nothing at all. That the
+// component puts .disclosure-mark on all three and that the mark does not vary
+// is TestTheNestingLevelIsAParameterWithThreeValues' and base.css's own guard.
+func TestTheLevelsLooksAreTheStylesheetsOwn(t *testing.T) {
+	live := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(stylesheet(t), "")
+
+	// What the stylesheets say: one entry per rule that dresses an open
+	// disclosure, in the order the cascade sees them.
+	type dressing struct {
+		class  string
+		rail   string
+		ground bool
+	}
+	var dressings []dressing
+	inset := regexp.MustCompile(`box-shadow:\s*inset\s+(\d+px)\s`)
+	for _, rule := range splitRules(live) {
+		for _, sel := range strings.Split(rule.selector, ",") {
+			sel = strings.TrimSpace(sel)
+			if !strings.Contains(sel, `[data-expanded="true"]`) {
+				continue
+			}
+			m := inset.FindStringSubmatch(rule.body)
+			if m == nil {
+				t.Errorf("%q dresses an open disclosure but declares no inset box-shadow. "+
+					"The rail IS the level's look; a rule here without one means the level "+
+					"table below is describing something that is no longer drawn", sel)
+				continue
+			}
+			dressings = append(dressings, dressing{
+				class:  strings.TrimSuffix(sel, `[data-expanded="true"]`),
+				rail:   m[1],
+				ground: regexp.MustCompile(`(^|[;{\s])background\s*:`).MatchString(rule.body),
+			})
+		}
+	}
+	if len(dressings) != 2 {
+		t.Fatalf("%d rules dress an open disclosure, want 2: %+v. The page has three "+
+			"nested levels and the innermost dresses nothing, deliberately - its rail "+
+			"would sit inside the file's rail inside the torrent's ground", len(dressings),
+			dressings)
+	}
+
+	// What the component says. Parsed out of the level table rather than
+	// hardcoded, so this compares two independent statements of one fact.
+	levels := regexp.MustCompile(
+		`\[(\d+), \{ name: "(\w+)", rail: (null|"\d+px"), ground: (true|false) \}\]`).
+		FindAllStringSubmatch(liveJS(t, accordionJS(t)), -1)
+	if len(levels) != 3 {
+		t.Fatalf("accordion.js's level table did not parse as three {name, rail, ground} "+
+			"entries - got %d. The rail and the ground are the level's whole meaning and "+
+			"they have to be readable, or this test is comparing the CSS with nothing",
+			len(levels))
+	}
+
+	// The rails, outermost first. Two levels have one and the third is null;
+	// the widths must thin as the nesting deepens, which is the design's own
+	// statement of what the level MEANS.
+	type railedLevel struct {
+		level, rail string
+		ground      bool
+	}
+	var railed []railedLevel
+	for _, m := range levels {
+		if m[3] == "null" {
+			if m[4] != "false" {
+				t.Errorf("level %s has no rail but claims a ground. A level that dresses "+
+					"nothing dresses nothing", m[1])
+			}
+			continue
+		}
+		railed = append(railed, railedLevel{m[1], strings.Trim(m[3], `"`), m[4] == "true"})
+	}
+	if len(railed) != len(dressings) {
+		t.Fatalf("accordion.js's table has %d levels with a rail and the stylesheets have "+
+			"%d rules that draw one. The table is meant to be the CSS's own values, so a "+
+			"mismatch is either a level that draws nothing or a rail nothing declares",
+			len(railed), len(dressings))
+	}
+
+	// Paired by depth against the rules sorted widest-rail first, because the
+	// depth IS how loudly the state is dressed.
+	sort.Slice(dressings, func(i, j int) bool {
+		return railWidth(t, dressings[i].rail) > railWidth(t, dressings[j].rail)
+	})
+	for i, want := range railed {
+		got := dressings[i]
+		if got.rail != want.rail {
+			t.Errorf("level %s claims a %s rail; the %s-widest rule that dresses an open "+
+				"disclosure (%s) draws %s. accordion.js's table is meant to BE the "+
+				"stylesheets' values - this is how it stops being a comment",
+				want.level, want.rail, ordinal(i), got.class, got.rail)
+		}
+		if got.ground != want.ground {
+			t.Errorf("level %s claims ground=%v; %s declares a background=%v. The one "+
+				"filled ground appears once, at the top - two nested grounds read as a "+
+				"third level of chrome nobody asked for (filelist.css says so where the "+
+				"file's rail is quieter than the torrent's)",
+				want.level, want.ground, got.class, got.ground)
+		}
+		// And it thins going in.
+		if i > 0 && railWidth(t, dressings[i].rail) >= railWidth(t, dressings[i-1].rail) {
+			t.Errorf("the rails do not thin with the depth: %s draws %s and %s draws %s. "+
+				"The depth is how loudly the open state is dressed, and a level that "+
+				"shouts louder than the one outside it is not a depth",
+				dressings[i-1].class, dressings[i-1].rail, dressings[i].class, dressings[i].rail)
+		}
+	}
+
+	// AND LEVEL 1'S CLASS, BY EXECUTION. The driver reads className off the
+	// element the shipped newRow() actually hands over as the summary, so the
+	// widest rail is tied to the outermost level by what the code does rather
+	// than by this test knowing a class name.
+	if got := runAccordionDriver(t).SummaryClass; got != strings.TrimPrefix(dressings[0].class, ".") {
+		t.Errorf("the run level dresses an element whose class is %q, but the widest rail "+
+			"is drawn on %q. The outermost level is the one with the ground and the 3px "+
+			"rail, and that has to be the same element the table's own rows carry",
+			got, dressings[0].class)
+	}
+	// Level 2's is the other one, and its class is checked against the two
+	// modules that hand it over - the row's <label>, which file-list.js builds
+	// and file-detail.js dresses.
+	if got := dressings[1].class; got != ".picker-file" {
+		t.Errorf("the 2px rail is drawn on %q, want .picker-file - the <label> that IS a "+
+			"file's row. filelist.css used to reach it through its <li> and TOR-222 moved "+
+			"the attribute onto it; if the element changed, file-detail.js's `summary` and "+
+			"file-list.js's bundle have to change with it", got)
+	}
+	if !strings.Contains(liveJS(t, fileDetailJS(t)), "summary: this.fileRow,") {
+		t.Error("file-detail.js's level-2 disclosure no longer dresses this.fileRow - the " +
+			"rail rule keys off .picker-file[data-expanded=\"true\"], so the summary the " +
+			"accordion is given has to be that <label>")
+	}
+	if !strings.Contains(liveJS(t, fileListJS(t)), `row.className = "picker-file";`) {
+		t.Error("file-list.js no longer builds the row as .picker-file, so the class the " +
+			"rail rule keys off is drawn on nothing")
+	}
+}
+
+// railWidth turns "3px" into 3. A rail spelled any other way is a failure
+// rather than a zero: the test above sorts on this, and a silent zero would
+// reorder the levels instead of reporting the problem.
+func railWidth(t *testing.T, rail string) int {
+	t.Helper()
+	n, err := strconv.Atoi(strings.TrimSuffix(rail, "px"))
+	if err != nil {
+		t.Fatalf("a disclosure's rail is %q, which is not a whole number of pixels: %v",
+			rail, err)
+	}
+	return n
+}
+
+// ordinal names which of the sorted dressing rules a message is about, so a
+// failure reads as a sentence rather than as an index.
+func ordinal(i int) string {
+	if i == 0 {
+		return "first"
+	}
+	return "next"
+}
+
+// TestTheAnywhereSpikeUsesTheShippedModule keeps criterion 1's evidence from
+// rotting into a mock-up.
+//
+// docs/spikes/TOR-222-anywhere/ is the unrelated use the ticket asks for - a
+// FAQ page with none of torpeek's markup and none of its stylesheets - and its
+// whole value rests on ONE line: it imports internal/web/assets/accordion.js
+// by relative path rather than carrying a copy. A copy would keep passing
+// forever while the shipped class changed under it, which is the failure mode
+// the two earlier spikes deliberately accept for tokens.css (they measure a
+// layout against frozen values) and this one must not.
+//
+// So: the import is there, no class of its own is declared, and no torpeek
+// stylesheet is linked. Not a skip if the file is missing - the file IS the
+// evidence, and a criterion whose evidence quietly stopped existing should
+// fail loudly.
+func TestTheAnywhereSpikeUsesTheShippedModule(t *testing.T) {
+	const path = "../../docs/spikes/TOR-222-anywhere/anywhere.html"
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v. That page is criterion 1's whole evidence - the "+
+			"component shown working somewhere that is not torpeek's table - and it is "+
+			"referenced from docs/front-end.md's TOR-222 section", path, err)
+	}
+	page := string(b)
+	// COMMENTS STRIPPED for the stylesheet arm below, and this file's own
+	// liveJS records why in the general case: the page EXPLAINS at length that
+	// it links none of torpeek's stylesheets, naming two of them, so a raw-text
+	// check reads the explanation as the violation. HTML and CSS comments are
+	// both block-delimited, so this is a safe strip - a `//` line strip on an
+	// HTML file would not be.
+	live := regexp.MustCompile(`(?s)<!--.*?-->`).ReplaceAllString(page, "")
+	live = regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(live, "")
+
+	const wantImport = `from "../../../internal/web/assets/accordion.js"`
+	if !strings.Contains(live, wantImport) {
+		t.Errorf("the spike does not import the shipped module (%s). Its claim is about "+
+			"the class that SHIPS; a page carrying its own copy would keep proving that "+
+			"copy works long after accordion.js had changed", wantImport)
+	}
+	// A copy would arrive as a class declaration, or as a second import from
+	// somewhere inside the spike's own directory.
+	for _, forbidden := range []string{"class Accordion", `from "./accordion.js"`,
+		`from "accordion.js"`} {
+		if strings.Contains(live, forbidden) {
+			t.Errorf("the spike contains %q - a copy of the component, or an import of "+
+				"one beside the page. There must be exactly one Accordion and it must be "+
+				"the served one", forbidden)
+		}
+	}
+	// And none of torpeek's stylesheets, because "it works without them" is
+	// half of what the page is for. Checked by filename against the served
+	// list rather than by naming two of them.
+	for _, sheet := range stylesheetFiles {
+		if strings.Contains(live, sheet) {
+			t.Errorf("the spike references %s. It is meant to prove the component needs "+
+				"none of torpeek's CSS - every rule on that page is its own, and a link "+
+				"to one of ours makes the whole reading uninterpretable", sheet)
+		}
+	}
+	// The control arm has to be in it, or the page is a probe that can only
+	// say yes. Its own README lists the five refusals it wires wrongly.
+	if !strings.Contains(live, "ACCEPTED - the check is not there") {
+		t.Error("the spike has no control arm. Every reading it takes is 'fine', and a " +
+			"probe that cannot be shown reporting otherwise measured nothing - so it " +
+			"wires five disclosures WRONGLY and records what each is refused with")
 	}
 }
