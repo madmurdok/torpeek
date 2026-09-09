@@ -2108,3 +2108,152 @@ func TestFileDoneNoLongerLinksManifest(t *testing.T) {
 // touches no JS that reads or writes a cell's data: the whole of its JS diff
 // is three part lookups and one insertion point. That is a reason, not a
 // claim that they are covered.
+//
+// THE NOTE ABOVE IS SUPERSEDED BY TOR-223, BELOW, which re-ran all six.
+
+// TOR-223's browser pass: TOR-207's six checks, a THIRD time, against
+// TOR-221's per-row grids (each `.run-row` its own grid over one shared
+// `--run-tracks` value, `subgrid` and `display: contents` gone from every
+// served stylesheet, the sticky moved to a new `.run-grid-head-row` band)
+// and TOR-222's accordion-as-wrapper (`.run-row-group`, `li.picker-item` and
+// `section.meta` adopted as the box at all three levels; `data-expanded`
+// moved from the file's container to its summary, `label.picker-file`).
+// Against a real torpeek server on 127.0.0.1:8930 (`-headless -dht=false
+// -max-active-torrents 1 -n 200`), real loopback-seeded torrents
+// (scratchpad/seed.go), an out dir seeded by copying TOR-216's own out216
+// forward (22 disk-row directories, never reposted as live torrents, so none
+// of the dedup trap below applies to them), and Chrome DevTools Protocol
+// driving the shipped page.
+//
+// THE MACHINE. `uptime`'s 1-minute figure ranged 3.49-10.90 across the whole
+// pass - calm throughout, unlike TOR-194/TOR-207/TOR-216's sessions. Despite
+// that, `javascript_tool` (CDP `Runtime.evaluate`) hit repeated 45s timeouts
+// on trivial expressions mid-pass, at a moment `uptime` read 4.91-8.77 - well
+// under the ~15 threshold TOR-216's own correction names as reliable. A
+// lighter read (`get_page_text`) answered correctly through the same window,
+// confirming the PAGE was fine and it was specifically the script-eval
+// bridge that was stuck; what cleared it was closing the tab and opening a
+// fresh one plus a full navigate, not waiting longer. Recorded in
+// RECIPE-194.md's own new correction section rather than re-derived here.
+// Nothing below that failed once and passed on a retry or a fresh tab is
+// treated as a finding about the page.
+//
+// CHECK 1 - A LIVE ROW'S FIGURES AT FULL STRENGTH. First attempt (tor223-
+// live1, `-rate-bps 40000` over a fresh 1.59MB clip, TOR-207's own figures)
+// was POSTed, then lost to the setup itself: by the time a tab was created,
+// navigated and queried - maybe 60-70s of unrelated tool calls later - `GET
+// /runs` already read `state: "done"` and the row's cells were back to
+// `data-absent="true"`. Re-run as tor223-live2, a second fresh payload never
+// seeded before, at `-rate-bps 20000` over a 1.98MB clip, read in the very
+// next tool call after navigating to a page already POSTed to: peers "1",
+// seeds "1", down "19.2 KB/s", up "0 B/s", availability "1.00×0 missing" -
+// every one of `.run-cell-peers/-seeds/-down/-up/-availability` reading
+// `data-absent="false"`, the real-zero UP cell included, matching TOR-207's
+// and TOR-216's own distinction exactly.
+//
+// CHECK 2 - ABSENT SINKING TO THE END OF A SORT, ON A TABLE HOLDING BOTH. Run
+// on 27 rows: 1 real (tor223-live3, a third fresh payload, `-rate-bps 8000`
+// over a 669KB clip for an ~84s window, `.run-cell-peers` `data-absent=
+// "false"`, text "1") and 26 absent (TOR-216's 22 disk rows carried forward
+// plus tor223-live1/-live2/-multi, all finished by this point in the pass).
+// The Peers header was clicked to ascending, then to descending; in BOTH
+// directions the 27-row sequence read exactly `R:1` at index 0 followed by
+// 26 `A`s - the one real row first, every absent row after it, both
+// directions, on more rows than TOR-207's 13 or TOR-216's 23.
+//
+// CHECK 3 - TWO ROWS OPEN AT ONCE, AND A FILE'S DETAIL SURVIVING A COLLAPSE
+// AND RE-OPEN. tor223-live2 (running) and tor223-multi (queued, see check 6)
+// were expanded together; both details' `getBoundingClientRect()` read
+// non-zero at once - live2 1168x6073.43, multi 1168x224.95 - with
+// `aria-expanded="true"` on both `.run-row-main` buttons simultaneously, not
+// merely asserted. Separately, on tor207-clip-k (a done row with real frames
+// on disk, carried forward from out207/out216): its file was opened via
+// `label.picker-file` - **read from the SUMMARY, not the container, per
+// TOR-222**: `.picker-item`'s own `dataset.expanded` is `undefined` now, the
+// label's is `"true"`, a spelling TOR-207's and TOR-216's own records used
+// that no longer works and is corrected in RECIPE-194.md. With the file open
+// (`.file-detail` present, not `[hidden]`, rect height 5829.96px), the WHOLE
+// TORRENT ROW was collapsed - the run-detail's own rect read exactly 0x0,
+// confirmed genuinely invisible rather than merely un-flagged - then
+// re-expanded: run-detail rect 1168x769.8, the file's own label still
+// `data-expanded="true"`, `.file-detail` still present and unhidden (height
+// 561.05px, a different number from before the round-trip, which is
+// expected - content reflows once the row itself has been rebuilt - but the
+// OPEN state itself is what survived, matching TOR-207's and TOR-216's own
+// finding through the new wrapper).
+//
+// CHECK 4 - COLUMN WIDTHS ACROSS A RELOAD, THE CORRUPT-localStorage
+// FALLBACK, AND THE ALIGNMENT DEVIATION - NUMBERS, SIDE BY SIDE WITH
+// TOR-221's OWN. A real pointer drag (`pointerdown`/three `pointermove`s
+// with `buttons: 1`/`pointerup`, all dispatched on the `.col-resizer` handle
+// itself, never `document` - TOR-216's own trap, reconfirmed still live)
+// moved the Name column from the default 320px (20rem) to 520px.
+// `localStorage["torpeek.columnWidths"]` read back `{"name":520}`, and a
+// full page reload (fresh `navigate`, not a soft refresh) still computed
+// `--col-w-name: 520px` and rendered the header at 520px - survived the
+// reload. Then `localStorage.setItem("torpeek.columnWidths", "{not valid
+// json!!!")` and another reload: 27 rows rendered normally, `--col-w-name`
+// read back the plain default `"20rem"` (320px), and `read_console_messages`
+// (armed before the reload that mattered) found ZERO messages of any kind
+// across that load, not even benign ones.
+//
+// The alignment deviation - `Math.abs(cell.getBoundingClientRect().left -
+// header.getBoundingClientRect().left)`, no rounding, maximum over all 10
+// columns x 27 rows (270 cells) - was re-measured at each of TOR-221's own
+// five states, on the real running page:
+//
+//	state                          TOR-221 (22 rows, 220 cells)   TOR-223 (27 rows, 270 cells)
+//	at rest                        0.0000px                       0.0000px
+//	mid-drag                       0.0000px                       0.0000px
+//	after the drag (640px ceiling) 0.0000px                       0.0000px
+//	three rows' details open       0.0000px                       0.0000px
+//	after a sort click             0.0000px                       0.0000px
+//
+// Every state, both tasks, exactly 0.0000px: TOR-221's own claim that one
+// grid per row holds the same figure the shared grid gave is confirmed again
+// here, on more rows, after TOR-222 changed what sits inside each row.
+//
+// CHECK 5 - THE STALL TICKER COUNTING UP, THEN GOING QUIET ONCE THE ELEMENT
+// IS REMOVED. tor223-stall was seeded and POSTed with its own peer address
+// deliberately left out of every `-peer` list this pass used: `GET /runs`
+// showed `"stall":{"code":"no_peers","since_ms":4999}` and climbing, and the
+// row's `.run-meta` text read "no peers connected for 19s", then "...40s"
+// after an 8s real wait - `data-stall="true"` throughout, the 1s ticker
+// counting up for real, unchanged by either task. To check it goes quiet:
+// `document.querySelector("run-table").stallTimer` read back `1` (an active
+// interval id); `window.clearInterval` was wrapped to record its argument;
+// `table.remove()` was called directly. Immediately after: `.stallTimer` had
+// been reset to `null` and the wrapped `clearInterval` had been called with
+// exactly `[1]` - `disconnectedCallback`'s `clearInterval(this.stallTimer)`
+// ran for real, on the real interval id, the moment the element left the
+// document.
+//
+// CHECK 6 - TOR-197'S FIVE-VERDICT CHAIN AND ITS TWO SENTENCES, ON A REAL
+// QUEUED TORRENT. tor223-multi (a-clip.mkv 653.6KB, b-clip.mkv 1.5MB) was
+// POSTed FIRST, while the one active slot was still free, reaching
+// `needs-action` ("CHOOSE FILES" badge, both files listed, neither ticked).
+// Before ticking, each `label.picker-file` carried the `!asked -> ""` case:
+// title "tick to start this file's frames now - 200 frames for this one
+// file, and the count is per file", no verdict. tor223-live2 was POSTed
+// SECOND and took the active slot (running). Both of tor223-multi's
+// checkboxes were then ticked by a real click on each
+// `input[type="checkbox"]`, asking for both files while still parked: the
+// row flipped to a genuine `state: "queued"`, badge "queued", queue cell "1
+// #1", and each `label.picker-file` title read exactly: "this torrent is
+// waiting to start and has not been handed to the engine yet - un-tick to
+// take this file out of the pass it will start with. The other 1 stay, and
+// nothing has been fetched or deleted" - the untick==="narrow" branch, word
+// for word, matching TOR-207's and TOR-216's own records and confirming the
+// title text and the ordering trap both survive the accordion becoming a
+// wrapper.
+//
+// NO DEFECT WAS FOUND in either TOR-221's or TOR-222's changes: all six
+// checks show the shipped code doing exactly what its own comments say,
+// through the per-row grids and the wrapper accordion alike. What TOR-223
+// did have to correct going in - not a defect, a stale assumption in this
+// file's and RECIPE-194.md's own prior records - is that `data-expanded`
+// moved from `.picker-item` to `label.picker-file` (TOR-222's own change,
+// documented in its section of docs/front-end.md); a script still reading
+// the container's `dataset.expanded` gets `undefined` silently rather than
+// failing loudly. RECIPE-194.md carries the correction. No new defect was
+// filed.
