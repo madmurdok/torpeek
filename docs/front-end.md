@@ -251,3 +251,53 @@ One line of §3.3 is build-adjacent - "фронтенд вшит в бинарн
 is embedded in the binary - and it is still exactly true. It is also the
 requirement this decision protects: a bundler would not break it, but it would
 put an artefact between the source and the thing embedded.
+
+## What the run table's markup carries, and what it is for (TOR-213)
+
+Written while asking whether the table could become a grid (TOR-214), because
+the one thing a `<table>` gives that a grid does not is semantics for free, and
+nobody had ever looked at what this table actually carries. It carries more
+than expected:
+
+    <th scope="col" data-sort="name" tabindex="0" role="button" aria-sort="none">
+
+  - **`scope="col"` on every header**, the three in `index.html` and the six
+    `buildLiveColumnHeaders` mints.
+  - **`aria-sort` is maintained, not just set**: `none`, `ascending` or
+    `descending`, rewritten on the sorted column and cleared on the others every
+    time the order changes (`run-table.js`, the sort-state block).
+  - **`tabindex="0"` and `role="button"`** on every sortable header, which is
+    what makes sorting reachable without a mouse.
+  - The row's toggle carries **`aria-expanded`**, and the page sets its
+    **`aria-controls`** to the detail's own id.
+  - The progress bar is a full **`role="progressbar"`** with min, max, now and a
+    label.
+
+**Two things in that list work against each other**, and it is worth knowing
+before any of it is carried across to another element:
+
+  - `role="button"` OVERRIDES a `th`'s implicit `columnheader` role. `aria-sort`
+    is defined on `columnheader`/`rowheader`, so on an element declared a button
+    it is probably inert - the attribute is maintained on every sort and may
+    reach nothing. Unverified: measuring it needs a screen reader, and the owner
+    has scoped screen-reader support out (see below).
+  - The tenth column's header carries **`aria-hidden="true"`** while the column
+    itself still exists in every row.
+
+**Measured without a screen reader, and complete on its own:** the column
+resize handles carry `aria-hidden="true"` and no `tabindex`. Resizing a column
+is mouse-only - it is not reachable from the keyboard at all. That is a
+KEYBOARD gap, not only an announcement one, and it is the one finding here that
+does not depend on assistive technology to matter.
+
+### Scope, recorded so the silence is not mistaken for an oversight
+
+The owner has decided not to invest in screen-reader support. So this section
+describes what the markup IS, not a standard it is held to, and nothing here is
+filed as a defect.
+
+What that decision changes, concretely: it removes the only argument for
+keeping a `<table>` over a grid, since the column behaviour a grid must
+reproduce is layout, not semantics. Keyboard operability is a separate question
+and was NOT scoped out - sorting by keyboard is `tabindex` and `role="button"`
+doing their other job, and whatever replaces the table has to keep it.
